@@ -244,7 +244,7 @@ Before starting the preprod deployment, confirm all of the following:
 
 - [ ] `materios-node` binary built: `cargo build --release -p materios-node`
 - [ ] Docker 24+ and Docker Compose v2 installed
-- [ ] `.env` file configured in `ops/` (copy from `.env.example` and edit passwords)
+- [ ] Environment variables configured (see [materios-ops](https://github.com/Flux-Point-Studios/materios-ops) private repo for templates)
 - [ ] At least 100 GB free disk space for Cardano chain data
 - [ ] At least 16 GB RAM available
 - [ ] Funded Cardano preprod wallet (for genesis UTXO and registration transactions)
@@ -255,26 +255,21 @@ Before starting the preprod deployment, confirm all of the following:
 The `preprod-boot.sh` script orchestrates the full wizard flow:
 
 ```bash
-cd ops/scripts
+# From the materios-ops private repo:
 bash preprod-boot.sh
 ```
 
-This runs Steps 0-6 below in sequence, pausing for confirmation before the irreversible mainchain setup step. See `ops/scripts/preprod-boot.sh` for details.
+This runs Steps 0-6 below in sequence, pausing for confirmation before the irreversible mainchain setup step.
 
 ### Manual Step-by-Step
 
 #### Step 0: Start Infrastructure and Wait for Sync
 
 ```bash
-cd ops
 docker compose up -d
 ```
 
-Wait for Cardano DB Sync to reach chain tip. This takes **12-48 hours** on first sync.
-
-```bash
-bash ops/scripts/wait-for-sync.sh 48
-```
+Wait for Cardano DB Sync to reach chain tip. This takes **12-48 hours** on first sync. Monitor progress via the DB Sync logs.
 
 #### Step 1: Generate Keys
 
