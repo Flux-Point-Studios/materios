@@ -1,4 +1,5 @@
-# Materios — Flux Settlement Rail
+# Materios
+<img width="2048" height="2048" alt="materios_wordmark_true_transparent" src="https://github.com/user-attachments/assets/43d63d5d-a0e4-40ff-b250-b092af71d516" />
 
 Materios is a **Cardano Partner Chain** purpose-built for cheap, fast settlement of gaming micro-transactions and AI audit receipts. It pairs a Substrate-based partner chain with a **Midnight ZK proof coprocessor** so that on-chain commitments remain small (roots, hashes, attestations) while full receipt data stays off-chain.
 
