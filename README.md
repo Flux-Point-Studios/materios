@@ -23,13 +23,15 @@ Materios has three layers:
 
 **Data flow:**
 ```
-JSONL input
-  -> receipt-builder (canonicalize, chunk, hash, compress, encrypt)
+Game run / AI trace
+  -> blob upload (JSON telemetry to gateway)
     -> Partner Chain pallet (receipt_id, content_hash, merkle_root)
-      -> Midnight contract (ZK proof: "risk >= threshold" without revealing score)
+      -> Cert daemon network (fetch, verify, attest)
+        -> Certified receipt (threshold attestation met)
+          -> Cardano L1 anchor (Merkle checkpoint)
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design, data-flow diagrams, and the 8 design decisions (D1–D8).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design, data-flow diagrams, and the 8 design decisions (D1-D8).
 
 ---
 
@@ -37,8 +39,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design, data-flow 
 
 | Token | Role | Transferable | Decimals |
 |-------|------|:------------:|:--------:|
-| **MATRA** | Capital token (native currency) | Yes | 12 |
-| **MOTRA** | Capacity token (pays fees, decays over time) | No | 12 |
+| **MATRA** | Capital token (native currency) | Yes | 6 |
+| **MOTRA** | Capacity token (pays fees, decays over time) | No | 6 |
 
 - **Fee formula:** `TxFee = MinFee + CongestionRate * Weight + LengthFeePerByte * Len` (paid in MOTRA)
 - **Congestion rate:** EMA smoothing, adjusts per block vs target fullness
@@ -49,45 +51,46 @@ Inspired by Midnight's NIGHT/DUST model. Details in [docs/ARCHITECTURE.md](docs/
 
 ---
 
+## Validator Rewards
+
+Operators earn tMATRA from two separate reserve pools:
+
+| Pool | Reserve | Mechanism |
+|------|---------|-----------|
+| **Block production** | 150M MATRA (15% of supply) | Pro-rata per era (~24h), proportional to blocks authored |
+| **Attestation** | 50M MATRA (5% of supply) | 10 tMATRA per signer per certified receipt, instant payout |
+
+- **No slashing** — missed blocks = missed rewards
+- **Permissionless attestation** — anyone can call `join_committee` and earn attestation rewards
+- **Per-era cap** — attestation rewards capped at 50,000 MATRA/era to prevent reserve drain
+
+---
+
 ## Project Structure
 
 ```
 materios/
-├── README.md
-├── .gitignore
-├── .dockerignore
-│
-├── docs/                                 # Specifications & operations
-│   ├── ARCHITECTURE.md                   #   System design, design decisions D1-D8
-│   ├── CANONICALIZATION.md               #   RFC 8785 JCS canonicalization spec
-│   ├── AVAILABILITY_CERT_SPEC.md         #   dCBOR availability certificate spec
-│   ├── GOVERNANCE.md                     #   Governance UTXO, D-parameter, migration
-│   └── RUNBOOK.md                        #   Deployment steps, testing, troubleshooting
-│
-├── partnerchain/                         # Substrate partner chain (Rust workspace)
+├── partnerchain/                         # Substrate partner chain (Rust)
 │   ├── Cargo.toml                        #   Workspace root
-│   ├── Cargo.lock                        #   Dependency lockfile
-│   ├── rust-toolchain.toml               #   Rust 1.90.0, wasm32v1-none
+│   ├── rust-toolchain.toml               #   Rust 1.88.0, wasm32-unknown-unknown
 │   ├── Dockerfile                        #   Multi-stage cargo-chef build
 │   ├── flake.nix                         #   Nix dev shell (optional)
-│   ├── node/                             #   Node binary (CLI, RPC, service)
-│   │   └── src/
-│   │       ├── main.rs
-│   │       ├── cli.rs                    #     CLI argument definitions
-│   │       ├── command.rs                #     Subcommand dispatch
-│   │       ├── service.rs                #     Full node / partial components
-│   │       ├── rpc.rs                    #     JSON-RPC extension wiring
-│   │       ├── chain_spec.rs             #     Dev / local chain specs
-│   │       └── chain_spec_preprod.rs     #     Preprod / staging chain specs
-│   ├── runtime/                          #   WASM runtime (pallets, config)
-│   │   └── src/lib.rs
+│   ├── node/src/                         #   Node binary
+│   │   ├── main.rs
+│   │   ├── cli.rs                        #     CLI argument definitions
+│   │   ├── command.rs                    #     Subcommand dispatch
+│   │   ├── service.rs                    #     Full node / partial components
+│   │   ├── rpc.rs                        #     JSON-RPC extension wiring
+│   │   ├── chain_spec.rs                 #     Dev / local chain specs
+│   │   └── chain_spec_preprod.rs         #     Preprod / staging chain specs
+│   ├── runtime/src/lib.rs                #   WASM runtime (spec_version 111)
 │   └── pallets/
 │       ├── orinq-receipts/               #   Receipt settlement pallet
 │       │   ├── src/
-│       │   │   ├── lib.rs                #     Pallet logic (submit, anchor, query)
-│       │   │   ├── types.rs              #     Receipt, ReceiptStatus, AnchorData
-│       │   │   ├── tests.rs              #     Unit tests
-│       │   │   ├── integration_tests.rs  #     E2E integration tests
+│       │   │   ├── lib.rs                #     Pallet logic (submit, attest, anchor, rewards)
+│       │   │   ├── types.rs              #     ReceiptRecord, PlayerSigRecord, AnchorRecord
+│       │   │   ├── tests.rs              #     Unit tests (15 tests)
+│       │   │   ├── integration_tests.rs  #     E2E integration tests (11 tests)
 │       │   │   ├── weights.rs            #     Benchmark weights
 │       │   │   └── benchmarking.rs
 │       │   ├── primitives/               #     Shared types for RPC
@@ -97,37 +100,48 @@ materios/
 │           │   ├── lib.rs                #     Generation, decay, delegation
 │           │   ├── fee.rs                #     ChargeMotra fee adapter
 │           │   ├── types.rs              #     MotraParams, MotraBalance
-│           │   ├── tests.rs              #     Unit tests
+│           │   ├── tests.rs              #     Unit tests (20 tests)
 │           │   ├── weights.rs
 │           │   └── benchmarking.rs
 │           ├── primitives/               #     Shared types for RPC
 │           └── rpc/                      #     motra_* JSON-RPC methods
 │
-├── cert-daemon/                         # Certification daemon (Python)
-│   ├── Dockerfile                       #   Multi-stage Python build
-│   ├── requirements.txt                 #   Python dependencies
+├── cert-daemon/                          # Certification daemon (Python)
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   ├── schemas/
+│   │   └── registry.json                 #   Content validation schema registry
 │   ├── daemon/
-│   │   ├── attestation.py               #     Receipt attestation (threshold multi-attester)
-│   │   ├── checkpoint.py                #     Cardano L1 checkpoint batching
-│   │   ├── heartbeat.py                 #     sr25519-signed heartbeats (30s interval)
-│   │   ├── locator_registry.py          #     Blob locator resolution via gateway
-│   │   ├── blob_verifier.py             #     Blob data verification (SHA-256 chunks)
-│   │   ├── substrate_client.py          #     Substrate RPC client
-│   │   └── watchtower.py                #     Committee health monitoring + Discord alerts
-│   ├── k8s/                             #   K8s manifests (deployments, configmaps, secrets)
-│   ├── chaos/                           #   Chaos drill scripts (5 drills)
+│   │   ├── main.py                       #     Entry point
+│   │   ├── config.py                     #     Configuration (env vars)
+│   │   ├── cert_daemon.py                #     Main poll loop and attestation logic
+│   │   ├── cert_builder.py               #     dCBOR certificate construction
+│   │   ├── cert_store.py                 #     Certificate persistence
+│   │   ├── content_validator.py          #     Schema-driven content validation
+│   │   ├── checkpoint.py                 #     Cardano L1 checkpoint batching
+│   │   ├── heartbeat.py                  #     sr25519-signed heartbeats (30s interval)
+│   │   ├── locator_registry.py           #     Blob locator resolution via gateway
+│   │   ├── blob_verifier.py              #     SHA-256 chunk verification
+│   │   ├── merkle.py                     #     Merkle tree construction
+│   │   ├── models.py                     #     Data models
+│   │   ├── health_server.py              #     HTTP health endpoints
+│   │   ├── substrate_client.py           #     Substrate RPC client
+│   │   └── watchtower.py                 #     Committee health monitoring
+│   ├── tests/                            #   Unit tests
 │   ├── scripts/
-│   │   └── verify.py                    #   8-step chain-of-custody verification
-│   └── materios-operator-kit/           #   Public external operator kit (submodule)
+│   │   └── verify.py                     #   8-step chain-of-custody verification
+│   ├── docs/
+│   │   └── verification-guide.md         #   Verification walkthrough
+│   ├── docker-compose.external.yml       #   External operator compose template
+│   └── e2e_test.py                       #   End-to-end test
 │
 ├── tools/
 │   ├── receipt-builder/                  # Off-chain receipt construction (TypeScript)
-│   │   ├── package.json                  #   @materios/receipt-builder
-│   │   ├── tsconfig.json
+│   │   ├── package.json
 │   │   ├── src/
-│   │   │   ├── index.ts                  #     CLI entry point (commander)
+│   │   │   ├── index.ts                  #     CLI entry point
 │   │   │   ├── pipeline.ts               #     Full canonicalize-chunk-hash-compress-encrypt
-│   │   │   ├── canonicalize.ts           #     RFC 8785 JCS per-line canonicalization
+│   │   │   ├── canonicalize.ts           #     RFC 8785 JCS canonicalization
 │   │   │   ├── chunker.ts               #     Line-aware chunking
 │   │   │   ├── compress.ts              #     gzip compression
 │   │   │   ├── encrypt.ts               #     AES-256-GCM encryption
@@ -137,54 +151,52 @@ materios/
 │   │   │   └── hash/
 │   │   │       ├── sha256.ts            #       SHA-256 (primary)
 │   │   │       ├── merkle.ts            #       Merkle tree builder
-│   │   │       └── poseidon.ts          #       Poseidon hash (optional, ZK-friendly)
+│   │   │       └── poseidon.ts          #       Poseidon hash (ZK-friendly, optional)
 │   │   ├── tests/
-│   │   │   └── pipeline.test.ts         #     Vitest test suite
+│   │   │   └── pipeline.test.ts
 │   │   └── examples/
 │   │       └── trace.jsonl              #     Sample AI audit trace
 │   │
-│   ├── materios-verify/                  # Receipt verification CLI + library (Python)
-│   │   ├── setup.py                      #   pip install materios-verify
-│   │   └── materios_verify/
-│   │       └── __main__.py               #   8-step chain-of-custody verification
+│   ├── materios-verify/                  # Receipt verification CLI (Python)
+│   │   ├── pyproject.toml
+│   │   ├── setup.py / setup.cfg
+│   │   ├── materios_verify/
+│   │   │   ├── cli.py                    #     CLI entry point
+│   │   │   └── core.py                   #     Verification logic
+│   │   └── examples/
+│   │       └── sample-receipts.json
 │   │
 │   └── explorer/                         # Receipt explorer web UI (FastAPI)
-│       └── app.py                        #   Dashboard: recent activity, verification status
+│       ├── Dockerfile
+│       ├── requirements.txt
+│       ├── app.py                        #     FastAPI routes + API endpoints
+│       ├── chain.py                      #     Chain indexer + event scanner
+│       ├── cache.py                      #     In-memory TTL cache
+│       └── static/
+│           ├── index.html                #     SPA shell
+│           ├── app.js                    #     Frontend (hash router)
+│           └── style.css
 │
 ├── midnight/                             # Midnight ZK coprocessor
-│   ├── package.json
 │   ├── PROOF_DEMO.md                     #   ZK proof walkthrough
 │   ├── docker-compose.yml                #   Midnight local devnet
 │   ├── contracts/
-│   │   └── audit-claims.compact          #   Compact ZK circuit (proveRiskThreshold)
-│   └── client/                           #   TypeScript client for Midnight
-│       ├── package.json
-│       ├── tsconfig.json
-│       └── src/
-│           ├── deploy.ts                 #     Contract deployment
-│           ├── submitCommitment.ts       #     Commit receipt roots
-│           ├── submitClaim.ts            #     Submit ZK claims
-│           ├── proveRiskThreshold.ts     #     Prove risk >= threshold
-│           ├── query.ts                  #     Query claims
-│           ├── providers.ts              #     Midnight provider setup
-│           └── utils.ts
+│   │   └── audit-claims.compact          #   Compact ZK circuit
+│   └── client/src/                       #   TypeScript client
+│       ├── deploy.ts                     #     Contract deployment
+│       ├── submitCommitment.ts           #     Commit receipt roots
+│       ├── submitClaim.ts                #     Submit ZK claims
+│       ├── proveRiskThreshold.ts         #     Prove risk >= threshold
+│       ├── query.ts                      #     Query claims
+│       └── providers.ts                  #     Midnight provider setup
 │
-└── ops/                                  # Operations & deployment
-    ├── docker-compose.yml                #   Full stack (6 services)
-    ├── deploy.sh                         #   One-shot deploy script
-    ├── .env.example                      #   Environment template
-    ├── .env.preprod                      #   Preprod-specific (jerry)
-    ├── nginx/
-    │   └── nginx.conf                    #   Reverse proxy, IP allowlist, rate limiting
-    ├── scripts/
-    │   ├── bootstrap.sh                  #   Download configs + start infra
-    │   ├── deploy.sh → ../deploy.sh
-    │   ├── preprod-boot.sh               #   Automated preprod bootstrap
-    │   ├── wait-for-sync.sh              #   Poll db-sync until chain tip
-    │   ├── healthcheck-substrate.sh      #   Docker HEALTHCHECK for materios-node
-    │   └── healthcheck-stack.sh          #   Operator full-stack health check
-    └── config/
-        └── preprod/                      #   Downloaded at deploy time (.gitignored)
+└── docs/                                 # Specifications
+    ├── ARCHITECTURE.md                   #   System design, decisions D1-D8
+    ├── CANONICALIZATION.md               #   RFC 8785 JCS canonicalization spec
+    ├── AVAILABILITY_CERT_SPEC.md         #   dCBOR availability certificate spec
+    ├── GOVERNANCE.md                     #   Governance UTXO, D-parameter
+    ├── OPERATOR_KIT.md                   #   External operator onboarding
+    └── RUNBOOK.md                        #   Deployment, testing, troubleshooting
 ```
 
 ---
@@ -193,10 +205,11 @@ materios/
 
 | Tool | Version | Notes |
 |------|---------|-------|
-| **Rust** | 1.90.0 | Pinned via `partnerchain/rust-toolchain.toml` |
-| **Node.js** | 22+ | LTS recommended |
+| **Rust** | 1.88.0 | Pinned via `partnerchain/rust-toolchain.toml` |
+| **Node.js** | 22+ | LTS recommended (for receipt-builder) |
 | **pnpm** | latest | For receipt-builder and midnight client |
 | **Docker** | 24+ | Docker Compose v2 plugin required |
+| **Python** | 3.12+ | For cert-daemon and verification tools |
 | **Nix** | optional | Reproducible dev shell via `partnerchain/flake.nix` |
 
 ---
@@ -205,13 +218,13 @@ materios/
 
 ```bash
 # Clone
-git clone https://github.com/<org>/materios.git && cd materios
+git clone https://github.com/Flux-Point-Studios/materios.git && cd materios
 
 # Build the partner chain node
 cd partnerchain
 cargo build --release -p materios-node
 
-# Run unit tests (38 pallet tests + 11 integration tests)
+# Run unit tests (46 tests across both pallets + integration tests)
 cargo test --workspace
 
 # Build the receipt-builder
@@ -236,66 +249,29 @@ curl -s -X POST http://localhost:9944 \
 
 ---
 
-## Container Deployment (Preprod)
+## Running the Cert Daemon
 
-The `ops/` directory contains a fully containerized stack for preprod burn-in.
-
-### Services
-
-| Service | Image | Purpose |
-|---------|-------|---------|
-| cardano-node | `ghcr.io/intersectmbo/cardano-node:10.5.1` | Cardano preprod relay |
-| postgres | `postgres:16-alpine` | DB Sync backend |
-| cardano-db-sync | `ghcr.io/intersectmbo/cardano-db-sync:13.6.0.4` | Chain indexer |
-| ogmios | `cardanosolutions/ogmios:v6.13.0` | Cardano JSON-RPC bridge |
-| materios-node | local build (`partnerchain/Dockerfile`) | Partner chain validator |
-| nginx | `nginx:1.27-alpine` | Reverse proxy + IP allowlist |
-
-### Deploy
+The cert daemon verifies blob integrity and attests receipt availability. It connects to a Materios node via WebSocket RPC.
 
 ```bash
-cd ops
-chmod +x deploy.sh && ./deploy.sh
+cd cert-daemon
+pip install -r requirements.txt
+python -m daemon.main
 ```
 
-This builds the materios-node image, starts the Cardano infrastructure, and prints wizard instructions for governance initialization. See the full sequence in [docs/RUNBOOK.md](docs/RUNBOOK.md).
+Configure via environment variables (see `daemon/config.py` for the full list):
 
-### Wizard-First Flow
+| Variable | Purpose |
+|----------|---------|
+| `MATERIOS_RPC_URL` | WebSocket endpoint for the Materios node |
+| `SIGNER_URI` | BIP39 mnemonic or `//Alice` for dev |
+| `BLOB_GATEWAY_URL` | Blob gateway URL for fetching blob data |
+| `CONTENT_VALIDATION_ENABLED` | Enable schema-based content validation |
+| `SCHEMA_REGISTRY_PATH` | Path to schema registry JSON (default: `schemas/registry.json`) |
 
-The materios-node does **not** auto-start as a validator. The deployment follows a wizard-first flow:
+### Schema Registry
 
-1. Start infrastructure: `docker compose up -d cardano-node postgres cardano-db-sync ogmios nginx`
-2. Wait for db-sync to reach chain tip (~12-48h)
-3. Run wizards as one-shot containers:
-   ```bash
-   docker compose run --rm materios-node materios-node wizards generate-keys
-   docker compose run --rm materios-node materios-node wizards prepare-configuration
-   docker compose run --rm materios-node materios-node wizards create-chain-spec
-   docker compose run --rm materios-node materios-node wizards setup-main-chain-state
-   ```
-4. Wait 2 Cardano epochs (~2 days)
-5. Start the validator: `docker compose up -d materios-node`
-
-### Security
-
-- **RPC lockdown:** `--rpc-methods safe` blocks admin/author methods; no `--rpc-cors`
-- **IP allowlist:** nginx `geo` module restricts RPC access to authorized networks
-- **Rate limiting:** 30 req/s RPC, 10 req/s WebSocket
-- **Ogmios:** Only health check and WebSocket exposed; dashboard blocked (426 on plain HTTP)
-
-### Health Checks
-
-```bash
-# Full stack check (all 5 services)
-bash ops/scripts/healthcheck-stack.sh
-
-# Individual service
-curl http://localhost/health              # nginx
-curl http://localhost/health-ogmios       # ogmios via nginx
-curl -X POST http://localhost/substrate/  # materios-node via nginx
-  -H 'Content-Type: application/json'
-  -d '{"jsonrpc":"2.0","method":"system_health","params":[],"id":1}'
-```
+Content validation uses a JSON schema registry (`schemas/registry.json`). Each game defines required fields, types, bounds, and computed plausibility checks. See the registry file for the format and the Clay Monster Dash v1 schema as a reference.
 
 ---
 
@@ -306,7 +282,7 @@ curl -X POST http://localhost/substrate/  # materios-node via nginx
 ```bash
 cd partnerchain
 
-# All workspace tests
+# All workspace tests (46 total: 15 orinq-receipts + 11 integration + 20 motra)
 cargo test --workspace
 
 # Specific pallet
@@ -325,11 +301,11 @@ pnpm test          # single run
 pnpm test:watch    # watch mode
 ```
 
-### Midnight Contract
+### Cert Daemon (Python)
 
 ```bash
-cd midnight
-pnpm run compile   # compile audit-claims.compact
+cd cert-daemon
+python -m pytest tests/
 ```
 
 ---
@@ -341,7 +317,8 @@ pnpm run compile   # compile audit-claims.compact
 | Method | Description |
 |--------|-------------|
 | `orinq_getReceipt` | Fetch a receipt by receipt_id |
-| `orinq_getReceiptsByContentHash` | Look up receipts by content_hash |
+| `orinq_getReceiptsByContent` | Look up receipt IDs by content_hash |
+| `orinq_getReceiptCount` | Get total number of receipts on-chain |
 | `orinq_receiptExists` | Check if a receipt exists (lightweight, returns bool) |
 | `orinq_getReceiptStatus` | Get receipt status: pending, certified, or anchored |
 
@@ -352,6 +329,54 @@ pnpm run compile   # compile audit-claims.compact
 | `motra_getBalance` | Query MOTRA balance for an account |
 | `motra_getParams` | Get current MOTRA parameters (decay rate, generation rate, etc.) |
 | `motra_estimateFee` | Estimate fee for a given extrinsic weight + length |
+
+---
+
+## Extrinsics
+
+### orinqReceipts
+
+| Call | Index | Description |
+|------|:-----:|-------------|
+| `submit_receipt` | 0 | Submit a receipt (studio wallet signs) |
+| `set_availability_cert` | 1 | Root-only: set availability cert directly |
+| `set_committee` | 2 | Root-only: set attestation committee + threshold |
+| `attest_availability_cert` | 3 | Committee member attests a receipt |
+| `submit_anchor` | 4 | Submit a Cardano L1 anchor |
+| `rotate_authorities` | 5 | Root-only: rotate Aura + Grandpa authority sets |
+| `submit_receipt_v2` | 6 | Submit receipt with player anti-cheat signature |
+| `join_committee` | 7 | Permissionless: join the attestation committee |
+| `leave_committee` | 8 | Voluntary: leave the attestation committee |
+
+---
+
+## Becoming an Operator
+
+There are two ways to participate:
+
+### Attestor (No Approval Needed)
+
+Run a cert daemon and earn tMATRA for verifying receipts:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Flux-Point-Studios/materios-operator-kit/main/install.sh \
+  | bash -s -- --mode attestor
+```
+
+Requirements: 1 vCPU, 512 MB RAM, 1 GB disk, outbound HTTPS only.
+
+### Full Validator (Invite Required)
+
+Run a full node (block production + finality) and a cert daemon:
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Flux-Point-Studios/materios-operator-kit/main/install.sh \
+  | bash -s -- --token YOUR_INVITE_TOKEN
+```
+
+Requirements: 2+ vCPU, 2 GB RAM, 50 GB SSD, port 30333 open.
+
+See the [Operator Guide](https://docs.fluxpointstudios.com/materios-partner-chain/operator-guide) for full details.
 
 ---
 
@@ -367,124 +392,22 @@ See [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for initialization procedures and t
 
 ---
 
-## License
+## Security
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
-- MIT License ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
-
-at your option.
+- **RPC lockdown:** `--rpc-methods safe` blocks admin/author methods on public-facing nodes
+- **No slashing:** Offline validators miss rewards but are not penalized
+- **Permissionless attestation:** Anyone can join via `join_committee`, with per-era reward caps to prevent drain
+- **Content validation:** Schema-driven, AST-based expression evaluation (no `eval()`)
+- **Path traversal protection:** All file:// and local manifest paths are normalized and prefix-checked
 
 ---
 
-## Appendix: Knowledge Map
+## Contributing
 
-A topic-to-file index for navigating the codebase.
+Contributions welcome. Please open an issue first to discuss significant changes.
 
-### Specifications
+---
 
-| Topic | Location | Notes |
-|-------|----------|-------|
-| System architecture & design decisions | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | D1-D8, data flow, component overview |
-| JSON canonicalization (RFC 8785 JCS) | [docs/CANONICALIZATION.md](docs/CANONICALIZATION.md) | Per-line normalization, hash-before-compress, chunk boundaries |
-| Availability certificates (dCBOR) | [docs/AVAILABILITY_CERT_SPEC.md](docs/AVAILABILITY_CERT_SPEC.md) | 9-field signed message, 3 verification levels, on-chain hash |
-| Governance & D-parameter | [docs/GOVERNANCE.md](docs/GOVERNANCE.md) | UTXO setup, wizard flow, decentralization roadmap |
-| Deployment runbook | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Full deployment, MOTRA testing, troubleshooting (8 scenarios) |
-| Midnight ZK proof demo | [midnight/PROOF_DEMO.md](midnight/PROOF_DEMO.md) | proveRiskThreshold circuit, fee considerations, limitations |
+## License
 
-### Partner Chain (Rust)
-
-| Topic | Location | Notes |
-|-------|----------|-------|
-| Receipt pallet (submit, anchor, query) | `partnerchain/pallets/orinq-receipts/src/lib.rs` | Core settlement logic |
-| Receipt types (Receipt, AnchorData) | `partnerchain/pallets/orinq-receipts/src/types.rs` | On-chain data structures |
-| Receipt RPC methods | `partnerchain/pallets/orinq-receipts/rpc/src/lib.rs` | orinq_getReceipt, orinq_getReceiptsByContentHash |
-| MOTRA pallet (generation, decay, delegation) | `partnerchain/pallets/motra/src/lib.rs` | Capacity token mechanics |
-| MOTRA fee adapter (ChargeMotra) | `partnerchain/pallets/motra/src/fee.rs` | Fee calculation with congestion EMA |
-| MOTRA types (MotraParams, MotraBalance) | `partnerchain/pallets/motra/src/types.rs` | Must stay in sync with primitives |
-| MOTRA RPC methods | `partnerchain/pallets/motra/rpc/src/lib.rs` | motra_getBalance, motra_getParams, motra_estimateFee |
-| Chain spec (dev / local) | `partnerchain/node/src/chain_spec.rs` | Genesis config for development |
-| Chain spec (preprod / staging) | `partnerchain/node/src/chain_spec_preprod.rs` | Genesis config for preprod |
-| CLI subcommands | `partnerchain/node/src/cli.rs` | Argument definitions |
-| Subcommand dispatch | `partnerchain/node/src/command.rs` | CLI routing + stub error messages |
-| Node service (full + partial) | `partnerchain/node/src/service.rs` | Aura, GRANDPA, RPC wiring |
-| Runtime configuration | `partnerchain/runtime/src/lib.rs` | Pallet composition, parameter tuning |
-| Rust toolchain | `partnerchain/rust-toolchain.toml` | 1.90.0, wasm32v1-none |
-| Dockerfile (multi-stage cargo-chef) | `partnerchain/Dockerfile` | Build context = repo root |
-
-### Receipt Builder (TypeScript)
-
-| Topic | Location | Notes |
-|-------|----------|-------|
-| CLI entry point | `tools/receipt-builder/src/index.ts` | commander-based CLI |
-| Full pipeline (canonicalize-chunk-hash-compress-encrypt) | `tools/receipt-builder/src/pipeline.ts` | End-to-end receipt construction |
-| RFC 8785 JCS canonicalization | `tools/receipt-builder/src/canonicalize.ts` | Uses `canonicalize` npm package |
-| Line-aware chunking | `tools/receipt-builder/src/chunker.ts` | Lines are atomic, never split |
-| SHA-256 hashing | `tools/receipt-builder/src/hash/sha256.ts` | Primary hash function |
-| Merkle tree construction | `tools/receipt-builder/src/hash/merkle.ts` | Builds tree from chunk hashes |
-| Poseidon hash (ZK-friendly) | `tools/receipt-builder/src/hash/poseidon.ts` | Optional, version-bound (D4) |
-| Pipeline tests | `tools/receipt-builder/tests/pipeline.test.ts` | Vitest suite |
-| Sample input | `tools/receipt-builder/examples/trace.jsonl` | AI audit trace example |
-
-### Midnight (ZK Coprocessor)
-
-| Topic | Location | Notes |
-|-------|----------|-------|
-| Compact ZK circuit | `midnight/contracts/audit-claims.compact` | proveRiskThreshold, commitReceipt |
-| Contract deployment | `midnight/client/src/deploy.ts` | Deploy to Midnight devnet/testnet |
-| Submit receipt commitments | `midnight/client/src/submitCommitment.ts` | Commit roots to Midnight |
-| Prove risk threshold | `midnight/client/src/proveRiskThreshold.ts` | ZK proof: risk >= threshold |
-| Submit ZK claims | `midnight/client/src/submitClaim.ts` | Post proof on-chain |
-| Query claims | `midnight/client/src/query.ts` | Look up verified claims |
-| Midnight devnet | `midnight/docker-compose.yml` | Local development network |
-
-### Cert Daemon (Python)
-
-| Topic | Location | Notes |
-|-------|----------|-------|
-| Receipt attestation (multi-attester) | `cert-daemon/daemon/attestation.py` | Threshold-based, 2-of-N committee |
-| Cardano L1 checkpointing | `cert-daemon/daemon/checkpoint.py` | Batches certified receipts, Merkle root anchoring |
-| sr25519-signed heartbeats | `cert-daemon/daemon/heartbeat.py` | 30s interval, verified on gateway |
-| Blob locator resolution | `cert-daemon/daemon/locator_registry.py` | Fetches blob data via gateway (public reads) |
-| Blob data verification | `cert-daemon/daemon/blob_verifier.py` | SHA-256 chunk verification |
-| Substrate RPC client | `cert-daemon/daemon/substrate_client.py` | Keypair, chain queries, extrinsic submission |
-| Committee watchtower | `cert-daemon/daemon/watchtower.py` | Health monitoring + Discord alerts |
-| Chaos drill scripts (5 drills) | `cert-daemon/chaos/` | Network partition, node failure, pipeline E2E |
-| Chain-of-custody verification | `cert-daemon/scripts/verify.py` | 8-step proof: receipt → cert → anchor → Merkle |
-| K8s deployments | `cert-daemon/k8s/` | Alice + Bob daemons, configmaps, secrets |
-| External operator kit | `cert-daemon/materios-operator-kit/` | Public repo for external validators |
-
-### Tools
-
-| Topic | Location | Notes |
-|-------|----------|-------|
-| Receipt verification CLI | `tools/materios-verify/` | `materios-verify <receipt_id>`, pip-installable |
-| Receipt explorer web UI | `tools/explorer/app.py` | FastAPI dashboard, 5-state status badges |
-
-### Operations & Deployment
-
-| Topic | Location | Notes |
-|-------|----------|-------|
-| Docker Compose (full stack, 6 services) | `ops/docker-compose.yml` | materios-net bridge, log rotation |
-| Nginx reverse proxy | `ops/nginx/nginx.conf` | IP allowlist, rate limiting, Ogmios WS gate |
-| Deploy script | `ops/deploy.sh` | One-shot: preflight, build, start infra |
-| Bootstrap (config download + start) | `ops/scripts/bootstrap.sh` | Downloads preprod config files |
-| Preprod automated boot | `ops/scripts/preprod-boot.sh` | Full automated deployment |
-| DB Sync wait | `ops/scripts/wait-for-sync.sh` | Polls until db-sync reaches chain tip |
-| Substrate health check | `ops/scripts/healthcheck-substrate.sh` | Docker HEALTHCHECK (system_health RPC) |
-| Stack health check | `ops/scripts/healthcheck-stack.sh` | Tests all 5 services, prints report |
-| Environment template | `ops/.env.example` | Tracked; copy to .env |
-| Preprod environment | `ops/.env.preprod` | jerry-asus-nuc-14 specific values |
-
-### Conventions
-
-| Convention | Reference |
-|------------|-----------|
-| Hash canonical bytes BEFORE compression | [docs/CANONICALIZATION.md](docs/CANONICALIZATION.md) (eliminates gzip non-determinism) |
-| RFC 8785 JCS for JSON canonicalization | [docs/CANONICALIZATION.md](docs/CANONICALIZATION.md) |
-| dCBOR (RFC 8949 sec. 4.2) for availability certs | [docs/AVAILABILITY_CERT_SPEC.md](docs/AVAILABILITY_CERT_SPEC.md) |
-| Runtime-sourced timestamps (not client) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (D6) |
-| content_hash = deterministic, receipt_id = unique per submission | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (D1) |
-| Only commitments on-chain (roots, hashes, attestations) | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (hard constraint) |
-| Schema version as hash, not semver | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (D8) |
+This project is licensed under the Apache License 2.0. See the source files for details.
