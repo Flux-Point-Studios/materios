@@ -404,7 +404,17 @@ See [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for initialization procedures and t
 
 ## Contributing
 
-Contributions welcome. Please open an issue first to discuss significant changes.
+Materios is newly open-source and we're actively looking for feedback from developers, security researchers, and anyone interested in verifiable gaming and on-chain attestation.
+
+**Ways to get involved:**
+
+- **Found a bug or vulnerability?** [Open an issue](https://github.com/Flux-Point-Studios/materios/issues) — security reports are especially appreciated
+- **Have a game you want to integrate?** Check the [Game Integration Guide](https://docs.fluxpointstudios.com/materios-partner-chain/game-integration) and open a PR to add your schema to `cert-daemon/schemas/registry.json`
+- **Want to improve the pallets?** The pallet weights are hand-estimated (not benchmarked), player signatures aren't verified on-chain yet, and there's room for gas optimization — PRs welcome
+- **Run an attestor node** and help secure the network — takes 1 minute, no approval needed (see [Becoming an Operator](#becoming-an-operator))
+- **Questions or ideas?** Join us in the [Flux Point Studios Discord](https://discord.gg/MfYUMnfrJM) (#materios channel)
+
+For significant changes, please open an issue first to discuss the approach.
 
 ---
 
