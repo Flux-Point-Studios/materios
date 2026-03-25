@@ -1,0 +1,8 @@
+{"event":"prompt","model":"gpt-4","content":"What is 2+2?","timestamp":1700000000000,"session":"abc123"}
+{"event":"response","model":"gpt-4","content":"4","tokens":{"prompt":12,"completion":1},"timestamp":1700000001000,"session":"abc123"}
+{"event":"safety_check","model":"gpt-4","result":"pass","flags":[],"timestamp":1700000001500,"session":"abc123"}
+{"event":"prompt","model":"gpt-4","content":"Explain quantum computing","timestamp":1700000010000,"session":"def456"}
+{"event":"response","model":"gpt-4","content":"Quantum computing uses quantum bits...","tokens":{"prompt":8,"completion":45},"timestamp":1700000012000,"session":"def456"}
+{"event":"safety_check","model":"gpt-4","result":"pass","flags":[],"timestamp":1700000012500,"session":"def456"}
+{"event":"monitor","type":"latency","value_ms":2000,"threshold_ms":5000,"timestamp":1700000015000}
+{"event":"monitor","type":"token_rate","value":46,"threshold":100,"timestamp":1700000015000}

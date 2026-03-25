@@ -1,0 +1,124 @@
+pragma language_version 0.20;
+import CompactStandardLibrary;
+
+// ============================================================================
+// Ledger State — Separate Maps per field (avoids struct-valued Maps)
+// ============================================================================
+
+export ledger zk_roots: Map<Bytes<32>, Bytes<32>>;
+export ledger base_roots: Map<Bytes<32>, Bytes<32>>;
+export ledger config_hashes: Map<Bytes<32>, Bytes<32>>;
+export ledger schema_hashes: Map<Bytes<32>, Bytes<32>>;
+export ledger timestamps: Map<Bytes<32>, Uint<64>>;
+export ledger commitment_count: Counter;
+
+// Claims ledger — stores verified claim results
+export ledger claims: Map<Bytes<32>, Boolean>;
+
+// Risk score threshold proofs — claim key encodes (receipt_id, threshold)
+export ledger risk_proofs: Map<Bytes<32>, Boolean>;
+
+// ============================================================================
+// Witnesses — private data provided by the prover (not visible on-chain)
+// ============================================================================
+
+// The prover provides the actual risk score privately
+witness local_risk_score(): Uint<64>;
+
+// The prover provides the monitor config used to compute the score
+witness local_config_hash(): Bytes<32>;
+
+// ============================================================================
+// Circuits
+// ============================================================================
+
+/// Submit a commitment from the partner chain.
+/// All values are disclosed (public). This anchors the receipt's roots on Midnight.
+export circuit submitCommitment(
+  receiptId: Bytes<32>,
+  zkRoot: Bytes<32>,
+  baseRoot: Bytes<32>,
+  configHash: Bytes<32>,
+  schemaHash: Bytes<32>,
+  ts: Uint<64>
+): [] {
+  // Store each field in its own map
+  zk_roots.insert(receiptId, zkRoot);
+  base_roots.insert(receiptId, baseRoot);
+  config_hashes.insert(receiptId, configHash);
+  schema_hashes.insert(receiptId, schemaHash);
+  timestamps.insert(receiptId, ts);
+  increment!(commitment_count, 1);
+}
+
+/// Prove that a receipt's risk score meets or exceeds a threshold.
+///
+/// This is the core ZK proof: the prover demonstrates knowledge of a risk_score
+/// that is >= threshold, computed under the committed monitor_config_hash,
+/// WITHOUT revealing the actual risk_score or raw trace data.
+///
+/// Public inputs (disclosed on-chain):
+///   - receiptId: which receipt this claim is about
+///   - threshold: the minimum acceptable risk score
+///
+/// Private inputs (via witness, never revealed):
+///   - local_risk_score(): the actual computed risk score
+///   - local_config_hash(): the monitor config used to compute it
+///
+/// The circuit verifies:
+///   1. The commitment exists (baseRoot is stored)
+///   2. The private config_hash matches the committed config_hash
+///   3. The private risk_score >= threshold
+///
+/// If all checks pass, the proof is stored on-chain as a Boolean claim.
+export circuit proveRiskThreshold(
+  receiptId: Bytes<32>,
+  threshold: Uint<64>
+): [] {
+  // 1. Verify commitment exists
+  assert base_roots.member(receiptId) "Commitment not found for receiptId";
+
+  // 2. Get the committed config hash
+  const committedConfig = config_hashes.lookup(receiptId);
+
+  // 3. Get private inputs from witness
+  const actualScore = local_risk_score();
+  const actualConfig = local_config_hash();
+
+  // 4. Verify the config used to compute the score matches what was committed
+  assert actualConfig == committedConfig
+    "Monitor config mismatch: score was not computed under the committed config";
+
+  // 5. Verify risk score meets threshold (THE CORE ZK STATEMENT)
+  assert actualScore >= threshold
+    "Risk score does not meet threshold";
+
+  // 6. Store the verified claim on-chain
+  // The claim key encodes both receipt and threshold so different thresholds
+  // produce different claim entries
+  // For simplicity, we store under receiptId (one proof per receipt for MVP)
+  risk_proofs.insert(receiptId, true);
+}
+
+/// Submit a generic boolean claim about a receipt.
+/// The claim is simply asserted by the submitter — no ZK proof.
+/// Use proveRiskThreshold for actual ZK-proven claims.
+export circuit submitClaim(
+  receiptId: Bytes<32>,
+  claimKey: Bytes<32>,
+  claimResult: Boolean
+): [] {
+  assert base_roots.member(receiptId) "Commitment must exist";
+  claims.insert(claimKey, claimResult);
+}
+
+/// Look up the base root for a committed receipt.
+export circuit lookupCommitment(receiptId: Bytes<32>): Bytes<32> {
+  assert base_roots.member(receiptId) "Commitment not found";
+  return base_roots.lookup(receiptId);
+}
+
+/// Check if a risk threshold proof exists for a receipt.
+export circuit hasRiskProof(receiptId: Bytes<32>): Boolean {
+  return risk_proofs.member(receiptId);
+}

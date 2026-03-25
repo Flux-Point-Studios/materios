@@ -1,0 +1,23 @@
+{
+  "name": "@materios/receipt-builder",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": { "receipt-builder": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "canonicalize": "^2.0.0",
+    "commander": "^12.0.0",
+    "poseidon-lite": "^0.3.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0",
+    "@types/node": "^22.0.0"
+  }
+}

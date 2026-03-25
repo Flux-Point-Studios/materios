@@ -1,0 +1,8 @@
+{
+  "name": "@materios/midnight",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "compile": "compactc compile contracts/audit-claims.compact contracts/managed/audit-claims"
+  }
+}

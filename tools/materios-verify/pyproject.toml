@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "materios-verify"
+version = "0.1.0"
+description = "End-to-end checkpoint verifier for the Materios Partner Chain"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "substrate-interface>=1.7.0,<2.0",
+]
+
+[project.scripts]
+materios-verify = "materios_verify.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Flux-Point-Studios/materios"
+
+[tool.setuptools.packages.find]
+include = ["materios_verify*"]

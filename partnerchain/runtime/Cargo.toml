@@ -1,0 +1,121 @@
+[package]
+name = "materios-runtime"
+version = "0.1.0"
+description = "Materios Partner Chain runtime"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[build-dependencies]
+substrate-wasm-builder = { workspace = true, optional = true }
+
+[dependencies]
+parity-scale-codec = { workspace = true }
+scale-info = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, default-features = false, features = ["alloc"] }
+
+# Substrate primitives
+sp-api = { workspace = true }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+sp-std = { workspace = true }
+sp-io = { workspace = true }
+sp-version = { workspace = true }
+sp-genesis-builder = { workspace = true }
+sp-inherents = { workspace = true }
+sp-block-builder = { workspace = true }
+sp-transaction-pool = { workspace = true }
+sp-offchain = { workspace = true }
+sp-session = { workspace = true }
+sp-consensus-aura = { workspace = true }
+sp-consensus-grandpa = { workspace = true }
+
+# FRAME
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+frame-executive = { workspace = true }
+
+# Pallets
+pallet-aura = { workspace = true }
+pallet-balances = { workspace = true }
+pallet-grandpa = { workspace = true }
+pallet-sudo = { workspace = true }
+pallet-timestamp = { workspace = true }
+pallet-transaction-payment = { workspace = true }
+pallet-transaction-payment-rpc-runtime-api = { workspace = true }
+
+# Local
+pallet-orinq-receipts = { workspace = true }
+orinq-receipts-primitives = { workspace = true }
+pallet-motra = { workspace = true }
+motra-primitives = { workspace = true }
+sp-arithmetic = { workspace = true }
+frame-system-rpc-runtime-api = { workspace = true }
+getrandom = { workspace = true }
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "serde/std",
+    "serde_json/std",
+    "sp-api/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "sp-io/std",
+    "sp-version/std",
+    "sp-genesis-builder/std",
+    "sp-inherents/std",
+    "sp-block-builder/std",
+    "sp-transaction-pool/std",
+    "sp-offchain/std",
+    "sp-session/std",
+    "sp-consensus-aura/std",
+    "sp-consensus-grandpa/std",
+    "frame-support/std",
+    "frame-system/std",
+    "frame-executive/std",
+    "pallet-aura/std",
+    "pallet-balances/std",
+    "pallet-grandpa/std",
+    "pallet-sudo/std",
+    "pallet-timestamp/std",
+    "pallet-transaction-payment/std",
+    "pallet-transaction-payment-rpc-runtime-api/std",
+    "pallet-orinq-receipts/std",
+    "orinq-receipts-primitives/std",
+    "pallet-motra/std",
+    "motra-primitives/std",
+    "sp-arithmetic/std",
+    "frame-system-rpc-runtime-api/std",
+    "substrate-wasm-builder",
+]
+runtime-benchmarks = [
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "pallet-balances/runtime-benchmarks",
+    "pallet-grandpa/runtime-benchmarks",
+    "pallet-sudo/runtime-benchmarks",
+    "pallet-timestamp/runtime-benchmarks",
+    "pallet-orinq-receipts/runtime-benchmarks",
+    "pallet-motra/runtime-benchmarks",
+    "sp-runtime/runtime-benchmarks",
+]
+try-runtime = [
+    "frame-support/try-runtime",
+    "frame-system/try-runtime",
+    "frame-executive/try-runtime",
+    "pallet-aura/try-runtime",
+    "pallet-balances/try-runtime",
+    "pallet-grandpa/try-runtime",
+    "pallet-sudo/try-runtime",
+    "pallet-timestamp/try-runtime",
+    "pallet-transaction-payment/try-runtime",
+    "pallet-orinq-receipts/try-runtime",
+    "pallet-motra/try-runtime",
+    "sp-runtime/try-runtime",
+]

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Materios Explorer</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+
+<nav class="nav-bar">
+    <div class="nav-brand">
+        <a href="#/">Materios Explorer</a>
+        <span class="nav-chain-badge" id="nav-chain-badge">Staging</span>
+    </div>
+    <div class="nav-links">
+        <a href="#/" class="nav-link" data-route="/">Home</a>
+        <a href="#/blocks" class="nav-link" data-route="/blocks">Blocks</a>
+        <a href="#/receipts" class="nav-link" data-route="/receipts">Receipts</a>
+        <a href="#/anchors" class="nav-link" data-route="/anchors">Anchors</a>
+        <a href="#/committee" class="nav-link" data-route="/committee">Committee</a>
+    </div>
+    <div class="nav-search">
+        <input type="text" id="global-search" placeholder="Search receipt, block, address..." spellcheck="false">
+        <button id="search-btn" onclick="doSearch()">Search</button>
+    </div>
+</nav>
+
+<main id="app" class="container">
+    <div class="loading">Loading...</div>
+</main>
+
+<footer class="footer">
+    <div class="footer-inner">
+        <span>Materios Explorer</span>
+        <span class="footer-sep">|</span>
+        <span id="footer-chain-info">Connecting...</span>
+    </div>
+</footer>
+
+<script src="static/app.js"></script>
+</body>
+</html>

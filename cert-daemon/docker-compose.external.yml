@@ -1,0 +1,58 @@
+# Materios Cert Daemon — External Operator Template
+#
+# Prerequisites:
+#   1. Generate a committee key: python generate_committee_key.py
+#   2. Send your SS58 address to the FPS team
+#   3. Receive: API key + committee addition confirmation
+#   4. Fill in the environment variables below
+#   5. Run: docker compose -f docker-compose.external.yml up -d
+#
+# This daemon connects to Materios via PUBLIC endpoints only.
+# No VPN, Tailscale, or cluster access needed.
+
+version: "3.8"
+
+services:
+  cert-daemon:
+    image: ghcr.io/flux-point-studios/materios-cert-daemon:latest
+    restart: unless-stopped
+    environment:
+      # === REQUIRED — fill these in ===
+      SIGNER_URI: ""                  # Your BIP39 mnemonic (24 words)
+      BLOB_GATEWAY_API_KEY: ""        # API key from FPS team
+
+      # === Chain connection (public endpoints) ===
+      MATERIOS_RPC_URL: "wss://materios.fluxpointstudios.com/rpc"
+      BLOB_GATEWAY_URL: "https://materios.fluxpointstudios.com/blobs"
+      LOCATOR_REGISTRY_URL: "https://materios.fluxpointstudios.com/blobs"
+      LOCATOR_REGISTRY_API_KEY: ""    # Same as BLOB_GATEWAY_API_KEY
+
+      # === Heartbeat (uses public gateway) ===
+      HEARTBEAT_URL: "https://materios.fluxpointstudios.com/blobs"
+      HEARTBEAT_INTERVAL: "30"
+
+      # === DO NOT checkpoint from external daemon ===
+      CHECKPOINT_ENABLED: "false"
+
+      # === Standard config ===
+      CHAIN_ID: "8f6e531be80341a12a0ae1b04484770fcaa797bb49dcc1cc9e79788f770a41b3"
+      POLL_INTERVAL: "12"
+      POLL_INTERVAL_FAST: "3"
+      POLL_INTERVAL_IDLE: "12"
+      DATA_DIR: "/data"
+      BLOB_LOCAL_DIR: "/data/materios-blobs"
+      CERT_STORE_DIR: "/data/certs"
+      STATE_FILE: "/data/daemon-state.json"
+      HEALTH_PORT: "8080"
+      MAX_BLOB_FETCH_RETRIES: "3"
+      BLOB_FETCH_TIMEOUT: "30"
+      FINALITY_CONFIRMATIONS: "4"
+      MAX_LEAF_WAIT_SECONDS: "90"
+
+    volumes:
+      - cert-daemon-data:/data
+    ports:
+      - "8080:8080"   # Health endpoint (optional)
+
+volumes:
+  cert-daemon-data:

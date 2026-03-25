@@ -1,0 +1,355 @@
+use crate as pallet_orinq_receipts;
+use crate::{pallet, types::ReceiptRecord};
+use frame_support::{
+    assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
+    traits::{ConstBool, ConstU32, ConstU64},
+};
+use sp_core::H256;
+use sp_runtime::{
+    traits::{BlakeTwo256, IdentityLookup},
+    BuildStorage,
+};
+
+// ---------------------------------------------------------------------------
+// Mock runtime
+// ---------------------------------------------------------------------------
+
+type Block = frame_system::mocking::MockBlock<Test>;
+
+construct_runtime! {
+    pub enum Test {
+        System: frame_system,
+        Timestamp: pallet_timestamp,
+        Aura: pallet_aura,
+        Grandpa: pallet_grandpa,
+        OrinqReceipts: pallet_orinq_receipts,
+    }
+}
+
+#[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+impl frame_system::Config for Test {
+    type Block = Block;
+    type AccountId = u64;
+    type Lookup = IdentityLookup<Self::AccountId>;
+}
+
+parameter_types! {
+    pub const MinimumPeriod: u64 = 5;
+}
+
+impl pallet_timestamp::Config for Test {
+    type Moment = u64;
+    type OnTimestampSet = ();
+    type MinimumPeriod = MinimumPeriod;
+    type WeightInfo = ();
+}
+
+impl pallet_aura::Config for Test {
+    type AuthorityId = sp_consensus_aura::sr25519::AuthorityId;
+    type DisabledValidators = ();
+    type MaxAuthorities = ConstU32<32>;
+    type AllowMultipleBlocksPerSlot = ConstBool<false>;
+    type SlotDuration = pallet_aura::MinimumPeriodTimesTwo<Test>;
+}
+
+impl pallet_grandpa::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type WeightInfo = ();
+    type MaxAuthorities = ConstU32<32>;
+    type MaxNominators = ConstU32<0>;
+    type MaxSetIdSessionEntries = ConstU64<0>;
+    type KeyOwnerProof = sp_core::Void;
+    type EquivocationReportSystem = ();
+}
+
+impl pallet::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type WeightInfo = crate::weights::SubstrateWeight;
+    type MaxResubmits = ConstU32<64>;
+    type MaxCommitteeSize = ConstU32<16>;
+}
+
+/// Build genesis storage for tests.
+fn new_test_ext() -> sp_io::TestExternalities {
+    let t = frame_system::GenesisConfig::<Test>::default()
+        .build_storage()
+        .unwrap();
+    let mut ext = sp_io::TestExternalities::new(t);
+    ext.execute_with(|| {
+        System::set_block_number(1);
+        // Seed timestamp so `pallet_timestamp::Now` is populated.
+        Timestamp::set_timestamp(1_000);
+    });
+    ext
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn dummy_hash(byte: u8) -> [u8; 32] {
+    [byte; 32]
+}
+
+fn submit(
+    who: u64,
+    receipt_id: H256,
+    content_hash: H256,
+) -> frame_support::dispatch::DispatchResult {
+    OrinqReceipts::submit_receipt(
+        RuntimeOrigin::signed(who),
+        receipt_id,
+        content_hash,
+        dummy_hash(1),       // base_root_sha256
+        None,                // zk_root_poseidon
+        None,                // poseidon_params_hash
+        dummy_hash(2),       // base_manifest_hash
+        dummy_hash(3),       // safety_manifest_hash
+        dummy_hash(4),       // monitor_config_hash
+        dummy_hash(5),       // attestation_evidence_hash
+        dummy_hash(6),       // storage_locator_hash
+        dummy_hash(7),       // schema_hash
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn submit_receipt_stores_record_and_increments_counter() {
+    new_test_ext().execute_with(|| {
+        let rid = H256::from([0xAA; 32]);
+        let ch = H256::from([0xBB; 32]);
+
+        assert_ok!(submit(1, rid, ch));
+
+        // Storage populated
+        let record = OrinqReceipts::receipts(rid).expect("receipt should exist");
+        assert_eq!(record.submitter, 1u64);
+        assert_eq!(record.content_hash, ch.0);
+        assert_eq!(record.base_root_sha256, dummy_hash(1));
+        assert_eq!(record.schema_hash, dummy_hash(7));
+
+        // Counter
+        assert_eq!(OrinqReceipts::receipt_count(), 1);
+
+        // Content index
+        let ids = OrinqReceipts::content_index(ch);
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0], rid);
+    });
+}
+
+#[test]
+fn submit_receipt_duplicate_fails() {
+    new_test_ext().execute_with(|| {
+        let rid = H256::from([0xCC; 32]);
+        let ch = H256::from([0xDD; 32]);
+
+        assert_ok!(submit(1, rid, ch));
+        assert_noop!(
+            submit(2, rid, ch),
+            pallet::Error::<Test>::ReceiptAlreadyExists
+        );
+    });
+}
+
+#[test]
+fn set_availability_cert_works_for_root() {
+    new_test_ext().execute_with(|| {
+        let rid = H256::from([0x11; 32]);
+        let ch = H256::from([0x22; 32]);
+        assert_ok!(submit(1, rid, ch));
+
+        let cert = [0xFF; 32];
+        assert_ok!(OrinqReceipts::set_availability_cert(
+            RuntimeOrigin::root(),
+            rid,
+            cert,
+        ));
+
+        let record = OrinqReceipts::receipts(rid).unwrap();
+        assert_eq!(record.availability_cert_hash, cert);
+    });
+}
+
+#[test]
+fn set_availability_cert_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let rid = H256::from([0x33; 32]);
+        let ch = H256::from([0x44; 32]);
+        assert_ok!(submit(1, rid, ch));
+
+        assert_noop!(
+            OrinqReceipts::set_availability_cert(
+                RuntimeOrigin::signed(1),
+                rid,
+                [0xFF; 32],
+            ),
+            frame_support::error::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn set_availability_cert_fails_for_missing_receipt() {
+    new_test_ext().execute_with(|| {
+        let rid = H256::from([0x55; 32]);
+        assert_noop!(
+            OrinqReceipts::set_availability_cert(RuntimeOrigin::root(), rid, [0xFF; 32]),
+            pallet::Error::<Test>::ReceiptNotFound
+        );
+    });
+}
+
+#[test]
+fn content_index_accumulates_multiple_receipts() {
+    new_test_ext().execute_with(|| {
+        let ch = H256::from([0xEE; 32]);
+
+        for i in 0u8..5 {
+            let rid = H256::from([i; 32]);
+            assert_ok!(submit(1, rid, ch));
+        }
+
+        let ids = OrinqReceipts::content_index(ch);
+        assert_eq!(ids.len(), 5);
+        assert_eq!(OrinqReceipts::receipt_count(), 5);
+    });
+}
+
+#[test]
+fn timestamp_comes_from_pallet_timestamp() {
+    new_test_ext().execute_with(|| {
+        // The test ext seeds timestamp at 1_000.
+        let rid = H256::from([0xFA; 32]);
+        let ch = H256::from([0xFB; 32]);
+        assert_ok!(submit(1, rid, ch));
+
+        let record = OrinqReceipts::receipts(rid).unwrap();
+        assert_eq!(record.created_at_millis, 1_000);
+
+        // Advance timestamp and submit another receipt.
+        Timestamp::set_timestamp(2_500);
+        let rid2 = H256::from([0xFC; 32]);
+        assert_ok!(submit(1, rid2, ch));
+
+        let record2 = OrinqReceipts::receipts(rid2).unwrap();
+        assert_eq!(record2.created_at_millis, 2_500);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// rotate_authorities tests
+// ---------------------------------------------------------------------------
+
+fn make_aura_ids(count: u8) -> Vec<sp_consensus_aura::sr25519::AuthorityId> {
+    use sp_core::crypto::UncheckedFrom;
+    (1..=count)
+        .map(|i| sp_consensus_aura::sr25519::AuthorityId::unchecked_from([i; 32]))
+        .collect()
+}
+
+fn make_grandpa_ids(count: u8) -> sp_consensus_grandpa::AuthorityList {
+    use sp_core::crypto::UncheckedFrom;
+    (1..=count)
+        .map(|i| (sp_consensus_grandpa::AuthorityId::unchecked_from([i; 32]), 1))
+        .collect()
+}
+
+#[test]
+fn rotate_authorities_works() {
+    new_test_ext().execute_with(|| {
+        let aura_ids = make_aura_ids(3);
+        let grandpa_ids = make_grandpa_ids(3);
+
+        assert_ok!(OrinqReceipts::rotate_authorities(
+            RuntimeOrigin::root(),
+            aura_ids.clone(),
+            grandpa_ids.clone(),
+            5,
+        ));
+
+        // Aura authorities updated immediately
+        let stored_aura = pallet_aura::Authorities::<Test>::get();
+        assert_eq!(stored_aura.len(), 3);
+
+        // Grandpa PendingChange was written (raw storage — type alias is pub(crate))
+        let pending_key = frame_support::storage::storage_prefix(b"Grandpa", b"PendingChange");
+        assert!(frame_support::storage::unhashed::exists(&pending_key));
+
+        // Stalled marker cleared (raw storage — type alias is pub(crate))
+        let stalled_key = frame_support::storage::storage_prefix(b"Grandpa", b"Stalled");
+        assert!(!frame_support::storage::unhashed::exists(&stalled_key));
+    });
+}
+
+#[test]
+fn rotate_authorities_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::rotate_authorities(
+                RuntimeOrigin::signed(1),
+                make_aura_ids(2),
+                make_grandpa_ids(2),
+                5,
+            ),
+            frame_support::error::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn rotate_authorities_rejects_empty_set() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::rotate_authorities(
+                RuntimeOrigin::root(),
+                vec![],
+                vec![],
+                5,
+            ),
+            pallet::Error::<Test>::EmptyAuthoritySet
+        );
+    });
+}
+
+#[test]
+fn rotate_authorities_rejects_mismatched_counts() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::rotate_authorities(
+                RuntimeOrigin::root(),
+                make_aura_ids(3),
+                make_grandpa_ids(2),
+                5,
+            ),
+            pallet::Error::<Test>::AuthorityCountMismatch
+        );
+    });
+}
+
+#[test]
+fn rotate_authorities_rejects_double_pending() {
+    new_test_ext().execute_with(|| {
+        // First rotation succeeds
+        assert_ok!(OrinqReceipts::rotate_authorities(
+            RuntimeOrigin::root(),
+            make_aura_ids(2),
+            make_grandpa_ids(2),
+            5,
+        ));
+
+        // Second rotation fails — PendingChange already exists
+        assert_noop!(
+            OrinqReceipts::rotate_authorities(
+                RuntimeOrigin::root(),
+                make_aura_ids(3),
+                make_grandpa_ids(3),
+                5,
+            ),
+            pallet::Error::<Test>::AuthorityChangeAlreadyPending
+        );
+    });
+}

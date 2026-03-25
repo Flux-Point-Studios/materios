@@ -1,0 +1,18 @@
+# Docker build context exclusions (context = repo root)
+# The Dockerfile is at partnerchain/Dockerfile but context is ..
+# ops/scripts/healthcheck-substrate.sh IS needed (COPY'd into image)
+
+partnerchain/target/
+.git/
+.github/
+.vscode/
+
+# Not needed in the build image
+docs/
+midnight/
+tools/
+*.md
+
+# Build artifacts
+node_modules/
+dist/

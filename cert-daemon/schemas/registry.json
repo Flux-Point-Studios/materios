@@ -1,0 +1,55 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "description": "Materios content validation schema registry. Each schema defines required fields, types, bounds, and computed plausibility checks for a specific game."
+  },
+  "schemas": {
+    "clay_monster_dash_v1": {
+      "game": "Clay Monster Dash",
+      "version": 1,
+      "description": "Run-complete payload for Clay Monster Dash",
+      "fields": {
+        "score":     { "type": "int",   "min": 0 },
+        "dist":      { "type": "float", "min": 0 },
+        "crystals":  { "type": "int",   "min": 0 },
+        "combo":     { "type": "int",   "min": 0, "max": 10 },
+        "near_miss": { "type": "int",   "min": 0 },
+        "slides":    { "type": "int",   "min": 0 },
+        "diff":      { "type": "int",   "min": 1, "max": 20 },
+        "dur":       { "type": "float", "min": 3.0 },
+        "player":    { "type": "string" }
+      },
+      "computed_checks": [
+        {
+          "name": "max_speed",
+          "expr": "dist / dur",
+          "max": 30.0,
+          "error": "Speed implausible: {value:.1f} m/s > {max} m/s"
+        },
+        {
+          "name": "crystal_rate",
+          "condition": "dist > 0",
+          "expr": "crystals / dist",
+          "max": 0.15,
+          "error": "Crystal rate implausible: {value:.3f}/m > {max}/m"
+        },
+        {
+          "name": "event_rate",
+          "condition": "dist > 0",
+          "expr": "(near_miss + slides) / dist",
+          "max": 0.25,
+          "error": "Event rate implausible: {value:.3f}/m > {max}/m"
+        },
+        {
+          "name": "score_cap",
+          "expr": "score",
+          "max_expr": "((dist * 10) + (crystals * 100) + ((near_miss * 50 + slides * 25) * 3.5)) * 1.1",
+          "error": "Score implausible: {value} > theoretical max {max:.0f}"
+        }
+      ]
+    }
+  },
+  "schema_lookup": {
+    "1": "clay_monster_dash_v1"
+  }
+}

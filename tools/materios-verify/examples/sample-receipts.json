@@ -1,0 +1,20 @@
+{
+  "_description": "Sample receipt IDs from the Materios staging testnet for verification walkthrough",
+  "_chain_id": "8f6e531be80341a12a0ae1b04484770fcaa797bb49dcc1cc9e79788f770a41b3",
+  "_rpc_url": "ws://127.0.0.1:9944",
+  "_network": "staging (Materios Partner Chain)",
+  "receipts": [
+    {
+      "receipt_id": "0x1bd74b07bd8a9a95f41c0a496418ff7397df7d414632427f3da1bfed2f9580e6",
+      "note": "FULLY_VERIFIED. Single-leaf batch (exact root match). Anchor at block #10850."
+    },
+    {
+      "receipt_id": "0x3db6c9009f9d88210cd9bcadd6505683c75847cea93e7f632cbc8a0267333a07",
+      "note": "FULLY_VERIFIED. Single-leaf batch. Anchor at block #10678."
+    },
+    {
+      "receipt_id": "0x0acf71bf7751b1172e6a73b70df1fd8ff5630a6d27ee4abcd517690d91e1f0a4",
+      "note": "From earlier E2E test run. May need wider scan window if state pruned."
+    }
+  ]
+}

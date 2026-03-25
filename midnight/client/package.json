@@ -1,0 +1,23 @@
+{
+  "name": "@materios/midnight-client",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "deploy": "tsx src/deploy.ts",
+    "submit-commitment": "tsx src/submitCommitment.ts",
+    "submit-claim": "tsx src/submitClaim.ts",
+    "prove-risk": "tsx src/proveRiskThreshold.ts",
+    "query": "tsx src/query.ts"
+  },
+  "dependencies": {
+    "@midnight-ntwrk/compact-runtime": "^0.20.0",
+    "@midnight-ntwrk/midnight-js-contracts": "^0.20.0",
+    "@midnight-ntwrk/midnight-js-types": "^0.20.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0",
+    "@types/node": "^22.0.0"
+  }
+}
