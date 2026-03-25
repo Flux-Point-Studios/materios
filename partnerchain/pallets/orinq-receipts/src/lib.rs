@@ -780,32 +780,34 @@ pub mod pallet {
             pallet_aura::Authorities::<T>::put(bounded_aura);
 
             // --- Schedule Grandpa authority change ---
+            // Use ScheduledChange (not ForcedChange) with a minimum 2-block delay.
+            // Grandpa's on_finalize emits the ScheduledChange log at scheduled_at,
+            // then enacts at scheduled_at + delay. Using forced + delay=0 breaks
+            // block import because the authority set changes mid-finalization.
             let current_block = frame_system::Pallet::<T>::block_number();
-            let delay: BlockNumberFor<T> = delay_blocks.max(1).into();
-            let apply_at = current_block + delay;
+            let delay: BlockNumberFor<T> = delay_blocks.max(2).into();
 
-            // Write PendingChange using raw storage (StoredPendingChange is pub(crate))
             let pending = GrandpaPendingChange {
-                scheduled_at: apply_at,
-                delay: BlockNumberFor::<T>::from(0u32),
+                scheduled_at: current_block,
+                delay,
                 next_authorities: new_grandpa.clone(),
-                forced: Some(apply_at),
+                forced: None,
             };
             frame_support::storage::unhashed::put(&pending_key, &pending);
 
             // Clear any stalled marker
             frame_support::storage::unhashed::kill(&stalled_key);
+            // Increment set_id so GRANDPA voters track the new authority set.
+            let new_set_id: u64 = frame_support::storage::unhashed::get(&set_id_key)
+                .unwrap_or(0u64)
+                .saturating_add(1);
+            frame_support::storage::unhashed::put(&set_id_key, &new_set_id);
 
-            // The Grandpa pallet's on_finalize will process PendingChange at apply_at,
-            // updating Authorities and incrementing CurrentSetId.
-            let current_set_id: u64 =
-                frame_support::storage::unhashed::get(&set_id_key).unwrap_or(0);
-            let next_set_id = current_set_id + 1;
-
+            let apply_at = current_block + delay;
             Self::deposit_event(Event::AuthoritiesRotated {
                 aura_count: new_grandpa.len() as u32,
                 grandpa_count: new_grandpa.len() as u32,
-                grandpa_set_id: next_set_id,
+                grandpa_set_id: new_set_id,
                 apply_at_block: apply_at,
             });
 
