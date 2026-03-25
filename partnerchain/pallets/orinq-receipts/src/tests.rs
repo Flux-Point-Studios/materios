@@ -1,9 +1,10 @@
 use crate as pallet_orinq_receipts;
-use crate::{pallet, types::ReceiptRecord};
+use crate::{pallet, pallet::GrandpaPendingChange, types::ReceiptRecord};
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
     traits::{ConstBool, ConstU32, ConstU64},
 };
+use parity_scale_codec::{Decode, Encode};
 use sp_core::H256;
 use sp_runtime::{
     traits::{BlakeTwo256, IdentityLookup},
@@ -352,4 +353,96 @@ fn rotate_authorities_rejects_double_pending() {
             pallet::Error::<Test>::AuthorityChangeAlreadyPending
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// GrandpaPendingChange SCALE layout tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn grandpa_pending_change_scale_round_trip() {
+    use sp_core::crypto::UncheckedFrom;
+
+    let authorities: sp_consensus_grandpa::AuthorityList = vec![
+        (sp_consensus_grandpa::AuthorityId::unchecked_from([1u8; 32]), 1),
+        (sp_consensus_grandpa::AuthorityId::unchecked_from([2u8; 32]), 10),
+    ];
+
+    let original = GrandpaPendingChange::<u64> {
+        scheduled_at: 42,
+        delay: 7,
+        next_authorities: authorities.clone(),
+        forced: Some(42),
+    };
+
+    let encoded = original.encode();
+    let decoded = GrandpaPendingChange::<u64>::decode(&mut &encoded[..])
+        .expect("round-trip decode must succeed");
+
+    assert_eq!(decoded.scheduled_at, 42);
+    assert_eq!(decoded.delay, 7);
+    assert_eq!(decoded.next_authorities, authorities);
+    assert_eq!(decoded.forced, Some(42));
+    assert_eq!(decoded, original);
+}
+
+#[test]
+fn grandpa_pending_change_scale_round_trip_no_forced() {
+    use sp_core::crypto::UncheckedFrom;
+
+    let authorities: sp_consensus_grandpa::AuthorityList = vec![
+        (sp_consensus_grandpa::AuthorityId::unchecked_from([0xAA; 32]), 5),
+    ];
+
+    let original = GrandpaPendingChange::<u64> {
+        scheduled_at: 100,
+        delay: 10,
+        next_authorities: authorities.clone(),
+        forced: None,
+    };
+
+    let encoded = original.encode();
+    let decoded = GrandpaPendingChange::<u64>::decode(&mut &encoded[..])
+        .expect("round-trip decode must succeed");
+
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.forced, None);
+}
+
+#[test]
+fn grandpa_pending_change_layout_compatibility() {
+    // Verify exact byte layout matches pallet_grandpa's StoredPendingChange
+    // (SDK: polkadot-stable2409-5, pallet-grandpa v38.0.0).
+    use sp_core::crypto::UncheckedFrom;
+
+    let auth_id = sp_consensus_grandpa::AuthorityId::unchecked_from([0x01; 32]);
+    let pending = GrandpaPendingChange::<u64> {
+        scheduled_at: 10,
+        delay: 3,
+        next_authorities: vec![(auth_id, 1)],
+        forced: Some(10),
+    };
+
+    let encoded = pending.encode();
+
+    // Build expected bytes manually:
+    let mut expected = Vec::new();
+    expected.extend_from_slice(&10u64.to_le_bytes()); // scheduled_at
+    expected.extend_from_slice(&3u64.to_le_bytes());  // delay
+    expected.push(0x04); // compact length: 1 item
+    expected.extend_from_slice(&[0x01; 32]); // AuthorityId
+    expected.extend_from_slice(&1u64.to_le_bytes()); // AuthorityWeight
+    expected.push(0x01); // Some variant
+    expected.extend_from_slice(&10u64.to_le_bytes()); // forced value
+
+    assert_eq!(
+        encoded, expected,
+        "GrandpaPendingChange byte layout does not match expected pallet_grandpa layout. \
+         If this fails after an SDK upgrade, inspect the new StoredPendingChange definition \
+         in substrate/frame/grandpa/src/lib.rs and update GrandpaPendingChange accordingly."
+    );
+
+    let decoded = GrandpaPendingChange::<u64>::decode(&mut &expected[..])
+        .expect("manually constructed bytes must decode");
+    assert_eq!(decoded, pending);
 }

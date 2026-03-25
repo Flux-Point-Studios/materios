@@ -105,12 +105,15 @@ const routes = [
     { pattern: /^\/$/,                       handler: renderDashboard },
     { pattern: /^\/blocks$/,                 handler: renderBlocksList },
     { pattern: /^\/block\/(.+)$/,            handler: (m) => renderBlockDetail(m[1]) },
+    { pattern: /^\/extrinsics$/,             handler: renderExtrinsicsList },
+    { pattern: /^\/extrinsic\/(.+)$/,        handler: (m) => renderExtrinsicDetail(m[1]) },
     { pattern: /^\/receipts$/,               handler: renderReceiptsList },
     { pattern: /^\/receipt\/(.+)$/,          handler: (m) => renderReceiptDetail(m[1]) },
     { pattern: /^\/verify\/(.+)$/,           handler: (m) => renderVerification(m[1]) },
     { pattern: /^\/anchors$/,                handler: renderAnchorsList },
     { pattern: /^\/anchor\/(.+)$/,           handler: (m) => renderAnchorDetail(m[1]) },
     { pattern: /^\/account\/(.+)$/,          handler: (m) => renderAccountDetail(m[1]) },
+    { pattern: /^\/tx\/(.+)$/,              handler: (m) => resolveTxHash(m[1]) },
     { pattern: /^\/committee$/,              handler: renderCommitteeHealth },
 ];
 
@@ -176,12 +179,33 @@ async function doSearch() {
         else if (result.type === 'receipt') location.hash = '#/receipt/' + result.id;
         else if (result.type === 'anchor') location.hash = '#/anchor/' + result.id;
         else if (result.type === 'account') location.hash = '#/account/' + result.id;
+        else if (result.type === 'tx') location.hash = '#/extrinsic/' + result.id;
         else {
             const app = document.getElementById('app');
             app.innerHTML = '<div class="error-msg">No results found for: ' + q + '</div>';
         }
     } catch (e) {
         document.getElementById('app').innerHTML = '<div class="error-msg">Search error: ' + e.message + '</div>';
+    }
+}
+
+async function resolveTxHash(txHash) {
+    const app = document.getElementById('app');
+    showLoadingIfEmpty('Resolving transaction...');
+    try {
+        const result = await apiFetch('tx/' + encodeURIComponent(txHash));
+        if (result.type === 'receipt' && result.receipt_id) {
+            location.hash = '#/receipt/' + result.receipt_id;
+        } else if (result.type === 'tx') {
+            location.hash = '#/extrinsic/' + (result.tx_hash || txHash);
+        } else if (result.receipt_id) {
+            location.hash = '#/receipt/' + result.receipt_id;
+        } else {
+            // Fall back to showing the extrinsic detail page
+            location.hash = '#/extrinsic/' + txHash;
+        }
+    } catch (e) {
+        app.innerHTML = '<div class="error-msg">Error resolving transaction: ' + e.message + '</div>';
     }
 }
 
@@ -503,6 +527,117 @@ function formatEventAttrs(attrs) {
         if (vs.length > 30) return `${k}: ${truncHash(vs, 10)}`;
         return `${k}: ${vs}`;
     }).join(' | ');
+}
+
+// ---------------------------------------------------------------------------
+// Extrinsics (Transactions) List
+// ---------------------------------------------------------------------------
+
+function txHashLink(hash) {
+    if (!hash) return 'N/A';
+    return `<a href="#/extrinsic/${hash}" class="truncated mono">${truncHash(hash, 10)}</a>`;
+}
+
+function extrinsicSuccessBadge(success) {
+    if (success) return '<span class="badge badge-success">Success</span>';
+    return '<span class="badge badge-fail">Failed</span>';
+}
+
+function renderExtrinsicsTable(extrinsics) {
+    if (!extrinsics.length) return '<div class="loading">No transactions found</div>';
+    return `<table class="data-table">
+        <thead><tr>
+            <th>Tx Hash</th>
+            <th>Block</th>
+            <th>Method</th>
+            <th>Signer</th>
+            <th>Status</th>
+            <th class="right">Time</th>
+        </tr></thead>
+        <tbody>
+        ${extrinsics.map(e => `<tr>
+            <td>${txHashLink(e.tx_hash)}</td>
+            <td>${e.block_number ? blockLink(e.block_number) : 'N/A'}</td>
+            <td><span class="badge badge-info">${e.method || '?'}</span></td>
+            <td>${addrLink(e.signer)}</td>
+            <td>${extrinsicSuccessBadge(e.success)}</td>
+            <td class="right time-ago" title="${e.timestamp ? new Date(e.timestamp).toISOString() : ''}">${timeAgo(e.timestamp)}</td>
+        </tr>`).join('')}
+        </tbody>
+    </table>`;
+}
+
+async function renderExtrinsicsList() {
+    const app = document.getElementById('app');
+    const page = getPage();
+    showLoadingIfEmpty('Loading transactions...');
+
+    try {
+        const data = await apiFetch(`extrinsics?page=${page}&limit=20`);
+        const totalPages = Math.max(1, Math.ceil((data.total || 0) / 20));
+        app.innerHTML = `
+            <div class="section-title">Transactions (Extrinsics)</div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">${formatNumber(data.total || 0)} total</span>
+                </div>
+                <div class="card-body">
+                    ${renderExtrinsicsTable(data.extrinsics || [])}
+                </div>
+            </div>
+            ${renderPagination(page, totalPages, '#/extrinsics')}
+        `;
+    } catch (e) {
+        if (!app.querySelector('.section-title')) {
+            app.innerHTML = '<div class="error-msg">Failed to load transactions: ' + e.message + '</div>';
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Extrinsic Detail
+// ---------------------------------------------------------------------------
+
+async function renderExtrinsicDetail(hash) {
+    const app = document.getElementById('app');
+    showLoadingIfEmpty('Loading extrinsic...');
+
+    try {
+        const ext = await apiFetch('extrinsic/' + encodeURIComponent(hash));
+        if (ext.error) {
+            app.innerHTML = '<div class="error-msg">' + ext.error + '</div>';
+            return;
+        }
+
+        let receiptRow = '';
+        if (ext.receipt_id) {
+            receiptRow = fieldRow('Receipt', `<a href="#/receipt/${ext.receipt_id}">${truncHash(ext.receipt_id, 12)}</a>`, false);
+        }
+
+        app.innerHTML = `
+            <div class="breadcrumb"><a href="#/extrinsics">Transactions</a> / Extrinsic</div>
+            <div class="section-title">Extrinsic Detail</div>
+
+            <div class="card">
+                <div class="card-header"><span class="card-title">Extrinsic Details</span></div>
+                <div class="card-body">
+                    <div class="field-grid">
+                        ${fieldRow('Tx Hash', ext.tx_hash, true)}
+                        ${fieldRow('Block', ext.block_number ? `<a href="#/block/${ext.block_number}">#${formatNumber(ext.block_number)}</a>` : 'N/A')}
+                        ${fieldRow('Method', `<span class="badge badge-info">${ext.method || '?'}</span>`)}
+                        ${fieldRow('Signer', ext.signer ? `<a href="#/account/${ext.signer}">${ext.signer}</a>` : 'N/A')}
+                        ${fieldRow('Status', extrinsicSuccessBadge(ext.success))}
+                        ${fieldRow('Timestamp', ext.timestamp ? new Date(ext.timestamp).toISOString() : 'N/A')}
+                        ${receiptRow}
+                    </div>
+                </div>
+            </div>
+        `;
+    } catch (e) {
+        if (!app.querySelector('.field-grid')) {
+            app.innerHTML = '<div class="error-msg">Failed to load extrinsic: ' + e.message + '</div>';
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

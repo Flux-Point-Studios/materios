@@ -170,7 +170,10 @@ class EventIndex:
     def __init__(self):
         self.receipts: list[dict] = []       # newest first (by created_at_millis)
         self.anchors: list[dict] = []        # newest first (by created_at_millis)
+        self.extrinsics: list[dict] = []     # newest first — ALL signed extrinsics
         self.certs: dict[str, dict] = {}     # receipt_id -> {block_num, cert_hash}
+        self.tx_hashes: dict[str, str] = {}  # tx_hash -> receipt_id (for tx hash search)
+        self.extrinsic_map: dict[str, dict] = {}  # tx_hash -> extrinsic dict (for detail lookup)
         self.failed_submissions: list[dict] = []  # newest first, capped at MAX_FAILED_SUBMISSIONS
         self.last_scanned_block: int = 0
         self._lock = threading.Lock()
@@ -292,6 +295,46 @@ class EventIndex:
                 "EventIndex: loaded %d receipts, %d anchors from storage",
                 len(self.receipts), len(self.anchors),
             )
+
+            # Build extrinsics list from already-loaded receipts (no block scanning needed)
+            # Each receipt submission is a transaction on the chain
+            all_extrinsics = []
+            for r in receipts:
+                ext_entry = {
+                    "tx_hash": r["receipt_id"],  # use receipt_id as tx identifier
+                    "block_number": r.get("block_num", 0),
+                    "signer": r.get("submitter", "unknown"),
+                    "method": "OrinqReceipts.submit_receipt",
+                    "success": True,  # if it's in storage, it succeeded
+                    "timestamp": r.get("timestamp", 0),
+                    "receipt_id": r["receipt_id"],
+                }
+                all_extrinsics.append(ext_entry)
+
+            # Also create entries for anchors
+            for a in anchors:
+                ext_entry = {
+                    "tx_hash": a["anchor_id"],
+                    "block_number": a.get("block_num", 0),
+                    "signer": a.get("submitter", "unknown"),
+                    "method": "OrinqReceipts.submit_anchor",
+                    "success": True,
+                    "timestamp": a.get("timestamp", 0),
+                    "receipt_id": None,
+                }
+                all_extrinsics.append(ext_entry)
+
+            # Sort newest first
+            all_extrinsics.sort(key=lambda e: e.get("timestamp", 0), reverse=True)
+
+            # Build lookup maps
+            all_extrinsic_map = {e["tx_hash"]: e for e in all_extrinsics if e["tx_hash"]}
+
+            with self._lock:
+                self.extrinsics = all_extrinsics
+                self.extrinsic_map = all_extrinsic_map
+
+            logger.info("EventIndex: built %d transactions from receipts + anchors", len(all_extrinsics))
         except Exception as e:
             import traceback
             logger.error("EventIndex initial load failed: %s\n%s", e, traceback.format_exc())
@@ -370,6 +413,25 @@ class EventIndex:
 
                     if event_id == "ReceiptSubmitted":
                         rid = attrs.get("receipt_id", "")
+                        # Map extrinsic hash → receipt_id for tx hash search
+                        phase = ev.get("phase", {})
+                        ext_idx = None
+                        if isinstance(phase, dict):
+                            ext_idx = phase.get("ApplyExtrinsic")
+                        elif isinstance(phase, (list, tuple)) and len(phase) >= 2:
+                            ext_idx = phase[1] if phase[0] == "ApplyExtrinsic" else None
+                        if ext_idx is not None:
+                            try:
+                                blk = substrate.get_block(block_hash=block_hash)
+                                exts = blk.get("extrinsics", [])
+                                if int(ext_idx) < len(exts):
+                                    eh = exts[int(ext_idx)].extrinsic_hash
+                                    if isinstance(eh, (bytes, bytearray)):
+                                        eh = "0x" + eh.hex()
+                                    if eh:
+                                        self.tx_hashes[eh] = rid
+                            except Exception:
+                                pass
                         if not any(r["receipt_id"] == rid for r in self.receipts):
                             # New receipt discovered via events — also query storage
                             try:
@@ -456,6 +518,12 @@ class EventIndex:
                     self._process_failed_extrinsics(
                         substrate, block_num, block_hash, timestamp, failed_ext_indices,
                     )
+
+                # Index ALL signed extrinsics in this block
+                self._index_block_extrinsics(
+                    substrate, block_num, block_hash, timestamp,
+                    set(failed_ext_indices.keys()) if failed_ext_indices else set(),
+                )
 
             except Exception as e:
                 logger.debug("EventIndex scan block %d failed: %s", block_num, e)
@@ -557,6 +625,95 @@ class EventIndex:
                     "timestamp": timestamp,
                 })
 
+    def _index_block_extrinsics(
+        self,
+        substrate: SubstrateInterface,
+        block_num: int,
+        block_hash: str,
+        timestamp: int,
+        failed_indices: set[int],
+    ):
+        """Index all signed and OrinqReceipts extrinsics in a block. Must hold _lock."""
+        try:
+            block = substrate.get_block(block_hash=block_hash)
+            extrinsics = block.get("extrinsics", [])
+        except Exception:
+            return
+
+        for i, ext in enumerate(extrinsics):
+            try:
+                val = ext.value if hasattr(ext, "value") else ext
+                if not isinstance(val, dict):
+                    continue
+                call = val.get("call", {})
+                signer = val.get("address", None)
+
+                call_module = call.get("call_module", "")
+                call_function = call.get("call_function", "")
+
+                # Skip inherent extrinsics unless OrinqReceipts
+                if signer is None and call_module != "OrinqReceipts":
+                    continue
+
+                method = f"{call_module}.{call_function}" if call_module else "unknown"
+
+                eh = ext.extrinsic_hash if hasattr(ext, "extrinsic_hash") else None
+                if eh:
+                    if isinstance(eh, (bytes, bytearray)):
+                        eh = "0x" + eh.hex()
+
+                # Extract receipt_id for OrinqReceipts calls (direct or nested in Sudo)
+                rid = None
+                target_call = call
+                if call_module == "Sudo" and call_function in ("sudo", "sudo_unchecked_weight"):
+                    call_args = call.get("call_args", [])
+                    for arg in call_args:
+                        if isinstance(arg, dict) and arg.get("name") == "call":
+                            inner = arg.get("value", {})
+                            if isinstance(inner, dict) and inner.get("call_module") == "OrinqReceipts":
+                                target_call = inner
+                                break
+
+                if target_call.get("call_module") == "OrinqReceipts":
+                    target_args = target_call.get("call_args", [])
+                    for arg in target_args:
+                        if isinstance(arg, dict) and arg.get("name") == "receipt_id":
+                            rid = arg.get("value", "")
+                            if isinstance(rid, (bytes, bytearray)):
+                                rid = "0x" + rid.hex()
+                            elif isinstance(rid, str) and not rid.startswith("0x"):
+                                rid = "0x" + rid
+                            break
+
+                # For unsigned OrinqReceipts, extract submitter from call args
+                display_signer = str(signer) if signer else None
+                if not display_signer and call_module == "OrinqReceipts":
+                    for arg in call.get("call_args", []):
+                        if isinstance(arg, dict) and arg.get("name") == "submitter":
+                            display_signer = str(arg.get("value", ""))
+                            break
+
+                ext_entry = {
+                    "tx_hash": eh or "",
+                    "block_number": block_num,
+                    "signer": display_signer or "unsigned",
+                    "method": method,
+                    "success": i not in failed_indices,
+                    "timestamp": timestamp,
+                    "receipt_id": rid,
+                }
+
+                # Avoid duplicates (check tx_hash)
+                if eh and eh not in self.extrinsic_map:
+                    self.extrinsics.insert(0, ext_entry)
+                    self.extrinsic_map[eh] = ext_entry
+
+                # Also update tx_hashes mapping for receipt lookups
+                if eh and rid:
+                    self.tx_hashes[eh] = rid
+            except Exception:
+                continue
+
     def _add_failed_submission(self, entry: dict):
         """Insert a failed submission at the front of the list, keeping the cap."""
         self.failed_submissions.insert(0, entry)
@@ -620,6 +777,11 @@ class EventIndex:
         with self._lock:
             return self.failed_submissions[:limit]
 
+    def lookup_tx_hash(self, tx_hash: str) -> Optional[str]:
+        """Look up a tx/extrinsic hash and return the associated receipt_id, or None."""
+        with self._lock:
+            return self.tx_hashes.get(tx_hash)
+
     def get_failed_for_receipt(self, receipt_id: str) -> Optional[dict]:
         """Look up a specific receipt_id in failed submissions."""
         with self._lock:
@@ -647,6 +809,19 @@ class EventIndex:
             start = (page - 1) * limit
             end = start + limit
             return filtered[start:end], total
+
+    def get_extrinsics_page(self, page: int, limit: int) -> tuple[list[dict], int]:
+        """Return a page of extrinsics (newest first) and total count."""
+        with self._lock:
+            total = len(self.extrinsics)
+            start = (page - 1) * limit
+            end = start + limit
+            return self.extrinsics[start:end], total
+
+    def get_extrinsic_by_hash(self, tx_hash: str) -> Optional[dict]:
+        """Look up a single extrinsic by its tx hash."""
+        with self._lock:
+            return self.extrinsic_map.get(tx_hash)
 
 
 # Global event index instance

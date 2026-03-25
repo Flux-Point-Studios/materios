@@ -27,12 +27,13 @@ pub mod pallet {
 
     /// Mirror of pallet_grandpa's StoredPendingChange (which is pub(crate)).
     /// Must match the SCALE encoding layout exactly.
-    #[derive(parity_scale_codec::Encode)]
-    struct GrandpaPendingChange<N: parity_scale_codec::Encode> {
-        scheduled_at: N,
-        delay: N,
-        next_authorities: sp_consensus_grandpa::AuthorityList,
-        forced: Option<N>,
+    /// SDK: polkadot-stable2409-5, pallet-grandpa v38.0.0.
+    #[derive(parity_scale_codec::Encode, parity_scale_codec::Decode, Debug, PartialEq)]
+    pub(crate) struct GrandpaPendingChange<N: parity_scale_codec::Encode + parity_scale_codec::Decode> {
+        pub scheduled_at: N,
+        pub delay: N,
+        pub next_authorities: sp_consensus_grandpa::AuthorityList,
+        pub forced: Option<N>,
     }
 
     #[pallet::pallet]

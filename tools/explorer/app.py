@@ -393,6 +393,53 @@ async def get_receipt(receipt_id: str):
     return cache.get_or_compute(f"receipt:{receipt_id}", _fetch, ttl=30.0)
 
 
+@app.get("/api/extrinsics")
+async def list_extrinsics(page: int = Query(1, ge=1), limit: int = Query(20, ge=1, le=100)):
+    def _fetch():
+        try:
+            event_index.ensure_initialized()
+            items, total = event_index.get_extrinsics_page(page, limit)
+            return {"extrinsics": items, "total": total, "page": page, "limit": limit}
+        except Exception as e:
+            return {"error": str(e), "extrinsics": [], "total": 0}
+
+    return cache.get_or_compute(f"extrinsics-list:{page}:{limit}", _fetch, ttl=15.0)
+
+
+@app.get("/api/extrinsic/{tx_hash}")
+async def get_extrinsic(tx_hash: str):
+    """Return a single extrinsic detail by tx hash."""
+    if not tx_hash.startswith("0x"):
+        tx_hash = "0x" + tx_hash
+
+    def _fetch():
+        event_index.ensure_initialized()
+        ext = event_index.get_extrinsic_by_hash(tx_hash)
+        if ext:
+            return ext
+        return {"error": "Extrinsic not found"}
+
+    return cache.get_or_compute(f"extrinsic:{tx_hash}", _fetch, ttl=30.0)
+
+
+@app.get("/api/tx/{tx_hash}")
+async def get_tx(tx_hash: str):
+    """Look up a transaction/extrinsic hash and resolve to its receipt or extrinsic."""
+    if not tx_hash.startswith("0x"):
+        tx_hash = "0x" + tx_hash
+
+    receipt_id = event_index.lookup_tx_hash(tx_hash)
+    if receipt_id:
+        return {"type": "receipt", "receipt_id": receipt_id}
+
+    # Check extrinsic index
+    ext = event_index.get_extrinsic_by_hash(tx_hash)
+    if ext:
+        return {"type": "tx", "tx_hash": tx_hash, **ext}
+
+    return {"error": "Transaction not found. The tx hash index is built from recent blocks on startup — if this is an older transaction, it may not yet be indexed."}
+
+
 # ---------------------------------------------------------------------------
 # Verification (subprocess-based)
 # ---------------------------------------------------------------------------
@@ -643,7 +690,7 @@ async def search(q: str = Query("")):
     if re.match(r'^\d+$', q):
         return {"type": "block", "id": q}
 
-    # Hex hash (receipt or anchor or block hash)
+    # Hex hash (receipt or anchor or tx hash or block hash)
     if re.match(r'^0x[0-9a-fA-F]{64}$', q):
         # Try receipt first
         try:
@@ -656,6 +703,14 @@ async def search(q: str = Query("")):
                 return {"type": "anchor", "id": q}
         except Exception:
             pass
+        # Try tx hash -> receipt mapping from in-memory index
+        receipt_id = event_index.lookup_tx_hash(q)
+        if receipt_id:
+            return {"type": "receipt", "id": receipt_id}
+        # Try extrinsic index (general tx hash)
+        ext = event_index.get_extrinsic_by_hash(q)
+        if ext:
+            return {"type": "tx", "id": q}
         return {"type": "receipt", "id": q}  # default to receipt even if not found
 
     # SS58 address (starts with 5, roughly 47-48 chars)
