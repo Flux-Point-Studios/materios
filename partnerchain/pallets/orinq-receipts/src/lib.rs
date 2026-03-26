@@ -757,19 +757,6 @@ pub mod pallet {
                 Error::<T>::AuthorityCountMismatch
             );
 
-            // Raw storage keys: twox_128("Grandpa") ++ twox_128("StorageName")
-            // These storage items are pub(crate) in pallet-grandpa, so we use
-            // raw storage operations via computed keys.
-            let pending_key = frame_support::storage::storage_prefix(b"Grandpa", b"PendingChange");
-            let stalled_key = frame_support::storage::storage_prefix(b"Grandpa", b"Stalled");
-            let set_id_key = frame_support::storage::storage_prefix(b"Grandpa", b"CurrentSetId");
-
-            // Ensure no Grandpa change is already pending
-            ensure!(
-                !frame_support::storage::unhashed::exists(&pending_key),
-                Error::<T>::AuthorityChangeAlreadyPending
-            );
-
             // --- Update Aura authorities (immediate) ---
             let bounded_aura: BoundedVec<
                 <T as pallet_aura::Config>::AuthorityId,
@@ -779,30 +766,27 @@ pub mod pallet {
                 .map_err(|_| Error::<T>::TooManyAuthorities)?;
             pallet_aura::Authorities::<T>::put(bounded_aura);
 
-            // --- Schedule Grandpa authority change ---
-            // Use ScheduledChange (not ForcedChange) with a minimum 2-block delay.
-            // Grandpa's on_finalize emits the ScheduledChange log at scheduled_at,
-            // then enacts at scheduled_at + delay. Using forced + delay=0 breaks
-            // block import because the authority set changes mid-finalization.
-            let current_block = frame_system::Pallet::<T>::block_number();
+            // --- Schedule Grandpa authority change via the pallet's public API ---
+            // Using pallet_grandpa::Pallet::schedule_change() ensures correct
+            // SCALE encoding of StoredPendingChange (including WeakBoundedVec
+            // for authorities). Raw storage writes caused "Invalid authority set"
+            // errors due to encoding mismatches.
             let delay: BlockNumberFor<T> = delay_blocks.max(2).into();
-
-            let pending = GrandpaPendingChange {
-                scheduled_at: current_block,
+            pallet_grandpa::Pallet::<T>::schedule_change(
+                new_grandpa.clone(),
                 delay,
-                next_authorities: new_grandpa.clone(),
-                forced: None,
-            };
-            frame_support::storage::unhashed::put(&pending_key, &pending);
+                None, // not forced — use ScheduledChange
+            )?;
 
-            // Clear any stalled marker
-            frame_support::storage::unhashed::kill(&stalled_key);
-            // Increment set_id so GRANDPA voters track the new authority set.
+            // Increment CurrentSetId so GRANDPA voters track the new authority set.
+            // schedule_change() does not do this (it's normally done by pallet_session).
+            let set_id_key = frame_support::storage::storage_prefix(b"Grandpa", b"CurrentSetId");
             let new_set_id: u64 = frame_support::storage::unhashed::get(&set_id_key)
                 .unwrap_or(0u64)
                 .saturating_add(1);
             frame_support::storage::unhashed::put(&set_id_key, &new_set_id);
 
+            let current_block = frame_system::Pallet::<T>::block_number();
             let apply_at = current_block + delay;
             Self::deposit_event(Event::AuthoritiesRotated {
                 aura_count: new_grandpa.len() as u32,
