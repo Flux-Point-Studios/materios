@@ -114,8 +114,9 @@ class CertDaemon:
             logger.info(f"Cert already stored for {receipt_id}, skipping")
             return
 
-        # Resolve blob locations
-        manifest = await self.locator.resolve(receipt_id)
+        # Resolve blob locations (try receipt_id first, then content_hash fallback)
+        content_hash_hex = receipt.content_hash.hex() if isinstance(receipt.content_hash, bytes) else str(receipt.content_hash)
+        manifest = await self.locator.resolve(receipt_id, content_hash=content_hash_hex)
         if manifest is None:
             logger.info(f"No locator found for {receipt_id}, adding to pending")
             if receipt_id not in self.pending:
@@ -197,7 +198,8 @@ class CertDaemon:
         now = time.time()
         to_remove = []
         for receipt_id, pending in list(self.pending.items()):
-            manifest = await self.locator.resolve(receipt_id)
+            content_hash_hex = pending.receipt.content_hash.hex() if isinstance(pending.receipt.content_hash, bytes) else str(pending.receipt.content_hash)
+            manifest = await self.locator.resolve(receipt_id, content_hash=content_hash_hex)
             if manifest is None:
                 pending.retries += 1
                 if now - pending.first_seen > self.config.pending_alert_seconds and pending.retries % 60 == 0:
