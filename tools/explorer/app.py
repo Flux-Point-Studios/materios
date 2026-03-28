@@ -445,7 +445,7 @@ async def get_tx(tx_hash: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/verify/{receipt_id}")
-async def verify(receipt_id: str, scan_window: int = 15):
+async def verify(receipt_id: str, scan_window: int = 500):
     """Run verification in a subprocess so it can be hard-killed on timeout."""
     import asyncio
 
