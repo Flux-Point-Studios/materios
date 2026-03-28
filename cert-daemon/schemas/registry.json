@@ -17,6 +17,7 @@
         "slides":    { "type": "int",   "min": 0 },
         "diff":      { "type": "int",   "min": 1, "max": 20 },
         "dur":       { "type": "float", "min": 3.0 },
+        "peak_mult": { "type": "float", "min": 1.0, "max": 10.0 },
         "player":    { "type": "string" }
       },
       "computed_checks": [
@@ -43,7 +44,7 @@
         {
           "name": "score_cap",
           "expr": "score",
-          "max_expr": "((dist * 10) + (crystals * 100) + ((near_miss * 50 + slides * 25) * 3.5)) * 1.1",
+          "max_expr": "((dist * 10) + (crystals * 100) + ((near_miss * 50 + slides * 25) * 3.5)) * peak_mult * 1.5",
           "error": "Score implausible: {value} > theoretical max {max:.0f}"
         }
       ]
