@@ -445,7 +445,7 @@ async def get_tx(tx_hash: str):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/verify/{receipt_id}")
-async def verify(receipt_id: str, scan_window: int = 500):
+async def verify(receipt_id: str, scan_window: int = 100):
     """Run verification in a subprocess so it can be hard-killed on timeout."""
     import asyncio
 
@@ -464,7 +464,7 @@ print(json.dumps(report.to_dict()))
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=25.0)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60.0)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
