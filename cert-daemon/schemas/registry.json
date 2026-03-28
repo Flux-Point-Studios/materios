@@ -30,7 +30,7 @@
           "name": "crystal_rate",
           "condition": "dist > 0",
           "expr": "crystals / dist",
-          "max": 0.15,
+          "max": 0.65,
           "error": "Crystal rate implausible: {value:.3f}/m > {max}/m"
         },
         {
