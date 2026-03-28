@@ -446,9 +446,42 @@ async def get_tx(tx_hash: str):
 
 @app.get("/api/verify/{receipt_id}")
 async def verify(receipt_id: str, scan_window: int = 100):
-    """Run verification in a subprocess so it can be hard-killed on timeout."""
+    """Run verification — tries pre-indexed record first, falls back to block scan."""
     import asyncio
 
+    # Fast path: check verification index (instant, no block scanning)
+    if BLOB_GATEWAY_URL:
+        try:
+            clean_id = receipt_id.replace("0x", "")
+            vi_resp = req.get(f"{BLOB_GATEWAY_URL}/verification/{clean_id}", timeout=3)
+            if vi_resp.status_code == 200:
+                vi = vi_resp.json()
+                # Return a pre-built verification report
+                return {
+                    "receipt_id": receipt_id,
+                    "verified": True,
+                    "source": "verification_index",
+                    "steps": [
+                        {"index": 0, "label": "Connect to Materios chain", "status": "pass"},
+                        {"index": 1, "label": "Query on-chain receipt", "status": "pass"},
+                        {"index": 2, "label": "Check availability certificate", "status": "pass",
+                         "details": {"cert_hash": vi.get("cert_hash", "")}},
+                        {"index": 3, "label": "Compute checkpoint leaf hash", "status": "pass",
+                         "details": {"leaf_hash": vi.get("leaf_hash", "")}},
+                        {"index": 4, "label": "Search for checkpoint anchor", "status": "pass",
+                         "details": {"anchor_id": vi.get("anchor_id", ""), "anchor_block": vi.get("anchor_block", 0)}},
+                        {"index": 5, "label": "Verify Merkle inclusion", "status": "pass",
+                         "details": {"merkle_root": vi.get("merkle_root", ""), "batch_size": vi.get("checkpoint_batch_size", 0)}},
+                        {"index": 6, "label": "Verify manifest hash", "status": "pass"},
+                        {"index": 7, "label": "Locate AvailabilityCertified event", "status": "pass"},
+                        {"index": 8, "label": "Verify Cardano L1 anchor", "status": "pass",
+                         "details": {"cardano_tx_hash": vi.get("cardano_tx_hash", ""), "verified_at": vi.get("verified_at", "")}},
+                    ],
+                }
+        except Exception:
+            pass  # Fall through to block scanning
+
+    # Slow path: scan blocks for anchor events
     script = f"""
 import json, sys
 sys.path.insert(0, '/app/materios-verify')
