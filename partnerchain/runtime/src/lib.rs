@@ -93,7 +93,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 113,
+    spec_version: 114,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -253,6 +253,36 @@ impl pallet_sudo::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Multisig
+// ---------------------------------------------------------------------------
+
+parameter_types! {
+    pub const DepositBase: Balance = 1_000;        // ~2x ExistentialDeposit
+    pub const DepositFactor: Balance = 500;         // per additional signatory
+}
+
+impl pallet_multisig::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type Currency = Balances;
+    type DepositBase = DepositBase;
+    type DepositFactor = DepositFactor;
+    type MaxSignatories = ConstU32<10>;
+    type WeightInfo = pallet_multisig::weights::SubstrateWeight<Runtime>;
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+
+impl pallet_utility::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type PalletsOrigin = OriginCaller;
+    type WeightInfo = pallet_utility::weights::SubstrateWeight<Runtime>;
+}
+
+// ---------------------------------------------------------------------------
 // Orinq Receipts
 // ---------------------------------------------------------------------------
 
@@ -285,6 +315,8 @@ construct_runtime! {
         Balances: pallet_balances,
         TransactionPayment: pallet_transaction_payment,
         Sudo: pallet_sudo,
+        Multisig: pallet_multisig,
+        Utility: pallet_utility,
         OrinqReceipts: pallet_orinq_receipts,
         Motra: pallet_motra,
     }

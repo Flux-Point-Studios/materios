@@ -15,10 +15,13 @@ frame-system = { workspace = true }
 pallet-timestamp = { workspace = true }
 pallet-aura = { workspace = true }
 pallet-grandpa = { workspace = true }
+pallet-balances = { workspace = true }
 sp-consensus-grandpa = { workspace = true, default-features = false }
 sp-core = { workspace = true }
 sp-runtime = { workspace = true }
 sp-std = { workspace = true }
+log = { version = "0.4", default-features = false }
+hex-literal = "0.4"
 
 [dev-dependencies]
 frame-benchmarking = { workspace = true, features = ["std"] }
@@ -37,10 +40,12 @@ std = [
     "pallet-timestamp/std",
     "pallet-aura/std",
     "pallet-grandpa/std",
+    "pallet-balances/std",
     "sp-consensus-grandpa/std",
     "sp-core/std",
     "sp-runtime/std",
     "sp-std/std",
+    "log/std",
 ]
 runtime-benchmarks = [
     "frame-benchmarking/runtime-benchmarks",

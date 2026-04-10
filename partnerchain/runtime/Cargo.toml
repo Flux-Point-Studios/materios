@@ -41,6 +41,8 @@ frame-executive = { workspace = true }
 pallet-aura = { workspace = true }
 pallet-balances = { workspace = true }
 pallet-grandpa = { workspace = true }
+pallet-multisig = { workspace = true }
+pallet-utility = { workspace = true }
 pallet-sudo = { workspace = true }
 pallet-timestamp = { workspace = true }
 pallet-transaction-payment = { workspace = true }
@@ -82,6 +84,8 @@ std = [
     "pallet-aura/std",
     "pallet-balances/std",
     "pallet-grandpa/std",
+    "pallet-multisig/std",
+    "pallet-utility/std",
     "pallet-sudo/std",
     "pallet-timestamp/std",
     "pallet-transaction-payment/std",
@@ -99,6 +103,8 @@ runtime-benchmarks = [
     "frame-system/runtime-benchmarks",
     "pallet-balances/runtime-benchmarks",
     "pallet-grandpa/runtime-benchmarks",
+    "pallet-multisig/runtime-benchmarks",
+    "pallet-utility/runtime-benchmarks",
     "pallet-sudo/runtime-benchmarks",
     "pallet-timestamp/runtime-benchmarks",
     "pallet-orinq-receipts/runtime-benchmarks",
@@ -112,6 +118,8 @@ try-runtime = [
     "pallet-aura/try-runtime",
     "pallet-balances/try-runtime",
     "pallet-grandpa/try-runtime",
+    "pallet-multisig/try-runtime",
+    "pallet-utility/try-runtime",
     "pallet-sudo/try-runtime",
     "pallet-timestamp/try-runtime",
     "pallet-transaction-payment/try-runtime",
