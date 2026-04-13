@@ -241,6 +241,44 @@ pub mod pallet {
     // -----------------------------------------------------------------------
 
     impl<T: Config> Pallet<T> {
+        /// Read-only projection of what the MOTRA balance would be if reconciled now.
+        ///
+        /// Unlike `reconcile()`, this does NOT write to storage. Used by RPC queries
+        /// so that freshly funded accounts show their projected balance immediately.
+        pub fn projected_balance(who: &T::AccountId) -> u128 {
+            let current_block = frame_system::Pallet::<T>::block_number();
+            let last = LastTouched::<T>::get(who);
+            let params = Params::<T>::get();
+
+            let elapsed: u64 = current_block
+                .saturating_sub(last)
+                .try_into()
+                .unwrap_or(u64::MAX);
+
+            let stored = MotraBalances::<T>::get(who);
+            if elapsed == 0 {
+                return stored;
+            }
+
+            // Apply decay
+            let decayed = Self::apply_decay_iterative(stored, params.decay_rate_per_block, elapsed);
+
+            // Generate from MATRA holdings
+            let matra_balance: u128 = Self::get_matra_balance(who);
+            let generated = matra_balance
+                .saturating_mul(params.generation_per_matra_per_block)
+                .saturating_mul(elapsed as u128)
+                / 1_000_000_000_000u128;
+
+            // Check delegation
+            let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
+            if &generation_target == who {
+                decayed.saturating_add(generated).min(params.max_balance)
+            } else {
+                decayed
+            }
+        }
+
         /// Core lazy accounting: apply decay since last touch, add generated MOTRA,
         /// respect max cap. Returns the new balance.
         ///

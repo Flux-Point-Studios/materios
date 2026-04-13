@@ -93,7 +93,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 114,
+    spec_version: 115,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -543,7 +543,9 @@ impl_runtime_apis! {
             use parity_scale_codec::Decode;
             let account_id = match AccountId::decode(&mut account.as_ref())
                 { Ok(id) => id, Err(_) => return 0 };
-            pallet_motra::MotraBalances::<Runtime>::get(&account_id)
+            // Use projected_balance for read-only lazy computation (includes
+            // pending generation from MATRA holdings without writing to storage).
+            pallet_motra::Pallet::<Runtime>::projected_balance(&account_id)
         }
 
         fn motra_params() -> motra_primitives::MotraParams {
