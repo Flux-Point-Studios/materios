@@ -68,7 +68,11 @@ where
             return Err(InvalidTransaction::Payment.into());
         }
 
-        Ok(ValidTransaction::default())
+        let priority = fee.min(u64::MAX as u128) as u64;
+        Ok(ValidTransaction {
+            priority,
+            ..Default::default()
+        })
     }
 
     fn pre_dispatch(

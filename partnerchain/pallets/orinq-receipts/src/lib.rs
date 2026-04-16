@@ -775,7 +775,7 @@ pub mod pallet {
             pallet_grandpa::Pallet::<T>::schedule_change(
                 new_grandpa.clone(),
                 delay,
-                None, // not forced — use ScheduledChange
+                Some(delay), // FORCED — applies at block height regardless of finality
             )?;
 
             // Increment CurrentSetId so GRANDPA voters track the new authority set.
