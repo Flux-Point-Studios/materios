@@ -161,7 +161,6 @@ runtime-benchmarks = [
     "pallet-orinq-receipts/runtime-benchmarks",
     "pallet-motra/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
-    "pallet-session-validator-management/runtime-benchmarks",
 ]
 try-runtime = [
     "frame-support/try-runtime",
@@ -178,5 +177,4 @@ try-runtime = [
     "pallet-orinq-receipts/try-runtime",
     "pallet-motra/try-runtime",
     "sp-runtime/try-runtime",
-    "pallet-session-validator-management/try-runtime",
 ]

@@ -42,7 +42,7 @@ sp-api = { workspace = true, features = ["std"] }
 sp-block-builder = { workspace = true, features = ["std"] }
 sp-transaction-pool = { workspace = true, features = ["std"] }
 sp-inherents = { workspace = true, features = ["std"] }
-sp-timestamp = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-5" }
+sp-timestamp = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
 
 # FRAME RPC
 substrate-frame-rpc-system = { workspace = true }
@@ -70,4 +70,4 @@ motra-rpc = { workspace = true }
 motra-primitives = { workspace = true, features = ["std"] }
 
 [build-dependencies]
-substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-5" }
+substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
