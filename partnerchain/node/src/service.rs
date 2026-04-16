@@ -1,4 +1,9 @@
 //! Service and ServiceFactory implementation. Specialized wrapper over substrate service.
+//!
+//! Configured for IOG partner-chain permissioned-only mode (D=1.0):
+//! - Block beneficiary inherent provider is included for `pallet_block_rewards`.
+//! - Mainchain follower data sources (mc_hash, ariadne, native_token) are omitted;
+//!   those will be added when the Cardano bridge is activated.
 
 use materios_runtime::{self, opaque::Block, RuntimeApi};
 use sc_client_api::{Backend, BlockBackend};
@@ -13,6 +18,15 @@ use std::sync::Arc;
 pub type FullClient = sc_service::TFullClient<Block, RuntimeApi, sc_executor::WasmExecutor<sp_io::SubstrateHostFunctions>>;
 type FullBackend = sc_service::TFullBackend<Block>;
 type FullSelectChain = sc_consensus::LongestChain<FullBackend, Block>;
+
+/// Environment variable name for the block beneficiary address.
+/// Set this to a hex-encoded 32-byte identifier to receive block rewards.
+/// If not set, block authoring will fail with a fatal inherent error.
+const BLOCK_BENEFICIARY_ENV: &str = "SIDECHAIN_BLOCK_BENEFICIARY";
+
+/// The BeneficiaryId type must match the runtime's pallet_block_rewards::Config::BeneficiaryId.
+/// Using a 32-byte sized byte string, same as the IOG reference implementation.
+type BeneficiaryId = sidechain_domain::byte_string::SizedByteString<32>;
 
 /// Build the full service components.
 pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::traits::Block>::Hash>>(
@@ -131,7 +145,16 @@ pub fn new_full<N: sc_network::NetworkBackend<Block, <Block as sp_runtime::trait
                         *timestamp,
                         slot_duration,
                     );
-                    Ok((slot, timestamp))
+
+                    // Block beneficiary inherent for pallet_block_rewards.
+                    // Required for every authored block; reads the beneficiary
+                    // address from the SIDECHAIN_BLOCK_BENEFICIARY env var.
+                    let block_beneficiary =
+                        sp_block_rewards::BlockBeneficiaryInherentProvider::<BeneficiaryId>::from_env(
+                            BLOCK_BENEFICIARY_ENV,
+                        )?;
+
+                    Ok((slot, timestamp, block_beneficiary))
                 },
                 force_authoring,
                 backoff_authoring_blocks,

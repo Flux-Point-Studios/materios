@@ -50,6 +50,18 @@ pallet-transaction-payment-rpc = { workspace = true }
 pallet-transaction-payment-rpc-runtime-api = { workspace = true, features = ["std"] }
 frame-system = { workspace = true, features = ["std"] }
 
+# IOG Partner Chains toolkit
+sidechain-domain = { workspace = true, features = ["std"] }
+sidechain-slots = { workspace = true, features = ["std"] }
+sp-sidechain = { workspace = true, features = ["std"] }
+sp-block-rewards = { workspace = true, features = ["std"] }
+pallet-sidechain = { workspace = true, features = ["std"] }
+pallet-block-rewards = { workspace = true, features = ["std"] }
+pallet-partner-chains-session = { workspace = true, features = ["std"] }
+pallet-session-validator-management = { workspace = true, features = ["std"] }
+sp-session-validator-management = { workspace = true, features = ["std"] }
+session-manager = { workspace = true, features = ["std"] }
+
 # Local
 materios-runtime = { workspace = true, features = ["std"] }
 orinq-receipts-rpc = { workspace = true }

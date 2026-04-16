@@ -14,8 +14,16 @@ fn account(hex: [u8; 32]) -> AccountId32 {
     AccountId32::from(hex)
 }
 
+/// Number of sidechain slots per epoch for preprod.
+/// With 6s blocks, 600 slots = ~1 hour epochs.
+const PREPROD_SLOTS_PER_EPOCH: u32 = 600;
+
 /// Preprod chain spec — MacBook + Gemtek as initial 2-validator authority set.
 /// Sudo is a 2-of-3 multisig. All fixes baked in from genesis.
+///
+/// Now includes IOG partner-chain pallet genesis configuration for permissioned-only
+/// mode (D=1.0).  Cardano mainchain follower placeholders will be replaced when the
+/// bridge is activated.
 pub fn preprod_config() -> Result<ChainSpec, String> {
     // -- Accounts --
     let alice_faucet = account([
@@ -114,14 +122,12 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         "sudo": {
             "key": multisig_sudo
         },
+        // Aura/Grandpa authorities left empty; managed by Session pallet.
         "aura": {
-            "authorities": [macbook_aura, gemtek_aura]
+            "authorities": [],
         },
         "grandpa": {
-            "authorities": [
-                (macbook_grandpa, 1u64),
-                (gemtek_grandpa, 1u64),
-            ]
+            "authorities": [],
         },
         "motra": {
             "minFee": 1_000_000,
@@ -133,7 +139,33 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "maxCongestionStep": 1_000_000,
             "lengthFeePerByte": 1_000,
             "congestionSmoothingPpm": 100_000_000
-        }
+        },
+        // -- IOG partner-chain pallets (permissioned-only mode) --
+        "sidechain": {
+            "genesisUtxo": "0x0000000000000000000000000000000000000000000000000000000000000000#0",
+            "slotsPerEpoch": PREPROD_SLOTS_PER_EPOCH,
+        },
+        "session": {
+            "initialValidators": [
+                [macbook_aura, { "aura": macbook_aura, "grandpa": macbook_grandpa }],
+                [gemtek_aura,  { "aura": gemtek_aura,  "grandpa": gemtek_grandpa  }],
+            ],
+        },
+        "sessionCommitteeManagement": {
+            "initialAuthorities": [],
+            "mainChainScripts": {
+                "committeeCandidateAddress": "",
+                "dParameterPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "permissionedCandidatesPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            },
+        },
+        "palletSession": {},
+        "nativeTokenManagement": {
+            "mainChainScripts": {
+                "nativeTokenPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "illiquidSupplyAddress": "",
+            },
+        },
     }))
     .build())
 }
