@@ -71,6 +71,12 @@ frame-system-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-s
 pallet-transaction-payment-rpc = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
 substrate-wasm-builder = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
 
+sp-timestamp = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-telemetry = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-offchain = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-rpc = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-rpc-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+
 # JSON-RPC
 jsonrpsee = { version = "0.24", features = ["server", "macros"] }
 
@@ -118,6 +124,23 @@ sidechain-domain = { git = "https://github.com/input-output-hk/partner-chains.gi
 sidechain-slots = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
 session-manager = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
 authority-selection-inherents = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+
+# IOG Partner Chains node-side (mainchain follower, consensus, mc-hash)
+sidechain-mc-hash = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+sc-partner-chains-consensus-aura = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+sp-partner-chains-consensus-aura = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+time-source = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+db-sync-follower = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+main-chain-follower-mock = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+pallet-sidechain-rpc = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sp-session-validator-management-query = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+pallet-session-validator-management-rpc = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+sc-consensus-grandpa-rpc = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+
+# Async / futures
+futures = "0.3"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
 
 # ---------------------------------------------------------------------------
 # Version pins for Rust 1.85.0 compatibility

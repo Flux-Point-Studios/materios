@@ -4,6 +4,8 @@ mod chain_spec;
 mod chain_spec_preprod;
 mod cli;
 mod command;
+mod inherent_data;
+mod main_chain_follower;
 mod rpc;
 mod service;
 
