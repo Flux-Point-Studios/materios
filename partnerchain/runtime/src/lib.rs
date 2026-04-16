@@ -4,21 +4,31 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+mod tests;
+
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
 
 use alloc::vec::Vec;
+use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
+use authority_selection_inherents::select_authorities::select_authorities;
 use frame_support::{
     construct_runtime, derive_impl, parameter_types,
-    traits::{ConstU32, ConstU64, ConstU128},
+    traits::{ConstBool, ConstU32, ConstU64},
     weights::{
-        constants::{BlockExecutionWeight, ExtrinsicBaseWeight, WEIGHT_REF_TIME_PER_SECOND},
+        constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         IdentityFee, Weight,
     },
     genesis_builder_helper::{build_state, get_preset},
+    BoundedVec,
 };
 use frame_system::limits::{BlockLength, BlockWeights};
 use pallet_transaction_payment::FungibleAdapter;
+use session_manager::ValidatorManagementSessionManager;
+use sidechain_domain::{
+    NativeTokenAmount, ScEpochNumber, ScSlotNumber, UtxoId,
+};
 use sp_api::impl_runtime_apis;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
@@ -26,11 +36,13 @@ use sp_core::{crypto::KeyTypeId, OpaqueMetadata, H256};
 use sp_runtime::{
     create_runtime_str,
     generic,
-    traits::{BlakeTwo256, Block as BlockT, IdentifyAccount, NumberFor, Verify},
+    traits::{BlakeTwo256, Block as BlockT, IdentifyAccount, NumberFor, OpaqueKeys, Verify},
     transaction_validity::{TransactionSource, TransactionValidity},
-    ApplyExtrinsicResult, MultiSignature,
+    ApplyExtrinsicResult, DispatchResult, MultiSignature,
 };
+use sp_sidechain::SidechainStatus;
 use sp_version::RuntimeVersion;
+use sp_weights;
 
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
@@ -39,6 +51,7 @@ use sp_version::NativeVersion;
 pub use frame_system;
 pub use pallet_balances;
 pub use pallet_motra;
+pub use pallet_session_validator_management;
 pub use pallet_timestamp;
 
 // ---------------------------------------------------------------------------
@@ -66,6 +79,8 @@ pub type Hash = H256;
 /// Opaque types for the node.
 pub mod opaque {
     use super::*;
+    use parity_scale_codec::MaxEncodedLen;
+    use sp_core::{ed25519, sr25519};
     pub use sp_runtime::OpaqueExtrinsic as UncheckedExtrinsic;
 
     /// Opaque block header type.
@@ -74,15 +89,77 @@ pub mod opaque {
     pub type Block = generic::Block<Header, UncheckedExtrinsic>;
     /// Opaque block identifier type.
     pub type BlockId = generic::BlockId<Block>;
-}
 
-// Session keys for Aura + Grandpa
-sp_runtime::impl_opaque_keys! {
-    pub struct SessionKeys {
-        pub aura: Aura,
-        pub grandpa: Grandpa,
+    pub const CROSS_CHAIN: KeyTypeId = KeyTypeId(*b"crch");
+    pub struct CrossChainRuntimeAppPublic;
+
+    pub mod cross_chain_app {
+        use super::CROSS_CHAIN;
+        use parity_scale_codec::MaxEncodedLen;
+        use sidechain_domain::SidechainPublicKey;
+        use sp_core::crypto::AccountId32;
+        use sp_runtime::app_crypto::{app_crypto, ecdsa};
+        use sp_runtime::traits::IdentifyAccount;
+        use sp_runtime::MultiSigner;
+        use sp_std::vec::Vec;
+
+        app_crypto!(ecdsa, CROSS_CHAIN);
+        impl MaxEncodedLen for Signature {
+            fn max_encoded_len() -> usize {
+                ecdsa::Signature::max_encoded_len()
+            }
+        }
+
+        impl From<Signature> for Vec<u8> {
+            fn from(value: Signature) -> Self {
+                value.into_inner().0.to_vec()
+            }
+        }
+
+        impl From<Public> for AccountId32 {
+            fn from(value: Public) -> Self {
+                MultiSigner::from(ecdsa::Public::from(value)).into_account()
+            }
+        }
+
+        impl From<Public> for Vec<u8> {
+            fn from(value: Public) -> Self {
+                value.into_inner().0.to_vec()
+            }
+        }
+
+        impl TryFrom<SidechainPublicKey> for Public {
+            type Error = SidechainPublicKey;
+            fn try_from(pubkey: SidechainPublicKey) -> Result<Self, Self::Error> {
+                let cross_chain_public_key =
+                    Public::try_from(pubkey.0.as_slice()).map_err(|_| pubkey)?;
+                Ok(cross_chain_public_key)
+            }
+        }
+    }
+
+    sp_runtime::impl_opaque_keys! {
+        #[derive(MaxEncodedLen, PartialOrd, Ord)]
+        pub struct SessionKeys {
+            pub aura: Aura,
+            pub grandpa: Grandpa,
+        }
+    }
+    impl From<(sr25519::Public, ed25519::Public)> for SessionKeys {
+        fn from((aura, grandpa): (sr25519::Public, ed25519::Public)) -> Self {
+            Self { aura: aura.into(), grandpa: grandpa.into() }
+        }
+    }
+
+    sp_runtime::impl_opaque_keys! {
+        pub struct CrossChainKey {
+            pub account: CrossChainPublic,
+        }
     }
 }
+
+pub type CrossChainPublic = opaque::cross_chain_app::Public;
+use opaque::SessionKeys;
 
 // ---------------------------------------------------------------------------
 // Runtime version
@@ -93,7 +170,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 117,
+    spec_version: 200,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -115,7 +192,7 @@ pub fn native_version() -> NativeVersion {
 
 const NORMAL_DISPATCH_RATIO: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(75);
 
-/// Maximum block weight: 2 seconds of compute with 75% normal dispatch.
+// Maximum block weight: 2 seconds of compute with 75% normal dispatch.
 parameter_types! {
     pub const BlockHashCount: BlockNumber = 2400;
     pub const Version: RuntimeVersion = VERSION;
@@ -177,16 +254,16 @@ impl pallet_timestamp::Config for Runtime {
 // Aura
 // ---------------------------------------------------------------------------
 
-parameter_types! {
-    pub const MaxAuthorities: u32 = 32;
-}
+/// Block time: 6 seconds.
+pub const MILLISECS_PER_BLOCK: u64 = 6000;
+pub const SLOT_DURATION: u64 = MILLISECS_PER_BLOCK;
 
 impl pallet_aura::Config for Runtime {
     type AuthorityId = AuraId;
     type DisabledValidators = ();
-    type MaxAuthorities = MaxAuthorities;
-    type AllowMultipleBlocksPerSlot = frame_support::traits::ConstBool<false>;
-    type SlotDuration = pallet_aura::MinimumPeriodTimesTwo<Runtime>;
+    type MaxAuthorities = MaxValidators;
+    type AllowMultipleBlocksPerSlot = ConstBool<false>;
+    type SlotDuration = ConstU64<SLOT_DURATION>;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,7 +273,7 @@ impl pallet_aura::Config for Runtime {
 impl pallet_grandpa::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = ();
-    type MaxAuthorities = MaxAuthorities;
+    type MaxAuthorities = MaxValidators;
     type MaxNominators = ConstU32<0>;
     type MaxSetIdSessionEntries = ConstU64<0>;
     type KeyOwnerProof = sp_core::Void;
@@ -303,6 +380,105 @@ impl pallet_motra::pallet::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// IOG Partner Chains: Sidechain
+// ---------------------------------------------------------------------------
+
+impl pallet_sidechain::Config for Runtime {
+    fn current_slot_number() -> ScSlotNumber {
+        ScSlotNumber(*pallet_aura::CurrentSlot::<Self>::get())
+    }
+    type OnNewEpoch = LogBeneficiaries;
+}
+
+pub struct LogBeneficiaries;
+impl sp_sidechain::OnNewEpoch for LogBeneficiaries {
+    fn on_new_epoch(old_epoch: ScEpochNumber, _new_epoch: ScEpochNumber) -> sp_weights::Weight {
+        let rewards = BlockRewards::get_rewards_and_clear();
+        log::info!("Rewards accrued in epoch {old_epoch}: {rewards:?}");
+        RuntimeDbWeight::get().reads_writes(1, 1)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IOG Partner Chains: Block Rewards
+// ---------------------------------------------------------------------------
+
+pub type BeneficiaryId = sidechain_domain::byte_string::SizedByteString<32>;
+
+impl pallet_block_rewards::Config for Runtime {
+    type BeneficiaryId = BeneficiaryId;
+    type BlockRewardPoints = u32;
+    type GetBlockRewardPoints = sp_block_rewards::SimpleBlockCount;
+}
+
+// ---------------------------------------------------------------------------
+// IOG Partner Chains: Session Validator Management
+// ---------------------------------------------------------------------------
+
+parameter_types! {
+    pub const MaxValidators: u32 = 32;
+}
+
+impl pallet_session_validator_management::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type MaxValidators = MaxValidators;
+    type AuthorityId = CrossChainPublic;
+    type AuthorityKeys = SessionKeys;
+    type AuthoritySelectionInputs = AuthoritySelectionInputs;
+    type ScEpochNumber = ScEpochNumber;
+    type WeightInfo = pallet_session_validator_management::weights::SubstrateWeight<Runtime>;
+
+    fn select_authorities(
+        input: AuthoritySelectionInputs,
+        sidechain_epoch: ScEpochNumber,
+    ) -> Option<BoundedVec<(Self::AuthorityId, Self::AuthorityKeys), Self::MaxValidators>> {
+        select_authorities(Sidechain::genesis_utxo(), input, sidechain_epoch)
+    }
+
+    fn current_epoch_number() -> ScEpochNumber {
+        Sidechain::current_epoch_number()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IOG Partner Chains: Partner Chains Session
+// ---------------------------------------------------------------------------
+
+impl pallet_partner_chains_session::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type ValidatorId = <Self as frame_system::Config>::AccountId;
+    type ShouldEndSession = ValidatorManagementSessionManager<Runtime>;
+    type NextSessionRotation = ();
+    type SessionManager = ValidatorManagementSessionManager<Runtime>;
+    type SessionHandler = <opaque::SessionKeys as OpaqueKeys>::KeyTypeIdProviders;
+    type Keys = opaque::SessionKeys;
+}
+
+// ---------------------------------------------------------------------------
+// IOG Partner Chains: pallet-session stub (required by pallet-grandpa)
+// ---------------------------------------------------------------------------
+
+pallet_session_runtime_stub::impl_pallet_session_config!(Runtime);
+
+// ---------------------------------------------------------------------------
+// IOG Partner Chains: Native Token Management
+// ---------------------------------------------------------------------------
+
+pub struct TokenTransferHandler;
+
+impl pallet_native_token_management::TokenTransferHandler for TokenTransferHandler {
+    fn handle_token_transfer(token_amount: NativeTokenAmount) -> DispatchResult {
+        log::info!("Registered transfer of {} native tokens", token_amount.0);
+        Ok(())
+    }
+}
+
+impl pallet_native_token_management::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type TokenTransferHandler = TokenTransferHandler;
+}
+
+// ---------------------------------------------------------------------------
 // Construct runtime
 // ---------------------------------------------------------------------------
 
@@ -319,6 +495,16 @@ construct_runtime! {
         Utility: pallet_utility,
         OrinqReceipts: pallet_orinq_receipts,
         Motra: pallet_motra,
+        // IOG Partner Chains pallets
+        // Sidechain must come after Aura (reads current slot from it)
+        Sidechain: pallet_sidechain,
+        SessionCommitteeManagement: pallet_session_validator_management,
+        BlockRewards: pallet_block_rewards,
+        // pallet_session stub (needed by pallet_grandpa for CurrentIndex)
+        PalletSession: pallet_session,
+        // pallet_partner_chains_session must come last for correct initialization order
+        Session: pallet_partner_chains_session,
+        NativeTokenManagement: pallet_native_token_management,
     }
 }
 
@@ -418,11 +604,13 @@ impl_runtime_apis! {
 
     impl sp_session::SessionKeys<Block> for Runtime {
         fn generate_session_keys(seed: Option<Vec<u8>>) -> Vec<u8> {
-            SessionKeys::generate(seed)
+            // Also generate the cross-chain key alongside the session keys
+            opaque::CrossChainKey::generate(seed.clone());
+            opaque::SessionKeys::generate(seed)
         }
 
         fn decode_session_keys(encoded: Vec<u8>) -> Option<Vec<(Vec<u8>, KeyTypeId)>> {
-            SessionKeys::decode_into_raw_public_keys(&encoded)
+            opaque::SessionKeys::decode_into_raw_public_keys(&encoded)
         }
     }
 
@@ -580,6 +768,58 @@ impl_runtime_apis! {
 
         fn insufficient_motra_failures() -> u64 {
             pallet_motra::InsufficientMotraFailures::<Runtime>::get()
+        }
+    }
+
+    impl sp_sidechain::GetGenesisUtxo<Block> for Runtime {
+        fn genesis_utxo() -> UtxoId {
+            Sidechain::genesis_utxo()
+        }
+    }
+
+    impl sp_sidechain::GetSidechainStatus<Block> for Runtime {
+        fn get_sidechain_status() -> SidechainStatus {
+            SidechainStatus {
+                epoch: Sidechain::current_epoch_number(),
+                slot: ScSlotNumber(*pallet_aura::CurrentSlot::<Runtime>::get()),
+                slots_per_epoch: Sidechain::slots_per_epoch().0,
+            }
+        }
+    }
+
+    impl sidechain_slots::SlotApi<Block> for Runtime {
+        fn slot_config() -> sidechain_slots::ScSlotConfig {
+            sidechain_slots::ScSlotConfig {
+                slots_per_epoch: Sidechain::slots_per_epoch(),
+                slot_duration: <Self as sp_consensus_aura::runtime_decl_for_aura_api::AuraApi<Block, AuraId>>::slot_duration()
+            }
+        }
+    }
+
+    impl sp_session_validator_management::SessionValidatorManagementApi<Block, SessionKeys, CrossChainPublic, AuthoritySelectionInputs, ScEpochNumber> for Runtime {
+        fn get_current_committee() -> (ScEpochNumber, Vec<CrossChainPublic>) {
+            SessionCommitteeManagement::get_current_committee()
+        }
+        fn get_next_committee() -> Option<(ScEpochNumber, Vec<CrossChainPublic>)> {
+            SessionCommitteeManagement::get_next_committee()
+        }
+        fn get_next_unset_epoch_number() -> ScEpochNumber {
+            SessionCommitteeManagement::get_next_unset_epoch_number()
+        }
+        fn calculate_committee(authority_selection_inputs: AuthoritySelectionInputs, sidechain_epoch: ScEpochNumber) -> Option<Vec<(CrossChainPublic, SessionKeys)>> {
+            SessionCommitteeManagement::calculate_committee(authority_selection_inputs, sidechain_epoch)
+        }
+        fn get_main_chain_scripts() -> sp_session_validator_management::MainChainScripts {
+            SessionCommitteeManagement::get_main_chain_scripts()
+        }
+    }
+
+    impl sp_native_token_management::NativeTokenManagementApi<Block> for Runtime {
+        fn get_main_chain_scripts() -> Option<sp_native_token_management::MainChainScripts> {
+            NativeTokenManagement::get_main_chain_scripts()
+        }
+        fn initialized() -> bool {
+            NativeTokenManagement::initialized()
         }
     }
 

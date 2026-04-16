@@ -22,20 +22,23 @@ services:
       BLOB_GATEWAY_API_KEY: ""        # API key from FPS team
 
       # === Chain connection (public endpoints) ===
-      MATERIOS_RPC_URL: "wss://materios.fluxpointstudios.com/rpc"
-      BLOB_GATEWAY_URL: "https://materios.fluxpointstudios.com/blobs"
-      LOCATOR_REGISTRY_URL: "https://materios.fluxpointstudios.com/blobs"
+      # NOTE: Materios migrated to v3 chain (genesis 0x105fed43...) on 2026-04-16.
+      # The /preprod-* routes point at the v3 node. The legacy /rpc and /blobs
+      # routes continue to serve v1 through the migration window.
+      MATERIOS_RPC_URL: "wss://materios.fluxpointstudios.com/preprod-rpc"
+      BLOB_GATEWAY_URL: "https://materios.fluxpointstudios.com/preprod-blobs"
+      LOCATOR_REGISTRY_URL: "https://materios.fluxpointstudios.com/preprod-blobs"
       LOCATOR_REGISTRY_API_KEY: ""    # Same as BLOB_GATEWAY_API_KEY
 
       # === Heartbeat (uses public gateway) ===
-      HEARTBEAT_URL: "https://materios.fluxpointstudios.com/blobs"
+      HEARTBEAT_URL: "https://materios.fluxpointstudios.com/preprod-blobs"
       HEARTBEAT_INTERVAL: "30"
 
       # === DO NOT checkpoint from external daemon ===
       CHECKPOINT_ENABLED: "false"
 
       # === Standard config ===
-      CHAIN_ID: "8f6e531be80341a12a0ae1b04484770fcaa797bb49dcc1cc9e79788f770a41b3"
+      CHAIN_ID: "105fed4310b56550d3646a13d7a6f4b69ab82f1c1269a6c732948a2a260b1360"
       POLL_INTERVAL: "12"
       POLL_INTERVAL_FAST: "3"
       POLL_INTERVAL_IDLE: "12"

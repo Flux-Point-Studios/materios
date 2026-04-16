@@ -57,6 +57,37 @@ sp-arithmetic = { workspace = true }
 frame-system-rpc-runtime-api = { workspace = true }
 getrandom = { workspace = true }
 
+# IOG Partner Chains pallets
+pallet-sidechain = { workspace = true }
+pallet-session-validator-management = { workspace = true }
+pallet-block-rewards = { workspace = true }
+pallet-partner-chains-session = { workspace = true }
+pallet-native-token-management = { workspace = true }
+pallet-session-runtime-stub = { workspace = true }
+
+# IOG Partner Chains primitives
+sp-sidechain = { workspace = true }
+sp-block-rewards = { workspace = true }
+sp-session-validator-management = { workspace = true, features = ["serde"] }
+sp-native-token-management = { workspace = true, features = ["serde"] }
+sidechain-domain = { workspace = true, features = ["serde"] }
+sidechain-slots = { workspace = true }
+session-manager = { workspace = true }
+authority-selection-inherents = { workspace = true }
+
+# Additional Substrate deps for IOG pallets
+sp-staking = { workspace = true }
+sp-weights = { workspace = true }
+sp-storage = { workspace = true }
+sp-consensus-slots = { workspace = true }
+pallet-session = { workspace = true }
+log = { workspace = true }
+
+[dev-dependencies]
+sp-keyring = { workspace = true }
+sp-io = { workspace = true }
+hex-literal = { workspace = true }
+
 [features]
 default = ["std"]
 std = [
@@ -97,6 +128,26 @@ std = [
     "sp-arithmetic/std",
     "frame-system-rpc-runtime-api/std",
     "substrate-wasm-builder",
+    "pallet-sidechain/std",
+    "pallet-session-validator-management/std",
+    "pallet-block-rewards/std",
+    "pallet-partner-chains-session/std",
+    "pallet-native-token-management/std",
+    "pallet-session-runtime-stub/std",
+    "sp-sidechain/std",
+    "sp-block-rewards/std",
+    "sp-session-validator-management/std",
+    "sp-native-token-management/std",
+    "sidechain-domain/std",
+    "sidechain-slots/std",
+    "session-manager/std",
+    "authority-selection-inherents/std",
+    "sp-staking/std",
+    "sp-weights/std",
+    "sp-storage/std",
+    "sp-consensus-slots/std",
+    "pallet-session/std",
+    "log/std",
 ]
 runtime-benchmarks = [
     "frame-support/runtime-benchmarks",

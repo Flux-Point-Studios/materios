@@ -14,8 +14,16 @@ fn account(hex: [u8; 32]) -> AccountId32 {
     AccountId32::from(hex)
 }
 
-/// Preprod chain spec — MacBook + Gemtek as initial 2-validator authority set.
+/// Number of sidechain slots per epoch for preprod.
+/// With 6s blocks, 600 slots = ~1 hour epochs.
+const PREPROD_SLOTS_PER_EPOCH: u32 = 600;
+
+/// Preprod chain spec — Gemtek + Node-2 + Node-3 + MacBook as initial 4-validator authority set.
 /// Sudo is a 2-of-3 multisig. All fixes baked in from genesis.
+///
+/// Now includes IOG partner-chain pallet genesis configuration for permissioned-only
+/// mode (D=1.0).  Cardano mainchain follower placeholders will be replaced when the
+/// bridge is activated.
 pub fn preprod_config() -> Result<ChainSpec, String> {
     // -- Accounts --
     let alice_faucet = account([
@@ -43,11 +51,11 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         0x8a, 0xce, 0xb0, 0x1d, 0xa2, 0x2f, 0x44, 0x00,
     ]);
     let multisig_sudo = account([
-        0x29, 0x89, 0xe9, 0x74, 0xed, 0x49, 0x60, 0x13,
-        0x7c, 0x9d, 0x16, 0x23, 0x45, 0x24, 0xa7, 0xf5,
-        0x17, 0x8d, 0x1a, 0x68, 0x04, 0x83, 0x45, 0x3d,
-        0xcd, 0x3f, 0x32, 0x09, 0xe6, 0x3a, 0xf6, 0x92,
-    ]);
+        0x7f, 0xde, 0xdf, 0x68, 0x3c, 0x3b, 0xe9, 0x82,
+        0xbb, 0xb1, 0x2b, 0x06, 0x1b, 0x58, 0x22, 0x29,
+        0x7e, 0x2c, 0x1b, 0xd5, 0x3c, 0xdf, 0xe3, 0xc1,
+        0x7c, 0x8b, 0x78, 0x5d, 0xc9, 0x04, 0xe3, 0xa2,
+    ]); // 5ExN9Pq8vRpRy49FCUZQptij8BQDEXFUVuSBY6qWzMiPodPk (2-of-3 multisig)
     let macbook_account = account([
         0x20, 0xcd, 0xba, 0x0a, 0x5d, 0x36, 0x8c, 0x5e,
         0xb0, 0xee, 0x11, 0x9d, 0x25, 0xf4, 0x40, 0xf8,
@@ -59,6 +67,18 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         0xc0, 0xe7, 0xc5, 0x99, 0x16, 0x95, 0x2c, 0x8c,
         0x21, 0x49, 0x60, 0x90, 0x42, 0x08, 0x29, 0x5a,
         0x0d, 0x70, 0xc4, 0xc4, 0x8e, 0x2a, 0x9a, 0x29,
+    ]);
+    let node2_account = account([
+        0x8e, 0xd4, 0x46, 0xc7, 0x11, 0x4f, 0xbe, 0xb7,
+        0x51, 0x86, 0x6e, 0x67, 0x52, 0xde, 0xdf, 0x36,
+        0xfb, 0xa9, 0xb3, 0xd2, 0x83, 0x2a, 0x9f, 0xc5,
+        0x0a, 0x00, 0x5e, 0x00, 0xed, 0x0a, 0xb1, 0x24,
+    ]);
+    let node3_account = account([
+        0x92, 0x5f, 0xe8, 0x60, 0x5f, 0xe3, 0x2a, 0x53,
+        0xa7, 0xb3, 0x91, 0x49, 0x8f, 0xc1, 0xb0, 0xab,
+        0x91, 0xd3, 0xaf, 0x73, 0x19, 0x60, 0x7b, 0xd7,
+        0x0b, 0x85, 0x0b, 0x4f, 0x5f, 0xa9, 0xd2, 0x55,
     ]);
 
     // -- Authority keys --
@@ -86,6 +106,30 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         0x07, 0x0f, 0xd0, 0x8d, 0xa4, 0x73, 0x29, 0xaf,
         0xca, 0x79, 0xf4, 0xb3, 0xdf, 0x6a, 0xaa, 0x7e,
     ]));
+    let node2_aura = AuraId::from(sp_core::sr25519::Public::from_raw([
+        0x8e, 0xd4, 0x46, 0xc7, 0x11, 0x4f, 0xbe, 0xb7,
+        0x51, 0x86, 0x6e, 0x67, 0x52, 0xde, 0xdf, 0x36,
+        0xfb, 0xa9, 0xb3, 0xd2, 0x83, 0x2a, 0x9f, 0xc5,
+        0x0a, 0x00, 0x5e, 0x00, 0xed, 0x0a, 0xb1, 0x24,
+    ]));
+    let node2_grandpa = GrandpaId::from(sp_core::ed25519::Public::from_raw([
+        0x4d, 0xc9, 0xc8, 0xf9, 0xbd, 0x37, 0xdf, 0x2b,
+        0xb9, 0x22, 0x34, 0x58, 0xc8, 0x97, 0xb0, 0x00,
+        0xfe, 0x43, 0x62, 0x95, 0x8d, 0xa6, 0xee, 0xb6,
+        0x41, 0x3b, 0x93, 0xdc, 0xfb, 0xab, 0xe2, 0xba,
+    ]));
+    let node3_aura = AuraId::from(sp_core::sr25519::Public::from_raw([
+        0x92, 0x5f, 0xe8, 0x60, 0x5f, 0xe3, 0x2a, 0x53,
+        0xa7, 0xb3, 0x91, 0x49, 0x8f, 0xc1, 0xb0, 0xab,
+        0x91, 0xd3, 0xaf, 0x73, 0x19, 0x60, 0x7b, 0xd7,
+        0x0b, 0x85, 0x0b, 0x4f, 0x5f, 0xa9, 0xd2, 0x55,
+    ]));
+    let node3_grandpa = GrandpaId::from(sp_core::ed25519::Public::from_raw([
+        0x75, 0x0d, 0x4b, 0xa2, 0xa8, 0x31, 0xa3, 0x0d,
+        0x41, 0x90, 0x09, 0xf2, 0xd8, 0xbc, 0x1e, 0xf1,
+        0xe6, 0xfc, 0x6f, 0x67, 0x3c, 0x7a, 0x2b, 0x5b,
+        0x50, 0x0a, 0x2b, 0x7f, 0x2a, 0x68, 0x45, 0x8e,
+    ]));
 
     Ok(ChainSpec::builder(
         WASM_BINARY.ok_or("WASM binary not available")?,
@@ -106,22 +150,23 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
                 [keyholder_1, 100_000_000_000_000u128],
                 [keyholder_2, 100_000_000_000_000u128],
                 [keyholder_3, 100_000_000_000_000u128],
-                // 2 validator accounts — funded for MOTRA generation
+                // 4 validator accounts — funded for MOTRA generation
                 [macbook_account, 100_000_000_000_000u128],
                 [gemtek_account, 100_000_000_000_000u128],
+                [node2_account, 100_000_000_000_000u128],
+                [node3_account, 100_000_000_000_000u128],
             ]
         },
         "sudo": {
             "key": multisig_sudo
         },
+        // Initial Aura/Grandpa authorities (bootstrap set).
+        // Session pallet takes over authority management after first epoch.
         "aura": {
-            "authorities": [macbook_aura, gemtek_aura]
+            "authorities": [macbook_aura, gemtek_aura, node2_aura, node3_aura],
         },
         "grandpa": {
-            "authorities": [
-                (macbook_grandpa, 1u64),
-                (gemtek_grandpa, 1u64),
-            ]
+            "authorities": [[macbook_grandpa, 1], [gemtek_grandpa, 1], [node2_grandpa, 1], [node3_grandpa, 1]],
         },
         "motra": {
             "minFee": 1_000_000,
@@ -133,7 +178,35 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "maxCongestionStep": 1_000_000,
             "lengthFeePerByte": 1_000,
             "congestionSmoothingPpm": 100_000_000
-        }
+        },
+        // -- IOG partner-chain pallets (permissioned-only mode) --
+        "sidechain": {
+            "genesisUtxo": "0x0000000000000000000000000000000000000000000000000000000000000000#0",
+            "slotsPerEpoch": PREPROD_SLOTS_PER_EPOCH,
+        },
+        "session": {
+            "initialValidators": [
+                [macbook_aura, { "aura": macbook_aura, "grandpa": macbook_grandpa }],
+                [gemtek_aura,  { "aura": gemtek_aura,  "grandpa": gemtek_grandpa  }],
+                [node2_aura,   { "aura": node2_aura,   "grandpa": node2_grandpa   }],
+                [node3_aura,   { "aura": node3_aura,   "grandpa": node3_grandpa   }],
+            ],
+        },
+        "sessionCommitteeManagement": {
+            "initialAuthorities": [],
+            "mainChainScripts": {
+                "committeeCandidateAddress": "",
+                "dParameterPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "permissionedCandidatesPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+            },
+        },
+        "palletSession": {},
+        "nativeTokenManagement": {
+            "mainChainScripts": {
+                "nativeTokenPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                "illiquidSupplyAddress": "",
+            },
+        },
     }))
     .build())
 }
