@@ -1,6 +1,4 @@
-use materios_runtime::{
-    SessionKeys, AccountId, Balance, RuntimeGenesisConfig, Signature, WASM_BINARY,
-};
+use materios_runtime::{AccountId, Balance, Signature, WASM_BINARY};
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;

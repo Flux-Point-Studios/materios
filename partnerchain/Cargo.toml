@@ -1,14 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    # "node",  # temporarily disabled
+    "node",
     "runtime",
     "pallets/orinq-receipts",
     "pallets/orinq-receipts/primitives",
-    # "pallets/orinq-receipts/rpc",
+    "pallets/orinq-receipts/rpc",
     "pallets/motra",
     "pallets/motra/primitives",
-    # "pallets/motra/rpc",
+    "pallets/motra/rpc",
 ]
 
 [workspace.package]
@@ -20,7 +20,7 @@ repository = "https://github.com/materios/materios"
 [workspace.dependencies]
 base64ct = "<1.7"
 # Parity SCALE
-parity-scale-codec = { version = "3.7", default-features = false, features = ["derive"] }
+parity-scale-codec = { version = "3.6.12", default-features = false, features = ["derive"] }
 scale-info = { version = "2.11", default-features = false, features = ["derive"] }
 
 # Substrate / polkadot-sdk (pinned to match Partner Chains v1.8.x)
@@ -119,4 +119,27 @@ sidechain-slots = { git = "https://github.com/input-output-hk/partner-chains.git
 session-manager = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
 authority-selection-inherents = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
 
-# Patch: IOG v1.5.1 depends on polkadot-stable2409-4; redirect to 2409-5
+# ---------------------------------------------------------------------------
+# Version pins for Rust 1.85.0 compatibility
+# ---------------------------------------------------------------------------
+
+# Pin `url` to 2.5.x so the resolver picks idna <1.0 (no icu_* v2 which needs Rust 1.86+)
+url = ">=2.5, <2.6"
+
+# Pin `idna` to 0.x  (the 1.x line pulls icu_* v2)
+idna = ">=0.5, <1"
+
+# Pin ahash to 0.8.11 which uses getrandom 0.2 (0.8.12 uses getrandom 0.3 -> wasip2)
+ahash = ">=0.8, <0.8.12"
+
+# Pin jobserver to avoid getrandom 0.3
+jobserver = ">=0.1, <0.1.33"
+
+# Pin tempfile to avoid getrandom 0.4
+tempfile = ">=3, <3.19"
+
+# ---------------------------------------------------------------------------
+# Patch: provide yanked `core2` crate from git
+# ---------------------------------------------------------------------------
+[patch.crates-io]
+core2 = { path = "vendor/core2" }

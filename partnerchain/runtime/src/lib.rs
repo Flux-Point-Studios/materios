@@ -15,7 +15,7 @@ use authority_selection_inherents::authority_selection_inputs::AuthoritySelectio
 use authority_selection_inherents::select_authorities::select_authorities;
 use frame_support::{
     construct_runtime, derive_impl, parameter_types,
-    traits::{ConstBool, ConstU32, ConstU64, ConstU128},
+    traits::{ConstBool, ConstU32, ConstU64},
     weights::{
         constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         IdentityFee, Weight,
@@ -192,7 +192,7 @@ pub fn native_version() -> NativeVersion {
 
 const NORMAL_DISPATCH_RATIO: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(75);
 
-/// Maximum block weight: 2 seconds of compute with 75% normal dispatch.
+// Maximum block weight: 2 seconds of compute with 75% normal dispatch.
 parameter_types! {
     pub const BlockHashCount: BlockNumber = 2400;
     pub const Version: RuntimeVersion = VERSION;

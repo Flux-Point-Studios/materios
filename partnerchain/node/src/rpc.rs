@@ -9,7 +9,7 @@ use materios_runtime::{opaque::Block, AccountId, Balance, Nonce};
 use sc_transaction_pool_api::TransactionPool;
 use sp_api::ProvideRuntimeApi;
 use sp_blockchain::{Error as BlockchainError, HeaderBackend, HeaderMetadata};
-use sp_runtime::traits::Block as BlockT;
+
 
 /// Full client dependencies.
 pub struct FullDeps<C, P> {

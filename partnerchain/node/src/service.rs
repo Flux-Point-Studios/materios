@@ -6,7 +6,7 @@
 //!   those will be added when the Cardano bridge is activated.
 
 use materios_runtime::{self, opaque::Block, RuntimeApi};
-use sc_client_api::{Backend, BlockBackend};
+use sc_client_api::BlockBackend;
 use sc_consensus_aura::{ImportQueueParams, SlotProportion, StartAuraParams};
 use sc_consensus_grandpa::SharedVoterState;
 use sc_service::{error::Error as ServiceError, Configuration, TaskManager};

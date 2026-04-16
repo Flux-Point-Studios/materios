@@ -52,7 +52,6 @@ use frame_support::{
     assert_ok,
     traits::{OnFinalize, OnInitialize},
 };
-use sp_core::H256;
 use sp_io::TestExternalities;
 use sp_runtime::BuildStorage;
 
@@ -158,6 +157,14 @@ fn test_beneficiary_id() -> BeneficiaryId {
 fn run_to_block(n: BlockNumber) {
     while System::block_number() < n {
         let current = System::block_number();
+        // Set timestamp so pallet_timestamp::on_finalize does not panic.
+        // Timestamp of 0 maps to slot 0 which is the initial CurrentSlot.
+        let _ = pallet_timestamp::Pallet::<Runtime>::set(
+            RuntimeOrigin::none(),
+            current as u64 * MILLISECS_PER_BLOCK,
+        );
+        // block_rewards requires CurrentBlockBeneficiary to be set before on_finalize.
+        pallet_block_rewards::CurrentBlockBeneficiary::<Runtime>::put(test_beneficiary_id());
         // Finalize current
         AllPalletsWithSystem::on_finalize(current);
         System::on_finalize(current);
@@ -247,7 +254,7 @@ fn sidechain_genesis_utxo_is_stored() {
 fn sidechain_slots_per_epoch_is_stored() {
     new_test_ext().execute_with(|| {
         let spe = pallet_sidechain::Pallet::<Runtime>::slots_per_epoch();
-        assert_eq!(spe, sidechain_slots::SlotsPerEpoch(SLOTS_PER_EPOCH));
+        assert_eq!(spe.0, SLOTS_PER_EPOCH);
     });
 }
 
@@ -408,12 +415,11 @@ fn block_rewards_separate_beneficiaries_tracked_independently() {
         let rewards = pallet_block_rewards::Pallet::<Runtime>::get_rewards_and_clear();
         assert_eq!(rewards.len(), 2);
 
-        let mut reward_map = std::collections::HashMap::new();
-        for (id, pts) in rewards {
-            reward_map.insert(id, pts);
-        }
-        assert_eq!(reward_map[&beneficiary_a], 2u32);
-        assert_eq!(reward_map[&beneficiary_b], 1u32);
+        let find_pts = |target: &BeneficiaryId| -> u32 {
+            rewards.iter().find(|(id, _)| id == target).map(|(_, pts)| *pts).unwrap()
+        };
+        assert_eq!(find_pts(&beneficiary_a), 2u32);
+        assert_eq!(find_pts(&beneficiary_b), 1u32);
     });
 }
 
@@ -487,9 +493,11 @@ fn native_token_set_main_chain_scripts_requires_root() {
 
     new_test_ext().execute_with(|| {
         let call = pallet_native_token_management::Call::<Runtime>::set_main_chain_scripts {
-            native_token_policy_id: sidechain_domain::PolicyId(Vec::new()),
-            native_token_asset_name: sidechain_domain::AssetName(Vec::new()),
-            illiquid_supply_validator_address: sidechain_domain::MainchainAddress(Vec::new()),
+            native_token_policy_id: sidechain_domain::PolicyId([0u8; 28]),
+            native_token_asset_name: sidechain_domain::AssetName(
+                frame_support::BoundedVec::try_from(Vec::new()).unwrap(),
+            ),
+            illiquid_supply_validator_address: "".parse::<sidechain_domain::MainchainAddress>().unwrap(),
         };
 
         // Signed origin should fail.
@@ -556,7 +564,6 @@ fn runtime_genesis_config_includes_all_iog_pallet_fields() {
         transaction_payment: Default::default(),
         // Existing Materios pallets
         motra: Default::default(),
-        orinq_receipts: Default::default(),
         // IOG pallets with genesis configs
         sidechain: pallet_sidechain::GenesisConfig {
             genesis_utxo: test_genesis_utxo(),
@@ -690,11 +697,11 @@ fn session_keys_contain_aura_and_grandpa() {
 
     let key_ids = opaque::SessionKeys::key_ids();
     assert!(
-        key_ids.contains(&sp_consensus_aura::AURA_ENGINE_ID),
+        key_ids.contains(&sp_core::crypto::KeyTypeId(sp_consensus_aura::AURA_ENGINE_ID)),
         "SessionKeys must include Aura"
     );
     assert!(
-        key_ids.contains(&sp_consensus_grandpa::GRANDPA_ENGINE_ID),
+        key_ids.contains(&sp_core::crypto::KeyTypeId(*b"gran")),
         "SessionKeys must include Grandpa"
     );
 }
@@ -826,6 +833,10 @@ fn all_pallets_hooks_run_without_panic() {
         // This exercises on_initialize for EVERY pallet in AllPalletsWithSystem,
         // including the six new IOG pallets.
         AllPalletsWithSystem::on_initialize(1u32);
+
+        // Set timestamp to 0 so it maps to slot 0, matching the initial CurrentSlot.
+        // pallet_timestamp::on_finalize requires the timestamp to have been set.
+        let _ = pallet_timestamp::Pallet::<Runtime>::set(RuntimeOrigin::none(), 0);
 
         // block_rewards requires CurrentBlockBeneficiary to be set before
         // on_finalize, so we set it.
