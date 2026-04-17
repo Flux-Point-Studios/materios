@@ -7,6 +7,8 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
+pub mod input_sanity;
+
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
 
@@ -170,7 +172,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 200,
+    spec_version: 201,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -415,8 +417,15 @@ impl pallet_block_rewards::Config for Runtime {
 // IOG Partner Chains: Session Validator Management
 // ---------------------------------------------------------------------------
 
+/// Shared upper bound on committee size. Referenced by the session pallet's
+/// `MaxValidators` AND by `input_sanity::MAX_COMMITTEE_SIZE`. Changing this
+/// value is load-bearing — the sanity layer has a compile-time assertion
+/// that its own constant equals this one, so bumping it here keeps the two
+/// in lockstep automatically.
+pub const MAX_VALIDATORS: u32 = 32;
+
 parameter_types! {
-    pub const MaxValidators: u32 = 32;
+    pub const MaxValidators: u32 = MAX_VALIDATORS;
 }
 
 impl pallet_session_validator_management::Config for Runtime {
@@ -432,7 +441,15 @@ impl pallet_session_validator_management::Config for Runtime {
         input: AuthoritySelectionInputs,
         sidechain_epoch: ScEpochNumber,
     ) -> Option<BoundedVec<(Self::AuthorityId, Self::AuthorityKeys), Self::MaxValidators>> {
-        select_authorities(Sidechain::genesis_utxo(), input, sidechain_epoch)
+        // Security hardening: before D<1.0 the registered-candidates list
+        // is untrusted db-sync output. Filter out duplicate keys, cap list
+        // sizes, and reject whole-input invariant violations. See
+        // `docs/d-param-sanity-checks-design.md`.
+        let sanitized = match input_sanity::sanitize_and_log(input) {
+            Ok(cleaned) => cleaned,
+            Err(_) => return None,
+        };
+        select_authorities(Sidechain::genesis_utxo(), sanitized, sidechain_epoch)
     }
 
     fn current_epoch_number() -> ScEpochNumber {

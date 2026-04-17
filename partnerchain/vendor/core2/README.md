@@ -1,3 +1,23 @@
+# Vendored copy — provenance note
+
+> This directory is a **vendored** copy of the `core2` crate embedded in the
+> Materios partner-chain tree.
+>
+> - **Upstream source:** https://github.com/bbqsrc/core2
+> - **Commit pinned:** `545e84bcb0f235b12e21351e0c69767958efe2a7`
+> - **Reason:** the version of `core2` on crates.io that IOG partner-chains
+>   transitively depends on was **yanked** by the maintainer; we vendor the
+>   upstream commit and redirect via `[patch.crates-io]` in
+>   `partnerchain/Cargo.toml`.
+> - **Verification:** `diff`ing this tree against a fresh clone of the upstream
+>   repo at the pinned commit should show only `Cargo.toml` path rewrites —
+>   no changes under `src/` or `tests/`. Any other divergence must be
+>   investigated.
+>
+> The original upstream README follows.
+
+---
+
 # core2
 
 [![Actions Status](https://github.com/bbqsrc/core2/workflows/CI/badge.svg)](https://github.com/bbqsrc/core2/actions)

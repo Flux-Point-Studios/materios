@@ -27,6 +27,13 @@ pub(crate) async fn create_cached_main_chain_follower_data_sources(
 	metrics_opt: Option<McFollowerMetrics>,
 ) -> std::result::Result<DataSources, ServiceError> {
 	if use_mock_follower() {
+		log::warn!(
+			"USE_MAIN_CHAIN_FOLLOWER_MOCK=true: loading authority-selection data from \
+			 on-disk JSON instead of db-sync. This is a DEVELOPMENT-ONLY mode and must \
+			 NEVER be enabled on a validator producing blocks for a live chain — an \
+			 attacker with write access to the mock registrations file could feed \
+			 arbitrary committee data. Unset the env var to use db-sync."
+		);
 		log::info!("Using MOCK main chain follower data sources");
 		create_mock_data_sources().map_err(|err| {
 			ServiceError::Application(
