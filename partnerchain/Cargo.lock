@@ -503,7 +503,6 @@ dependencies = [
 [[package]]
 name = "authority-selection-inherents"
 version = "1.5.1"
-source = "git+https://github.com/input-output-hk/partner-chains.git?tag=v1.5.1#20e607f260037e119ad282da006dc4d9e1a67f62"
 dependencies = [
  "async-trait",
  "frame-support",
@@ -1649,7 +1648,6 @@ dependencies = [
 [[package]]
 name = "db-sync-follower"
 version = "1.5.1"
-source = "git+https://github.com/input-output-hk/partner-chains.git?tag=v1.5.1#20e607f260037e119ad282da006dc4d9e1a67f62"
 dependencies = [
  "async-trait",
  "authority-selection-inherents",

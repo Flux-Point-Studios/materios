@@ -179,9 +179,16 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "lengthFeePerByte": 1_000,
             "congestionSmoothingPpm": 100_000_000
         },
-        // -- IOG partner-chain pallets (permissioned-only mode) --
+        // -- IOG partner-chain pallets (permissioned-only mode, D=1.0) --
+        // Serialization rules learned the hard way:
+        //  * pallet-level keys are camelCase (sessionCommitteeManagement, mainChainScripts)
+        //    because the runtime's aggregate GenesisConfig uses rename_all="camelCase"
+        //  * INNER sub-struct fields (MainChainScripts) are snake_case because that
+        //    struct has plain serde derive with no rename_all. Using camelCase there
+        //    is silently dropped as "unknown field" and leaves Default (all zeros).
+        // Real deployed contract values from project_cardano_preprod_contracts.md.
         "sidechain": {
-            "genesisUtxo": "0x0000000000000000000000000000000000000000000000000000000000000000#0",
+            "genesisUtxo": "0bacdb7e50ba61a1f9e28007a4f9543fa0e8e31ce10027b2f1dda8ab3438d388#0",
             "slotsPerEpoch": PREPROD_SLOTS_PER_EPOCH,
         },
         "session": {
@@ -195,18 +202,22 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         "sessionCommitteeManagement": {
             "initialAuthorities": [],
             "mainChainScripts": {
-                "committeeCandidateAddress": "",
-                "dParameterPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "permissionedCandidatesPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
+                // MainchainAddress serializes as hex of UTF-8 bytes of the bech32 string
+                // (the follower queries db-sync for the literal address string).
+                // Hex below = "addr_test1wzr6en3y43437qps5wscegufxw0euspmy0c3976mjm95j0cwuvezm"
+                "committee_candidate_address": "0x616464725f7465737431777a7236656e337934333433377170733577736365677566787730657573706d793063333937366d6a6d39356a3063777576657a6d",
+                "d_parameter_policy_id": "0x7f57bb675447c65ba0d68270a6b9b93aecc8dfdacaa3aa8cd081f9f3",
+                "permissioned_candidates_policy_id": "0x70cd1c6fbbbd7b1e855f589abd842f433ec0d7b46c7a9e437194e931",
             },
         },
         "palletSession": {},
-        "nativeTokenManagement": {
-            "mainChainScripts": {
-                "nativeTokenPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
-                "illiquidSupplyAddress": "",
-            },
-        },
+        // nativeTokenManagement left to runtime defaults — no native token is
+        // minted to it yet on Cardano preprod, so the zero policy id + empty
+        // validator address are intentional. Set via sudo when a token is
+        // deployed. (Providing wrong field names here would fail build-spec
+        // deserialization; the expected snake_case fields are
+        // native_token_policy_id, native_token_asset_name, and
+        // illiquid_supply_validator_address.)
     }))
     .build())
 }

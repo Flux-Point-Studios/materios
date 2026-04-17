@@ -97,10 +97,6 @@ pub mod pallet {
         OptionQuery,
     >;
 
-    /// One-time migration flag: committee reset to dev keys.
-    #[pallet::storage]
-    pub type CommitteeMigrationDone<T: Config> = StorageValue<_, bool, ValueQuery>;
-
     // ── Validator Reward Storage ──────────────────────────────────────────
 
     /// Blocks authored by each validator in the current era.
@@ -298,35 +294,17 @@ pub mod pallet {
         T::AccountId: From<[u8; 32]>,
         BlockNumberFor<T>: Into<u32> + From<u32>,
     {
-        fn on_initialize(n: BlockNumberFor<T>) -> Weight {
+        fn on_initialize(_n: BlockNumberFor<T>) -> Weight {
             let mut weight = Weight::zero();
 
-            // ── One-time committee migration (runs once on first block) ──
-            if !CommitteeMigrationDone::<T>::get() {
-                let alice: [u8; 32] = hex_literal::hex!("d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d");
-                let bob: [u8; 32] = hex_literal::hex!("8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48");
-                let charlie: [u8; 32] = hex_literal::hex!("90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22");
-                let dave: [u8; 32] = hex_literal::hex!("306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20");
-
-                let mut set = BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::new();
-                let _ = set.try_insert(T::AccountId::from(alice));
-                let _ = set.try_insert(T::AccountId::from(bob));
-                let _ = set.try_insert(T::AccountId::from(charlie));
-                let _ = set.try_insert(T::AccountId::from(dave));
-
-                CommitteeMembers::<T>::put(&set);
-                AttestationThreshold::<T>::put(2u32);
-                let _ = Attestations::<T>::clear(u32::MAX, None);
-
-                frame_support::storage::unhashed::put_raw(
-                    &frame_support::storage::storage_prefix(b"Sudo", b"Key"),
-                    &alice,
-                );
-
-                CommitteeMigrationDone::<T>::put(true);
-                log::info!("Committee migrated to dev keys, sudo reset to //Alice");
-                weight = weight.saturating_add(Weight::from_parts(100_000_000, 0));
-            }
+            // REMOVED (flux-point-studios/materios, v3+): a legacy one-time
+            // migration that overwrote CommitteeMembers with //Alice/Bob/Charlie/
+            // Dave dev keys AND reset Sudo::Key to //Alice. It was a preview-era
+            // test helper that leaked into production code, firing on block #1
+            // of any fresh chain. With v3's genesis (multisig sudo from block 0,
+            // IOG permissioned-candidates list driven by Cardano), the migration
+            // is unneeded and actively harmful — it silently replaces a 2-of-3
+            // multisig with a publicly-known dev keypair. Do NOT re-introduce.
 
             // ── Validator rewards: track block author ────────────────────
             // Aura round-robin: author = authorities[slot % len]

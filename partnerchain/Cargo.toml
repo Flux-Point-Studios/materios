@@ -166,3 +166,25 @@ tempfile = ">=3, <3.19"
 # ---------------------------------------------------------------------------
 [patch.crates-io]
 core2 = { path = "vendor/core2" }
+
+# ---------------------------------------------------------------------------
+# Patch: vendored forks of two IOG partner-chains crates so Materios preprod
+# can launch in the same Cardano epoch the D-parameter / permissioned-
+# candidates transactions were submitted, instead of waiting 10 days for the
+# upstream `- 2` stability offset.
+#
+# 1. `authority-selection-inherents` — relax the ariadne data_epoch check
+#    from `data_epoch < mc_reference_epoch` to `<=`. IOG's own comment
+#    acknowledges `<=` is more accurate; they used `<` only for simpler math.
+#
+# 2. `db-sync-follower` — drop the `- 2` Cardano-epoch offset in
+#    get_epoch_of_data_storage. The 2-epoch settling window provides zero
+#    marginal safety on preprod in permissioned-only mode (D=1.0) because
+#    `get_latest_stable_block_for` already enforces k=432-blocks depth.
+#
+# MAINNET MUST REVERT BOTH patches. The upstream behavior is the correct
+# security posture for production partner-chains with non-permissioned SPOs.
+# ---------------------------------------------------------------------------
+[patch."https://github.com/input-output-hk/partner-chains.git"]
+authority-selection-inherents = { path = "vendor/authority-selection-inherents" }
+db-sync-follower = { path = "vendor/db-sync-follower" }
