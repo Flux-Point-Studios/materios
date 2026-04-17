@@ -294,7 +294,7 @@ pub mod pallet {
         T::AccountId: From<[u8; 32]>,
         BlockNumberFor<T>: Into<u32> + From<u32>,
     {
-        fn on_initialize(_n: BlockNumberFor<T>) -> Weight {
+        fn on_initialize(n: BlockNumberFor<T>) -> Weight {
             let mut weight = Weight::zero();
 
             // REMOVED (flux-point-studios/materios, v3+): a legacy one-time
