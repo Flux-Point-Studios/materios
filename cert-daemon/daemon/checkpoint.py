@@ -20,6 +20,7 @@ from datetime import datetime
 from typing import Optional
 
 import requests
+from substrateinterface import Keypair
 
 from daemon.config import DaemonConfig
 
@@ -60,6 +61,11 @@ class CardanoCheckpointer:
         self.pending_leaves: list[dict] = []
         self.last_checkpointed_block: int = 0
         self.last_flush_time: float = 0.0
+        # Derive SS58 from signer_uri ONCE at startup so we never include the
+        # raw URI (which may be a BIP39 mnemonic on validator hosts) in any
+        # outbound metadata payload. Anchor worker forwards batch_metadata
+        # into Cardano L1 tx metadata — a seed leak here is permanent.
+        self.submitter_address: str = Keypair.create_from_uri(config.signer_uri).ss58_address
         self._load_state()
 
     def _load_state(self):
@@ -193,7 +199,7 @@ class CardanoCheckpointer:
             "leafHashes": [lh.hex() for lh in leaves],
             "blockRangeStart": from_block,
             "blockRangeEnd": to_block,
-            "submitter": self.config.signer_uri,
+            "submitter": self.submitter_address,
             "timestamp": datetime.utcnow().isoformat(),
             "source": "daemon",
         }
@@ -285,7 +291,7 @@ class CardanoCheckpointer:
                 "leafHashes": leaf_hashes,
                 "blockRangeStart": min(leaf.get("block_num", 0) for leaf in eligible_leaves),
                 "blockRangeEnd": max(leaf.get("block_num", 0) for leaf in eligible_leaves),
-                "submitter": self.config.signer_uri,
+                "submitter": self.submitter_address,
                 "timestamp": datetime.utcnow().isoformat(),
             }
 
