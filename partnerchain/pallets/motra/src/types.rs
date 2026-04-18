@@ -18,8 +18,9 @@ pub struct MotraParams {
     /// e.g., Perbill(999_900_000) means 99.99% retained per block => 0.01% decay per block
     pub decay_rate_per_block: Perbill,
     /// MOTRA generated per MATRA unit per block (in MOTRA smallest units).
-    /// e.g., if 1 MATRA = 10^12 units and generation = 1000, then holding 1 MATRA
-    /// generates 1000 MOTRA-units per block.
+    /// MATRA is 6 decimals, MOTRA is 15 decimals (Midnight DUST-style high precision).
+    /// With generation_per_matra_per_block = 100_000, holding 1 MATRA (10^6 base)
+    /// generates 10^5 MOTRA-base per block = 10^-10 MOTRA/block in display units.
     pub generation_per_matra_per_block: u128,
     /// Maximum MOTRA any account can accumulate (prevents infinite hoarding).
     pub max_balance: u128,
@@ -38,14 +39,14 @@ pub struct MotraParams {
 impl Default for MotraParams {
     fn default() -> Self {
         Self {
-            min_fee: 1_000_000,                                     // 1M smallest units
+            min_fee: 1_000_000_000,                                 // 1 µMOTRA floor at 15-decimals
             congestion_rate: 0,                                     // starts at zero congestion
             target_fullness: Perbill::from_percent(50),
             decay_rate_per_block: Perbill::from_parts(999_900_000), // retain 99.99% per block
-            generation_per_matra_per_block: 100,                    // 100 MOTRA-units per MATRA-unit per block
-            max_balance: 1_000_000_000_000_000,                     // 1 quadrillion cap
-            max_congestion_step: 1_000_000,                         // max adjustment step
-            length_fee_per_byte: 1_000,                             // 1000 MOTRA-units per byte
+            generation_per_matra_per_block: 100_000,                // preserves v4 economic ratio at 6/15 decimal split
+            max_balance: 1_000_000_000_000_000_000,                 // 1,000 MOTRA cap at 15-decimals
+            max_congestion_step: 1_000_000_000,                     // congestion step at 15-decimal scale
+            length_fee_per_byte: 1_000_000,                         // 1 nano-MOTRA/byte at 15-decimals
             congestion_smoothing: Perbill::from_percent(10),        // 10% EMA smoothing
         }
     }

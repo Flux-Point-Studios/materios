@@ -150,26 +150,36 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         WASM_BINARY.ok_or("WASM binary not available")?,
         None,
     )
-    .with_name("Materios Preprod")
-    .with_id("materios_preprod")
+    .with_name("Materios Preprod v5")
+    .with_id("materios_preprod_v5")
     .with_chain_type(ChainType::Live)
-    .with_protocol_id("materios-preprod")
+    .with_protocol_id("materios-preprod-v5")
+    .with_properties({
+        // Token metadata — required so explorers / wallets display correct units.
+        // MATRA = 6 decimals (matches cMATRA on Cardano; constrained by u64).
+        // MOTRA = 15 decimals (Midnight DUST parity; separate pallet storage).
+        let mut props = serde_json::Map::new();
+        props.insert("tokenDecimals".to_string(), serde_json::json!(6));
+        props.insert("tokenSymbol".to_string(), serde_json::json!("MATRA"));
+        props.insert("ss58Format".to_string(), serde_json::json!(42));
+        props
+    })
     .with_genesis_config_patch(serde_json::json!({
         "balances": {
             "balances": [
-                // Faucet signer (//Alice) — large balance for drips
-                [alice_faucet, 1_000_000_000_000_000_000u128],
-                // Multisig sudo account — small balance for existential deposit
-                [multisig_sudo, 1_000_000_000_000u128],
-                // 3 multisig keyholders — funded for governance TXs
-                [keyholder_1, 100_000_000_000_000u128],
-                [keyholder_2, 100_000_000_000_000u128],
-                [keyholder_3, 100_000_000_000_000u128],
-                // 4 validator accounts — funded for MOTRA generation
-                [macbook_account, 100_000_000_000_000u128],
-                [gemtek_account, 100_000_000_000_000u128],
-                [node2_account, 100_000_000_000_000u128],
-                [node3_account, 100_000_000_000_000u128],
+                // Faucet signer (//Alice) — 10M MATRA for drips
+                [alice_faucet, 10_000_000_000_000u128],
+                // Multisig sudo account — 1,000 MATRA for governance ops
+                [multisig_sudo, 1_000_000_000u128],
+                // 3 multisig keyholders — 100 MATRA each for governance TXs
+                [keyholder_1, 100_000_000u128],
+                [keyholder_2, 100_000_000u128],
+                [keyholder_3, 100_000_000u128],
+                // 4 validator accounts — 100 MATRA each for MOTRA generation
+                [macbook_account, 100_000_000u128],
+                [gemtek_account, 100_000_000u128],
+                [node2_account, 100_000_000u128],
+                [node3_account, 100_000_000u128],
             ]
         },
         "sudo": {
@@ -184,14 +194,17 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "authorities": [[macbook_grandpa, 1], [gemtek_grandpa, 1], [node2_grandpa, 1], [node3_grandpa, 1]],
         },
         "motra": {
-            "minFee": 1_000_000,
+            // v5 decimals: MATRA=6, MOTRA=15. These must mirror MotraParams::default() in
+            // pallets/motra/src/types.rs (genesis build ignores the Rust Default and applies
+            // the chain-spec values directly).
+            "minFee": 1_000_000_000u128,
             "congestionRate": 0,
             "targetFullnessPpm": 500_000_000,
             "decayRatePerBlockPpm": 999_900_000,
-            "generationPerMatraPerBlock": 100,
-            "maxBalance": 1_000_000_000_000_000u128,
-            "maxCongestionStep": 1_000_000,
-            "lengthFeePerByte": 1_000,
+            "generationPerMatraPerBlock": 100_000u128,
+            "maxBalance": 1_000_000_000_000_000_000u128,
+            "maxCongestionStep": 1_000_000_000u128,
+            "lengthFeePerByte": 1_000_000u128,
             "congestionSmoothingPpm": 100_000_000
         },
         // -- IOG partner-chain pallets (permissioned-only mode, D=1.0) --

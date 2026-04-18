@@ -268,7 +268,7 @@ pub mod pallet {
             let generated = matra_balance
                 .saturating_mul(params.generation_per_matra_per_block)
                 .saturating_mul(elapsed as u128)
-                / 1_000_000_000_000u128;
+                / 1_000_000u128; // Normalize: MATRA is 6 decimals
 
             // Check delegation
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
@@ -312,7 +312,7 @@ pub mod pallet {
             let generated = matra_balance
                 .saturating_mul(params.generation_per_matra_per_block)
                 .saturating_mul(elapsed as u128)
-                / 1_000_000_000_000u128; // Normalize: MATRA is 12 decimals
+                / 1_000_000u128; // Normalize: MATRA is 6 decimals
 
             // 3) Route generated MOTRA.
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());

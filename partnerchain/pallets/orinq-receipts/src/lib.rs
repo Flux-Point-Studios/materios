@@ -315,12 +315,11 @@ pub mod pallet {
 
             // ── Validator rewards: era distribution ──────────────────────
             // Era length: 14400 blocks (~24h at 6s block time)
-            // Reward pool: 150,000,000 MATRA (with 6 decimals = 150_000_000_000_000)
-            // Over ~4 years (1460 days) = ~102,739,726 units/day = ~102_739_726_000_000 base/day
-            // Per era (14400 blocks): 102_739_726_000_000 base units
+            // Reward pool: 150,000,000 MATRA (6 decimals = 150_000_000_000_000 base units)
+            // Over ~4 years (1460 days) = ~102.74 MATRA/era at 14400 blocks/era
             const ERA_LENGTH: u32 = 14400;
-            const REWARD_PER_ERA: u128 = 102_739_726_000_000; // ~102.7M base units (~102.7 MATRA/era)
-            const VALIDATOR_RESERVE: u128 = 150_000_000_000_000_000_000; // 150M MATRA in base units
+            const REWARD_PER_ERA: u128 = 102_739_726; // ~102.74 MATRA/era (6 decimals)
+            const VALIDATOR_RESERVE: u128 = 150_000_000_000_000; // 150M MATRA (6 decimals)
 
             let block_num: u32 = n.into();
             let era_start: u32 = EraStartBlock::<T>::get().into();
@@ -602,7 +601,7 @@ pub mod pallet {
                 // Simplified: fixed reward per attester per certification = 10 MATRA base units
                 // (This will be tuned via governance on mainnet)
                 const ATTESTATION_REWARD_PER_SIGNER: u128 = 10_000_000; // 10 MATRA (6 decimals)
-                const ATTESTATION_RESERVE: u128 = 50_000_000_000_000_000_000; // 50M MATRA
+                const ATTESTATION_RESERVE: u128 = 50_000_000_000_000; // 50M MATRA (6 decimals)
                 // Cap attestation rewards per era to prevent reserve drain.
                 // 50M MATRA / ~1,461 eras (4 years) ≈ 34,223 MATRA/era.
                 // Set slightly higher to allow for burst activity.

@@ -100,7 +100,7 @@ pub fn local_testnet_config() -> Result<ChainSpec, String> {
     .build())
 }
 
-const ENDOWMENT: Balance = 1_000_000_000_000_000_000;
+const ENDOWMENT: Balance = 1_000_000_000_000; // 1M MATRA (6 decimals)
 
 /// Build a genesis config JSON patch.
 ///
