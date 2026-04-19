@@ -83,18 +83,17 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     .unwrap();
 
     // Set default MOTRA params.
+    // GenesisConfig fields are flat (ppm for Perbill values) — see pallet lib.rs.
     pallet_motra::GenesisConfig::<Test> {
-        params: MotraParams {
-            min_fee: 1_000,
-            congestion_rate: 0,
-            target_fullness: Perbill::from_percent(50),
-            decay_rate_per_block: Perbill::from_parts(999_000_000), // 99.9% retained
-            generation_per_matra_per_block: 1_000,
-            max_balance: 1_000_000_000_000_000,
-            max_congestion_step: 500,
-            length_fee_per_byte: 1_000,
-            congestion_smoothing: Perbill::from_percent(10),
-        },
+        min_fee: 1_000,
+        congestion_rate: 0,
+        target_fullness_ppm: Perbill::from_percent(50).deconstruct(),
+        decay_rate_per_block_ppm: 999_000_000, // 99.9% retained
+        generation_per_matra_per_block: 1_000,
+        max_balance: 1_000_000_000_000_000,
+        max_congestion_step: 500,
+        length_fee_per_byte: 1_000,
+        congestion_smoothing_ppm: Perbill::from_percent(10).deconstruct(),
         _phantom: Default::default(),
     }
     .assimilate_storage(&mut t)

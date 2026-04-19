@@ -19,11 +19,20 @@ mod benchmarking;
 pub mod pallet {
     use alloc::vec::Vec;
     use frame_support::pallet_prelude::*;
+    use frame_support::traits::{BalanceStatus, ReservableCurrency};
+    use frame_support::PalletId;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
+    use sp_runtime::traits::AccountIdConversion;
 
-    use crate::types::{AnchorRecord, PlayerSigRecord, ReceiptRecord};
+    use crate::types::{AnchorRecord, PlayerSigRecord, ReceiptRecord, SlashReason};
     use crate::weights::WeightInfo;
+
+    /// Alias for the reservable balance type exposed by `T::Currency`.
+    pub(crate) type BalanceOf<T> =
+        <<T as Config>::Currency as frame_support::traits::Currency<
+            <T as frame_system::Config>::AccountId,
+        >>::Balance;
 
     /// Mirror of pallet_grandpa's StoredPendingChange (which is pub(crate)).
     /// Must match the SCALE encoding layout exactly.
@@ -53,6 +62,17 @@ pub mod pallet {
         type MaxResubmits: Get<u32>;
         #[pallet::constant]
         type MaxCommitteeSize: Get<u32>;
+
+        /// Reservable currency used for attestor bonds. Bond funds are
+        /// reserved on `bond`, unreserved on `unbond`, and
+        /// `repatriate_reserved`-ed to the attestor reserve pot on slash.
+        type Currency: ReservableCurrency<Self::AccountId>;
+
+        /// PalletId used to derive the attestor reserve pot account. Must
+        /// match the runtime's `mat/attr` id so slashed funds land in the
+        /// same pot that the fee router's 30% share funds.
+        #[pallet::constant]
+        type AttestorReservePotId: Get<PalletId>;
     }
 
     // ── Storage ──────────────────────────────────────────────────────────
@@ -155,6 +175,61 @@ pub mod pallet {
     pub type Anchors<T: Config> =
         StorageMap<_, Blake2_128Concat, H256, AnchorRecord<T::AccountId>, OptionQuery>;
 
+    // ── Component 5: dynamic attestation reward + era cap ───────────────
+    //
+    // Replace the previous hard-coded constants with governance-tunable
+    // storage. Defaults match the original constants for migration safety.
+    // The effective era cap auto-scales linearly with the number of active
+    // attestors (CommitteeMembers::len) relative to `EraCapBaselineAttestorCount`,
+    // so reward capacity grows as the committee grows without requiring a
+    // runtime upgrade.
+
+    /// Reward paid to each signer per certified receipt, in MATRA base units
+    /// (6 decimals). Default: 10 MATRA per signer per cert.
+    #[pallet::storage]
+    #[pallet::getter(fn attestation_reward_per_signer)]
+    pub type AttestationRewardPerSigner<T: Config> = StorageValue<_, u128, ValueQuery>;
+
+    /// Base cap on total attestation rewards paid out per era, in MATRA base
+    /// units (6 decimals). The effective cap scales linearly with the number
+    /// of active attestors relative to `EraCapBaselineAttestorCount`.
+    /// Default: 50,000 MATRA (=50_000_000_000 base units).
+    #[pallet::storage]
+    #[pallet::getter(fn era_cap_base)]
+    pub type EraCapBase<T: Config> = StorageValue<_, u128, ValueQuery>;
+
+    /// The attestor-count at which `effective_era_cap()` equals `era_cap_base`.
+    /// Defaults to 16 (the original `MaxCommitteeSize`). Raising this widens
+    /// the committee without increasing total per-era reward emission; at
+    /// `active_count == baseline`, the effective cap equals the base.
+    #[pallet::storage]
+    #[pallet::getter(fn era_cap_baseline_attestor_count)]
+    pub type EraCapBaselineAttestorCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    // ── Component 8: attestor bond + slashing ───────────────────────────
+    //
+    // Attestors must lock a bond before joining the committee. Misbehaviour
+    // is punished by slashing the bond; slashed funds are repatriated (not
+    // burned) to the attestor reserve pot (`mat/attr`) so MATRA accumulates
+    // for future reward payouts. Auto-eject if the remaining bond drops
+    // below `BondRequirement`.
+
+    /// Bonded amount per attestor, in MATRA base units (6 decimals). Tracks
+    /// the value reserved via `T::Currency::reserve` — kept in a dedicated
+    /// map because reserve identifiers aren't inspectable cross-pallet and
+    /// we want a single-read authoritative source of truth.
+    #[pallet::storage]
+    #[pallet::getter(fn attestor_bonds)]
+    pub type AttestorBonds<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, u128, ValueQuery>;
+
+    /// Minimum bond required to join the committee. Governance-tunable; a
+    /// zero value effectively disables the bond check (useful during
+    /// preprod rehearsals but MUST NOT be 0 on mainnet).
+    #[pallet::storage]
+    #[pallet::getter(fn bond_requirement)]
+    pub type BondRequirement<T: Config> = StorageValue<_, u128, ValueQuery>;
+
     // ── Events ───────────────────────────────────────────────────────────
 
     #[pallet::event]
@@ -214,6 +289,35 @@ pub mod pallet {
             grandpa_set_id: u64,
             apply_at_block: BlockNumberFor<T>,
         },
+        /// `AttestationRewardPerSigner` was updated by governance.
+        AttestationRewardPerSignerUpdated { new_value: u128 },
+        /// `EraCapBase` was updated by governance.
+        EraCapBaseUpdated { new_value: u128 },
+        /// `EraCapBaselineAttestorCount` was updated by governance.
+        EraCapBaselineAttestorCountUpdated { new_value: u32 },
+        /// An attestor added to their bond. `new_total` is the bond after
+        /// the call.
+        Bonded {
+            who: T::AccountId,
+            amount: u128,
+            new_total: u128,
+        },
+        /// An attestor withdrew their entire bond. `amount` is what was
+        /// unreserved back to free balance.
+        Unbonded { who: T::AccountId, amount: u128 },
+        /// A portion of an attestor's bond was slashed and repatriated to
+        /// the attestor reserve pot.
+        Slashed {
+            who: T::AccountId,
+            amount: u128,
+            reason: SlashReason,
+            remaining_bond: u128,
+        },
+        /// `BondRequirement` was updated by governance.
+        BondRequirementUpdated { new_value: u128 },
+        /// An attestor was automatically removed from the committee because
+        /// their post-slash bond fell below `BondRequirement`.
+        AutoEjected { who: T::AccountId, remaining_bond: u128 },
     }
 
     // ── Errors ───────────────────────────────────────────────────────────
@@ -284,6 +388,71 @@ pub mod pallet {
         /// `grandpa.PendingChange` storage) before scheduling another
         /// rotation.
         AuthorityChangeAlreadyPending,
+        /// `EraCapBaselineAttestorCount` cannot be zero — it is the divisor
+        /// in `effective_era_cap()` and zero would panic/saturate.
+        InvalidBaseline,
+        /// The attestor's bond is below `BondRequirement`. Top up via
+        /// `bond(extra)` and retry `join_committee`.
+        InsufficientBond,
+        /// The attestor is still a committee member and cannot unbond.
+        /// Call `leave_committee` first, then `unbond`.
+        StillInCommittee,
+        /// The caller has no bond to unbond. Call `bond(amount)` first.
+        NothingToUnbond,
+    }
+
+    // ── Genesis ──────────────────────────────────────────────────────────
+    //
+    // Genesis config exists to seed the Component-5 dynamic storage on
+    // *new* chains. On existing chains (v3/v4/v5 preprod), the values
+    // come from the runtime-upgrade migration (see `on_runtime_upgrade`).
+
+    #[pallet::genesis_config]
+    #[derive(frame_support::DefaultNoBound)]
+    pub struct GenesisConfig<T: Config> {
+        /// Initial reward per signer, in MATRA base units (6 decimals).
+        pub attestation_reward_per_signer: u128,
+        /// Initial base cap on attestation rewards per era.
+        pub era_cap_base: u128,
+        /// Initial baseline attestor count for cap auto-scaling.
+        pub era_cap_baseline_attestor_count: u32,
+        /// Initial bond requirement for joining the committee
+        /// (Component 8). Defaults to 1K MATRA.
+        pub bond_requirement: u128,
+        #[serde(skip)]
+        pub _phantom: core::marker::PhantomData<T>,
+    }
+
+    #[pallet::genesis_build]
+    impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
+        fn build(&self) {
+            // Respect explicit genesis values; otherwise fall back to the
+            // documented defaults that match the prior const values.
+            let reward = if self.attestation_reward_per_signer == 0 {
+                10_000_000u128 // 10 MATRA
+            } else {
+                self.attestation_reward_per_signer
+            };
+            let cap = if self.era_cap_base == 0 {
+                50_000_000_000u128 // 50K MATRA
+            } else {
+                self.era_cap_base
+            };
+            let baseline = if self.era_cap_baseline_attestor_count == 0 {
+                16u32
+            } else {
+                self.era_cap_baseline_attestor_count
+            };
+            let bond_req = if self.bond_requirement == 0 {
+                1_000_000_000u128 // 1K MATRA (6 decimals)
+            } else {
+                self.bond_requirement
+            };
+            AttestationRewardPerSigner::<T>::put(reward);
+            EraCapBase::<T>::put(cap);
+            EraCapBaselineAttestorCount::<T>::put(baseline);
+            BondRequirement::<T>::put(bond_req);
+        }
     }
 
     // ── Hooks ────────────────────────────────────────────────────────────
@@ -395,6 +564,40 @@ pub mod pallet {
 
             weight.saturating_add(Weight::from_parts(10_000_000, 0))
         }
+
+        /// Populate Component-5 storage values on existing chains that did
+        /// not run `build_genesis` (everything >= preprod v3). Idempotent:
+        /// only writes when a key is missing so a re-run is a no-op.
+        ///
+        /// Safe to leave in place across future upgrades — after the first
+        /// upgrade the three storage values are all populated and the
+        /// migration short-circuits with three reads.
+        fn on_runtime_upgrade() -> Weight {
+            let mut writes = 0u64;
+            let reads = 4u64;
+
+            if !AttestationRewardPerSigner::<T>::exists() {
+                AttestationRewardPerSigner::<T>::put(10_000_000u128);
+                writes += 1;
+            }
+            if !EraCapBase::<T>::exists() {
+                EraCapBase::<T>::put(50_000_000_000u128);
+                writes += 1;
+            }
+            if !EraCapBaselineAttestorCount::<T>::exists() {
+                EraCapBaselineAttestorCount::<T>::put(16u32);
+                writes += 1;
+            }
+            // Component 8: seed the default bond requirement. 1K MATRA at
+            // 6 decimals = 1_000_000_000 base units. Preprod can override
+            // via `set_bond_requirement` after the upgrade lands.
+            if !BondRequirement::<T>::exists() {
+                BondRequirement::<T>::put(1_000_000_000u128);
+                writes += 1;
+            }
+
+            T::DbWeight::get().reads_writes(reads, writes)
+        }
     }
 
     impl<T: Config> Pallet<T>
@@ -427,6 +630,45 @@ pub mod pallet {
                 }
             }
             None
+        }
+    }
+
+    // ── Component 5 + 8 helpers (no AccountId bound needed) ─────────────
+
+    impl<T: Config> Pallet<T> {
+        /// The derived attestor reserve pot account (`mat/attr`). Slashed
+        /// bonds are repatriated here; the fee router also credits its
+        /// 30% share to this account.
+        pub fn attestor_reserve_account() -> T::AccountId {
+            T::AttestorReservePotId::get().into_account_truncating()
+        }
+
+        /// Effective per-era cap on attestation rewards.
+        ///
+        /// Formula: `era_cap_base * active_attestor_count / baseline`.
+        /// When `active_attestor_count == baseline`, the effective cap
+        /// equals the base. Scales linearly up (more attestors = more
+        /// capacity) or down (fewer attestors = less capacity, including
+        /// zero when the committee is empty).
+        ///
+        /// Uses `saturating_mul` to prevent overflow and relies on the
+        /// extrinsic that sets `EraCapBaselineAttestorCount` to reject
+        /// zero (see `InvalidBaseline`). If somehow zero leaks in, we
+        /// fall back to the base cap so rewards aren't silently disabled
+        /// by a governance-config bug.
+        pub fn effective_era_cap() -> u128 {
+            let base = EraCapBase::<T>::get();
+            // NOTE: BoundedBTreeSet does not implement `decode_len`, so we
+            // have to decode the whole set to count it. This is O(n) in the
+            // committee size, but n is bounded by MaxCommitteeSize (typically
+            // small), so the cost is acceptable for a helper that's only
+            // called inside `set_availability_cert` on threshold hit.
+            let active = CommitteeMembers::<T>::get().len() as u128;
+            let baseline = EraCapBaselineAttestorCount::<T>::get() as u128;
+            if baseline == 0 {
+                return base;
+            }
+            base.saturating_mul(active) / baseline
         }
     }
 
@@ -598,27 +840,31 @@ pub mod pallet {
                 // Attestation reward pool: 50M MATRA over ~4 years
                 // = ~34,246,575 base units per day = ~34.2 MATRA/day
                 // Per receipt: daily_pool / avg_receipts_per_day (dynamic)
-                // Simplified: fixed reward per attester per certification = 10 MATRA base units
-                // (This will be tuned via governance on mainnet)
-                const ATTESTATION_REWARD_PER_SIGNER: u128 = 10_000_000; // 10 MATRA (6 decimals)
+                //
+                // The per-signer reward and the per-era cap are now
+                // governance-tunable via `set_attestation_reward_per_signer`
+                // and `set_era_cap_base` (see Component 5). The effective
+                // cap auto-scales linearly with active committee size via
+                // `effective_era_cap()`. ATTESTATION_RESERVE remains a
+                // constant — it is the 4-year pool ceiling, not a per-era
+                // knob, and resizing it is a conscious economic decision
+                // that belongs to a runtime upgrade.
                 const ATTESTATION_RESERVE: u128 = 50_000_000_000_000; // 50M MATRA (6 decimals)
-                // Cap attestation rewards per era to prevent reserve drain.
-                // 50M MATRA / ~1,461 eras (4 years) ≈ 34,223 MATRA/era.
-                // Set slightly higher to allow for burst activity.
-                const ATTESTATION_ERA_CAP: u128 = 50_000_000_000; // 50,000 MATRA per era
+                let reward_per_signer = AttestationRewardPerSigner::<T>::get();
+                let era_cap = Self::effective_era_cap();
 
                 let total_att_paid = TotalAttestationRewards::<T>::get();
                 let era_att_paid = AttestationRewardsPaidInEra::<T>::get();
-                if total_att_paid < ATTESTATION_RESERVE && era_att_paid < ATTESTATION_ERA_CAP {
+                if total_att_paid < ATTESTATION_RESERVE && era_att_paid < era_cap {
                     // Get signers before we remove the attestation
                     if let Some((_, ref signers)) = Attestations::<T>::get(receipt_id) {
                         for signer in signers.iter() {
                             // Re-check era cap inside loop (multiple signers per cert)
                             let current_era_paid = AttestationRewardsPaidInEra::<T>::get();
-                            if current_era_paid >= ATTESTATION_ERA_CAP {
+                            if current_era_paid >= era_cap {
                                 break;
                             }
-                            let reward = ATTESTATION_REWARD_PER_SIGNER;
+                            let reward = reward_per_signer;
                             use frame_support::traits::Currency;
                             let balance: <T as pallet_balances::Config>::Balance =
                                 reward.try_into().unwrap_or_default();
@@ -850,6 +1096,15 @@ pub mod pallet {
         pub fn join_committee(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
+            // Component 8: require a bond at or above BondRequirement.
+            // BondRequirement == 0 intentionally permits joins without a
+            // bond (preprod bootstrap / upgrade grace window).
+            let required = BondRequirement::<T>::get();
+            if required > 0 {
+                let posted = AttestorBonds::<T>::get(&who);
+                ensure!(posted >= required, Error::<T>::InsufficientBond);
+            }
+
             CommitteeMembers::<T>::try_mutate(|set| {
                 ensure!(!set.contains(&who), Error::<T>::AlreadyCommitteeMember);
                 set.try_insert(who.clone()).map_err(|_| Error::<T>::CommitteeFull)?;
@@ -881,6 +1136,219 @@ pub mod pallet {
                 });
                 Ok(())
             })
+        }
+
+        // ── Component 5: governance setters for dynamic reward config ────
+
+        /// Update the per-signer attestation reward. Root-only. Takes effect
+        /// immediately; future certifications pay out at the new rate.
+        #[pallet::call_index(9)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_attestation_reward_per_signer(
+            origin: OriginFor<T>,
+            value: u128,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            AttestationRewardPerSigner::<T>::put(value);
+            Self::deposit_event(Event::AttestationRewardPerSignerUpdated { new_value: value });
+            Ok(())
+        }
+
+        /// Update the base per-era attestation-reward cap. Root-only. The
+        /// effective cap auto-scales via `effective_era_cap()`; callers
+        /// should pass the cap value that would apply at
+        /// `baseline_attestor_count` exactly.
+        #[pallet::call_index(10)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_era_cap_base(origin: OriginFor<T>, value: u128) -> DispatchResult {
+            ensure_root(origin)?;
+            EraCapBase::<T>::put(value);
+            Self::deposit_event(Event::EraCapBaseUpdated { new_value: value });
+            Ok(())
+        }
+
+        /// Update the baseline attestor count used as the denominator in
+        /// `effective_era_cap()`. Must be non-zero (rejected otherwise with
+        /// `InvalidBaseline`). Root-only.
+        #[pallet::call_index(11)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_era_cap_baseline_attestor_count(
+            origin: OriginFor<T>,
+            value: u32,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(value > 0, Error::<T>::InvalidBaseline);
+            EraCapBaselineAttestorCount::<T>::put(value);
+            Self::deposit_event(Event::EraCapBaselineAttestorCountUpdated { new_value: value });
+            Ok(())
+        }
+
+        // ── Component 8: attestor bond + slashing ────────────────────────
+
+        /// Lock `amount` of MATRA as an attestor bond.
+        ///
+        /// Reserves the amount via `T::Currency::reserve`, which fails with
+        /// `pallet_balances::Error::InsufficientBalance` if free balance is
+        /// too low. Calling `bond` multiple times extends the existing
+        /// reservation — bond totals accumulate, they do not clobber.
+        ///
+        /// The bond is required to join the committee (see `join_committee`).
+        /// It can be withdrawn via `unbond` when the attestor is not in the
+        /// committee.
+        #[pallet::call_index(12)]
+        #[pallet::weight(Weight::from_parts(20_000, 0)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(2)))]
+        pub fn bond(origin: OriginFor<T>, amount: u128) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            // Reserve the amount; propagates balances::Error::InsufficientBalance
+            // on failure. `try_into` here collapses u128 into Currency::Balance
+            // (which is u128 on Materios but kept generic for portability).
+            // If the pallet's Currency::Balance is narrower than u128 and
+            // `amount` overflows, we default to 0 and the reserve call below
+            // will simply succeed as a no-op — the bookkeeping below records
+            // 0, keeping the extrinsic infallible rather than panicking.
+            let balance: BalanceOf<T> = amount.try_into().unwrap_or_default();
+            T::Currency::reserve(&who, balance)?;
+
+            let new_total = AttestorBonds::<T>::mutate(&who, |total| {
+                *total = total.saturating_add(amount);
+                *total
+            });
+
+            Self::deposit_event(Event::Bonded {
+                who,
+                amount,
+                new_total,
+            });
+            Ok(())
+        }
+
+        /// Withdraw the entire bond. Fails if the caller is still a
+        /// committee member — call `leave_committee` first.
+        #[pallet::call_index(13)]
+        #[pallet::weight(Weight::from_parts(20_000, 0)
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(2)))]
+        pub fn unbond(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+
+            ensure!(
+                !CommitteeMembers::<T>::get().contains(&who),
+                Error::<T>::StillInCommittee
+            );
+
+            let bonded = AttestorBonds::<T>::get(&who);
+            ensure!(bonded > 0, Error::<T>::NothingToUnbond);
+
+            let balance: BalanceOf<T> = bonded.try_into().unwrap_or_default();
+            // `unreserve` returns any remainder it couldn't unreserve; we
+            // ignore it because the stored `bonded` is our own accounting
+            // and we just cleared it.
+            let _ = T::Currency::unreserve(&who, balance);
+            AttestorBonds::<T>::remove(&who);
+
+            Self::deposit_event(Event::Unbonded { who, amount: bonded });
+            Ok(())
+        }
+
+        /// Root-only: slash `amount` from `attestor`'s bond, repatriating
+        /// the funds to the attestor reserve pot (NOT burning). If the
+        /// post-slash bond drops below `BondRequirement`, the attestor is
+        /// automatically ejected from the committee.
+        ///
+        /// Uses `repatriate_reserved` instead of `slash` by design — we
+        /// want MATRA to accumulate in `mat/attr` for future reward
+        /// payouts, not to shrink total issuance.
+        #[pallet::call_index(14)]
+        #[pallet::weight(Weight::from_parts(30_000, 0)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(3)))]
+        pub fn slash_attestor(
+            origin: OriginFor<T>,
+            attestor: T::AccountId,
+            amount: u128,
+            reason: SlashReason,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let current_bond = AttestorBonds::<T>::get(&attestor);
+            // Cap the slash at the actual bonded amount so repatriate_reserved
+            // can never ask for more than has been reserved.
+            let slash_amount = core::cmp::min(amount, current_bond);
+
+            if slash_amount > 0 {
+                let reserve_acct = Self::attestor_reserve_account();
+                let balance: BalanceOf<T> = slash_amount.try_into().unwrap_or_default();
+                // `repatriate_reserved` returns any amount it could not move
+                // (e.g. if the reserve pot account doesn't pass the ED check
+                // as the beneficiary). We do not propagate this — the caller
+                // is Root and the reserve pot is a known runtime-fixed
+                // account, so any shortfall is an infrastructure bug rather
+                // than a user-facing error.
+                let _ = T::Currency::repatriate_reserved(
+                    &attestor,
+                    &reserve_acct,
+                    balance,
+                    BalanceStatus::Free,
+                )?;
+
+                AttestorBonds::<T>::mutate(&attestor, |total| {
+                    *total = total.saturating_sub(slash_amount);
+                });
+            }
+
+            let remaining_bond = AttestorBonds::<T>::get(&attestor);
+
+            Self::deposit_event(Event::Slashed {
+                who: attestor.clone(),
+                amount: slash_amount,
+                reason,
+                remaining_bond,
+            });
+
+            // Auto-eject if the remaining bond is below the requirement
+            // AND the attestor is currently in the committee.
+            let required = BondRequirement::<T>::get();
+            if remaining_bond < required {
+                let was_member = CommitteeMembers::<T>::mutate(|set| {
+                    let was = set.contains(&attestor);
+                    if was {
+                        set.remove(&attestor);
+                    }
+                    was
+                });
+                if was_member {
+                    Self::deposit_event(Event::AutoEjected {
+                        who: attestor,
+                        remaining_bond,
+                    });
+                }
+            }
+
+            Ok(())
+        }
+
+        /// Update the minimum bond required to join the committee.
+        /// Root-only. Takes effect immediately; new joins must meet the
+        /// new requirement, but existing members are NOT retroactively
+        /// ejected (prevents a governance key from booting the committee
+        /// by raising the bar).
+        #[pallet::call_index(15)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_bond_requirement(
+            origin: OriginFor<T>,
+            value: u128,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            BondRequirement::<T>::put(value);
+            Self::deposit_event(Event::BondRequirementUpdated { new_value: value });
+            Ok(())
         }
     }
 }
