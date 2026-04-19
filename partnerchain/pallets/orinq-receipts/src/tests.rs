@@ -107,9 +107,19 @@ fn acc(seed: u8) -> MockAccountId {
 
 /// Build genesis storage for tests.
 fn new_test_ext() -> sp_io::TestExternalities {
-    let t = frame_system::GenesisConfig::<Test>::default()
+    let mut t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap();
+    // Seed Component-5 storage from genesis (defaults match the previous
+    // const values: 10 MATRA/signer, 50K MATRA/era base, baseline 16).
+    pallet_orinq_receipts::GenesisConfig::<Test> {
+        attestation_reward_per_signer: 10_000_000,
+        era_cap_base: 50_000_000_000,
+        era_cap_baseline_attestor_count: 16,
+        _phantom: Default::default(),
+    }
+    .assimilate_storage(&mut t)
+    .unwrap();
     let mut ext = sp_io::TestExternalities::new(t);
     ext.execute_with(|| {
         System::set_block_number(1);
