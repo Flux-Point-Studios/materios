@@ -401,6 +401,193 @@ fn rotate_authorities_rejects_double_pending() {
 }
 
 // ---------------------------------------------------------------------------
+// Component 5 — dynamic attestation reward + era cap
+//
+// These tests are the TDD contract for converting the two hard-coded
+// `const` values in the pallet (ATTESTATION_REWARD_PER_SIGNER,
+// ATTESTATION_ERA_CAP) into governance-tunable storage with a default
+// that matches the previous constants (for migration safety) and an
+// auto-scaling era cap that grows with `active_attestor_count`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn reward_per_signer_readable_via_storage() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(
+            OrinqReceipts::attestation_reward_per_signer(),
+            10_000_000u128,
+            "default must match previous const for migration safety"
+        );
+    });
+}
+
+#[test]
+fn reward_per_signer_settable_by_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_attestation_reward_per_signer(
+            RuntimeOrigin::root(),
+            5_000_000
+        ));
+        assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 5_000_000);
+    });
+}
+
+#[test]
+fn reward_per_signer_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_attestation_reward_per_signer(
+                RuntimeOrigin::signed(acc(1)),
+                5_000_000
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn era_cap_base_has_default() {
+    // Default baseline = 50_000_000_000 (50K MATRA in 6-decimal base units).
+    new_test_ext().execute_with(|| {
+        assert_eq!(OrinqReceipts::era_cap_base(), 50_000_000_000u128);
+    });
+}
+
+#[test]
+fn era_cap_baseline_attestor_count_has_default() {
+    // Default baseline attestor count = 16 (matches MaxCommitteeSize in tests).
+    new_test_ext().execute_with(|| {
+        assert_eq!(OrinqReceipts::era_cap_baseline_attestor_count(), 16u32);
+    });
+}
+
+#[test]
+fn era_cap_auto_scales_with_attestor_count() {
+    // With baseline_count = 16, doubling the committee size should double
+    // the effective era cap. We can't add more than 16 (MaxCommitteeSize)
+    // in the test mock, so verify linear scaling at two representative
+    // sub-baseline counts (4 and 8).
+    new_test_ext().execute_with(|| {
+        let base_cap = OrinqReceipts::era_cap_base();
+        let baseline = OrinqReceipts::era_cap_baseline_attestor_count() as u128;
+        assert_eq!(baseline, 16);
+
+        // Seed committee with 4 members.
+        for i in 1u8..=4 {
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(i))));
+        }
+        let cap_at_4 = OrinqReceipts::effective_era_cap();
+        assert_eq!(
+            cap_at_4,
+            base_cap * 4 / 16,
+            "effective cap at 4 attestors must be base * 4 / 16"
+        );
+
+        // Grow to 8 members.
+        for i in 5u8..=8 {
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(i))));
+        }
+        let cap_at_8 = OrinqReceipts::effective_era_cap();
+        assert_eq!(
+            cap_at_8,
+            base_cap * 8 / 16,
+            "effective cap at 8 attestors must be base * 8 / 16"
+        );
+        assert_eq!(cap_at_8, cap_at_4 * 2, "8 attestors = 2× the cap of 4");
+    });
+}
+
+#[test]
+fn era_cap_settable_by_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_era_cap_base(
+            RuntimeOrigin::root(),
+            100_000_000_000
+        ));
+        assert_eq!(OrinqReceipts::era_cap_base(), 100_000_000_000);
+    });
+}
+
+#[test]
+fn era_cap_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_era_cap_base(RuntimeOrigin::signed(acc(1)), 100_000_000_000),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn era_cap_baseline_settable_by_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_era_cap_baseline_attestor_count(
+            RuntimeOrigin::root(),
+            32
+        ));
+        assert_eq!(OrinqReceipts::era_cap_baseline_attestor_count(), 32);
+    });
+}
+
+#[test]
+fn era_cap_baseline_rejects_zero() {
+    // Prevent div-by-zero in effective_era_cap().
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_era_cap_baseline_attestor_count(RuntimeOrigin::root(), 0),
+            pallet::Error::<Test>::InvalidBaseline
+        );
+    });
+}
+
+#[test]
+fn effective_era_cap_with_zero_attestors_is_zero() {
+    // If the committee is empty, the cap should collapse to zero — we
+    // shouldn't be paying rewards when nobody is attesting.
+    new_test_ext().execute_with(|| {
+        assert_eq!(OrinqReceipts::committee_members().len(), 0);
+        assert_eq!(OrinqReceipts::effective_era_cap(), 0);
+    });
+}
+
+#[test]
+fn storage_values_emit_events_on_set() {
+    // Each governance-tunable storage update must emit a dedicated event
+    // so indexers + governance dashboards can observe the change.
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_attestation_reward_per_signer(
+            RuntimeOrigin::root(),
+            7_500_000
+        ));
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::AttestationRewardPerSignerUpdated { new_value: 7_500_000 }
+                )
+            )
+        });
+        assert!(matched, "AttestationRewardPerSignerUpdated event must fire");
+
+        assert_ok!(OrinqReceipts::set_era_cap_base(
+            RuntimeOrigin::root(),
+            123_456_789
+        ));
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::EraCapBaseUpdated { new_value: 123_456_789 }
+                )
+            )
+        });
+        assert!(matched, "EraCapBaseUpdated event must fire");
+    });
+}
+
+// ---------------------------------------------------------------------------
 // GrandpaPendingChange SCALE layout tests
 // ---------------------------------------------------------------------------
 
