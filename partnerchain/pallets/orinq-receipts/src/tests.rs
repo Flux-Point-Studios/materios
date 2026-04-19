@@ -2,7 +2,7 @@ use crate as pallet_orinq_receipts;
 use crate::{pallet, pallet::GrandpaPendingChange, types::{ReceiptRecord, SlashReason}};
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
-    traits::{ConstBool, ConstU32, ConstU64},
+    traits::{ConstBool, ConstU32, ConstU64, Currency},
     PalletId,
 };
 use parity_scale_codec::{Decode, Encode};
@@ -125,6 +125,7 @@ fn new_test_ext() -> sp_io::TestExternalities {
         attestation_reward_per_signer: 10_000_000,
         era_cap_base: 50_000_000_000,
         era_cap_baseline_attestor_count: 16,
+        bond_requirement: 1_000_000_000,
         _phantom: Default::default(),
     }
     .assimilate_storage(&mut t)
@@ -491,8 +492,14 @@ fn era_cap_auto_scales_with_attestor_count() {
         let baseline = OrinqReceipts::era_cap_baseline_attestor_count() as u128;
         assert_eq!(baseline, 16);
 
-        // Seed committee with 4 members.
+        // Seed committee with 4 members. Component 8 requires a bond to
+        // join, so fund + bond each account before joining.
         for i in 1u8..=4 {
+            Balances::make_free_balance_be(&acc(i), 10_000_000_000);
+            assert_ok!(OrinqReceipts::bond(
+                RuntimeOrigin::signed(acc(i)),
+                1_000_000_000
+            ));
             assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(i))));
         }
         let cap_at_4 = OrinqReceipts::effective_era_cap();
@@ -504,6 +511,11 @@ fn era_cap_auto_scales_with_attestor_count() {
 
         // Grow to 8 members.
         for i in 5u8..=8 {
+            Balances::make_free_balance_be(&acc(i), 10_000_000_000);
+            assert_ok!(OrinqReceipts::bond(
+                RuntimeOrigin::signed(acc(i)),
+                1_000_000_000
+            ));
             assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(i))));
         }
         let cap_at_8 = OrinqReceipts::effective_era_cap();
