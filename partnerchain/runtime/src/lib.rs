@@ -493,6 +493,12 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     type WeightInfo = pallet_orinq_receipts::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
     type MaxCommitteeSize = ConstU32<16>;
+    // Component 8: attestor bonds are held as reserved MATRA on Balances.
+    type Currency = Balances;
+    // Slashed bonds repatriate to the attestor reserve pot (`mat/attr`),
+    // the same PalletId the fee router's 30% share credits to, so the
+    // reserve pot funds accumulate from both sources.
+    type AttestorReservePotId = AttestorReservePalletId;
 }
 
 // ---------------------------------------------------------------------------

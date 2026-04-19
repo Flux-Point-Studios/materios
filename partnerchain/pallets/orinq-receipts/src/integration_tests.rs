@@ -98,11 +98,18 @@ impl pallet_motra::pallet::Config for Test {
     type WeightInfo = pallet_motra::weights::SubstrateWeight;
 }
 
+parameter_types! {
+    pub const AttestorReservePotId: frame_support::PalletId =
+        frame_support::PalletId(*b"mat/attr");
+}
+
 impl crate::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = crate::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
     type MaxCommitteeSize = ConstU32<16>;
+    type Currency = Balances;
+    type AttestorReservePotId = AttestorReservePotId;
 }
 
 // ---------------------------------------------------------------------------
