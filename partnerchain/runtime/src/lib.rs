@@ -7,6 +7,7 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
+pub mod fee_router;
 pub mod input_sanity;
 
 #[cfg(feature = "std")]
@@ -17,14 +18,15 @@ use authority_selection_inherents::authority_selection_inputs::AuthoritySelectio
 use authority_selection_inherents::select_authorities::select_authorities;
 use frame_support::{
     construct_runtime, derive_impl, parameter_types,
-    traits::{ConstBool, ConstU32, ConstU64},
+    traits::{ConstBool, ConstU32, ConstU64, WithdrawReasons},
     weights::{
         constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         IdentityFee, Weight,
     },
     genesis_builder_helper::{build_state, get_preset},
-    BoundedVec,
+    BoundedVec, PalletId,
 };
+use frame_system::{EnsureRoot, EnsureRootWithSuccess};
 use frame_system::limits::{BlockLength, BlockWeights};
 use pallet_transaction_payment::FungibleAdapter;
 use session_manager::ValidatorManagementSessionManager;
@@ -38,9 +40,12 @@ use sp_core::{crypto::KeyTypeId, OpaqueMetadata, H256};
 use sp_runtime::{
     create_runtime_str,
     generic,
-    traits::{BlakeTwo256, Block as BlockT, IdentifyAccount, NumberFor, OpaqueKeys, Verify},
+    traits::{
+        AccountIdConversion, BlakeTwo256, Block as BlockT, ConvertInto, IdentifyAccount,
+        IdentityLookup, NumberFor, OpaqueKeys, Verify,
+    },
     transaction_validity::{TransactionSource, TransactionValidity},
-    ApplyExtrinsicResult, DispatchResult, MultiSignature,
+    ApplyExtrinsicResult, DispatchResult, MultiSignature, Permill,
 };
 use sp_sidechain::SidechainStatus;
 use sp_version::RuntimeVersion;
@@ -312,7 +317,9 @@ impl pallet_balances::Config for Runtime {
 
 impl pallet_transaction_payment::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type OnChargeTransaction = FungibleAdapter<Balances, ()>;
+    // v5.1 tokenomics: route fees through the 40/30/20/10 splitter instead
+    // of the default author-only path. See `fee_router::DealWithFees`.
+    type OnChargeTransaction = FungibleAdapter<Balances, fee_router::DealWithFees<Runtime>>;
     type OperationalFeeMultiplier = ConstU8<5>;
     type WeightToFee = IdentityFee<Balance>;
     type LengthToFee = IdentityFee<Balance>;
@@ -320,6 +327,122 @@ impl pallet_transaction_payment::Config for Runtime {
 }
 
 use frame_support::traits::ConstU8;
+
+// ---------------------------------------------------------------------------
+// v5.1 tokenomics: Treasury
+// ---------------------------------------------------------------------------
+//
+// Canonical PalletId for the Materios treasury account. Changing this value
+// reroutes the 20% fee share and breaks on-chain governance — do NOT change
+// once the runtime ships. See `feedback_chain_reset_runbook.md`.
+parameter_types! {
+    pub const TreasuryPalletId: PalletId = PalletId(*b"mat/trsy");
+    /// Governance SpendPeriod — how often queued approvals are paid out.
+    ///
+    /// 7 days @ 6s blocks = 100_800 blocks. Tests re-export this as
+    /// `SPEND_PERIOD_BLOCKS`; mainnet governance should review at every
+    /// runtime upgrade.
+    pub const SpendPeriod: BlockNumber = 100_800;
+    /// Mainnet-safe burn fraction. Set to 0% to avoid surprising fund loss
+    /// on idle SpendPeriod ticks; the 10% fee-router burn is the sole burn
+    /// path. Can be raised by governance via `set_code`.
+    pub const TreasuryBurn: Permill = Permill::from_percent(0);
+    pub const MaxApprovals: u32 = 100;
+    /// Upper bound on a single `spend_local` approval. Even Root cannot
+    /// approve more than this in one call — a mainnet-safety rail.
+    pub const MaxSpend: Balance = 1_000_000_000_000_000; // 1e15 base units (~1B MATRA @ 6 dec)
+    pub const PayoutPeriod: BlockNumber = 30 * DAYS;
+}
+
+// Re-export for tests: `run_to_block(SPEND_PERIOD_BLOCKS + 1)` must tick past
+// the period to trigger payout. Using the `Get` value keeps tests in sync
+// with the production constant.
+pub const SPEND_PERIOD_BLOCKS: BlockNumber = 100_800;
+
+/// Convenience alias for the treasury account ID (derived from TreasuryPalletId).
+pub fn treasury_account() -> AccountId {
+    TreasuryPalletId::get().into_account_truncating()
+}
+
+pub const DAYS: BlockNumber = 24 * 60 * 60 * 1000 / (MILLISECS_PER_BLOCK as BlockNumber);
+
+impl pallet_treasury::Config for Runtime {
+    type PalletId = TreasuryPalletId;
+    type Currency = Balances;
+    // Root (via sudo or the multisig) is the only path to reject proposals.
+    type RejectOrigin = EnsureRoot<AccountId>;
+    type RuntimeEvent = RuntimeEvent;
+    type SpendPeriod = SpendPeriod;
+    type Burn = TreasuryBurn;
+    // Burn path: when Burn>0, unbalanced imbalance is dropped (= burned) by ().
+    type BurnDestination = ();
+    // No bounties pallet integrated; SpendFunds is a no-op handler.
+    type SpendFunds = ();
+    type WeightInfo = pallet_treasury::weights::SubstrateWeight<Runtime>;
+    type MaxApprovals = MaxApprovals;
+    // SpendOrigin caps individual spend_local amounts at MaxSpend even when
+    // Root is used, as a mainnet safety rail.
+    type SpendOrigin = EnsureRootWithSuccess<AccountId, MaxSpend>;
+    // This runtime has no Assets pallet; native-only treasury.
+    type AssetKind = ();
+    type Beneficiary = AccountId;
+    type BeneficiaryLookup = IdentityLookup<Self::Beneficiary>;
+    type Paymaster = frame_support::traits::tokens::PayFromAccount<Balances, TreasuryAccountSource>;
+    type BalanceConverter = frame_support::traits::tokens::UnityAssetBalanceConversion;
+    type PayoutPeriod = PayoutPeriod;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
+}
+
+// `PayFromAccount` takes a `TypedGet<Type = AccountId>` (not a PalletId). We
+// use `parameter_types!` which implements both `Get` and `TypedGet` so the
+// treasury paymaster's constraint is satisfied.
+parameter_types! {
+    pub TreasuryAccountSource: AccountId = TreasuryPalletId::get().into_account_truncating();
+}
+
+// ---------------------------------------------------------------------------
+// v5.1 tokenomics: Fee router (40/30/20/10)
+// ---------------------------------------------------------------------------
+//
+// The reserve account for the attestor slashing pallet (Component 8). Until
+// Component 8 lands, the 30% share accumulates on this PalletId-derived
+// account, where governance can drain it via `Sudo::sudo_as`.
+parameter_types! {
+    pub const AttestorReservePalletId: PalletId = PalletId(*b"mat/attr");
+}
+
+pub fn attestor_reserve_account() -> AccountId {
+    AttestorReservePalletId::get().into_account_truncating()
+}
+
+// ---------------------------------------------------------------------------
+// v5.1 tokenomics: Vesting
+// ---------------------------------------------------------------------------
+
+parameter_types! {
+    /// Minimum amount for a `vested_transfer` to be accepted. Prevents lock
+    /// spam / dust attacks on accounts. 1 MATRA (6 dec) == 1_000_000.
+    pub const MinVestedTransfer: Balance = 1_000_000;
+    /// Even while vested, accounts can still pay tx fees and reserve funds
+    /// for multisig/governance operations; only `TRANSFER` and `RESERVE` are
+    /// blocked by the lock.
+    pub UnvestedFundsAllowedWithdrawReasons: WithdrawReasons =
+        WithdrawReasons::except(WithdrawReasons::TRANSFER | WithdrawReasons::RESERVE);
+}
+
+impl pallet_vesting::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type BlockNumberToBalance = ConvertInto;
+    type MinVestedTransfer = MinVestedTransfer;
+    type WeightInfo = pallet_vesting::weights::SubstrateWeight<Runtime>;
+    type UnvestedFundsAllowedWithdrawReasons = UnvestedFundsAllowedWithdrawReasons;
+    type BlockNumberProvider = System;
+    // 28 distinct schedules per account is the standard Polkadot value;
+    // gives room for Strategic+Investor+Team+Advisor+community schedules.
+    const MAX_VESTING_SCHEDULES: u32 = 28;
+}
 
 // ---------------------------------------------------------------------------
 // Sudo
@@ -510,6 +633,9 @@ construct_runtime! {
         Sudo: pallet_sudo,
         Multisig: pallet_multisig,
         Utility: pallet_utility,
+        // v5.1 tokenomics foundation
+        Treasury: pallet_treasury,
+        Vesting: pallet_vesting,
         OrinqReceipts: pallet_orinq_receipts,
         Motra: pallet_motra,
         // IOG Partner Chains pallets

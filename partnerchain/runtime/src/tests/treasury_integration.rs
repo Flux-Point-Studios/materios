@@ -25,7 +25,7 @@ use crate::*;
 
 use frame_support::{
     assert_noop, assert_ok,
-    traits::{Currency, Hooks, OnFinalize, OnInitialize, PalletInfoAccess},
+    traits::{OnFinalize, OnInitialize, PalletInfoAccess},
 };
 use sp_io::TestExternalities;
 use sp_runtime::{BuildStorage, traits::AccountIdConversion};
@@ -104,27 +104,25 @@ fn new_test_ext() -> TestExternalities {
     storage.into()
 }
 
-/// Advance the chain, running `on_initialize` / `on_finalize` so the treasury
-/// `SpendPeriod` tick actually fires.
+/// Advance the chain enough for the treasury's `SpendPeriod` tick to fire.
+///
+/// We only call `on_initialize` / `on_finalize` for the pallets that matter
+/// for treasury tests (System + Treasury), avoiding AllPalletsWithSystem
+/// because pallet_aura's on_finalize asserts that the timestamp inherent
+/// matches CurrentSlot — which we'd have to fabricate per-block. For the
+/// scope of these tests (verifying treasury fund-flow), those consensus
+/// pallets are orthogonal.
 fn run_to_block(n: BlockNumber) {
     while System::block_number() < n {
         let current = System::block_number();
-        // pallet_timestamp::on_finalize requires set() to have been called in-block.
-        let _ = pallet_timestamp::Pallet::<Runtime>::set(
-            RuntimeOrigin::none(),
-            current as u64 * MILLISECS_PER_BLOCK,
-        );
-        pallet_block_rewards::CurrentBlockBeneficiary::<Runtime>::put(
-            sidechain_domain::byte_string::SizedByteString([0xAAu8; 32]),
-        );
-        AllPalletsWithSystem::on_finalize(current);
+        Treasury::on_finalize(current);
         System::on_finalize(current);
 
         let next = current + 1;
         System::reset_events();
         System::set_block_number(next);
         System::on_initialize(next);
-        AllPalletsWithSystem::on_initialize(next);
+        Treasury::on_initialize(next);
     }
 }
 
@@ -175,6 +173,10 @@ fn treasury_spend_local_moves_balance_on_spend_period() {
         let beneficiary = sp_keyring::Sr25519Keyring::Charlie.to_account_id();
         let treasury = treasury_account();
 
+        // System events aren't recorded at block 0; move to a real block so
+        // SpendApproved is deposited in the event queue.
+        System::set_block_number(1);
+
         // BEFORE
         assert_eq!(
             pallet_balances::Pallet::<Runtime>::free_balance(&treasury),
@@ -200,7 +202,8 @@ fn treasury_spend_local_moves_balance_on_spend_period() {
         ));
         assert!(
             approved_event.is_some(),
-            "Treasury::SpendApproved must be emitted on spend_local approval"
+            "Treasury::SpendApproved must be emitted on spend_local approval; got events: {:?}",
+            events.iter().map(|e| &e.event).collect::<Vec<_>>(),
         );
 
         // Tick to SpendPeriod so `spend_funds` pays out queued approvals.

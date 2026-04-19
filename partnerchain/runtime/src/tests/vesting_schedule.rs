@@ -18,7 +18,7 @@ use crate::*;
 
 use frame_support::{
     assert_noop, assert_ok,
-    traits::{Currency, PalletInfoAccess, VestingSchedule},
+    traits::{PalletInfoAccess, VestingSchedule},
 };
 use sp_io::TestExternalities;
 use sp_runtime::{BuildStorage, MultiAddress};
@@ -46,12 +46,12 @@ fn new_test_ext() -> TestExternalities {
 
     // Granter holds 10 MATRA * 1e6 = 10_000_000, the Strategic bucket for
     // these tests. Needs to be > MinVestedTransfer.
+    // Grantee starts at ExistentialDeposit so later transfers can add locks;
+    // pallet_balances panics if a positive-balance account drops below ED.
     pallet_balances::GenesisConfig::<Runtime> {
         balances: vec![
             (granter(), 10_000_000 * MATRA),
-            // Grantee starts with exactly ExistentialDeposit so transfers can
-            // add locks. 0 would be fine too on a locked-transfer path.
-            (grantee(), 0),
+            (grantee(), ExistentialDeposit::get()),
         ],
     }
     .assimilate_storage(&mut storage)
@@ -297,16 +297,33 @@ fn grantee_cannot_transfer_locked_portion_mid_schedule() {
             RuntimeOrigin::signed(grantee()),
         ));
 
-        // Attempting to transfer more than 500 units should fail (locked).
+        // Grantee's transferable balance:
+        //   seed (ED=500) + unlocked_via_schedule (500) = 1000 transferable
+        //   (seed doesn't come from the schedule, so it's always spendable)
+        // Transferring 2000 exceeds both the seed and the 500 unlocked units,
+        // hitting the lock on the remaining 999_500.
         let bob = sp_keyring::Sr25519Keyring::Bob.to_account_id();
         let result = pallet_balances::Pallet::<Runtime>::transfer_allow_death(
             RuntimeOrigin::signed(grantee()),
             MultiAddress::Id(bob),
-            1_000,
+            2_000,
         );
         assert!(
             result.is_err(),
-            "transferring more than unlocked amount must fail while locked"
+            "transferring more than the seed + unlocked portion must fail \
+             while the schedule lock is active; got {:?}", result,
         );
+
+        // Conversely: transferring within the seed+unlocked window must
+        // succeed. The target must already exist (or receive >= ED to be
+        // created); Bob was seeded implicitly via `assert_noop!` earlier runs
+        // — use a pre-funded account so we don't trip the ED guard.
+        // We send to `granter()` (already > ED) so the transfer is the
+        // pure-locking test, not an account-creation test.
+        assert_ok!(pallet_balances::Pallet::<Runtime>::transfer_allow_death(
+            RuntimeOrigin::signed(grantee()),
+            MultiAddress::Id(granter()),
+            100,
+        ));
     });
 }

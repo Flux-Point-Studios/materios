@@ -23,12 +23,13 @@
 //!   3. The attestor reserve PalletId is declared in the runtime (re-exported
 //!      as `AttestorReservePalletId` + `attestor_reserve_account()`).
 
+use crate::fee_router::DealWithFees;
 use crate::*;
 
 use frame_support::traits::{
-    fungible::{Balanced, Inspect, Credit},
+    fungible::{Balanced, Credit},
     tokens::Precision,
-    Currency, Imbalance, OnUnbalanced,
+    OnUnbalanced,
 };
 use sp_io::TestExternalities;
 use sp_runtime::{BuildStorage, traits::AccountIdConversion};
@@ -46,11 +47,10 @@ fn fee_payer() -> AccountId {
 }
 
 fn author_account() -> AccountId {
-    // DealWithFees must route 40% here. Tests set this as the author via
-    // `pallet_authorship::Author` storage; if the runtime uses a different
-    // mechanism (e.g. pallet_block_rewards beneficiary), the DealWithFees
-    // implementation is responsible for resolving it.
-    sp_keyring::Sr25519Keyring::Eve.to_account_id()
+    // DealWithFees routes the 40% author share to the canonical "mat/auth"
+    // PalletId account, which pallet_block_rewards pays out on epoch
+    // rotation. Tests target THAT account, not a keyring identity.
+    crate::fee_router::author_pot_account()
 }
 
 fn attestor_reserve_account_local() -> AccountId {
@@ -70,13 +70,17 @@ fn new_test_ext() -> TestExternalities {
         .build_storage()
         .expect("frame_system genesis builds");
 
+    // Seed the fee payer AND pre-fund author/reserve/treasury at
+    // ExistentialDeposit so that deposits of fee-shares smaller than ED still
+    // succeed (Balanced::resolve refuses to create an account with < ED).
+    // Snapshots subtract pre-balance so the ED seed is invisible in deltas.
+    let ed = ExistentialDeposit::get();
     pallet_balances::GenesisConfig::<Runtime> {
         balances: vec![
             (fee_payer(), FEE_PAYER_SEED),
-            (author_account(), 0), // explicitly 0; asserts mean post-balance IS the credit
-            // Reserve + treasury start at 0 so we measure deltas cleanly.
-            (attestor_reserve_account_local(), 0),
-            (treasury_account_local(), 0),
+            (author_account(), ed),
+            (attestor_reserve_account_local(), ed),
+            (treasury_account_local(), ed),
         ],
     }
     .assimilate_storage(&mut storage)
@@ -136,7 +140,7 @@ fn route_fee(fee: Balance) -> RoutedSnapshot {
     let pre = snapshot();
 
     let credit: Credit<AccountId, pallet_balances::Pallet<Runtime>> =
-        pallet_balances::Pallet::<Runtime>::withdraw(
+        <pallet_balances::Pallet<Runtime> as Balanced<AccountId>>::withdraw(
             &fee_payer(),
             fee,
             Precision::Exact,
@@ -264,8 +268,9 @@ fn fee_split_conservation_across_sampled_values() {
             let payer = fee_payer();
             let current = pallet_balances::Pallet::<Runtime>::free_balance(&payer);
             if current < fee {
+                use frame_support::traits::Currency;
                 let topup = FEE_PAYER_SEED - current;
-                let _ = pallet_balances::Pallet::<Runtime>::deposit_creating(&payer, topup);
+                let _ = <pallet_balances::Pallet<Runtime> as Currency<AccountId>>::deposit_creating(&payer, topup);
             }
             let r = route_fee(fee);
             assert_eq!(
@@ -298,7 +303,10 @@ fn fee_split_zero_fee_is_noop() {
     new_test_ext().execute_with(|| {
         let pre_total = pallet_balances::Pallet::<Runtime>::total_issuance();
         // A zero credit should not panic or burn anything.
-        let credit: Credit<AccountId, pallet_balances::Pallet<Runtime>> = Credit::zero();
+        use frame_support::traits::tokens::imbalance::Imbalance;
+        let credit: Credit<AccountId, pallet_balances::Pallet<Runtime>> =
+            <Credit<AccountId, pallet_balances::Pallet<Runtime>>
+                as Imbalance<Balance>>::zero();
         <DealWithFees<Runtime> as OnUnbalanced<Credit<AccountId, pallet_balances::Pallet<Runtime>>>>
             ::on_unbalanceds(core::iter::once(credit));
         let post_total = pallet_balances::Pallet::<Runtime>::total_issuance();
@@ -342,14 +350,14 @@ fn fee_split_fee_and_tip_both_routed() {
         let total = fee_part + tip_part;
 
         let pre = snapshot();
-        let fee_credit = pallet_balances::Pallet::<Runtime>::withdraw(
+        let fee_credit = <pallet_balances::Pallet<Runtime> as Balanced<AccountId>>::withdraw(
             &fee_payer(),
             fee_part,
             Precision::Exact,
             frame_support::traits::tokens::Preservation::Preserve,
             frame_support::traits::tokens::Fortitude::Polite,
         ).expect("fee part");
-        let tip_credit = pallet_balances::Pallet::<Runtime>::withdraw(
+        let tip_credit = <pallet_balances::Pallet<Runtime> as Balanced<AccountId>>::withdraw(
             &fee_payer(),
             tip_part,
             Precision::Exact,
