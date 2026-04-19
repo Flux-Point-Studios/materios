@@ -47,6 +47,9 @@ pallet-sudo = { workspace = true }
 pallet-timestamp = { workspace = true }
 pallet-transaction-payment = { workspace = true }
 pallet-transaction-payment-rpc-runtime-api = { workspace = true }
+# v5.1 tokenomics foundation
+pallet-treasury = { workspace = true }
+pallet-vesting = { workspace = true }
 
 # Local
 pallet-orinq-receipts = { workspace = true }
@@ -121,6 +124,8 @@ std = [
     "pallet-timestamp/std",
     "pallet-transaction-payment/std",
     "pallet-transaction-payment-rpc-runtime-api/std",
+    "pallet-treasury/std",
+    "pallet-vesting/std",
     "pallet-orinq-receipts/std",
     "orinq-receipts-primitives/std",
     "pallet-motra/std",
@@ -158,6 +163,8 @@ runtime-benchmarks = [
     "pallet-utility/runtime-benchmarks",
     "pallet-sudo/runtime-benchmarks",
     "pallet-timestamp/runtime-benchmarks",
+    "pallet-treasury/runtime-benchmarks",
+    "pallet-vesting/runtime-benchmarks",
     "pallet-orinq-receipts/runtime-benchmarks",
     "pallet-motra/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
@@ -174,6 +181,8 @@ try-runtime = [
     "pallet-sudo/try-runtime",
     "pallet-timestamp/try-runtime",
     "pallet-transaction-payment/try-runtime",
+    "pallet-treasury/try-runtime",
+    "pallet-vesting/try-runtime",
     "pallet-orinq-receipts/try-runtime",
     "pallet-motra/try-runtime",
     "sp-runtime/try-runtime",
