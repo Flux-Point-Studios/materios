@@ -41,3 +41,23 @@ pub struct AnchorRecord<AccountId> {
     pub created_at_millis: u64,
     pub submitter: AccountId,
 }
+
+/// Reason for slashing an attestor's bond.
+///
+/// Enumerates the misbehaviours governance / the runtime can cite when
+/// invoking `slash_attestor`. The variant is recorded in the `Slashed`
+/// event so indexers / dashboards can classify each slash.
+#[derive(Clone, Copy, Encode, Decode, TypeInfo, MaxEncodedLen, Debug, PartialEq, Eq)]
+pub enum SlashReason {
+    /// The attestor produced an invalid signature for an availability
+    /// certificate (cryptographic failure or forged material).
+    InvalidSignature,
+    /// The attestor was unreachable / did not attest during a window in
+    /// which they were expected to.
+    Unavailability,
+    /// Double-signing: the attestor signed two conflicting certificates
+    /// for the same receipt.
+    DoubleSign,
+    /// Generic governance-authored slash — reason encoded off-chain.
+    Governance,
+}

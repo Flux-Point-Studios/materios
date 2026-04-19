@@ -1,13 +1,14 @@
 use crate as pallet_orinq_receipts;
-use crate::{pallet, pallet::GrandpaPendingChange, types::ReceiptRecord};
+use crate::{pallet, pallet::GrandpaPendingChange, types::{ReceiptRecord, SlashReason}};
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
     traits::{ConstBool, ConstU32, ConstU64},
+    PalletId,
 };
 use parity_scale_codec::{Decode, Encode};
 use sp_core::{crypto::AccountId32, H256};
 use sp_runtime::{
-    traits::{BlakeTwo256, IdentityLookup},
+    traits::{AccountIdConversion, BlakeTwo256, IdentityLookup},
     BuildStorage,
 };
 
@@ -93,11 +94,19 @@ impl pallet_balances::Config for Test {
     type RuntimeFreezeReason = RuntimeFreezeReason;
 }
 
+parameter_types! {
+    /// Mock attestor reserve pot — matches the production runtime's
+    /// `mat/attr` PalletId so test expectations mirror the real routing.
+    pub const AttestorReservePotId: PalletId = PalletId(*b"mat/attr");
+}
+
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = crate::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
     type MaxCommitteeSize = ConstU32<16>;
+    type Currency = Balances;
+    type AttestorReservePotId = AttestorReservePotId;
 }
 
 /// Construct a deterministic AccountId32 from a single byte seed (for tests).
@@ -649,6 +658,252 @@ fn grandpa_pending_change_scale_round_trip_no_forced() {
 
     assert_eq!(decoded, original);
     assert_eq!(decoded.forced, None);
+}
+
+// ---------------------------------------------------------------------------
+// Component 8 — Attestor Bond + Slashing
+//
+// Attestors must lock a bond before joining the committee. Misbehaviour is
+// punished by slashing the bond and repatriating funds to the attestor
+// reserve pot (`mat/attr`) so the MATRA accumulates for future rewards
+// rather than being burned. Auto-eject if the remaining bond drops below
+// `BondRequirement`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bond_reserves_balance_and_records_amount() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            5_000_000_000
+        ));
+        assert_eq!(Balances::reserved_balance(&attestor), 5_000_000_000);
+        assert_eq!(OrinqReceipts::attestor_bonds(&attestor), 5_000_000_000);
+    });
+}
+
+#[test]
+fn bond_rejects_insufficient_balance() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 1_000_000);
+        assert_noop!(
+            OrinqReceipts::bond(RuntimeOrigin::signed(attestor), 5_000_000_000),
+            pallet_balances::Error::<Test>::InsufficientBalance
+        );
+    });
+}
+
+#[test]
+fn bond_accumulates_on_repeat_calls() {
+    // Calling `bond` twice should extend the existing reservation rather
+    // than clobber it — attestors can top up without a withdraw/re-bond.
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            2_000_000_000
+        ));
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            3_000_000_000
+        ));
+        assert_eq!(OrinqReceipts::attestor_bonds(&attestor), 5_000_000_000);
+        assert_eq!(Balances::reserved_balance(&attestor), 5_000_000_000);
+    });
+}
+
+#[test]
+fn unbond_while_in_committee_fails() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            1_000_000_000
+        ));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor.clone())));
+        assert_noop!(
+            OrinqReceipts::unbond(RuntimeOrigin::signed(attestor)),
+            pallet::Error::<Test>::StillInCommittee
+        );
+    });
+}
+
+#[test]
+fn unbond_returns_balance_when_not_in_committee() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            1_000_000_000
+        ));
+        assert_eq!(Balances::reserved_balance(&attestor), 1_000_000_000);
+
+        assert_ok!(OrinqReceipts::unbond(RuntimeOrigin::signed(attestor.clone())));
+        assert_eq!(Balances::reserved_balance(&attestor), 0);
+        assert_eq!(OrinqReceipts::attestor_bonds(&attestor), 0);
+        assert_eq!(Balances::free_balance(&attestor), 10_000_000_000);
+    });
+}
+
+#[test]
+fn unbond_without_prior_bond_fails() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_noop!(
+            OrinqReceipts::unbond(RuntimeOrigin::signed(attestor)),
+            pallet::Error::<Test>::NothingToUnbond
+        );
+    });
+}
+
+#[test]
+fn join_committee_requires_bond() {
+    // Default BondRequirement is 1_000_000_000 (1K MATRA at 6 decimals).
+    // Without enough bond, join_committee must reject.
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_noop!(
+            OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor.clone())),
+            pallet::Error::<Test>::InsufficientBond
+        );
+
+        // Bond below requirement still fails.
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            500_000_000
+        ));
+        assert_noop!(
+            OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor.clone())),
+            pallet::Error::<Test>::InsufficientBond
+        );
+
+        // Top up to meet the requirement and retry.
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            500_000_000
+        ));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor)));
+    });
+}
+
+#[test]
+fn slash_reduces_bond_and_routes_to_reserve_pot() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        // Pre-fund the reserve pot above ED so it can receive repatriated funds.
+        Balances::make_free_balance_be(&reserve_acct, 1);
+
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            5_000_000_000
+        ));
+
+        let reserve_before = Balances::free_balance(&reserve_acct);
+        assert_ok!(OrinqReceipts::slash_attestor(
+            RuntimeOrigin::root(),
+            attestor.clone(),
+            1_000_000_000,
+            SlashReason::InvalidSignature
+        ));
+        assert_eq!(OrinqReceipts::attestor_bonds(&attestor), 4_000_000_000);
+        assert_eq!(Balances::reserved_balance(&attestor), 4_000_000_000);
+        assert_eq!(
+            Balances::free_balance(&reserve_acct),
+            reserve_before + 1_000_000_000
+        );
+    });
+}
+
+#[test]
+fn slash_auto_ejects_if_bond_drops_below_requirement() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        Balances::make_free_balance_be(&reserve_acct, 1);
+
+        // Bond exactly at requirement (default = 1_000_000_000) then join.
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            1_000_000_000
+        ));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(
+            attestor.clone()
+        )));
+        assert!(OrinqReceipts::committee_members().contains(&attestor));
+
+        // Slash half the bond — new bond = 500M, below the 1B requirement.
+        assert_ok!(OrinqReceipts::slash_attestor(
+            RuntimeOrigin::root(),
+            attestor.clone(),
+            500_000_000,
+            SlashReason::Unavailability
+        ));
+
+        // Auto-ejected.
+        assert!(!OrinqReceipts::committee_members().contains(&attestor));
+    });
+}
+
+#[test]
+fn slash_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        let caller = acc(2);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            5_000_000_000
+        ));
+
+        assert_noop!(
+            OrinqReceipts::slash_attestor(
+                RuntimeOrigin::signed(caller),
+                attestor,
+                1_000_000_000,
+                SlashReason::Governance
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn set_bond_requirement_root_only() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_bond_requirement(
+            RuntimeOrigin::root(),
+            2_500_000_000
+        ));
+        assert_eq!(OrinqReceipts::bond_requirement(), 2_500_000_000);
+
+        assert_noop!(
+            OrinqReceipts::set_bond_requirement(RuntimeOrigin::signed(acc(1)), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn bond_requirement_has_default() {
+    new_test_ext().execute_with(|| {
+        // Default = 1_000_000_000 base units (1K MATRA at 6 decimals).
+        assert_eq!(OrinqReceipts::bond_requirement(), 1_000_000_000);
+    });
 }
 
 #[test]
