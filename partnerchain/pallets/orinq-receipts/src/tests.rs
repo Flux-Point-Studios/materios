@@ -2,7 +2,7 @@ use crate as pallet_orinq_receipts;
 use crate::{pallet, pallet::GrandpaPendingChange, types::{ReceiptRecord, SlashReason}};
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
-    traits::{ConstBool, ConstU32, ConstU64, Currency},
+    traits::{ConstBool, ConstU32, ConstU64, Currency, ReservableCurrency},
     PalletId,
 };
 use parity_scale_codec::{Decode, Encode};
@@ -125,11 +125,16 @@ fn new_test_ext() -> sp_io::TestExternalities {
         .unwrap();
     // Seed Component-5 storage from genesis (defaults match the previous
     // const values: 10 MATRA/signer, 50K MATRA/era base, baseline 16).
+    // Component 4: seed the per-receipt fee, floor, and expiry deadline at
+    // the documented defaults.
     pallet_orinq_receipts::GenesisConfig::<Test> {
         attestation_reward_per_signer: 10_000_000,
         era_cap_base: 50_000_000_000,
         era_cap_baseline_attestor_count: 16,
         bond_requirement: 1_000_000_000,
+        receipt_submission_fee: 1_000_000,
+        receipt_submission_fee_floor: 100_000,
+        receipt_expiry_blocks: 14_400,
         _phantom: Default::default(),
     }
     .assimilate_storage(&mut t)
@@ -156,6 +161,15 @@ fn submit(
     receipt_id: H256,
     content_hash: H256,
 ) -> frame_support::dispatch::DispatchResult {
+    // Component 4: ensure the submitter has enough MATRA to reserve the
+    // per-receipt submission fee. Tests that explicitly want to exercise
+    // the InsufficientFee error bypass this helper and fund manually —
+    // we only auto-fund accounts at zero so a deliberately-underfunded
+    // account (e.g. with 500_000 balance, below the 1M fee) isn't
+    // silently topped up.
+    if Balances::free_balance(&acc(who_seed)) == 0 {
+        Balances::make_free_balance_be(&acc(who_seed), 10_000_000);
+    }
     OrinqReceipts::submit_receipt(
         RuntimeOrigin::signed(acc(who_seed)),
         receipt_id,
@@ -208,6 +222,10 @@ fn submit_receipt_duplicate_fails() {
         let ch = H256::from([0xDD; 32]);
 
         assert_ok!(submit(1, rid, ch));
+
+        // Pre-fund the second submitter outside `assert_noop!` so its
+        // auto-fund side-effect does not pollute the storage hash check.
+        Balances::make_free_balance_be(&acc(2), 10_000_000);
         assert_noop!(
             submit(2, rid, ch),
             pallet::Error::<Test>::ReceiptAlreadyExists

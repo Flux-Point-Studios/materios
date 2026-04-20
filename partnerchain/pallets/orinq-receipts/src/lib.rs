@@ -23,7 +23,7 @@ pub mod pallet {
     use frame_support::PalletId;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
-    use sp_runtime::traits::AccountIdConversion;
+    use sp_runtime::traits::{AccountIdConversion, Saturating};
 
     use crate::types::{AnchorRecord, PlayerSigRecord, ReceiptRecord, SlashReason};
     use crate::weights::WeightInfo;
@@ -73,6 +73,13 @@ pub mod pallet {
         /// same pot that the fee router's 30% share funds.
         #[pallet::constant]
         type AttestorReservePotId: Get<PalletId>;
+
+        /// PalletId used to derive the treasury pot account. Must match the
+        /// runtime's `mat/trsy` id so the 20% treasury share of receipt
+        /// submission fees lands in the same pot that pallet_treasury and
+        /// the fee-router's 20% share credit to (Component 4).
+        #[pallet::constant]
+        type TreasuryPotId: Get<PalletId>;
     }
 
     // ── Storage ──────────────────────────────────────────────────────────
@@ -230,6 +237,59 @@ pub mod pallet {
     #[pallet::getter(fn bond_requirement)]
     pub type BondRequirement<T: Config> = StorageValue<_, u128, ValueQuery>;
 
+    // ── Component 4: per-receipt submission fee + signer payout ─────────
+    //
+    // Submitter pays a flat fee per receipt, held in reserved balance with
+    // ReceiptFeeEscrow as the tag-like tracking map. On threshold-hit the
+    // fee is split 80% / 20% between the actual signers and the treasury
+    // pot. On expiry (pre-threshold) the fee refunds to the submitter.
+    //
+    // Storage layout:
+    //   ReceiptSubmissionFee      — flat per-receipt fee (governance-tunable)
+    //   ReceiptSubmissionFeeFloor — minimum allowed fee (governance-tunable)
+    //   ReceiptExpiryBlocks       — blocks before a submitted, uncertified
+    //                               receipt can be refunded (governance-tunable)
+    //   ReceiptFeeEscrow          — receipt_id -> (submitter, reserved_amount)
+    //   ReceiptSubmittedAt        — receipt_id -> block_number (expiry anchor)
+
+    /// Per-receipt submission fee in MATRA base units (6 decimals).
+    /// Default: 1_000_000 base units (1 MATRA). Must be >= ReceiptSubmissionFeeFloor
+    /// when updated via governance.
+    #[pallet::storage]
+    #[pallet::getter(fn receipt_submission_fee)]
+    pub type ReceiptSubmissionFee<T: Config> = StorageValue<_, u128, ValueQuery>;
+
+    /// Minimum allowed value of `ReceiptSubmissionFee`. Prevents governance
+    /// from accidentally zero-ing out the fee (which would disable the
+    /// recycling mechanism entirely). Default: 100_000 (0.1 MATRA).
+    #[pallet::storage]
+    #[pallet::getter(fn receipt_submission_fee_floor)]
+    pub type ReceiptSubmissionFeeFloor<T: Config> = StorageValue<_, u128, ValueQuery>;
+
+    /// Number of blocks after `ReceiptSubmittedAt` at which an uncertified
+    /// receipt becomes eligible for fee refund via `expire_receipt_fee`.
+    /// Default: 14_400 (~24h at 6s block time). Governance-tunable.
+    #[pallet::storage]
+    #[pallet::getter(fn receipt_expiry_blocks)]
+    pub type ReceiptExpiryBlocks<T: Config> = StorageValue<_, u32, ValueQuery>;
+
+    /// Per-receipt fee escrow. Populated on `submit_receipt`; drained on
+    /// threshold-hit payout OR `expire_receipt_fee`. Missing entry means
+    /// either the receipt predates Component 4 (legacy) or the fee has
+    /// already been settled.
+    ///
+    /// Key: receipt_id -> (submitter_account, reserved_amount)
+    #[pallet::storage]
+    pub type ReceiptFeeEscrow<T: Config> =
+        StorageMap<_, Blake2_128Concat, H256, (T::AccountId, u128), OptionQuery>;
+
+    /// Block number at which a receipt was submitted. Used as the anchor
+    /// for computing expiry eligibility in `expire_receipt_fee`. Only
+    /// populated for Component-4+ submissions.
+    #[pallet::storage]
+    pub type ReceiptSubmittedAt<T: Config> =
+        StorageMap<_, Blake2_128Concat, H256, BlockNumberFor<T>, OptionQuery>;
+
     // ── Events ───────────────────────────────────────────────────────────
 
     #[pallet::event]
@@ -318,6 +378,31 @@ pub mod pallet {
         /// An attestor was automatically removed from the committee because
         /// their post-slash bond fell below `BondRequirement`.
         AutoEjected { who: T::AccountId, remaining_bond: u128 },
+        /// Submission-fee escrow was distributed on threshold hit. `total_fee`
+        /// is the full escrow amount; `per_signer_amount` is the flat share
+        /// each of the `signer_count` actual signers received; `treasury_amount`
+        /// is the residual (20% + any rounding dust).
+        ReceiptFeeDistributed {
+            receipt_id: H256,
+            submitter: T::AccountId,
+            total_fee: u128,
+            per_signer_amount: u128,
+            treasury_amount: u128,
+            signer_count: u32,
+        },
+        /// Submission-fee escrow was refunded to the submitter because the
+        /// receipt expired without reaching the attestation threshold.
+        ReceiptFeeRefunded {
+            receipt_id: H256,
+            submitter: T::AccountId,
+            amount: u128,
+        },
+        /// `ReceiptSubmissionFee` was updated by governance.
+        ReceiptSubmissionFeeUpdated { new_value: u128 },
+        /// `ReceiptSubmissionFeeFloor` was updated by governance.
+        ReceiptSubmissionFeeFloorUpdated { new_value: u128 },
+        /// `ReceiptExpiryBlocks` was updated by governance.
+        ReceiptExpiryBlocksUpdated { new_value: u32 },
     }
 
     // ── Errors ───────────────────────────────────────────────────────────
@@ -399,6 +484,20 @@ pub mod pallet {
         StillInCommittee,
         /// The caller has no bond to unbond. Call `bond(amount)` first.
         NothingToUnbond,
+        /// The submitter could not reserve enough balance to cover the
+        /// per-receipt submission fee. Top up free balance and retry.
+        InsufficientFee,
+        /// A governance update to `ReceiptSubmissionFee` was rejected
+        /// because the new value is below `ReceiptSubmissionFeeFloor`.
+        /// Either raise the proposed value or lower the floor first.
+        FeeBelowFloor,
+        /// `expire_receipt_fee` called before `ReceiptExpiryBlocks` have
+        /// elapsed since submission. Wait for the deadline to pass.
+        ReceiptNotExpired,
+        /// `expire_receipt_fee` called on a receipt that has already been
+        /// certified — the escrow was already drained via the signer
+        /// payout path. No action is required.
+        ReceiptAlreadyCertified,
     }
 
     // ── Genesis ──────────────────────────────────────────────────────────
@@ -419,6 +518,15 @@ pub mod pallet {
         /// Initial bond requirement for joining the committee
         /// (Component 8). Defaults to 1K MATRA.
         pub bond_requirement: u128,
+        /// Initial per-receipt submission fee (Component 4). Defaults to
+        /// 1 MATRA (1_000_000 base units).
+        pub receipt_submission_fee: u128,
+        /// Initial fee floor (Component 4). Defaults to 0.1 MATRA
+        /// (100_000 base units).
+        pub receipt_submission_fee_floor: u128,
+        /// Initial expiry deadline in blocks (Component 4). Defaults to
+        /// 14_400 blocks (~24h at 6s/block).
+        pub receipt_expiry_blocks: u32,
         #[serde(skip)]
         pub _phantom: core::marker::PhantomData<T>,
     }
@@ -448,10 +556,28 @@ pub mod pallet {
             } else {
                 self.bond_requirement
             };
+            let fee = if self.receipt_submission_fee == 0 {
+                1_000_000u128 // 1 MATRA (6 decimals)
+            } else {
+                self.receipt_submission_fee
+            };
+            let floor = if self.receipt_submission_fee_floor == 0 {
+                100_000u128 // 0.1 MATRA (6 decimals)
+            } else {
+                self.receipt_submission_fee_floor
+            };
+            let expiry = if self.receipt_expiry_blocks == 0 {
+                14_400u32 // ~24h at 6s/block
+            } else {
+                self.receipt_expiry_blocks
+            };
             AttestationRewardPerSigner::<T>::put(reward);
             EraCapBase::<T>::put(cap);
             EraCapBaselineAttestorCount::<T>::put(baseline);
             BondRequirement::<T>::put(bond_req);
+            ReceiptSubmissionFee::<T>::put(fee);
+            ReceiptSubmissionFeeFloor::<T>::put(floor);
+            ReceiptExpiryBlocks::<T>::put(expiry);
         }
     }
 
@@ -574,7 +700,7 @@ pub mod pallet {
         /// migration short-circuits with three reads.
         fn on_runtime_upgrade() -> Weight {
             let mut writes = 0u64;
-            let reads = 4u64;
+            let reads = 7u64;
 
             if !AttestationRewardPerSigner::<T>::exists() {
                 AttestationRewardPerSigner::<T>::put(10_000_000u128);
@@ -593,6 +719,22 @@ pub mod pallet {
             // via `set_bond_requirement` after the upgrade lands.
             if !BondRequirement::<T>::exists() {
                 BondRequirement::<T>::put(1_000_000_000u128);
+                writes += 1;
+            }
+            // Component 4: seed the per-receipt submission fee + floor +
+            // expiry deadline. Defaults match the brief (1 MATRA / 0.1 MATRA /
+            // ~24h). Idempotent: re-running the migration after all three
+            // are set short-circuits to reads-only.
+            if !ReceiptSubmissionFee::<T>::exists() {
+                ReceiptSubmissionFee::<T>::put(1_000_000u128);
+                writes += 1;
+            }
+            if !ReceiptSubmissionFeeFloor::<T>::exists() {
+                ReceiptSubmissionFeeFloor::<T>::put(100_000u128);
+                writes += 1;
+            }
+            if !ReceiptExpiryBlocks::<T>::exists() {
+                ReceiptExpiryBlocks::<T>::put(14_400u32);
                 writes += 1;
             }
 
@@ -641,6 +783,123 @@ pub mod pallet {
         /// 30% share to this account.
         pub fn attestor_reserve_account() -> T::AccountId {
             T::AttestorReservePotId::get().into_account_truncating()
+        }
+
+        /// The derived treasury pot account (`mat/trsy`). The 20% share of
+        /// each per-receipt submission fee is credited here on threshold
+        /// hit; rounding residue from the 80% signer split also ends up
+        /// here rather than being burned.
+        pub fn treasury_account() -> T::AccountId {
+            T::TreasuryPotId::get().into_account_truncating()
+        }
+
+        /// Component 4 helper: reserve the current `ReceiptSubmissionFee`
+        /// from `submitter` and populate `ReceiptFeeEscrow` +
+        /// `ReceiptSubmittedAt` for the given receipt. Callers must fire
+        /// `ReceiptSubmitted` separately. Returns the reserved fee amount
+        /// on success.
+        fn charge_submission_fee(
+            submitter: &T::AccountId,
+            receipt_id: H256,
+        ) -> Result<u128, DispatchError> {
+            let fee = ReceiptSubmissionFee::<T>::get();
+            if fee > 0 {
+                let balance: BalanceOf<T> = fee.try_into().unwrap_or_default();
+                // Map any reserve failure (free balance < fee, or
+                // ExistentialDeposit check against remaining free balance)
+                // onto our own `InsufficientFee` so SDK callers get a
+                // deterministic, Component-4-scoped error.
+                T::Currency::reserve(submitter, balance)
+                    .map_err(|_| Error::<T>::InsufficientFee)?;
+            }
+            ReceiptFeeEscrow::<T>::insert(receipt_id, (submitter.clone(), fee));
+            ReceiptSubmittedAt::<T>::insert(
+                receipt_id,
+                frame_system::Pallet::<T>::block_number(),
+            );
+            Ok(fee)
+        }
+
+        /// Component 4 helper: distribute the escrowed fee for a freshly
+        /// certified receipt. 80% pro-rata-flat to `signers`, 20% plus
+        /// rounding residue to the treasury pot. No-op if the receipt has
+        /// no escrow (legacy / pre-Component-4) or if `signers` is empty
+        /// (defensive — threshold is always >= 1).
+        ///
+        /// Uses `repatriate_reserved` with `BalanceStatus::Free` to move
+        /// funds directly from the submitter's reserved balance into each
+        /// beneficiary's free balance, keeping the invariant that the fee
+        /// is only ever in one place: submitter's reserve -> recipients.
+        fn distribute_submission_fee(
+            receipt_id: H256,
+            signers: &BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize>,
+        ) {
+            let (submitter, reserved_fee) = match ReceiptFeeEscrow::<T>::take(receipt_id) {
+                Some(v) => v,
+                None => return, // pre-Component-4 receipt — nothing to pay out
+            };
+            ReceiptSubmittedAt::<T>::remove(receipt_id);
+
+            if reserved_fee == 0 || signers.is_empty() {
+                // Defensive: an escrow of 0 is possible if governance set
+                // the fee to 0 after submission (even though the floor
+                // rule prevents <floor, an empty-fee era is still legal).
+                // Unreserve anything that might somehow still be held and
+                // return without firing a distributed event.
+                if reserved_fee > 0 {
+                    let balance: BalanceOf<T> = reserved_fee.try_into().unwrap_or_default();
+                    let _ = T::Currency::unreserve(&submitter, balance);
+                }
+                return;
+            }
+
+            let signer_count = signers.len() as u32;
+            let to_signers = reserved_fee.saturating_mul(80) / 100;
+            let per_signer = to_signers / (signer_count as u128);
+            let signer_paid = per_signer.saturating_mul(signer_count as u128);
+            // Rounding dust from the 80% bucket is routed to treasury
+            // rather than dropped/burned — per Component-4 anti-BS rules.
+            let to_treasury = reserved_fee.saturating_sub(signer_paid);
+
+            // Move each signer's flat share from submitter's reserved
+            // balance into their free balance. repatriate_reserved returns
+            // any un-moved remainder; we ignore it because in practice
+            // the reserve is exactly `reserved_fee` (set in submit).
+            if per_signer > 0 {
+                for signer in signers.iter() {
+                    let balance: BalanceOf<T> = per_signer.try_into().unwrap_or_default();
+                    let _ = T::Currency::repatriate_reserved(
+                        &submitter,
+                        signer,
+                        balance,
+                        BalanceStatus::Free,
+                    );
+                }
+            }
+
+            // Remaining reserve -> treasury. This captures the 20% base
+            // share plus any rounding residue from the integer-division
+            // above. We use repatriate_reserved here for the same reason:
+            // the invariant is that all reserved fee leaves the submitter.
+            if to_treasury > 0 {
+                let treasury_acct = Self::treasury_account();
+                let balance: BalanceOf<T> = to_treasury.try_into().unwrap_or_default();
+                let _ = T::Currency::repatriate_reserved(
+                    &submitter,
+                    &treasury_acct,
+                    balance,
+                    BalanceStatus::Free,
+                );
+            }
+
+            Self::deposit_event(Event::ReceiptFeeDistributed {
+                receipt_id,
+                submitter,
+                total_fee: reserved_fee,
+                per_signer_amount: per_signer,
+                treasury_amount: to_treasury,
+                signer_count,
+            });
         }
 
         /// Effective per-era cap on attestation rewards.
@@ -698,6 +957,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let submitter = ensure_signed(origin)?;
             ensure!(!Receipts::<T>::contains_key(receipt_id), Error::<T>::ReceiptAlreadyExists);
+
+            // Component 4: reserve the per-receipt submission fee from the
+            // submitter BEFORE mutating any receipt storage. On failure the
+            // whole extrinsic unwinds so no orphan state is left behind.
+            Self::charge_submission_fee(&submitter, receipt_id)?;
+
             let now: u64 = pallet_timestamp::Pallet::<T>::get().into();
             let record = ReceiptRecord {
                 schema_hash,
@@ -896,6 +1161,13 @@ pub mod pallet {
                     Ok::<(), DispatchError>(())
                 })?;
 
+                // Component 4: distribute the escrowed submission fee to
+                // the actual signers and the treasury pot BEFORE removing
+                // the attestation record (we need the signer set).
+                if let Some((_, ref signers)) = Attestations::<T>::get(receipt_id) {
+                    Self::distribute_submission_fee(receipt_id, signers);
+                }
+
                 // Clean up the attestation record — it's no longer needed.
                 Attestations::<T>::remove(receipt_id);
 
@@ -1050,6 +1322,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let submitter = ensure_signed(origin)?;
             ensure!(!Receipts::<T>::contains_key(receipt_id), Error::<T>::ReceiptAlreadyExists);
+
+            // Component 4: same fee charge as submit_receipt. submit_receipt_v2
+            // is the studio-pays-fees-with-player-signed-receipt path and
+            // the fee flow must be identical.
+            Self::charge_submission_fee(&submitter, receipt_id)?;
+
             let now: u64 = pallet_timestamp::Pallet::<T>::get().into();
             let record = ReceiptRecord {
                 schema_hash,
@@ -1348,6 +1626,126 @@ pub mod pallet {
             ensure_root(origin)?;
             BondRequirement::<T>::put(value);
             Self::deposit_event(Event::BondRequirementUpdated { new_value: value });
+            Ok(())
+        }
+
+        // ── Component 4: per-receipt submission fee governance ───────────
+
+        /// Update the per-receipt submission fee. Root-only. The new value
+        /// must be at or above `ReceiptSubmissionFeeFloor`; otherwise
+        /// rejected with `FeeBelowFloor`.
+        #[pallet::call_index(16)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_receipt_submission_fee(
+            origin: OriginFor<T>,
+            value: u128,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            let floor = ReceiptSubmissionFeeFloor::<T>::get();
+            ensure!(value >= floor, Error::<T>::FeeBelowFloor);
+            ReceiptSubmissionFee::<T>::put(value);
+            Self::deposit_event(Event::ReceiptSubmissionFeeUpdated { new_value: value });
+            Ok(())
+        }
+
+        /// Update the minimum allowed value of `ReceiptSubmissionFee`.
+        /// Root-only. Does NOT retroactively invalidate an already-set fee
+        /// that falls below the new floor — only future `set_receipt_submission_fee`
+        /// calls are gated.
+        #[pallet::call_index(17)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_receipt_submission_fee_floor(
+            origin: OriginFor<T>,
+            value: u128,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ReceiptSubmissionFeeFloor::<T>::put(value);
+            Self::deposit_event(Event::ReceiptSubmissionFeeFloorUpdated { new_value: value });
+            Ok(())
+        }
+
+        /// Update the expiry window (in blocks) after which an uncertified
+        /// receipt's escrow can be refunded via `expire_receipt_fee`.
+        /// Root-only.
+        #[pallet::call_index(18)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_receipt_expiry_blocks(
+            origin: OriginFor<T>,
+            value: u32,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ReceiptExpiryBlocks::<T>::put(value);
+            Self::deposit_event(Event::ReceiptExpiryBlocksUpdated { new_value: value });
+            Ok(())
+        }
+
+        /// Permissionless: refund the escrowed submission fee back to the
+        /// submitter's free balance once the receipt has expired without
+        /// reaching the attestation threshold.
+        ///
+        /// Fails with:
+        /// * `ReceiptNotFound` — the escrow entry is absent (receipt was
+        ///   never submitted, was already refunded, or predates Component 4).
+        /// * `ReceiptAlreadyCertified` — the receipt's availability cert
+        ///   hash is non-zero (threshold already hit; payout already ran).
+        /// * `ReceiptNotExpired` — `ReceiptExpiryBlocks` have not yet
+        ///   elapsed since submission.
+        #[pallet::call_index(19)]
+        #[pallet::weight(Weight::from_parts(25_000, 0)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(2)))]
+        pub fn expire_receipt_fee(
+            origin: OriginFor<T>,
+            receipt_id: H256,
+        ) -> DispatchResult {
+            // Origin is required to be signed but has no other restriction —
+            // anyone can kick the refund once the deadline has passed so
+            // stuck reserves don't require submitter action.
+            let _caller = ensure_signed(origin)?;
+
+            // Defensive error ordering: verify cert-not-set BEFORE checking
+            // the escrow. If the receipt was certified the escrow is already
+            // drained; returning `ReceiptNotFound` in that case would be
+            // misleading. Also surfaces a clear error when the submitter
+            // accidentally calls expire on a cert'd receipt.
+            if let Some(record) = Receipts::<T>::get(receipt_id) {
+                ensure!(
+                    record.availability_cert_hash == [0u8; 32],
+                    Error::<T>::ReceiptAlreadyCertified
+                );
+            }
+
+            // Compute the expiry deadline.
+            let submitted_at = ReceiptSubmittedAt::<T>::get(receipt_id)
+                .ok_or(Error::<T>::ReceiptNotFound)?;
+            let expiry_blocks: BlockNumberFor<T> =
+                ReceiptExpiryBlocks::<T>::get().into();
+            let deadline = submitted_at.saturating_add(expiry_blocks);
+            let now = frame_system::Pallet::<T>::block_number();
+            ensure!(now > deadline, Error::<T>::ReceiptNotExpired);
+
+            let (submitter, reserved_fee) = ReceiptFeeEscrow::<T>::take(receipt_id)
+                .ok_or(Error::<T>::ReceiptNotFound)?;
+            ReceiptSubmittedAt::<T>::remove(receipt_id);
+
+            if reserved_fee > 0 {
+                let balance: BalanceOf<T> = reserved_fee.try_into().unwrap_or_default();
+                // Unreserve returns any amount it couldn't return (e.g. if
+                // the reserved balance is somehow lower than the escrow
+                // value). We ignore it: the stored escrow is our source of
+                // truth and the event reports what we _intended_ to refund.
+                let _ = T::Currency::unreserve(&submitter, balance);
+            }
+
+            Self::deposit_event(Event::ReceiptFeeRefunded {
+                receipt_id,
+                submitter,
+                amount: reserved_fee,
+            });
             Ok(())
         }
     }

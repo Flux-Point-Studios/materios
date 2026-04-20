@@ -499,6 +499,11 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     // the same PalletId the fee router's 30% share credits to, so the
     // reserve pot funds accumulate from both sources.
     type AttestorReservePotId = AttestorReservePalletId;
+    // Component 4: the 20% share of the per-receipt submission fee (plus
+    // any rounding residue from the 80% signer split) is routed here.
+    // `TreasuryPalletId` already exists for `pallet_treasury`; reusing it
+    // keeps the treasury pot as a single canonical account.
+    type TreasuryPotId = TreasuryPalletId;
 }
 
 // ---------------------------------------------------------------------------
