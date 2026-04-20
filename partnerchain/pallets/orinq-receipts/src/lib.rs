@@ -45,6 +45,19 @@ pub mod pallet {
         pub forced: Option<N>,
     }
 
+    /// Minimum allowed value for `ReceiptExpiryBlocks`, enforced by
+    /// `set_receipt_expiry_blocks`. Set at 10 blocks (~60s at 6s/block).
+    ///
+    /// Lower values create a grief vector where a root/governance key could
+    /// set expiry=0 and call `expire_receipt_fee` on an in-flight receipt
+    /// whose signers are attesting but have not yet crossed the threshold
+    /// — stealing the submitter→signer flow. 10 blocks is large enough to
+    /// make the race implausible under normal block times while still
+    /// leaving room for legitimate tight-window regimes during preprod
+    /// rehearsals. If a real use case emerges that needs lower, this
+    /// constant can be dropped in a runtime upgrade.
+    pub const MIN_RECEIPT_EXPIRY_BLOCKS: u32 = 10;
+
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
@@ -397,6 +410,16 @@ pub mod pallet {
             submitter: T::AccountId,
             amount: u128,
         },
+        /// Per-receipt submission fee was successfully reserved from the
+        /// submitter and escrowed (Component 4). Emitted by `submit_receipt`
+        /// so auditors have a direct on-chain trace of the reservation —
+        /// previously only `ReceiptSubmitted` fired, which says nothing
+        /// about the fee flow.
+        ReceiptFeeReserved {
+            receipt_id: H256,
+            submitter: T::AccountId,
+            amount: u128,
+        },
         /// `ReceiptSubmissionFee` was updated by governance.
         ReceiptSubmissionFeeUpdated { new_value: u128 },
         /// `ReceiptSubmissionFeeFloor` was updated by governance.
@@ -498,6 +521,12 @@ pub mod pallet {
         /// certified — the escrow was already drained via the signer
         /// payout path. No action is required.
         ReceiptAlreadyCertified,
+        /// `set_receipt_expiry_blocks` was called with a value below
+        /// `MIN_RECEIPT_EXPIRY_BLOCKS`. Very low expiry windows create a
+        /// grief vector where root (or a compromised governance key) could
+        /// race-refund in-flight receipts whose signers are still attesting,
+        /// stealing the submitter→signer flow. Raise the proposed value.
+        ReceiptExpiryBlocksTooLow,
     }
 
     // ── Genesis ──────────────────────────────────────────────────────────
