@@ -846,6 +846,14 @@ pub mod pallet {
                 receipt_id,
                 frame_system::Pallet::<T>::block_number(),
             );
+            // Emit a dedicated reservation event so auditors/explorers can
+            // trace the escrow lifecycle without scraping the Balances
+            // pallet's `Reserved` events (which aren't scoped to orinq).
+            Self::deposit_event(Event::ReceiptFeeReserved {
+                receipt_id,
+                submitter: submitter.clone(),
+                amount: fee,
+            });
             Ok(fee)
         }
 
@@ -910,15 +918,46 @@ pub mod pallet {
             // share plus any rounding residue from the integer-division
             // above. We use repatriate_reserved here for the same reason:
             // the invariant is that all reserved fee leaves the submitter.
+            //
+            // On a fresh chain the treasury pot may be "dead" (free balance
+            // below ED with no providers). In that case pallet_balances'
+            // `repatriate_reserved` returns `Err(DeadAccount)` rather than
+            // a non-zero remainder — see `do_transfer_reserved` which
+            // `ensure!(!is_new, ...)` before moving funds. A `Polite`
+            // partial success would return `Ok(remainder)`.
+            //
+            // We handle both cases: map `Err` to "full amount un-moved"
+            // and unreserve whatever remains on the submitter. Net effect:
+            // either the treasury got its cut, or the submitter got it
+            // back. The event reports what actually moved, never the
+            // intended amount. Keeps the math honest for explorers that
+            // sum `treasury_amount` across events.
+            let mut actual_to_treasury = 0u128;
             if to_treasury > 0 {
                 let treasury_acct = Self::treasury_account();
                 let balance: BalanceOf<T> = to_treasury.try_into().unwrap_or_default();
-                let _ = T::Currency::repatriate_reserved(
+                let remainder_u128: u128 = match T::Currency::repatriate_reserved(
                     &submitter,
                     &treasury_acct,
                     balance,
                     BalanceStatus::Free,
-                );
+                ) {
+                    Ok(remainder_bal) => remainder_bal.try_into().unwrap_or_default(),
+                    // Treasury pot is dead / below ED — no funds moved.
+                    // Full requested amount is still reserved on submitter.
+                    Err(_) => to_treasury,
+                };
+                if remainder_u128 > 0 {
+                    let remainder_bal: BalanceOf<T> =
+                        remainder_u128.try_into().unwrap_or_default();
+                    // Release the un-moved remainder back to submitter's
+                    // free balance. Falling back to `unreserve` (not a
+                    // retry of repatriate) because the treasury pot is
+                    // demonstrably un-openable for this call; retrying
+                    // would just fail again.
+                    T::Currency::unreserve(&submitter, remainder_bal);
+                }
+                actual_to_treasury = to_treasury.saturating_sub(remainder_u128);
             }
 
             Self::deposit_event(Event::ReceiptFeeDistributed {
@@ -926,7 +965,7 @@ pub mod pallet {
                 submitter,
                 total_fee: reserved_fee,
                 per_signer_amount: per_signer,
-                treasury_amount: to_treasury,
+                treasury_amount: actual_to_treasury,
                 signer_count,
             });
         }
@@ -1019,6 +1058,15 @@ pub mod pallet {
 
         /// Root-only: directly set an availability certificate on a receipt.
         /// Retained for backward compatibility / emergency override.
+        ///
+        /// Component-4 invariant: if the receipt has an open fee escrow,
+        /// the root override has no actual signers to reward — so the
+        /// cleanest policy is to refund the submitter in full and clear
+        /// the escrow storage. Without this, the reserved balance would
+        /// be stranded forever: `expire_receipt_fee` rejects certified
+        /// receipts with `ReceiptAlreadyCertified`, and no other code path
+        /// drains `ReceiptFeeEscrow`. Mirrors the expire-refund event for
+        /// auditability.
         #[pallet::call_index(1)]
         #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::set_availability_cert())]
         pub fn set_availability_cert(
@@ -1032,6 +1080,24 @@ pub mod pallet {
                 record.availability_cert_hash = cert_hash;
                 Ok::<(), DispatchError>(())
             })?;
+
+            // Refund any open escrow to the submitter. Legacy (pre-Component-4)
+            // receipts have no escrow entry and this is a silent no-op —
+            // preserving the prior behaviour for any stale data on-chain.
+            if let Some((submitter, amount_u128)) = ReceiptFeeEscrow::<T>::take(&receipt_id) {
+                if amount_u128 > 0 {
+                    let amount_bal: BalanceOf<T> =
+                        amount_u128.try_into().unwrap_or_default();
+                    let _ = T::Currency::unreserve(&submitter, amount_bal);
+                }
+                Self::deposit_event(Event::ReceiptFeeRefunded {
+                    receipt_id,
+                    submitter,
+                    amount: amount_u128,
+                });
+            }
+            ReceiptSubmittedAt::<T>::remove(&receipt_id);
+
             Self::deposit_event(Event::AvailabilityCertified {
                 receipt_id,
                 cert_hash: H256::from(cert_hash),
@@ -1699,6 +1765,12 @@ pub mod pallet {
         /// Update the expiry window (in blocks) after which an uncertified
         /// receipt's escrow can be refunded via `expire_receipt_fee`.
         /// Root-only.
+        ///
+        /// Rejects values below `MIN_RECEIPT_EXPIRY_BLOCKS` (10). Very low
+        /// expiry windows create a grief vector: a compromised root key
+        /// could set expiry=0 and race-refund receipts whose signers are
+        /// mid-attestation, stealing the submitter→signer flow. See
+        /// `MIN_RECEIPT_EXPIRY_BLOCKS` docs for the threat model.
         #[pallet::call_index(18)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
             .saturating_add(T::DbWeight::get().writes(1)))]
@@ -1707,6 +1779,10 @@ pub mod pallet {
             value: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            ensure!(
+                value >= MIN_RECEIPT_EXPIRY_BLOCKS,
+                Error::<T>::ReceiptExpiryBlocksTooLow
+            );
             ReceiptExpiryBlocks::<T>::put(value);
             Self::deposit_event(Event::ReceiptExpiryBlocksUpdated { new_value: value });
             Ok(())
