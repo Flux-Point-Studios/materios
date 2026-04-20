@@ -2,7 +2,7 @@ use crate as pallet_orinq_receipts;
 use crate::{pallet, pallet::GrandpaPendingChange, types::{ReceiptRecord, SlashReason}};
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
-    traits::{ConstBool, ConstU32, ConstU64, Currency},
+    traits::{ConstBool, ConstU32, ConstU64, Currency, ReservableCurrency},
     PalletId,
 };
 use parity_scale_codec::{Decode, Encode};
@@ -98,6 +98,9 @@ parameter_types! {
     /// Mock attestor reserve pot — matches the production runtime's
     /// `mat/attr` PalletId so test expectations mirror the real routing.
     pub const AttestorReservePotId: PalletId = PalletId(*b"mat/attr");
+    /// Mock treasury pot — matches the production runtime's `mat/trsy`
+    /// PalletId so Component-4 fee-split tests mirror the real routing.
+    pub const TreasuryPotId: PalletId = PalletId(*b"mat/trsy");
 }
 
 impl pallet::Config for Test {
@@ -107,6 +110,7 @@ impl pallet::Config for Test {
     type MaxCommitteeSize = ConstU32<16>;
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
+    type TreasuryPotId = TreasuryPotId;
 }
 
 /// Construct a deterministic AccountId32 from a single byte seed (for tests).
@@ -121,11 +125,16 @@ fn new_test_ext() -> sp_io::TestExternalities {
         .unwrap();
     // Seed Component-5 storage from genesis (defaults match the previous
     // const values: 10 MATRA/signer, 50K MATRA/era base, baseline 16).
+    // Component 4: seed the per-receipt fee, floor, and expiry deadline at
+    // the documented defaults.
     pallet_orinq_receipts::GenesisConfig::<Test> {
         attestation_reward_per_signer: 10_000_000,
         era_cap_base: 50_000_000_000,
         era_cap_baseline_attestor_count: 16,
         bond_requirement: 1_000_000_000,
+        receipt_submission_fee: 1_000_000,
+        receipt_submission_fee_floor: 100_000,
+        receipt_expiry_blocks: 14_400,
         _phantom: Default::default(),
     }
     .assimilate_storage(&mut t)
@@ -152,6 +161,15 @@ fn submit(
     receipt_id: H256,
     content_hash: H256,
 ) -> frame_support::dispatch::DispatchResult {
+    // Component 4: ensure the submitter has enough MATRA to reserve the
+    // per-receipt submission fee. Tests that explicitly want to exercise
+    // the InsufficientFee error bypass this helper and fund manually —
+    // we only auto-fund accounts at zero so a deliberately-underfunded
+    // account (e.g. with 500_000 balance, below the 1M fee) isn't
+    // silently topped up.
+    if Balances::free_balance(&acc(who_seed)) == 0 {
+        Balances::make_free_balance_be(&acc(who_seed), 10_000_000);
+    }
     OrinqReceipts::submit_receipt(
         RuntimeOrigin::signed(acc(who_seed)),
         receipt_id,
@@ -204,6 +222,10 @@ fn submit_receipt_duplicate_fails() {
         let ch = H256::from([0xDD; 32]);
 
         assert_ok!(submit(1, rid, ch));
+
+        // Pre-fund the second submitter outside `assert_noop!` so its
+        // auto-fund side-effect does not pollute the storage hash check.
+        Balances::make_free_balance_be(&acc(2), 10_000_000);
         assert_noop!(
             submit(2, rid, ch),
             pallet::Error::<Test>::ReceiptAlreadyExists
@@ -954,4 +976,828 @@ fn grandpa_pending_change_layout_compatibility() {
     let decoded = GrandpaPendingChange::<u64>::decode(&mut &expected[..])
         .expect("manually constructed bytes must decode");
     assert_eq!(decoded, pending);
+}
+
+// ---------------------------------------------------------------------------
+// Component 4 — per-receipt submission fee + signer payout
+//
+// Submitter pays a flat fee on each receipt, held in escrow. When the
+// attestation threshold is met, 80% is split pro-rata flat among the actual
+// signers and 20% plus any rounding residue goes to the treasury pot. If the
+// receipt expires before certification, the full fee refunds to the
+// submitter. Both the fee amount and a minimum-floor are governance-tunable.
+// ---------------------------------------------------------------------------
+
+/// Default fee at genesis: 1 MATRA (6 decimals = 1_000_000 base units).
+const DEFAULT_FEE: u128 = 1_000_000;
+/// Default floor at genesis: 0.1 MATRA (100_000 base units).
+const DEFAULT_FLOOR: u128 = 100_000;
+
+fn treasury_account() -> MockAccountId {
+    TreasuryPotId::get().into_account_truncating()
+}
+
+/// Submit a receipt with dummy field values — shorthand used by Component-4
+/// tests, distinct from the top-of-file `submit` helper which predates
+/// Component 4 so is re-used unchanged.
+fn submit_c4(who_seed: u8, receipt_id: H256, content_hash: H256) -> frame_support::dispatch::DispatchResult {
+    submit(who_seed, receipt_id, content_hash)
+}
+
+/// Attach Alice (seed 1) to the committee with a bond and threshold-1 setup,
+/// and seed enough free balance that the receipt fee can be reserved.
+fn seed_submitter_and_committee(submitter_seed: u8, committee_seeds: &[u8]) {
+    // Submitter gets enough MATRA to cover the fee.
+    Balances::make_free_balance_be(&acc(submitter_seed), 10_000_000_000);
+    // Committee members each fund + bond + join.
+    for &s in committee_seeds.iter() {
+        Balances::make_free_balance_be(&acc(s), 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(RuntimeOrigin::signed(acc(s)), 1_000_000_000));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(s))));
+    }
+    // Treasury pot pre-funded above ED so it can receive deposits.
+    Balances::make_free_balance_be(&treasury_account(), 1);
+}
+
+#[test]
+fn fee_storage_defaults_match_genesis() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(OrinqReceipts::receipt_submission_fee(), DEFAULT_FEE);
+        assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), DEFAULT_FLOOR);
+    });
+}
+
+#[test]
+fn submit_receipt_reserves_fee_from_submitter() {
+    new_test_ext().execute_with(|| {
+        let submitter = acc(1);
+        Balances::make_free_balance_be(&submitter, 10_000_000);
+        let rid = H256::from([7u8; 32]);
+        let ch = H256::from([8u8; 32]);
+
+        assert_ok!(submit_c4(1, rid, ch));
+
+        // Fee reserved from submitter's free balance.
+        assert_eq!(Balances::reserved_balance(&submitter), DEFAULT_FEE);
+        assert_eq!(Balances::free_balance(&submitter), 10_000_000 - DEFAULT_FEE);
+
+        // Escrow map populated.
+        let escrow = pallet::ReceiptFeeEscrow::<Test>::get(rid)
+            .expect("escrow must be populated on submit");
+        assert_eq!(escrow.0, submitter);
+        assert_eq!(escrow.1, DEFAULT_FEE);
+    });
+}
+
+#[test]
+fn insufficient_balance_rejects_submission() {
+    new_test_ext().execute_with(|| {
+        let submitter = acc(1);
+        // Below fee (1M).
+        Balances::make_free_balance_be(&submitter, 500_000);
+        let rid = H256::from([7u8; 32]);
+        let ch = H256::from([8u8; 32]);
+
+        assert_noop!(
+            submit_c4(1, rid, ch),
+            pallet::Error::<Test>::InsufficientFee
+        );
+    });
+}
+
+#[test]
+fn threshold_hit_splits_fee_80_20_three_signers() {
+    new_test_ext().execute_with(|| {
+        // 5-member committee, threshold 3; 3 signers actually attest.
+        // Expected: each signer gets (1M * 80/100) / 3 = 266_666 (dust 2 -> treasury)
+        //           treasury gets 200_000 + 2 = 200_002
+        let submitter_seed = 10;
+        let committee_seeds: Vec<u8> = (1u8..=5).collect();
+        seed_submitter_and_committee(submitter_seed, &committee_seeds);
+
+        // Set threshold to 3 (committee has 5 members).
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            3
+        ));
+
+        let rid = H256::from([0xA1; 32]);
+        let ch = H256::from([0xA2; 32]);
+
+        let submitter_free_before = Balances::free_balance(&acc(submitter_seed));
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+        assert_eq!(Balances::reserved_balance(&acc(submitter_seed)), DEFAULT_FEE);
+
+        // Snapshot signer + treasury balances BEFORE certification.
+        let signer_seeds = [1u8, 2, 3];
+        let signer_before: Vec<u128> =
+            signer_seeds.iter().map(|&s| Balances::free_balance(&acc(s))).collect();
+        let treasury_before = Balances::free_balance(&treasury_account());
+
+        // Three signers attest — threshold hits on the third.
+        let cert_hash = [0xCE; 32];
+        for &s in signer_seeds.iter() {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                cert_hash
+            ));
+        }
+
+        // to_signers = 1_000_000 * 80 / 100 = 800_000
+        // per_signer = 800_000 / 3 = 266_666
+        // residue    = 800_000 - 3*266_666 = 2
+        // to_treasury (final) = 200_000 + 2 = 200_002
+        let per_signer = 266_666u128;
+        let to_treasury = 200_002u128;
+
+        for (i, &s) in signer_seeds.iter().enumerate() {
+            let delta = Balances::free_balance(&acc(s)) - signer_before[i];
+            // Each signer also earns the attestation reward (10M base units);
+            // the Component-4 payout is in addition to that. Subtract the
+            // attestation reward to isolate the fee share.
+            let fee_share = delta - 10_000_000;
+            assert_eq!(
+                fee_share, per_signer,
+                "signer {} should get {} fee share, got {}",
+                s, per_signer, fee_share
+            );
+        }
+
+        assert_eq!(
+            Balances::free_balance(&treasury_account()) - treasury_before,
+            to_treasury,
+            "treasury must receive 20% + rounding residue"
+        );
+
+        // Submitter's reserve drained, escrow cleared, free balance went down
+        // by exactly the full fee.
+        assert_eq!(Balances::reserved_balance(&acc(submitter_seed)), 0);
+        assert!(pallet::ReceiptFeeEscrow::<Test>::get(rid).is_none());
+        assert_eq!(
+            submitter_free_before - Balances::free_balance(&acc(submitter_seed)),
+            DEFAULT_FEE
+        );
+    });
+}
+
+#[test]
+fn threshold_hit_with_seven_signers_splits_cleanly() {
+    // 1M × 0.80 = 800_000; / 7 = 114_285 each; residue = 800_000 - 7*114_285 = 5.
+    // Treasury = 200_000 + 5 = 200_005.
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        let committee_seeds: Vec<u8> = (1u8..=7).collect();
+        seed_submitter_and_committee(submitter_seed, &committee_seeds);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            7
+        ));
+
+        let rid = H256::from([0xB1; 32]);
+        let ch = H256::from([0xB2; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        let signer_before: Vec<u128> =
+            committee_seeds.iter().map(|&s| Balances::free_balance(&acc(s))).collect();
+        let treasury_before = Balances::free_balance(&treasury_account());
+
+        let cert_hash = [0xCE; 32];
+        for &s in committee_seeds.iter() {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                cert_hash
+            ));
+        }
+
+        let per_signer = 114_285u128;
+        let to_treasury = 200_005u128;
+
+        for (i, &s) in committee_seeds.iter().enumerate() {
+            let delta = Balances::free_balance(&acc(s)) - signer_before[i];
+            let fee_share = delta - 10_000_000;
+            assert_eq!(
+                fee_share, per_signer,
+                "signer {} should get {} fee share, got {}",
+                s, per_signer, fee_share
+            );
+        }
+
+        assert_eq!(
+            Balances::free_balance(&treasury_account()) - treasury_before,
+            to_treasury
+        );
+    });
+}
+
+#[test]
+fn threshold_hit_single_signer_gets_full_80_percent() {
+    // Edge case: N_signers == 1 means that signer receives 800_000 in one
+    // lump. Test documents the behaviour explicitly so it's not a surprise.
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let rid = H256::from([0xC1; 32]);
+        let ch = H256::from([0xC2; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        let signer_before = Balances::free_balance(&acc(1));
+        let treasury_before = Balances::free_balance(&treasury_account());
+
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            [0xCE; 32]
+        ));
+
+        // Whole 80% goes to the sole signer, 20% goes to treasury.
+        let signer_delta = Balances::free_balance(&acc(1)) - signer_before;
+        let fee_share = signer_delta - 10_000_000; // subtract attestation reward
+        assert_eq!(fee_share, 800_000);
+        assert_eq!(
+            Balances::free_balance(&treasury_account()) - treasury_before,
+            200_000
+        );
+    });
+}
+
+#[test]
+fn threshold_hit_emits_fee_distributed_event() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        let committee_seeds: Vec<u8> = (1u8..=3).collect();
+        seed_submitter_and_committee(submitter_seed, &committee_seeds);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            3
+        ));
+
+        let rid = H256::from([0xD1; 32]);
+        let ch = H256::from([0xD2; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+        for &s in committee_seeds.iter() {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                [0xCE; 32]
+            ));
+        }
+
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::ReceiptFeeDistributed { total_fee, signer_count, .. }
+                ) if *total_fee == DEFAULT_FEE && *signer_count == 3
+            )
+        });
+        assert!(matched, "ReceiptFeeDistributed event must fire");
+    });
+}
+
+#[test]
+fn pre_component_4_receipt_skips_fee_payout() {
+    // Simulate a receipt that exists without escrow (pre-Component-4 legacy).
+    // The threshold-hit path must not panic; it must simply skip the fee
+    // distribution and still finalize the cert.
+    new_test_ext().execute_with(|| {
+        let submitter = acc(10);
+        Balances::make_free_balance_be(&submitter, 10_000_000_000);
+        let committee_seeds = [1u8, 2];
+        for &s in committee_seeds.iter() {
+            Balances::make_free_balance_be(&acc(s), 10_000_000_000);
+            assert_ok!(OrinqReceipts::bond(RuntimeOrigin::signed(acc(s)), 1_000_000_000));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(s))));
+        }
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            2
+        ));
+
+        let rid = H256::from([0xE1; 32]);
+        let ch = H256::from([0xE2; 32]);
+        assert_ok!(submit_c4(10, rid, ch));
+
+        // Wipe the escrow as though the receipt was submitted before
+        // Component 4 landed.
+        pallet::ReceiptFeeEscrow::<Test>::remove(rid);
+        // Also clear the submitter's reserve to mirror legacy state.
+        let _ = Balances::unreserve(&submitter, DEFAULT_FEE);
+
+        // Certify — must not error.
+        for &s in committee_seeds.iter() {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                [0xCE; 32]
+            ));
+        }
+
+        // Receipt is certified.
+        let record = OrinqReceipts::receipts(rid).unwrap();
+        assert_eq!(record.availability_cert_hash, [0xCE; 32]);
+    });
+}
+
+#[test]
+fn expired_receipt_refunds_submitter() {
+    new_test_ext().execute_with(|| {
+        let submitter = acc(1);
+        Balances::make_free_balance_be(&submitter, 10_000_000);
+        let rid = H256::from([0xF1; 32]);
+        let ch = H256::from([0xF2; 32]);
+        assert_ok!(submit_c4(1, rid, ch));
+        assert_eq!(Balances::reserved_balance(&submitter), DEFAULT_FEE);
+
+        // Fast-forward past expiry — default is 14400 blocks (~24h).
+        let expiry = OrinqReceipts::receipt_expiry_blocks();
+        System::set_block_number(1 + expiry as u32 + 1);
+
+        // Anyone can call expire_receipt_fee.
+        assert_ok!(OrinqReceipts::expire_receipt_fee(
+            RuntimeOrigin::signed(acc(99)),
+            rid
+        ));
+
+        // Reserve drained, escrow cleared, free balance restored.
+        assert_eq!(Balances::reserved_balance(&submitter), 0);
+        assert!(pallet::ReceiptFeeEscrow::<Test>::get(rid).is_none());
+        assert_eq!(Balances::free_balance(&submitter), 10_000_000);
+
+        // Event fired.
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::ReceiptFeeRefunded { amount, .. }
+                ) if *amount == DEFAULT_FEE
+            )
+        });
+        assert!(matched, "ReceiptFeeRefunded event must fire");
+    });
+}
+
+#[test]
+fn expire_before_deadline_fails() {
+    new_test_ext().execute_with(|| {
+        let submitter = acc(1);
+        Balances::make_free_balance_be(&submitter, 10_000_000);
+        let rid = H256::from([0x11; 32]);
+        let ch = H256::from([0x12; 32]);
+        assert_ok!(submit_c4(1, rid, ch));
+
+        // Block has not advanced past expiry.
+        assert_noop!(
+            OrinqReceipts::expire_receipt_fee(RuntimeOrigin::signed(acc(99)), rid),
+            pallet::Error::<Test>::ReceiptNotExpired
+        );
+    });
+}
+
+#[test]
+fn expire_after_certification_fails() {
+    // Once a receipt is certified the escrow is cleared by the payout path;
+    // calling expire_receipt_fee must fail with a clear error rather than
+    // silently no-oping.
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let rid = H256::from([0x21; 32]);
+        let ch = H256::from([0x22; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            [0xCE; 32]
+        ));
+
+        let expiry = OrinqReceipts::receipt_expiry_blocks();
+        System::set_block_number(1 + expiry as u32 + 1);
+        assert_noop!(
+            OrinqReceipts::expire_receipt_fee(RuntimeOrigin::signed(acc(99)), rid),
+            pallet::Error::<Test>::ReceiptAlreadyCertified
+        );
+    });
+}
+
+#[test]
+fn set_fee_works_for_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_receipt_submission_fee(
+            RuntimeOrigin::root(),
+            5_000_000
+        ));
+        assert_eq!(OrinqReceipts::receipt_submission_fee(), 5_000_000);
+
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::ReceiptSubmissionFeeUpdated { new_value: 5_000_000 }
+                )
+            )
+        });
+        assert!(matched, "ReceiptSubmissionFeeUpdated event must fire");
+    });
+}
+
+#[test]
+fn set_fee_rejects_below_floor() {
+    new_test_ext().execute_with(|| {
+        // Default floor is 100_000. Setting fee below the floor must fail.
+        assert_noop!(
+            OrinqReceipts::set_receipt_submission_fee(RuntimeOrigin::root(), 50_000),
+            pallet::Error::<Test>::FeeBelowFloor
+        );
+    });
+}
+
+#[test]
+fn set_fee_root_only() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_receipt_submission_fee(
+                RuntimeOrigin::signed(acc(1)),
+                5_000_000
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn set_floor_works_for_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_receipt_submission_fee_floor(
+            RuntimeOrigin::root(),
+            250_000
+        ));
+        assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), 250_000);
+    });
+}
+
+#[test]
+fn set_floor_root_only() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_receipt_submission_fee_floor(
+                RuntimeOrigin::signed(acc(1)),
+                250_000
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn raising_floor_above_current_fee_does_not_retroactively_invalidate() {
+    // Governance setters are independent — raising the floor above the
+    // current fee is allowed; the fee remains in place until the next
+    // set_receipt_submission_fee call reconciles it. The invariant is on
+    // *fee updates*, not on *floor updates*.
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_receipt_submission_fee_floor(
+            RuntimeOrigin::root(),
+            5_000_000
+        ));
+        assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), 5_000_000);
+        // The fee is still 1_000_000, which is below the new floor — allowed.
+        assert_eq!(OrinqReceipts::receipt_submission_fee(), 1_000_000);
+
+        // But the next attempt to set_receipt_submission_fee below the floor fails.
+        assert_noop!(
+            OrinqReceipts::set_receipt_submission_fee(RuntimeOrigin::root(), 999_999),
+            pallet::Error::<Test>::FeeBelowFloor
+        );
+        // At-floor is allowed.
+        assert_ok!(OrinqReceipts::set_receipt_submission_fee(
+            RuntimeOrigin::root(),
+            5_000_000
+        ));
+    });
+}
+
+#[test]
+fn migration_idempotent() {
+    new_test_ext().execute_with(|| {
+        use frame_support::traits::Hooks;
+
+        // First run — a no-op because genesis already set both values.
+        let _ = <OrinqReceipts as Hooks<_>>::on_runtime_upgrade();
+        let fee_after_1 = OrinqReceipts::receipt_submission_fee();
+        let floor_after_1 = OrinqReceipts::receipt_submission_fee_floor();
+
+        // Second run must not change anything.
+        let _ = <OrinqReceipts as Hooks<_>>::on_runtime_upgrade();
+        assert_eq!(OrinqReceipts::receipt_submission_fee(), fee_after_1);
+        assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), floor_after_1);
+
+        // Explicitly zero-out storage to simulate a pre-Component-4 chain,
+        // then run migration — it should populate the defaults.
+        pallet::ReceiptSubmissionFee::<Test>::kill();
+        pallet::ReceiptSubmissionFeeFloor::<Test>::kill();
+        pallet::ReceiptExpiryBlocks::<Test>::kill();
+        let _ = <OrinqReceipts as Hooks<_>>::on_runtime_upgrade();
+        assert_eq!(OrinqReceipts::receipt_submission_fee(), DEFAULT_FEE);
+        assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), DEFAULT_FLOOR);
+
+        // Re-running must still be idempotent.
+        let fee_a = OrinqReceipts::receipt_submission_fee();
+        let floor_a = OrinqReceipts::receipt_submission_fee_floor();
+        let _ = <OrinqReceipts as Hooks<_>>::on_runtime_upgrade();
+        assert_eq!(OrinqReceipts::receipt_submission_fee(), fee_a);
+        assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), floor_a);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Security-review follow-ups (pre-merge hardening)
+// ---------------------------------------------------------------------------
+
+/// C1 — `set_availability_cert` must release the fee escrow so the submitter's
+/// reserved balance does not remain stuck forever. The Root override has no
+/// actual signers to reward, so the cleanest invariant is "refund the
+/// submitter in full and emit `ReceiptFeeRefunded`", mirroring the expire
+/// path.
+#[test]
+fn set_availability_cert_root_refunds_escrow_if_present() {
+    new_test_ext().execute_with(|| {
+        let submitter = acc(1);
+        Balances::make_free_balance_be(&submitter, 10_000_000);
+        let rid = H256::from([0x10; 32]);
+        let ch = H256::from([0x20; 32]);
+
+        // Regular Component-4 submission: escrow populated, balance reserved.
+        assert_ok!(submit_c4(1, rid, ch));
+        assert_eq!(Balances::reserved_balance(&submitter), DEFAULT_FEE);
+        assert!(pallet::ReceiptFeeEscrow::<Test>::get(rid).is_some());
+        assert!(pallet::ReceiptSubmittedAt::<Test>::get(rid).is_some());
+
+        // Root-override cert'ifies the receipt directly.
+        let cert = [0xCE; 32];
+        assert_ok!(OrinqReceipts::set_availability_cert(
+            RuntimeOrigin::root(),
+            rid,
+            cert
+        ));
+
+        // The receipt is certified.
+        let record = OrinqReceipts::receipts(rid).unwrap();
+        assert_eq!(record.availability_cert_hash, cert);
+
+        // Critical invariants: the reserve MUST be released and escrow
+        // storage MUST be cleared, otherwise the submitter's funds are
+        // stranded (expire_receipt_fee would reject with ReceiptAlreadyCertified).
+        assert_eq!(
+            Balances::reserved_balance(&submitter), 0,
+            "root override must unreserve submitter's fee"
+        );
+        assert_eq!(
+            Balances::free_balance(&submitter), 10_000_000,
+            "submitter's free balance must be restored in full"
+        );
+        assert!(
+            pallet::ReceiptFeeEscrow::<Test>::get(rid).is_none(),
+            "escrow map must be cleared"
+        );
+        assert!(
+            pallet::ReceiptSubmittedAt::<Test>::get(rid).is_none(),
+            "submitted-at anchor must be cleared"
+        );
+
+        // Refund event mirrors the expire-refund path for auditability.
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::ReceiptFeeRefunded { amount, .. }
+                ) if *amount == DEFAULT_FEE
+            )
+        });
+        assert!(
+            matched,
+            "ReceiptFeeRefunded event must fire so explorers can trace the refund"
+        );
+    });
+}
+
+/// C1 — When no escrow is present (pre-Component-4 / legacy receipt), the
+/// Root override must still succeed and MUST NOT emit a spurious refund
+/// event or touch any reserve. Preserves the existing behaviour for
+/// receipts that predate fee escrow.
+#[test]
+fn set_availability_cert_root_without_escrow_is_noop_on_refund_path() {
+    new_test_ext().execute_with(|| {
+        let submitter = acc(1);
+        Balances::make_free_balance_be(&submitter, 10_000_000);
+        let rid = H256::from([0x30; 32]);
+        let ch = H256::from([0x31; 32]);
+        assert_ok!(submit_c4(1, rid, ch));
+
+        // Simulate a legacy receipt: wipe escrow but leave the on-chain
+        // receipt record in place.
+        pallet::ReceiptFeeEscrow::<Test>::remove(rid);
+        pallet::ReceiptSubmittedAt::<Test>::remove(rid);
+        let _ = Balances::unreserve(&submitter, DEFAULT_FEE);
+
+        // Snapshot events-pre so we can diff just the override's effects.
+        let events_before = frame_system::Pallet::<Test>::events().len();
+
+        assert_ok!(OrinqReceipts::set_availability_cert(
+            RuntimeOrigin::root(),
+            rid,
+            [0xCE; 32]
+        ));
+
+        // No refund event fires when there was no escrow to refund.
+        let refund_after = frame_system::Pallet::<Test>::events()
+            .iter()
+            .skip(events_before)
+            .any(|r| matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(crate::Event::ReceiptFeeRefunded { .. })
+            ));
+        assert!(!refund_after, "no refund event should fire when no escrow present");
+    });
+}
+
+/// I1 — `submit_receipt` MUST emit a `ReceiptFeeReserved` event so auditors
+/// have a direct on-chain trace of the reservation (current `ReceiptSubmitted`
+/// says nothing about the fee or the escrow, which makes sampling tooling
+/// brittle).
+#[test]
+fn submit_receipt_emits_fee_reserved_event() {
+    new_test_ext().execute_with(|| {
+        let submitter = acc(1);
+        Balances::make_free_balance_be(&submitter, 10_000_000);
+        let rid = H256::from([0x40; 32]);
+        let ch = H256::from([0x41; 32]);
+
+        assert_ok!(submit_c4(1, rid, ch));
+
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::ReceiptFeeReserved { receipt_id, amount, .. }
+                ) if *receipt_id == rid && *amount == DEFAULT_FEE
+            )
+        });
+        assert!(
+            matched,
+            "ReceiptFeeReserved event must fire on successful submit_receipt"
+        );
+    });
+}
+
+/// I2 — `set_receipt_expiry_blocks` must reject values below the minimum
+/// (10 blocks). A compromised root key could otherwise set expiry=0 and
+/// race-refund in-flight submissions whose signers are mid-attestation,
+/// stealing the submitter→signer fee flow.
+#[test]
+fn set_receipt_expiry_blocks_rejects_below_minimum() {
+    new_test_ext().execute_with(|| {
+        // 0 is the worst case — must be rejected.
+        assert_noop!(
+            OrinqReceipts::set_receipt_expiry_blocks(RuntimeOrigin::root(), 0),
+            pallet::Error::<Test>::ReceiptExpiryBlocksTooLow
+        );
+        // Anything below the constant must also be rejected.
+        assert_noop!(
+            OrinqReceipts::set_receipt_expiry_blocks(
+                RuntimeOrigin::root(),
+                pallet::MIN_RECEIPT_EXPIRY_BLOCKS - 1
+            ),
+            pallet::Error::<Test>::ReceiptExpiryBlocksTooLow
+        );
+        // Exactly at the minimum is allowed.
+        assert_ok!(OrinqReceipts::set_receipt_expiry_blocks(
+            RuntimeOrigin::root(),
+            pallet::MIN_RECEIPT_EXPIRY_BLOCKS
+        ));
+        assert_eq!(
+            OrinqReceipts::receipt_expiry_blocks(),
+            pallet::MIN_RECEIPT_EXPIRY_BLOCKS
+        );
+        // And above-minimum still works.
+        assert_ok!(OrinqReceipts::set_receipt_expiry_blocks(
+            RuntimeOrigin::root(),
+            100
+        ));
+        assert_eq!(OrinqReceipts::receipt_expiry_blocks(), 100);
+    });
+}
+
+/// I3 — If the treasury pot is below ED at payout, `repatriate_reserved`
+/// silently returns the amount un-moved. Without the fix, the submitter's
+/// reserve would remain stuck AND the event would report a treasury_amount
+/// that was never transferred. The fix must refund the remainder to the
+/// submitter and emit an event whose `treasury_amount` reflects what
+/// actually moved.
+#[test]
+fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
+    new_test_ext().execute_with(|| {
+        // 5-member committee, threshold 3; 3 signers actually attest.
+        // Per-signer = 266_666, to_treasury = 200_002 on DEFAULT_FEE.
+        let submitter_seed = 10;
+        let committee_seeds: Vec<u8> = (1u8..=5).collect();
+
+        // Seed: submitter funded; committee bonded + joined; but
+        // explicitly DO NOT pre-fund the treasury pot. With ED=1 and a
+        // zero balance, the 200_002 repatriation will silently keep the
+        // funds reserved on the submitter (the pot can't be opened below ED).
+        Balances::make_free_balance_be(&acc(submitter_seed), 10_000_000_000);
+        for &s in committee_seeds.iter() {
+            Balances::make_free_balance_be(&acc(s), 10_000_000_000);
+            assert_ok!(OrinqReceipts::bond(
+                RuntimeOrigin::signed(acc(s)),
+                1_000_000_000
+            ));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(s))));
+        }
+        // Treasury pot explicitly drained below ED.
+        Balances::make_free_balance_be(&treasury_account(), 0);
+        assert_eq!(Balances::free_balance(&treasury_account()), 0);
+
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            3
+        ));
+
+        let rid = H256::from([0x50; 32]);
+        let ch = H256::from([0x51; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+        assert_eq!(
+            Balances::reserved_balance(&acc(submitter_seed)),
+            DEFAULT_FEE
+        );
+
+        let submitter_free_before = Balances::free_balance(&acc(submitter_seed));
+
+        // Three signers attest — threshold hits.
+        let signer_seeds = [1u8, 2, 3];
+        for &s in signer_seeds.iter() {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                [0xCE; 32]
+            ));
+        }
+
+        // Invariant 1: submitter's reserve is fully drained. Without the
+        // fix the treasury share would still be held.
+        assert_eq!(
+            Balances::reserved_balance(&acc(submitter_seed)),
+            0,
+            "submitter's full reserve must be released regardless of treasury state"
+        );
+
+        // Invariant 2: submitter's free balance reflects refund of the
+        // treasury share (since the pot was below ED).
+        let expected_refund = 200_002u128; // 20% + dust
+        assert_eq!(
+            Balances::free_balance(&acc(submitter_seed)),
+            submitter_free_before + expected_refund,
+            "submitter must be refunded the un-moved treasury share"
+        );
+
+        // Invariant 3: the event reports actual_treasury_moved (0 in this
+        // case), not the requested 200_002.
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::ReceiptFeeDistributed { treasury_amount, .. }
+                ) if *treasury_amount == 0
+            )
+        });
+        assert!(
+            matched,
+            "event must report treasury_amount=0 when the pot was below ED"
+        );
+    });
 }

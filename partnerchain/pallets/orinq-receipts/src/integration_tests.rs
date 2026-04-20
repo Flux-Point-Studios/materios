@@ -101,6 +101,8 @@ impl pallet_motra::pallet::Config for Test {
 parameter_types! {
     pub const AttestorReservePotId: frame_support::PalletId =
         frame_support::PalletId(*b"mat/attr");
+    pub const TreasuryPotId: frame_support::PalletId =
+        frame_support::PalletId(*b"mat/trsy");
 }
 
 impl crate::pallet::Config for Test {
@@ -110,6 +112,7 @@ impl crate::pallet::Config for Test {
     type MaxCommitteeSize = ConstU32<16>;
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
+    type TreasuryPotId = TreasuryPotId;
 }
 
 // ---------------------------------------------------------------------------
