@@ -7,8 +7,13 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
-pub mod fee_router;
+// v5.1 Midnight-style fees: the 40/30/20/10 MATRA fee-router (see
+// `fee_router.rs` on main up to spec 201) is DELETED. MATRA is no longer
+// charged on transactions — MOTRA is the sole tx-fee mechanism via
+// `pallet_motra::fee::ChargeMotra`. The no-op adapter below replaces it.
+pub mod no_op_charge;
 pub mod input_sanity;
+pub mod migrations;
 
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
@@ -28,7 +33,7 @@ use frame_support::{
 };
 use frame_system::{EnsureRoot, EnsureRootWithSuccess};
 use frame_system::limits::{BlockLength, BlockWeights};
-use pallet_transaction_payment::FungibleAdapter;
+// `FungibleAdapter` is no longer used — see `no_op_charge::NoOpCharge`.
 use session_manager::ValidatorManagementSessionManager;
 use sidechain_domain::{
     NativeTokenAmount, ScEpochNumber, ScSlotNumber, UtxoId,
@@ -177,7 +182,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 201,
+    // 202 = v5.1 Midnight-style fees (MATRA no longer charged, MOTRA-only;
+    //        85/15 validator/treasury emission split; one-shot sweep of
+    //        residual mat/auth + mat/attr balances into mat/trsy, 2026-04-21).
+    spec_version: 202,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -317,9 +325,13 @@ impl pallet_balances::Config for Runtime {
 
 impl pallet_transaction_payment::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    // v5.1 tokenomics: route fees through the 40/30/20/10 splitter instead
-    // of the default author-only path. See `fee_router::DealWithFees`.
-    type OnChargeTransaction = FungibleAdapter<Balances, fee_router::DealWithFees<Runtime>>;
+    // v5.1 Midnight-style fees (spec 202, 2026-04-21): MATRA is not charged
+    // on transactions. MOTRA is the sole tx-fee via
+    // `pallet_motra::fee::ChargeMotra` in `SignedExtra`. `NoOpCharge` makes
+    // `withdraw_fee` / `correct_and_deposit_fee` zero-effect, so MATRA
+    // total_issuance is conserved. `WeightToFee` / `LengthToFee` still
+    // compute nominal figures for the RPC surface (wallets call them).
+    type OnChargeTransaction = no_op_charge::NoOpCharge<Balances>;
     type OperationalFeeMultiplier = ConstU8<5>;
     type WeightToFee = IdentityFee<Balance>;
     type LengthToFee = IdentityFee<Balance>;
@@ -683,8 +695,21 @@ pub type SignedExtra = (
 pub type UncheckedExtrinsic =
     generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, SignedExtra>;
 /// Executive: handles dispatch to the various modules.
-pub type Executive =
-    frame_executive::Executive<Runtime, Block, frame_system::ChainContext<Runtime>, Runtime, AllPalletsWithSystem>;
+///
+/// The 6th type parameter is `COnRuntimeUpgrade`: extra migrations that run
+/// BEFORE `AllPalletsWithSystem::on_runtime_upgrade`. Our v5.1 sweep migration
+/// is placed here so it runs first on the 201 → 202 upgrade block, then the
+/// per-pallet hooks (including orinq-receipts' Component-4 defaults seeder)
+/// run after. The migration is self-gated on a dedicated storage version so
+/// subsequent upgrades short-circuit.
+pub type Executive = frame_executive::Executive<
+    Runtime,
+    Block,
+    frame_system::ChainContext<Runtime>,
+    Runtime,
+    AllPalletsWithSystem,
+    migrations::SweepFeeRouterPotsIntoTreasury,
+>;
 
 // ---------------------------------------------------------------------------
 // Runtime APIs
