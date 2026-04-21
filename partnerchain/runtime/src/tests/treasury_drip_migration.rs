@@ -287,3 +287,124 @@ fn spec_version_bumped_to_202() {
         "transaction_version must stay at 1 — no breaking wire format change"
     );
 }
+
+#[test]
+fn migration_sweeps_when_treasury_account_does_not_preexist() {
+    // MEDIUM follow-up from PR-9 security review: the existing
+    // `migration_sweeps_author_and_attestor_pots_into_treasury` test
+    // pre-funds treasury with ExistentialDeposit so the sweep's recipient
+    // side doesn't trip the ED-on-deposit guard. On a fresh mainnet
+    // spec-202 upgrade, however, `mat/trsy` may never have been touched
+    // — `pallet_treasury` defers account creation until its first spend.
+    //
+    // This test leaves `mat/trsy` uncreated (no genesis seed, no prior
+    // touch) and verifies the sweep still succeeds and preserves
+    // issuance. Per the security-review spec, the migration must
+    // pre-create the treasury before the first transfer so even an
+    // account that didn't pre-exist gains one write and accepts the
+    // subsequent credit.
+    //
+    // We seed `mat/auth` with a realistic sweep-worthy amount (above ED)
+    // so the transfer is semantically a real sweep, not a dust-recovery
+    // corner case. The sub-ED corner is Substrate-immovable (ED rule is
+    // global), so the right behavior there is to log + skip, not to
+    // invent bytes.
+    const AUTHOR_POT_SEED: Balance = 7_777_777; // >> ED=500
+
+    let mut storage = frame_system::GenesisConfig::<Runtime>::default()
+        .build_storage()
+        .expect("frame_system genesis builds");
+
+    pallet_balances::GenesisConfig::<Runtime> {
+        // mat/auth has real funds; mat/attr is empty; mat/trsy is NOT
+        // seeded — this is the configuration that exercises the corner
+        // case.
+        balances: vec![
+            (PalletId(*b"mat/auth").into_account_truncating(), AUTHOR_POT_SEED),
+        ],
+    }
+    .assimilate_storage(&mut storage)
+    .expect("balances genesis");
+
+    pallet_sidechain::GenesisConfig::<Runtime> {
+        genesis_utxo: sidechain_domain::UtxoId::new(
+            hex_literal::hex!(
+                "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"
+            ),
+            0,
+        ),
+        slots_per_epoch: sidechain_slots::SlotsPerEpoch(7),
+        ..Default::default()
+    }
+    .assimilate_storage(&mut storage)
+    .expect("sidechain genesis");
+
+    pallet_session_validator_management::GenesisConfig::<Runtime> {
+        initial_authorities: Vec::new(),
+        main_chain_scripts: sp_session_validator_management::MainChainScripts::default(),
+    }
+    .assimilate_storage(&mut storage)
+    .expect("scv genesis");
+
+    pallet_partner_chains_session::GenesisConfig::<Runtime> {
+        initial_validators: Vec::new(),
+    }
+    .assimilate_storage(&mut storage)
+    .expect("pcs genesis");
+
+    pallet_native_token_management::GenesisConfig::<Runtime> {
+        main_chain_scripts: sp_native_token_management::MainChainScripts::default(),
+        ..Default::default()
+    }
+    .assimilate_storage(&mut storage)
+    .expect("ntm genesis");
+
+    let mut ext: TestExternalities = storage.into();
+    ext.execute_with(|| {
+        frame_system::Pallet::<Runtime>::set_block_number(1);
+
+        let auth_pot = PalletId(*b"mat/auth").into_account_truncating();
+        let trsy = trsy_pot();
+
+        // Pre-state: mat/auth has funds, mat/trsy has NO AccountInfo row.
+        let pre_auth = pallet_balances::Pallet::<Runtime>::free_balance(&auth_pot);
+        let pre_trsy = pallet_balances::Pallet::<Runtime>::free_balance(&trsy);
+        let pre_issuance = pallet_balances::Pallet::<Runtime>::total_issuance();
+        assert_eq!(pre_auth, AUTHOR_POT_SEED);
+        assert_eq!(pre_trsy, 0, "mat/trsy must not pre-exist");
+        // Confirm treasury really has no AccountInfo entry; `free_balance`
+        // would return 0 either way, so check the system-side directly.
+        assert!(
+            !frame_system::Account::<Runtime>::contains_key(&trsy),
+            "mat/trsy must have no AccountInfo before sweep"
+        );
+
+        // Act: run the sweep migration.
+        Executive::execute_on_runtime_upgrade();
+
+        // Post: the sweep moves the full author pot to treasury. Even
+        // though treasury didn't pre-exist, the migration's pre-creation
+        // step ensures the account is established before the first
+        // transfer.
+        let post_auth = pallet_balances::Pallet::<Runtime>::free_balance(&auth_pot);
+        let post_trsy = pallet_balances::Pallet::<Runtime>::free_balance(&trsy);
+        let post_issuance = pallet_balances::Pallet::<Runtime>::total_issuance();
+
+        assert_eq!(
+            post_auth, 0,
+            "mat/auth must be drained even when treasury didn't pre-exist"
+        );
+        assert_eq!(
+            post_trsy, AUTHOR_POT_SEED,
+            "mat/trsy must receive the full sweep even when created by the migration"
+        );
+        assert_eq!(
+            pre_issuance, post_issuance,
+            "sweep preserves total_issuance regardless of treasury pre-existence"
+        );
+        assert!(
+            frame_system::Account::<Runtime>::contains_key(&trsy),
+            "mat/trsy must have AccountInfo after sweep"
+        );
+    });
+}
