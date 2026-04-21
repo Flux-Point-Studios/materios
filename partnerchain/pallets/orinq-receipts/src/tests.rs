@@ -112,7 +112,11 @@ impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = crate::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
-    type MaxCommitteeSize = ConstU32<16>;
+    // Mock mirrors the spec-203 runtime cap (64). Tests under this mock
+    // must therefore be tolerant of a larger committee than spec-202's
+    // 16-seat ceiling. See `committee_can_hold_up_to_64_distinct_members`
+    // and `sixty_fifth_member_join_fails_with_committee_full`.
+    type MaxCommitteeSize = ConstU32<64>;
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
@@ -512,9 +516,10 @@ fn era_cap_baseline_attestor_count_has_default() {
 #[test]
 fn era_cap_auto_scales_with_attestor_count() {
     // With baseline_count = 16, doubling the committee size should double
-    // the effective era cap. We can't add more than 16 (MaxCommitteeSize)
-    // in the test mock, so verify linear scaling at two representative
-    // sub-baseline counts (4 and 8).
+    // the effective era cap. We verify linear scaling at two representative
+    // sub-baseline counts (4 and 8). In spec 203 the mock MaxCommitteeSize
+    // is ConstU32<64> so we could go higher, but two sub-baseline points
+    // are enough to pin the linear-scaling contract.
     new_test_ext().execute_with(|| {
         let base_cap = OrinqReceipts::era_cap_base();
         let baseline = OrinqReceipts::era_cap_baseline_attestor_count() as u128;

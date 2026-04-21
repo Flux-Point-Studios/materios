@@ -34,14 +34,32 @@ pub const MAX_EPOCH_NONCE_BYTES: usize = 64;
 /// registration claiming more stake than this is definitionally
 /// corrupt db-sync output.
 pub const MAX_PLAUSIBLE_STAKE_LOVELACE: u64 = 45_000_000_000u64 * 1_000_000u64;
-/// Upper bound on seats per epoch. Derived from `crate::MAX_VALIDATORS`
-/// so that bumping the session pallet's MaxValidators can't drift this
-/// constant. The compile-time `const _` below enforces that invariant.
+/// Upper bound on seats-per-epoch accepted from a Cardano-sourced
+/// `AuthoritySelectionInputs.d_parameter`.
+///
+/// Spec 203 decoupled this from `crate::MAX_VALIDATORS`. Before 203 it
+/// was `crate::MAX_VALIDATORS as u16` (= 32), which conflated two
+/// distinct concepts:
+///   1. The Aura/GRANDPA/session block-producer cap
+///      (`pallet_session_validator_management::MaxValidators`).
+///   2. The `pallet_orinq_receipts` attestor committee cap
+///      (`MaxCommitteeSize`).
+///
+/// Raising `MaxCommitteeSize` 16 → 64 in spec 203 required this constant
+/// to track the pallet cap, not the session cap, otherwise Ariadne
+/// d-parameter inputs summing to > 32 would be silently rejected at the
+/// sanitation layer while the pallet would accept them — creating
+/// debug-hostile asymmetry. It's therefore pinned to 64 directly.
+///
+/// The compile-time assertion still holds that `MAX_VALIDATORS` fits in
+/// u16 (required because `DParameter` uses u16 count fields) but no
+/// longer derives the cap.
 pub const MAX_COMMITTEE_SIZE: u16 = {
-    // Fail compilation if the session pallet's cap ever exceeds u16 (which
-    // is what `DParameter` uses for its count fields).
+    // Sanity: the session-pallet cap must still fit in u16 because the
+    // `select_authorities` return BoundedVec is bounded by MaxValidators
+    // and downstream consumers treat counts as u16.
     assert!(crate::MAX_VALIDATORS <= u16::MAX as u32);
-    crate::MAX_VALIDATORS as u16
+    64
 };
 
 /// Top-level invariant violations. When any of these fires we discard
