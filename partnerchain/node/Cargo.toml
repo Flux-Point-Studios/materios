@@ -50,8 +50,9 @@ sp-timestamp = { workspace = true }
 
 # FRAME RPC
 substrate-frame-rpc-system = { workspace = true }
-pallet-transaction-payment-rpc = { workspace = true }
-pallet-transaction-payment-rpc-runtime-api = { workspace = true, features = ["std"] }
+# pallet-transaction-payment-rpc and its -runtime-api were removed at spec
+# 202 (HIGH #1 follow-up to PR #9, 2026-04-21). See runtime/Cargo.toml and
+# node/src/rpc.rs for the rationale.
 frame-system = { workspace = true, features = ["std"] }
 
 # IOG Partner Chains toolkit

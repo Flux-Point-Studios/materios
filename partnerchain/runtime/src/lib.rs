@@ -7,11 +7,17 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
-// v5.1 Midnight-style fees: the 40/30/20/10 MATRA fee-router (see
-// `fee_router.rs` on main up to spec 201) is DELETED. MATRA is no longer
-// charged on transactions — MOTRA is the sole tx-fee mechanism via
-// `pallet_motra::fee::ChargeMotra`. The no-op adapter below replaces it.
-pub mod no_op_charge;
+// v5.1 Midnight-style fees (spec 202, 2026-04-21): the 40/30/20/10 MATRA
+// fee-router (see `fee_router.rs` on main up to spec 201) is DELETED.
+// MATRA is no longer charged on transactions — MOTRA is the sole tx-fee
+// mechanism via `pallet_motra::fee::ChargeMotra`.
+//
+// The `pallet_transaction_payment` integration was ALSO removed in the
+// HIGH #1 follow-up on the same spec (2026-04-21): it was never actually
+// wired into `SignedExtra` in this runtime (see git history), so its
+// `OnChargeTransaction` hook was dead code and `NoOpCharge` was dead
+// scaffolding. The simpler surface is to delete the pallet entirely —
+// `ChargeMotra` is the single fee authority in this runtime.
 pub mod input_sanity;
 pub mod migrations;
 
@@ -26,14 +32,16 @@ use frame_support::{
     traits::{ConstBool, ConstU32, ConstU64, WithdrawReasons},
     weights::{
         constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
-        IdentityFee, Weight,
+        Weight,
     },
     genesis_builder_helper::{build_state, get_preset},
     BoundedVec, PalletId,
 };
 use frame_system::{EnsureRoot, EnsureRootWithSuccess};
 use frame_system::limits::{BlockLength, BlockWeights};
-// `FungibleAdapter` is no longer used — see `no_op_charge::NoOpCharge`.
+// No MATRA OnChargeTransaction adapter is installed — `pallet_transaction_
+// payment` was removed entirely at spec 202 (see deletion note above in the
+// `Transaction payment (REMOVED spec 202)` section).
 use session_manager::ValidatorManagementSessionManager;
 use sidechain_domain::{
     NativeTokenAmount, ScEpochNumber, ScSlotNumber, UtxoId,
@@ -320,25 +328,24 @@ impl pallet_balances::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
-// Transaction payment
+// Transaction payment (REMOVED spec 202)
 // ---------------------------------------------------------------------------
-
-impl pallet_transaction_payment::Config for Runtime {
-    type RuntimeEvent = RuntimeEvent;
-    // v5.1 Midnight-style fees (spec 202, 2026-04-21): MATRA is not charged
-    // on transactions. MOTRA is the sole tx-fee via
-    // `pallet_motra::fee::ChargeMotra` in `SignedExtra`. `NoOpCharge` makes
-    // `withdraw_fee` / `correct_and_deposit_fee` zero-effect, so MATRA
-    // total_issuance is conserved. `WeightToFee` / `LengthToFee` still
-    // compute nominal figures for the RPC surface (wallets call them).
-    type OnChargeTransaction = no_op_charge::NoOpCharge<Balances>;
-    type OperationalFeeMultiplier = ConstU8<5>;
-    type WeightToFee = IdentityFee<Balance>;
-    type LengthToFee = IdentityFee<Balance>;
-    type FeeMultiplierUpdate = ();
-}
-
-use frame_support::traits::ConstU8;
+//
+// `pallet_transaction_payment` was removed from the runtime at spec 202 as
+// part of the HIGH #1 follow-up to PR #9. Pre-202 the pallet was present in
+// construct_runtime! but its `OnChargeTransaction` was never installed into
+// `SignedExtra` — so the whole `withdraw_fee` / `correct_and_deposit_fee`
+// plumbing was dead code. Keeping dead scaffolding around invites future
+// regressions; we delete it entirely and let `ChargeMotra` be the single
+// source of tx-fee truth.
+//
+// Wallets / explorers that previously queried `TransactionPaymentApi` must
+// now query `MotraApi::estimate_fee(weight_ref_time)` for quotes — a MOTRA-
+// denominated figure that matches the actual burn the sender will pay.
+//
+// Pallet index 5 is intentionally left unused in `construct_runtime!` below.
+// Explicit index pins are added to every remaining pallet to prevent the
+// drift-by-one cascade that `feedback_pallet_index_shift.md` warns about.
 
 // ---------------------------------------------------------------------------
 // v5.1 tokenomics: Treasury
@@ -656,32 +663,46 @@ impl pallet_native_token_management::Config for Runtime {
 // Construct runtime
 // ---------------------------------------------------------------------------
 
+// Pallet indices are EXPLICITLY pinned (= N) to defend against index drift
+// when pallets are added or removed. See feedback_pallet_index_shift.md: an
+// off-by-one shift silently invalidates every consumer of the runtime
+// metadata (explorers, wallets, SDK type generators). By pinning each
+// index, removing a pallet leaves a gap at that index rather than shifting
+// everything after it down by one.
+//
+// Pallet index 5 is reserved — previously `pallet_transaction_payment` —
+// and intentionally left vacant. Removing `pallet_transaction_payment`
+// entirely (HIGH #1, spec 202 / 2026-04-21) WITHOUT shifting subsequent
+// indices keeps every downstream consumer stable across the 201→202
+// upgrade. MOTRA burn-on-use via `ChargeMotra` SignedExtension is the sole
+// tx-fee mechanism; there is no `TransactionPayment` pallet or RuntimeApi
+// on this chain anymore.
 construct_runtime! {
     pub enum Runtime {
-        System: frame_system,
-        Timestamp: pallet_timestamp,
-        Aura: pallet_aura,
-        Grandpa: pallet_grandpa,
-        Balances: pallet_balances,
-        TransactionPayment: pallet_transaction_payment,
-        Sudo: pallet_sudo,
-        Multisig: pallet_multisig,
-        Utility: pallet_utility,
+        System: frame_system = 0,
+        Timestamp: pallet_timestamp = 1,
+        Aura: pallet_aura = 2,
+        Grandpa: pallet_grandpa = 3,
+        Balances: pallet_balances = 4,
+        // [index 5 reserved — previously `pallet_transaction_payment`]
+        Sudo: pallet_sudo = 6,
+        Multisig: pallet_multisig = 7,
+        Utility: pallet_utility = 8,
         // v5.1 tokenomics foundation
-        Treasury: pallet_treasury,
-        Vesting: pallet_vesting,
-        OrinqReceipts: pallet_orinq_receipts,
-        Motra: pallet_motra,
+        Treasury: pallet_treasury = 9,
+        Vesting: pallet_vesting = 10,
+        OrinqReceipts: pallet_orinq_receipts = 11,
+        Motra: pallet_motra = 12,
         // IOG Partner Chains pallets
         // Sidechain must come after Aura (reads current slot from it)
-        Sidechain: pallet_sidechain,
-        SessionCommitteeManagement: pallet_session_validator_management,
-        BlockRewards: pallet_block_rewards,
+        Sidechain: pallet_sidechain = 13,
+        SessionCommitteeManagement: pallet_session_validator_management = 14,
+        BlockRewards: pallet_block_rewards = 15,
         // pallet_session stub (needed by pallet_grandpa for CurrentIndex)
-        PalletSession: pallet_session,
+        PalletSession: pallet_session = 16,
         // pallet_partner_chains_session must come last for correct initialization order
-        Session: pallet_partner_chains_session,
-        NativeTokenManagement: pallet_native_token_management,
+        Session: pallet_partner_chains_session = 17,
+        NativeTokenManagement: pallet_native_token_management = 18,
     }
 }
 
@@ -847,29 +868,13 @@ impl_runtime_apis! {
         }
     }
 
-    impl pallet_transaction_payment_rpc_runtime_api::TransactionPaymentApi<Block, Balance> for Runtime {
-        fn query_info(
-            uxt: <Block as BlockT>::Extrinsic,
-            len: u32,
-        ) -> pallet_transaction_payment_rpc_runtime_api::RuntimeDispatchInfo<Balance> {
-            TransactionPayment::query_info(uxt, len)
-        }
-
-        fn query_fee_details(
-            uxt: <Block as BlockT>::Extrinsic,
-            len: u32,
-        ) -> pallet_transaction_payment::FeeDetails<Balance> {
-            TransactionPayment::query_fee_details(uxt, len)
-        }
-
-        fn query_weight_to_fee(weight: Weight) -> Balance {
-            TransactionPayment::weight_to_fee(weight)
-        }
-
-        fn query_length_to_fee(length: u32) -> Balance {
-            TransactionPayment::length_to_fee(length)
-        }
-    }
+    // NOTE: `pallet_transaction_payment_rpc_runtime_api::TransactionPaymentApi`
+    // is NOT implemented — the pallet was removed from the runtime at spec 202.
+    // Wallets / explorers should query `MotraApi::estimate_fee` for MOTRA-
+    // denominated fee quotes. The previous `query_info` / `query_fee_details`
+    // / `query_weight_to_fee` / `query_length_to_fee` surface returned MATRA
+    // figures that were never actually charged (NoOpCharge) — removing the
+    // RPC eliminates the misleading quote.
 
     impl orinq_receipts_primitives::OrinqReceiptsApi<Block, AccountId> for Runtime {
         fn get_receipt(id: H256) -> Option<orinq_receipts_primitives::ReceiptRecord<AccountId>> {

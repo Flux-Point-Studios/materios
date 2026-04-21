@@ -561,7 +561,7 @@ fn runtime_genesis_config_includes_all_iog_pallet_fields() {
         aura: Default::default(),
         grandpa: Default::default(),
         sudo: Default::default(),
-        transaction_payment: Default::default(),
+        // transaction_payment field removed at spec 202 alongside the pallet.
         // Existing Materios pallets
         motra: Default::default(),
         // IOG pallets with genesis configs

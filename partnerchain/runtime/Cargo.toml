@@ -45,8 +45,11 @@ pallet-multisig = { workspace = true }
 pallet-utility = { workspace = true }
 pallet-sudo = { workspace = true }
 pallet-timestamp = { workspace = true }
-pallet-transaction-payment = { workspace = true }
-pallet-transaction-payment-rpc-runtime-api = { workspace = true }
+# pallet-transaction-payment and its -rpc-runtime-api were removed at spec
+# 202 (HIGH #1 follow-up to PR #9, 2026-04-21). The pallet was never wired
+# into `SignedExtra` in this runtime, so its `OnChargeTransaction` hook
+# was dead code. MOTRA burn-on-use via `ChargeMotra` SignedExtension is
+# the sole tx-fee mechanism.
 # v5.1 tokenomics foundation
 pallet-treasury = { workspace = true }
 pallet-vesting = { workspace = true }
@@ -122,8 +125,7 @@ std = [
     "pallet-utility/std",
     "pallet-sudo/std",
     "pallet-timestamp/std",
-    "pallet-transaction-payment/std",
-    "pallet-transaction-payment-rpc-runtime-api/std",
+    # pallet-transaction-payment removed at spec 202 — see [dependencies]
     "pallet-treasury/std",
     "pallet-vesting/std",
     "pallet-orinq-receipts/std",
@@ -180,7 +182,7 @@ try-runtime = [
     "pallet-utility/try-runtime",
     "pallet-sudo/try-runtime",
     "pallet-timestamp/try-runtime",
-    "pallet-transaction-payment/try-runtime",
+    # pallet-transaction-payment removed at spec 202 — see [dependencies]
     "pallet-treasury/try-runtime",
     "pallet-vesting/try-runtime",
     "pallet-orinq-receipts/try-runtime",

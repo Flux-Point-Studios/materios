@@ -1,11 +1,17 @@
 //! A collection of node-specific RPC methods.
 //!
-//! Merges Substrate system + transaction-payment RPCs with the orinq-receipts RPC.
+//! Merges Substrate system RPC with orinq-receipts + MOTRA RPCs.
+//!
+//! NOTE: `pallet_transaction_payment_rpc` was removed at spec 202 (HIGH #1
+//! follow-up to PR #9, 2026-04-21). The pallet it depended on was deleted
+//! from the runtime because it was never wired into `SignedExtra` —
+//! `ChargeMotra` is the sole tx-fee path. Wallets / explorers should
+//! query `MotraApi::estimate_fee` for MOTRA-denominated fee quotes.
 
 use std::sync::Arc;
 
 use jsonrpsee::RpcModule;
-use materios_runtime::{opaque::Block, AccountId, Balance, Nonce};
+use materios_runtime::{opaque::Block, AccountId, Nonce};
 use sc_transaction_pool_api::TransactionPool;
 use sp_api::ProvideRuntimeApi;
 use sp_blockchain::{Error as BlockchainError, HeaderBackend, HeaderMetadata};
@@ -31,7 +37,6 @@ where
         + Sync
         + 'static,
     C::Api: substrate_frame_rpc_system::AccountNonceApi<Block, AccountId, Nonce>,
-    C::Api: pallet_transaction_payment_rpc::TransactionPaymentRuntimeApi<Block, Balance>,
     C::Api: orinq_receipts_primitives::OrinqReceiptsApi<Block, AccountId>,
     C::Api: motra_primitives::MotraApi<Block>,
     C::Api: sp_block_builder::BlockBuilder<Block>,
@@ -39,7 +44,6 @@ where
 {
     use motra_rpc::MotraRpcApiServer;
     use orinq_receipts_rpc::{OrinqReceipts, OrinqReceiptsApiServer};
-    use pallet_transaction_payment_rpc::{TransactionPayment, TransactionPaymentApiServer};
     use substrate_frame_rpc_system::{System, SystemApiServer};
 
     let mut module = RpcModule::new(());
@@ -47,7 +51,6 @@ where
 
     // Substrate built-ins
     module.merge(System::new(client.clone(), pool).into_rpc())?;
-    module.merge(TransactionPayment::new(client.clone()).into_rpc())?;
 
     // Orinq receipts
     module.merge(OrinqReceipts::new(client.clone()).into_rpc())?;
