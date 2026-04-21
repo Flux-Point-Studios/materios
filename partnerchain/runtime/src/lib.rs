@@ -50,7 +50,7 @@ use sp_runtime::{
         IdentityLookup, NumberFor, OpaqueKeys, Verify,
     },
     transaction_validity::{TransactionSource, TransactionValidity},
-    ApplyExtrinsicResult, DispatchResult, MultiSignature, Permill,
+    ApplyExtrinsicResult, DispatchResult, MultiSignature, Perbill, Permill,
 };
 use sp_sidechain::SidechainStatus;
 use sp_version::RuntimeVersion;
@@ -422,6 +422,12 @@ parameter_types! {
 // account, where governance can drain it via `Sudo::sudo_as`.
 parameter_types! {
     pub const AttestorReservePalletId: PalletId = PalletId(*b"mat/attr");
+    /// Validator-emission treasury share (spec 202+). 15% of each era's
+    /// validator-reserve emission is routed to `mat/trsy`, the rest goes
+    /// to block-authoring validators pro-rata. Governance-tunable: change
+    /// this value in a runtime upgrade to retune the validator↔treasury
+    /// balance. Rounding residue always lands in treasury (safer sink).
+    pub const TreasuryEmissionShare: Perbill = Perbill::from_percent(15);
 }
 
 pub fn attestor_reserve_account() -> AccountId {
@@ -516,6 +522,11 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     // `TreasuryPalletId` already exists for `pallet_treasury`; reusing it
     // keeps the treasury pot as a single canonical account.
     type TreasuryPotId = TreasuryPalletId;
+    // Validator emission split knob (spec 202 onward). Governance can
+    // retune the treasury share via runtime upgrade by changing the
+    // `TreasuryEmissionShare` parameter_types value below — no code
+    // change in the pallet needed.
+    type TreasuryEmissionShare = TreasuryEmissionShare;
 }
 
 // ---------------------------------------------------------------------------

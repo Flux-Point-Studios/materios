@@ -9,7 +9,7 @@ use parity_scale_codec::{Decode, Encode};
 use sp_core::{crypto::AccountId32, H256};
 use sp_runtime::{
     traits::{AccountIdConversion, BlakeTwo256, IdentityLookup},
-    BuildStorage,
+    BuildStorage, Perbill,
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +101,11 @@ parameter_types! {
     /// Mock treasury pot — matches the production runtime's `mat/trsy`
     /// PalletId so Component-4 fee-split tests mirror the real routing.
     pub const TreasuryPotId: PalletId = PalletId(*b"mat/trsy");
+    /// Mock treasury emission share. `pub static` (rather than `pub const`)
+    /// generates a mutable `TreasuryEmissionShareValue::set(Perbill)` setter
+    /// used by `era_emission_respects_configurable_treasury_share` to retune
+    /// the split at test-time. Default matches the production 15%.
+    pub static TreasuryEmissionShareValue: Perbill = Perbill::from_percent(15);
 }
 
 impl pallet::Config for Test {
@@ -111,6 +116,7 @@ impl pallet::Config for Test {
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
+    type TreasuryEmissionShare = TreasuryEmissionShareValue;
 }
 
 /// Construct a deterministic AccountId32 from a single byte seed (for tests).
@@ -1892,8 +1898,14 @@ mod era_emission_drip {
 
             // Treasury delta is at least the floor 15% share; with rounding
             // residue it can be strictly greater. The exact distribution is:
-            //   validator = floor(102_739_726 * 85 / 100) = 87_328_766
-            //   treasury  = 102_739_726 - 87_328_766     = 15_410_960
+            //   validator = floor(102_739_726 * 85 / 100) = 87_328_767
+            //   treasury  = 102_739_726 - 87_328_767     = 15_410_959
+            // (HIGH #3 fix 2026-04-21: this comment previously said the
+            // validator got 87_328_766 / treasury got 15_410_960, which was
+            // off-by-one — the assertion in
+            // `era_emission_rounding_residue_goes_to_treasury_not_validator`
+            // is, correctly, 87_328_767 / 15_410_959.)
+            //
             // The old expected pre-migration behaviour was:
             //   validator = 102_739_726 (full reward to author)
             //   treasury  = 0
