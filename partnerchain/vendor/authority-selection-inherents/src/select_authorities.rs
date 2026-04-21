@@ -119,3 +119,106 @@ fn weighted_selection<TAccountId: Clone + Ord, TAccountKeys: Clone>(
 			.collect(),
 	)
 }
+
+#[cfg(test)]
+mod dedup_tests {
+	//! Tests for `dedup_committee`. These tests pin down the exact semantics
+	//! required by the Ariadne-output-dedup [materios-patch]:
+	//!   - order-preserving (first occurrence wins)
+	//!   - deterministic (no randomness)
+	//!   - idempotent (dedup(dedup(x)) == dedup(x))
+	//!   - length-non-increasing
+	//!   - the pathological 2026-04-21 draw `[MacBook×3, Node-3×1]` collapses
+	//!     to `[MacBook, Node-3]`, preserving first-occurrence order.
+	use super::dedup_committee;
+
+	type K = &'static str;
+	type V = u32;
+
+	#[test]
+	fn empty_input_returns_empty() {
+		let input: Vec<(K, V)> = vec![];
+		assert_eq!(dedup_committee(input), Vec::<(K, V)>::new());
+	}
+
+	#[test]
+	fn no_duplicates_passes_through() {
+		let input: Vec<(K, V)> = vec![("alice", 1), ("bob", 2), ("charlie", 3)];
+		let expected = input.clone();
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn all_same_pubkey_collapses_to_one() {
+		let input: Vec<(K, V)> =
+			vec![("mac", 1), ("mac", 1), ("mac", 1), ("mac", 1)];
+		let expected: Vec<(K, V)> = vec![("mac", 1)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn pathological_macbook_times_three_collapses_to_two() {
+		// Exact 2026-04-21 Ariadne output that caused the finality stall.
+		// MacBook seat #1, #2, #3 (same pubkey) + Node-3 seat #1.
+		// Expected: distinct-validator committee = [MacBook, Node-3]
+		let input: Vec<(K, V)> =
+			vec![("macbook", 10), ("macbook", 10), ("macbook", 10), ("node-3", 20)];
+		let expected: Vec<(K, V)> = vec![("macbook", 10), ("node-3", 20)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn mixed_interleaved_keeps_first_occurrence() {
+		// Alice, Bob, Alice, Charlie, Bob — first-occurrence wins.
+		let input: Vec<(K, V)> =
+			vec![("alice", 1), ("bob", 2), ("alice", 1), ("charlie", 3), ("bob", 2)];
+		let expected: Vec<(K, V)> = vec![("alice", 1), ("bob", 2), ("charlie", 3)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn dedup_is_idempotent() {
+		let input: Vec<(K, V)> =
+			vec![("alice", 1), ("bob", 2), ("alice", 1), ("charlie", 3), ("bob", 2)];
+		let once = dedup_committee(input.clone());
+		let twice = dedup_committee(once.clone());
+		assert_eq!(once, twice);
+	}
+
+	#[test]
+	fn dedup_preserves_first_occurrence_order() {
+		// Insert duplicates scattered; the output must keep the first-seen
+		// positional order — not alphabetical, not stable-sort, not last-wins.
+		let input: Vec<(K, V)> = vec![
+			("zebra", 1),
+			("alpha", 2),
+			("zebra", 1),
+			("mike", 3),
+			("alpha", 2),
+			("mike", 3),
+		];
+		let expected: Vec<(K, V)> = vec![("zebra", 1), ("alpha", 2), ("mike", 3)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn dedup_never_increases_length() {
+		let inputs: Vec<Vec<(K, V)>> = vec![
+			vec![],
+			vec![("a", 1)],
+			vec![("a", 1), ("b", 2)],
+			vec![("a", 1), ("a", 1)],
+			vec![("a", 1), ("b", 2), ("a", 1), ("c", 3), ("b", 2)],
+		];
+		for input in inputs {
+			let original_len = input.len();
+			let out_len = dedup_committee(input).len();
+			assert!(
+				out_len <= original_len,
+				"dedup output length {} exceeds input length {}",
+				out_len,
+				original_len
+			);
+		}
+	}
+}

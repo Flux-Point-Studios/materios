@@ -506,8 +506,12 @@ version = "1.5.1"
 dependencies = [
  "async-trait",
  "frame-support",
+ "hex",
+ "hex-literal",
  "log",
  "minicbor",
+ "num-bigint",
+ "num-traits",
  "parity-scale-codec",
  "plutus",
  "plutus-datum-derive",
@@ -524,6 +528,7 @@ dependencies = [
  "sp-session-validator-management",
  "sp-std",
  "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

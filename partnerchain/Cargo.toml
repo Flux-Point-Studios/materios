@@ -9,6 +9,10 @@ members = [
     "pallets/motra",
     "pallets/motra/primitives",
     "pallets/motra/rpc",
+    # Vendored IOG crates carrying materios-patch[es]. Included so
+    # `cargo test --workspace` exercises the patched sources and so dev-
+    # dependencies (hex-literal, tokio, etc.) are resolved correctly.
+    "vendor/authority-selection-inherents",
 ]
 
 [workspace.package]
