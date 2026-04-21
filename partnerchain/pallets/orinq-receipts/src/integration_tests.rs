@@ -103,6 +103,11 @@ parameter_types! {
         frame_support::PalletId(*b"mat/attr");
     pub const TreasuryPotId: frame_support::PalletId =
         frame_support::PalletId(*b"mat/trsy");
+    /// Treasury emission share for integration tests — matches production
+    /// default (15%). Integration tests don't retune it, but it must be
+    /// bound because `TreasuryEmissionShare` is a non-default Config
+    /// associated type on the pallet.
+    pub const IntegrationTestTreasuryShare: Perbill = Perbill::from_percent(15);
 }
 
 impl crate::pallet::Config for Test {
@@ -113,6 +118,7 @@ impl crate::pallet::Config for Test {
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
+    type TreasuryEmissionShare = IntegrationTestTreasuryShare;
 }
 
 // ---------------------------------------------------------------------------

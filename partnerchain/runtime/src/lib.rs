@@ -7,8 +7,19 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
-pub mod fee_router;
+// v5.1 Midnight-style fees (spec 202, 2026-04-21): the 40/30/20/10 MATRA
+// fee-router (see `fee_router.rs` on main up to spec 201) is DELETED.
+// MATRA is no longer charged on transactions — MOTRA is the sole tx-fee
+// mechanism via `pallet_motra::fee::ChargeMotra`.
+//
+// The `pallet_transaction_payment` integration was ALSO removed in the
+// HIGH #1 follow-up on the same spec (2026-04-21): it was never actually
+// wired into `SignedExtra` in this runtime (see git history), so its
+// `OnChargeTransaction` hook was dead code and `NoOpCharge` was dead
+// scaffolding. The simpler surface is to delete the pallet entirely —
+// `ChargeMotra` is the single fee authority in this runtime.
 pub mod input_sanity;
+pub mod migrations;
 
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
@@ -21,14 +32,16 @@ use frame_support::{
     traits::{ConstBool, ConstU32, ConstU64, WithdrawReasons},
     weights::{
         constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
-        IdentityFee, Weight,
+        Weight,
     },
     genesis_builder_helper::{build_state, get_preset},
     BoundedVec, PalletId,
 };
 use frame_system::{EnsureRoot, EnsureRootWithSuccess};
 use frame_system::limits::{BlockLength, BlockWeights};
-use pallet_transaction_payment::FungibleAdapter;
+// No MATRA OnChargeTransaction adapter is installed — `pallet_transaction_
+// payment` was removed entirely at spec 202 (see deletion note above in the
+// `Transaction payment (REMOVED spec 202)` section).
 use session_manager::ValidatorManagementSessionManager;
 use sidechain_domain::{
     NativeTokenAmount, ScEpochNumber, ScSlotNumber, UtxoId,
@@ -45,7 +58,7 @@ use sp_runtime::{
         IdentityLookup, NumberFor, OpaqueKeys, Verify,
     },
     transaction_validity::{TransactionSource, TransactionValidity},
-    ApplyExtrinsicResult, DispatchResult, MultiSignature, Permill,
+    ApplyExtrinsicResult, DispatchResult, MultiSignature, Perbill, Permill,
 };
 use sp_sidechain::SidechainStatus;
 use sp_version::RuntimeVersion;
@@ -177,7 +190,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 201,
+    // 202 = v5.1 Midnight-style fees (MATRA no longer charged, MOTRA-only;
+    //        85/15 validator/treasury emission split; one-shot sweep of
+    //        residual mat/auth + mat/attr balances into mat/trsy, 2026-04-21).
+    spec_version: 202,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -312,21 +328,24 @@ impl pallet_balances::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
-// Transaction payment
+// Transaction payment (REMOVED spec 202)
 // ---------------------------------------------------------------------------
-
-impl pallet_transaction_payment::Config for Runtime {
-    type RuntimeEvent = RuntimeEvent;
-    // v5.1 tokenomics: route fees through the 40/30/20/10 splitter instead
-    // of the default author-only path. See `fee_router::DealWithFees`.
-    type OnChargeTransaction = FungibleAdapter<Balances, fee_router::DealWithFees<Runtime>>;
-    type OperationalFeeMultiplier = ConstU8<5>;
-    type WeightToFee = IdentityFee<Balance>;
-    type LengthToFee = IdentityFee<Balance>;
-    type FeeMultiplierUpdate = ();
-}
-
-use frame_support::traits::ConstU8;
+//
+// `pallet_transaction_payment` was removed from the runtime at spec 202 as
+// part of the HIGH #1 follow-up to PR #9. Pre-202 the pallet was present in
+// construct_runtime! but its `OnChargeTransaction` was never installed into
+// `SignedExtra` — so the whole `withdraw_fee` / `correct_and_deposit_fee`
+// plumbing was dead code. Keeping dead scaffolding around invites future
+// regressions; we delete it entirely and let `ChargeMotra` be the single
+// source of tx-fee truth.
+//
+// Wallets / explorers that previously queried `TransactionPaymentApi` must
+// now query `MotraApi::estimate_fee(weight_ref_time)` for quotes — a MOTRA-
+// denominated figure that matches the actual burn the sender will pay.
+//
+// Pallet index 5 is intentionally left unused in `construct_runtime!` below.
+// Explicit index pins are added to every remaining pallet to prevent the
+// drift-by-one cascade that `feedback_pallet_index_shift.md` warns about.
 
 // ---------------------------------------------------------------------------
 // v5.1 tokenomics: Treasury
@@ -410,6 +429,12 @@ parameter_types! {
 // account, where governance can drain it via `Sudo::sudo_as`.
 parameter_types! {
     pub const AttestorReservePalletId: PalletId = PalletId(*b"mat/attr");
+    /// Validator-emission treasury share (spec 202+). 15% of each era's
+    /// validator-reserve emission is routed to `mat/trsy`, the rest goes
+    /// to block-authoring validators pro-rata. Governance-tunable: change
+    /// this value in a runtime upgrade to retune the validator↔treasury
+    /// balance. Rounding residue always lands in treasury (safer sink).
+    pub const TreasuryEmissionShare: Perbill = Perbill::from_percent(15);
 }
 
 pub fn attestor_reserve_account() -> AccountId {
@@ -504,6 +529,11 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     // `TreasuryPalletId` already exists for `pallet_treasury`; reusing it
     // keeps the treasury pot as a single canonical account.
     type TreasuryPotId = TreasuryPalletId;
+    // Validator emission split knob (spec 202 onward). Governance can
+    // retune the treasury share via runtime upgrade by changing the
+    // `TreasuryEmissionShare` parameter_types value below — no code
+    // change in the pallet needed.
+    type TreasuryEmissionShare = TreasuryEmissionShare;
 }
 
 // ---------------------------------------------------------------------------
@@ -633,32 +663,46 @@ impl pallet_native_token_management::Config for Runtime {
 // Construct runtime
 // ---------------------------------------------------------------------------
 
+// Pallet indices are EXPLICITLY pinned (= N) to defend against index drift
+// when pallets are added or removed. See feedback_pallet_index_shift.md: an
+// off-by-one shift silently invalidates every consumer of the runtime
+// metadata (explorers, wallets, SDK type generators). By pinning each
+// index, removing a pallet leaves a gap at that index rather than shifting
+// everything after it down by one.
+//
+// Pallet index 5 is reserved — previously `pallet_transaction_payment` —
+// and intentionally left vacant. Removing `pallet_transaction_payment`
+// entirely (HIGH #1, spec 202 / 2026-04-21) WITHOUT shifting subsequent
+// indices keeps every downstream consumer stable across the 201→202
+// upgrade. MOTRA burn-on-use via `ChargeMotra` SignedExtension is the sole
+// tx-fee mechanism; there is no `TransactionPayment` pallet or RuntimeApi
+// on this chain anymore.
 construct_runtime! {
     pub enum Runtime {
-        System: frame_system,
-        Timestamp: pallet_timestamp,
-        Aura: pallet_aura,
-        Grandpa: pallet_grandpa,
-        Balances: pallet_balances,
-        TransactionPayment: pallet_transaction_payment,
-        Sudo: pallet_sudo,
-        Multisig: pallet_multisig,
-        Utility: pallet_utility,
+        System: frame_system = 0,
+        Timestamp: pallet_timestamp = 1,
+        Aura: pallet_aura = 2,
+        Grandpa: pallet_grandpa = 3,
+        Balances: pallet_balances = 4,
+        // [index 5 reserved — previously `pallet_transaction_payment`]
+        Sudo: pallet_sudo = 6,
+        Multisig: pallet_multisig = 7,
+        Utility: pallet_utility = 8,
         // v5.1 tokenomics foundation
-        Treasury: pallet_treasury,
-        Vesting: pallet_vesting,
-        OrinqReceipts: pallet_orinq_receipts,
-        Motra: pallet_motra,
+        Treasury: pallet_treasury = 9,
+        Vesting: pallet_vesting = 10,
+        OrinqReceipts: pallet_orinq_receipts = 11,
+        Motra: pallet_motra = 12,
         // IOG Partner Chains pallets
         // Sidechain must come after Aura (reads current slot from it)
-        Sidechain: pallet_sidechain,
-        SessionCommitteeManagement: pallet_session_validator_management,
-        BlockRewards: pallet_block_rewards,
+        Sidechain: pallet_sidechain = 13,
+        SessionCommitteeManagement: pallet_session_validator_management = 14,
+        BlockRewards: pallet_block_rewards = 15,
         // pallet_session stub (needed by pallet_grandpa for CurrentIndex)
-        PalletSession: pallet_session,
+        PalletSession: pallet_session = 16,
         // pallet_partner_chains_session must come last for correct initialization order
-        Session: pallet_partner_chains_session,
-        NativeTokenManagement: pallet_native_token_management,
+        Session: pallet_partner_chains_session = 17,
+        NativeTokenManagement: pallet_native_token_management = 18,
     }
 }
 
@@ -683,8 +727,21 @@ pub type SignedExtra = (
 pub type UncheckedExtrinsic =
     generic::UncheckedExtrinsic<Address, RuntimeCall, Signature, SignedExtra>;
 /// Executive: handles dispatch to the various modules.
-pub type Executive =
-    frame_executive::Executive<Runtime, Block, frame_system::ChainContext<Runtime>, Runtime, AllPalletsWithSystem>;
+///
+/// The 6th type parameter is `COnRuntimeUpgrade`: extra migrations that run
+/// BEFORE `AllPalletsWithSystem::on_runtime_upgrade`. Our v5.1 sweep migration
+/// is placed here so it runs first on the 201 → 202 upgrade block, then the
+/// per-pallet hooks (including orinq-receipts' Component-4 defaults seeder)
+/// run after. The migration is self-gated on a dedicated storage version so
+/// subsequent upgrades short-circuit.
+pub type Executive = frame_executive::Executive<
+    Runtime,
+    Block,
+    frame_system::ChainContext<Runtime>,
+    Runtime,
+    AllPalletsWithSystem,
+    migrations::SweepFeeRouterPotsIntoTreasury,
+>;
 
 // ---------------------------------------------------------------------------
 // Runtime APIs
@@ -811,29 +868,13 @@ impl_runtime_apis! {
         }
     }
 
-    impl pallet_transaction_payment_rpc_runtime_api::TransactionPaymentApi<Block, Balance> for Runtime {
-        fn query_info(
-            uxt: <Block as BlockT>::Extrinsic,
-            len: u32,
-        ) -> pallet_transaction_payment_rpc_runtime_api::RuntimeDispatchInfo<Balance> {
-            TransactionPayment::query_info(uxt, len)
-        }
-
-        fn query_fee_details(
-            uxt: <Block as BlockT>::Extrinsic,
-            len: u32,
-        ) -> pallet_transaction_payment::FeeDetails<Balance> {
-            TransactionPayment::query_fee_details(uxt, len)
-        }
-
-        fn query_weight_to_fee(weight: Weight) -> Balance {
-            TransactionPayment::weight_to_fee(weight)
-        }
-
-        fn query_length_to_fee(length: u32) -> Balance {
-            TransactionPayment::length_to_fee(length)
-        }
-    }
+    // NOTE: `pallet_transaction_payment_rpc_runtime_api::TransactionPaymentApi`
+    // is NOT implemented — the pallet was removed from the runtime at spec 202.
+    // Wallets / explorers should query `MotraApi::estimate_fee` for MOTRA-
+    // denominated fee quotes. The previous `query_info` / `query_fee_details`
+    // / `query_weight_to_fee` / `query_length_to_fee` surface returned MATRA
+    // figures that were never actually charged (NoOpCharge) — removing the
+    // RPC eliminates the misleading quote.
 
     impl orinq_receipts_primitives::OrinqReceiptsApi<Block, AccountId> for Runtime {
         fn get_receipt(id: H256) -> Option<orinq_receipts_primitives::ReceiptRecord<AccountId>> {

@@ -23,6 +23,7 @@ pub mod pallet {
     use frame_support::PalletId;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
+    use sp_runtime::Perbill;
     use sp_runtime::traits::{AccountIdConversion, Saturating};
 
     use crate::types::{AnchorRecord, PlayerSigRecord, ReceiptRecord, SlashReason};
@@ -93,6 +94,17 @@ pub mod pallet {
         /// the fee-router's 20% share credit to (Component 4).
         #[pallet::constant]
         type TreasuryPotId: Get<PalletId>;
+
+        /// Fraction of each era's `REWARD_PER_ERA` routed to the treasury
+        /// (the complement goes to block-authoring validators pro-rata).
+        /// Default: 15% (Perbill::from_percent(15)). Governance can retune
+        /// this via runtime upgrade without code change — it's the single
+        /// tunable knob for validator ↔ treasury emission balance.
+        ///
+        /// Rounding residue from the Perbill multiplication is always routed
+        /// to treasury (safer sink), regardless of the share value.
+        #[pallet::constant]
+        type TreasuryEmissionShare: Get<Perbill>;
     }
 
     // ── Storage ──────────────────────────────────────────────────────────
@@ -666,12 +678,46 @@ pub mod pallet {
                     }
 
                     if total_blocks > 0 {
-                        let mut distributed_this_era: u128 = 0;
+                        // Validator emission split: runtime-tunable validator/treasury share (Option A — 2026-04-21).
+                        //
+                        // Future upgrade path (Option B — block-fullness-weighted):
+                        // Per Midnight whitepaper (2025-06) §5, block rewards can be split into:
+                        //   - fixed subsidy (100% to producer, guarantees floor reward)
+                        //   - variable component (producer/treasury split by block fullness)
+                        // Defer until preprod mainnet has organic tx volume; block-fullness signal
+                        // is noise at current preprod volumes. Flag for re-eval post-mainnet TGE.
+                        //
+                        // Rounding residue → treasury (safer sink than validators).
+                        // `T::TreasuryEmissionShare` is a runtime-tunable `Get<Perbill>`
+                        // (defaults to 15% in the runtime's `parameter_types!`) so governance
+                        // can retune via runtime upgrade without code change.
+                        //
+                        // NOTE: pre-202 the full `era_reward` went to validators; `total_distributed`
+                        // and `ValidatorRewards` tracked the lifetime-paid validator figure only.
+                        // With the split, BOTH go through the pool: validators track their share,
+                        // treasury emission is accounted under `TotalRewardsDistributed` as well
+                        // so the VALIDATOR_RESERVE cap still gates the full emission envelope.
+                        let treasury_share: Perbill = T::TreasuryEmissionShare::get();
+                        // Validator gets the complement of the treasury share, computed via
+                        // `Perbill::saturating_sub` to stay in the Perbill domain. At
+                        // treasury_share=15% this is validator_share=85%.
+                        let validator_share: Perbill =
+                            Perbill::one().saturating_sub(treasury_share);
+                        let validator_pool = validator_share.mul_floor(era_reward);
+                        // Treasury gets the exact complement — this ensures
+                        // validator_pool + treasury_pool == era_reward with zero leak,
+                        // and rolls any residue from the percent multiplication into
+                        // treasury (the safer sink per spec).
+                        let treasury_pool = era_reward.saturating_sub(validator_pool);
+
+                        let mut distributed_to_validators: u128 = 0;
                         let validators_count = authored.len() as u32;
 
+                        // Pro-rata pay validators from the 85% pool. Any floor()
+                        // residue here also rolls into treasury below.
                         for (account, blocks) in &authored {
-                            // Pro-rata: reward = era_reward * blocks / total_blocks
-                            let reward = era_reward
+                            // Pro-rata: reward = validator_pool * blocks / total_blocks
+                            let reward = validator_pool
                                 .saturating_mul(*blocks as u128)
                                 / (total_blocks as u128);
 
@@ -689,8 +735,28 @@ pub mod pallet {
                                 ValidatorRewards::<T>::mutate(account, |total| {
                                     *total = total.saturating_add(reward);
                                 });
-                                distributed_this_era = distributed_this_era.saturating_add(reward);
+                                distributed_to_validators =
+                                    distributed_to_validators.saturating_add(reward);
                             }
+                        }
+
+                        // Credit treasury: baseline 15% pool + pro-rata residue
+                        // from the validator loop. `residue` can legitimately be 0
+                        // when `validator_pool` divides evenly by total_blocks.
+                        let pro_rata_residue =
+                            validator_pool.saturating_sub(distributed_to_validators);
+                        let treasury_emission = treasury_pool.saturating_add(pro_rata_residue);
+                        let distributed_this_era = distributed_to_validators
+                            .saturating_add(treasury_emission);
+
+                        if treasury_emission > 0 {
+                            use frame_support::traits::Currency;
+                            let balance: <T as pallet_balances::Config>::Balance =
+                                treasury_emission.try_into().unwrap_or_default();
+                            let _ = pallet_balances::Pallet::<T>::deposit_creating(
+                                &Self::treasury_account(),
+                                balance,
+                            );
                         }
 
                         TotalRewardsDistributed::<T>::mutate(|total| {
@@ -704,8 +770,9 @@ pub mod pallet {
                         });
 
                         log::info!(
-                            "Validator rewards distributed: {} to {} validators ({} blocks)",
-                            distributed_this_era, validators_count, total_blocks
+                            "Era emission: validators={} ({} blocks), treasury={}, total={}",
+                            distributed_to_validators, total_blocks,
+                            treasury_emission, distributed_this_era,
                         );
                     }
 

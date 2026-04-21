@@ -4597,8 +4597,6 @@ dependencies = [
  "pallet-session-validator-management-rpc",
  "pallet-sidechain",
  "pallet-sidechain-rpc",
- "pallet-transaction-payment-rpc",
- "pallet-transaction-payment-rpc-runtime-api",
  "sc-basic-authorship",
  "sc-cli",
  "sc-client-api",
@@ -4674,8 +4672,6 @@ dependencies = [
  "pallet-sidechain",
  "pallet-sudo",
  "pallet-timestamp",
- "pallet-transaction-payment",
- "pallet-transaction-payment-rpc-runtime-api",
  "pallet-treasury",
  "pallet-utility",
  "pallet-vesting",
@@ -5833,49 +5829,6 @@ dependencies = [
  "sp-runtime",
  "sp-storage",
  "sp-timestamp",
-]
-
-[[package]]
-name = "pallet-transaction-payment"
-version = "38.0.2"
-source = "git+https://github.com/paritytech/polkadot-sdk.git?tag=polkadot-stable2409-4#c455194a2ae2f613c1c671e00dbf397b83ed8171"
-dependencies = [
- "frame-support",
- "frame-system",
- "parity-scale-codec",
- "scale-info",
- "serde",
- "sp-core",
- "sp-io",
- "sp-runtime",
-]
-
-[[package]]
-name = "pallet-transaction-payment-rpc"
-version = "41.0.0"
-source = "git+https://github.com/paritytech/polkadot-sdk.git?tag=polkadot-stable2409-4#c455194a2ae2f613c1c671e00dbf397b83ed8171"
-dependencies = [
- "jsonrpsee",
- "pallet-transaction-payment-rpc-runtime-api",
- "parity-scale-codec",
- "sp-api",
- "sp-blockchain",
- "sp-core",
- "sp-rpc",
- "sp-runtime",
- "sp-weights",
-]
-
-[[package]]
-name = "pallet-transaction-payment-rpc-runtime-api"
-version = "38.0.0"
-source = "git+https://github.com/paritytech/polkadot-sdk.git?tag=polkadot-stable2409-4#c455194a2ae2f613c1c671e00dbf397b83ed8171"
-dependencies = [
- "pallet-transaction-payment",
- "parity-scale-codec",
- "sp-api",
- "sp-runtime",
- "sp-weights",
 ]
 
 [[package]]

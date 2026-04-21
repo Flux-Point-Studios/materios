@@ -9,7 +9,7 @@ use parity_scale_codec::{Decode, Encode};
 use sp_core::{crypto::AccountId32, H256};
 use sp_runtime::{
     traits::{AccountIdConversion, BlakeTwo256, IdentityLookup},
-    BuildStorage,
+    BuildStorage, Perbill,
 };
 
 // ---------------------------------------------------------------------------
@@ -101,6 +101,11 @@ parameter_types! {
     /// Mock treasury pot — matches the production runtime's `mat/trsy`
     /// PalletId so Component-4 fee-split tests mirror the real routing.
     pub const TreasuryPotId: PalletId = PalletId(*b"mat/trsy");
+    /// Mock treasury emission share. `pub static` (rather than `pub const`)
+    /// generates a mutable `TreasuryEmissionShareValue::set(Perbill)` setter
+    /// used by `era_emission_respects_configurable_treasury_share` to retune
+    /// the split at test-time. Default matches the production 15%.
+    pub static TreasuryEmissionShareValue: Perbill = Perbill::from_percent(15);
 }
 
 impl pallet::Config for Test {
@@ -111,6 +116,7 @@ impl pallet::Config for Test {
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
+    type TreasuryEmissionShare = TreasuryEmissionShareValue;
 }
 
 /// Construct a deterministic AccountId32 from a single byte seed (for tests).
@@ -1800,4 +1806,266 @@ fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
             "event must report treasury_amount=0 when the pot was below ED"
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// Validator emission — 85/15 validator/treasury split (2026-04-21)
+// ---------------------------------------------------------------------------
+//
+// Under the Midnight-style fee redesign, MATRA is no longer charged on
+// transactions, so the 20% fee-router treasury feed is gone. To compensate,
+// 15% of each era's validator emission (the 102.74 MATRA/era pre-allocated
+// reserve distribution) is redirected to the treasury PalletId (`mat/trsy`).
+// The remaining 85% is distributed pro-rata by blocks authored, unchanged.
+//
+// Rounding residue from floor(reward * 85 / 100) and floor(reward * 15 / 100)
+// goes to TREASURY (the safer sink) rather than validators.
+
+#[cfg(test)]
+mod era_emission_drip {
+    use super::*;
+    use frame_support::traits::Hooks;
+    use sp_runtime::traits::AccountIdConversion;
+
+    const ERA_LENGTH: u32 = 14_400;
+    const REWARD_PER_ERA: u128 = 102_739_726;
+
+    fn validator_a() -> MockAccountId {
+        acc(0xA1)
+    }
+
+    fn treasury_pot() -> MockAccountId {
+        let pid: PalletId = TreasuryPotId::get();
+        pid.into_account_truncating()
+    }
+
+    /// Seed one validator as the sole author of an entire era, then trip
+    /// the era boundary by calling on_initialize at block ERA_LENGTH+1.
+    /// Returns (validator_delta, treasury_delta) in MATRA base units.
+    fn run_one_era_with_single_author() -> (u128, u128) {
+        // Drive BlocksAuthored directly — the production `find_block_author`
+        // path requires Aura digests, which would be noise for this test.
+        // We're testing the SPLIT logic, not the author-identification logic
+        // (which is unchanged from pre-fix).
+        pallet::BlocksAuthored::<Test>::insert(&validator_a(), ERA_LENGTH);
+        pallet::EraStartBlock::<Test>::put(1u32);
+
+        let pre_validator = Balances::free_balance(&validator_a());
+        let pre_trsy = Balances::free_balance(&treasury_pot());
+
+        // Advance System block number past the era boundary so
+        // `block_num - era_start >= ERA_LENGTH` fires.
+        System::set_block_number(ERA_LENGTH + 2);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(ERA_LENGTH + 2);
+
+        let post_validator = Balances::free_balance(&validator_a());
+        let post_trsy = Balances::free_balance(&treasury_pot());
+        (
+            post_validator.saturating_sub(pre_validator),
+            post_trsy.saturating_sub(pre_trsy),
+        )
+    }
+
+    #[test]
+    fn era_emission_splits_85_validator_15_treasury() {
+        new_test_ext().execute_with(|| {
+            // Pre-fund treasury pot at ED so sub-ED deposits don't fail the
+            // account-existence check; test asserts deltas, not absolutes.
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+            let pre_trsy = Balances::free_balance(&treasury_pot());
+
+            let (validator_delta, treasury_delta) = run_one_era_with_single_author();
+
+            // With a SINGLE author, pro-rata reduces to: validator gets the
+            // full 85% share, treasury gets the 15% share, and any rounding
+            // residue must end up in treasury (not lost, not to validator).
+            let expected_validator = REWARD_PER_ERA.saturating_mul(85) / 100;
+            let expected_treasury_min = REWARD_PER_ERA.saturating_mul(15) / 100;
+
+            assert_eq!(
+                validator_delta,
+                expected_validator,
+                "sole validator must receive exactly floor(reward * 85 / 100)"
+            );
+
+            // Total distributed to the two buckets must equal the full era
+            // reward — no MATRA leaks to burn or nowhere.
+            assert_eq!(
+                validator_delta + treasury_delta,
+                REWARD_PER_ERA,
+                "sum of validator + treasury emissions must equal full era reward (no leak)"
+            );
+
+            // Treasury delta is at least the floor 15% share; with rounding
+            // residue it can be strictly greater. The exact distribution is:
+            //   validator = floor(102_739_726 * 85 / 100) = 87_328_767
+            //   treasury  = 102_739_726 - 87_328_767     = 15_410_959
+            // (HIGH #3 fix 2026-04-21: this comment previously said the
+            // validator got 87_328_766 / treasury got 15_410_960, which was
+            // off-by-one — the assertion in
+            // `era_emission_rounding_residue_goes_to_treasury_not_validator`
+            // is, correctly, 87_328_767 / 15_410_959.)
+            //
+            // The old expected pre-migration behaviour was:
+            //   validator = 102_739_726 (full reward to author)
+            //   treasury  = 0
+            assert!(
+                treasury_delta >= expected_treasury_min,
+                "treasury must receive >= floor(reward * 15 / 100); got {} expected >= {}",
+                treasury_delta, expected_treasury_min,
+            );
+            let _ = pre_trsy; // kept for debugging failure output
+        });
+    }
+
+    #[test]
+    fn era_emission_rounding_residue_goes_to_treasury_not_validator() {
+        // Pin down the exact rounding behavior so a future refactor can't
+        // silently flip the residue to the validator side.
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+            let (validator_delta, treasury_delta) = run_one_era_with_single_author();
+
+            // 102_739_726 * 85 = 8_732_876_710; / 100 = 87_328_767 (rem 10).
+            //   validator = floor(reward * 85 / 100) = 87_328_767
+            //   treasury  = reward - validator        = 15_410_959 (includes residue of 10)
+            //
+            // Pre-fix expected: validator=102_739_726, treasury=0. Preserved
+            // in this comment for reviewer traceability.
+            let expected_validator: u128 = 87_328_767;
+            let expected_treasury: u128 = 15_410_959;
+            assert_eq!(validator_delta, expected_validator);
+            assert_eq!(treasury_delta, expected_treasury);
+        });
+    }
+
+    #[test]
+    fn era_emission_split_matra_issuance_net_increases_by_full_reward() {
+        // Validator + treasury emissions are `deposit_creating`, i.e. MATRA
+        // is MINTED from the pre-allocated reserve (the 150M pool). So total
+        // issuance goes UP by exactly the full era reward — no burn path.
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+            let pre_issuance = Balances::total_issuance();
+            let _ = run_one_era_with_single_author();
+            let post_issuance = Balances::total_issuance();
+            assert_eq!(
+                post_issuance - pre_issuance,
+                REWARD_PER_ERA,
+                "total_issuance must rise by exactly REWARD_PER_ERA after the era boundary"
+            );
+        });
+    }
+
+    #[test]
+    fn era_emission_multi_validator_pro_rata_plus_residue_to_treasury() {
+        // 3-validator scenario to verify the 85% pro-rata split still works
+        // and residue from pro-rata rounding goes to treasury.
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+
+            let v1 = acc(0xB1);
+            let v2 = acc(0xB2);
+            let v3 = acc(0xB3);
+            // Non-divisible-by-3 counts to exercise pro-rata rounding.
+            pallet::BlocksAuthored::<Test>::insert(&v1, 5_000u32);
+            pallet::BlocksAuthored::<Test>::insert(&v2, 5_000u32);
+            pallet::BlocksAuthored::<Test>::insert(&v3, 4_400u32);
+            pallet::EraStartBlock::<Test>::put(1u32);
+
+            let pre_trsy = Balances::free_balance(&treasury_pot());
+
+            System::set_block_number(ERA_LENGTH + 2);
+            let _ = <OrinqReceipts as Hooks<_>>::on_initialize(ERA_LENGTH + 2);
+
+            let got_v1 = Balances::free_balance(&v1);
+            let got_v2 = Balances::free_balance(&v2);
+            let got_v3 = Balances::free_balance(&v3);
+            let got_trsy = Balances::free_balance(&treasury_pot());
+
+            let validator_pool = REWARD_PER_ERA.saturating_mul(85) / 100;
+            let total_blocks: u128 = 14_400;
+
+            // Each validator gets floor(validator_pool * their_blocks / total).
+            let expected_v1 = validator_pool * 5_000 / total_blocks;
+            let expected_v2 = validator_pool * 5_000 / total_blocks;
+            let expected_v3 = validator_pool * 4_400 / total_blocks;
+            assert_eq!(got_v1, expected_v1);
+            assert_eq!(got_v2, expected_v2);
+            assert_eq!(got_v3, expected_v3);
+
+            let paid_to_validators = got_v1 + got_v2 + got_v3;
+            let expected_trsy_delta = REWARD_PER_ERA - paid_to_validators;
+
+            assert_eq!(
+                got_trsy - pre_trsy,
+                expected_trsy_delta,
+                "treasury receives 15% nominal + all pro-rata residue"
+            );
+            assert_eq!(
+                paid_to_validators + (got_trsy - pre_trsy),
+                REWARD_PER_ERA,
+                "full era reward conserved across validators + treasury"
+            );
+        });
+    }
+
+    #[test]
+    fn era_emission_respects_configurable_treasury_share() {
+        // HIGH #2: `TreasuryEmissionShare` must be a real runtime-tunable
+        // `Get<Perbill>` — NOT a hardcoded `Perbill::from_percent(15)` in
+        // the pallet hook. Proof: override the share in the mock runtime
+        // and assert the validator/treasury split tracks the new value.
+        //
+        // This test drives the Config-trait refactor per TDD: it sets
+        // `TreasuryEmissionShare` to 20% (and then 10%) via a mutable
+        // `parameter_types!` static and verifies the math follows.
+        //
+        // If `TreasuryEmissionShare` is hardcoded at 15% anywhere in the
+        // hook, both sub-cases below will fail with validator_delta ==
+        // floor(reward * 85 / 100) regardless of the configured share.
+        use sp_runtime::Perbill;
+
+        // Sub-case 1: 20% treasury share ⇒ 80% validator.
+        TreasuryEmissionShareValue::set(Perbill::from_percent(20));
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+            let (validator_delta, treasury_delta) = run_one_era_with_single_author();
+            let expected_validator = REWARD_PER_ERA.saturating_mul(80) / 100;
+            let expected_treasury = REWARD_PER_ERA.saturating_sub(expected_validator);
+            assert_eq!(
+                validator_delta, expected_validator,
+                "at 20% treasury share, sole validator must receive floor(reward * 80 / 100)"
+            );
+            assert_eq!(
+                treasury_delta, expected_treasury,
+                "at 20% treasury share, treasury must receive reward - validator_pool"
+            );
+            assert_eq!(
+                validator_delta + treasury_delta, REWARD_PER_ERA,
+                "split at 20% must still conserve the full era reward"
+            );
+        });
+
+        // Sub-case 2: 10% treasury share ⇒ 90% validator.
+        TreasuryEmissionShareValue::set(Perbill::from_percent(10));
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+            let (validator_delta, treasury_delta) = run_one_era_with_single_author();
+            let expected_validator = REWARD_PER_ERA.saturating_mul(90) / 100;
+            let expected_treasury = REWARD_PER_ERA.saturating_sub(expected_validator);
+            assert_eq!(
+                validator_delta, expected_validator,
+                "at 10% treasury share, sole validator must receive floor(reward * 90 / 100)"
+            );
+            assert_eq!(
+                treasury_delta, expected_treasury,
+                "at 10% treasury share, treasury must receive reward - validator_pool"
+            );
+        });
+
+        // Reset to the documented default so subsequent tests (if any run
+        // after this in the same process) observe the 15/85 baseline.
+        TreasuryEmissionShareValue::set(Perbill::from_percent(15));
+    }
 }
