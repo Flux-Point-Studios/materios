@@ -13,6 +13,7 @@ members = [
     # `cargo test --workspace` exercises the patched sources and so dev-
     # dependencies (hex-literal, tokio, etc.) are resolved correctly.
     "vendor/authority-selection-inherents",
+    "vendor/pallet-session-validator-management",
 ]
 
 [workspace.package]
@@ -176,23 +177,53 @@ tempfile = ">=3, <3.19"
 core2 = { path = "vendor/core2" }
 
 # ---------------------------------------------------------------------------
-# Patch: vendored forks of two IOG partner-chains crates so Materios preprod
-# can launch in the same Cardano epoch the D-parameter / permissioned-
-# candidates transactions were submitted, instead of waiting 10 days for the
-# upstream `- 2` stability offset.
+# Patch: vendored forks of IOG partner-chains crates carrying the Materios
+# [materios-patch] runtime patches. Every entry below is required to preserve
+# production chain stability AND must be revisited before mainnet.
 #
-# 1. `authority-selection-inherents` — relax the ariadne data_epoch check
-#    from `data_epoch < mc_reference_epoch` to `<=`. IOG's own comment
-#    acknowledges `<=` is more accurate; they used `<` only for simpler math.
+# 1. `authority-selection-inherents` — two patches:
+#    a. ariadne data_epoch early-launch relax (`<` → `<=`). Lets Materios
+#       preprod start producing blocks in the same Cardano epoch the
+#       D-parameter / permissioned-candidates txs were submitted, instead
+#       of waiting 10 days for the upstream `- 2` stability offset.
+#    b. [materios-patch: ariadne-output-dedup] — collapse duplicate
+#       validators produced by IOG's with-replacement weighted-random
+#       sampler. Fixes the 2026-04-21 MacBook×3+Node-3×1 finality stall
+#       at Materios block #26197 (4h30m stall). Applied inside
+#       `select_authorities` after the sampler and before the pallet
+#       receives the committee vec. See Task #60 handoff.
 #
 # 2. `db-sync-follower` — drop the `- 2` Cardano-epoch offset in
 #    get_epoch_of_data_storage. The 2-epoch settling window provides zero
 #    marginal safety on preprod in permissioned-only mode (D=1.0) because
 #    `get_latest_stable_block_for` already enforces k=432-blocks depth.
 #
-# MAINNET MUST REVERT BOTH patches. The upstream behavior is the correct
-# security posture for production partner-chains with non-permissioned SPOs.
+# 3. `pallet-session-validator-management` —
+#    [materios-patch: idp-none-fallback]. Prevents a runtime panic at every
+#    sc_epoch boundary where the Ariadne IDP returns Ok(None). Patches 4
+#    functions so create_inherent skips (returns None) instead of
+#    panicking, check_inherent accepts a missing-inherent block,
+#    is_inherent_required reports "not required" when the IDP has no data,
+#    and inherent_data_to_authority_selection_inputs returns Option
+#    instead of panicking via `.expect(...)`. See
+#    feedback_iog_idp_none_panic.md for the full 2026-04-19 incident
+#    analysis.
+#
+# MAINNET POSTURE:
+#   - Patches 1a and 2 (early-launch relaxations): MUST REVERT for mainnet.
+#     Upstream's conservative stability offset is the correct posture for
+#     production partner-chains with non-permissioned SPOs.
+#   - Patch 1b (ariadne-output-dedup): safe for mainnet as-is. Should ALSO
+#     be upstreamed; the with-replacement sampler bug is not preprod-
+#     specific.
+#   - Patch 3 (idp-none-fallback): preserve until task #123 lands the
+#     upstream "last-known-good Ariadne IDP cache" (tracked in IOG issue
+#     #1154). The workaround is safe but masks an architectural mismatch
+#     between short sc_epochs (1h) and long mc_epochs (5d). The mainnet
+#     plan is the upstream IDP cache — see feedback_iog_idp_none_panic.md
+#     §"Durable fix roadmap".
 # ---------------------------------------------------------------------------
 [patch."https://github.com/input-output-hk/partner-chains.git"]
 authority-selection-inherents = { path = "vendor/authority-selection-inherents" }
 db-sync-follower = { path = "vendor/db-sync-follower" }
+pallet-session-validator-management = { path = "vendor/pallet-session-validator-management" }

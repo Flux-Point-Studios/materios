@@ -5735,7 +5735,6 @@ dependencies = [
 [[package]]
 name = "pallet-session-validator-management"
 version = "1.5.1"
-source = "git+https://github.com/input-output-hk/partner-chains.git?tag=v1.5.1#20e607f260037e119ad282da006dc4d9e1a67f62"
 dependencies = [
  "frame-support",
  "frame-system",
@@ -5744,6 +5743,7 @@ dependencies = [
  "scale-info",
  "sidechain-domain",
  "sp-core",
+ "sp-io",
  "sp-runtime",
  "sp-session-validator-management",
  "sp-std",
