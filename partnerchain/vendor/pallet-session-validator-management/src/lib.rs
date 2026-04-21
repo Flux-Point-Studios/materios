@@ -173,8 +173,23 @@ pub mod pallet {
 				None
 			} else {
 				let for_epoch_number = CurrentCommittee::<T>::get().epoch + One::one();
+				// [materios-patch: idp-none-fallback] When the Ariadne IDP
+				// returns Ok(None) — e.g. at every sc_epoch boundary where
+				// `data_epoch >= mc_reference_epoch` — skip the set() call
+				// entirely. The pallet will reuse `CurrentCommittee` via
+				// the `ValidatorManagementSessionManager` fallback. See
+				// feedback_iog_idp_none_panic.md for the full mechanism.
 				let (authority_selection_inputs, selection_inputs_hash) =
-					Self::inherent_data_to_authority_selection_inputs(data);
+					match Self::inherent_data_to_authority_selection_inputs(data) {
+						Some(inputs) => inputs,
+						None => {
+							log::warn!(
+								target: "runtime::session-validator-management",
+								"[materios-patch] validator inherent data unavailable; skipping set() for epoch {for_epoch_number}"
+							);
+							return None;
+						},
+					};
 				if let Some(validators) =
 					T::select_authorities(authority_selection_inputs, for_epoch_number)
 				{
@@ -199,8 +214,26 @@ pub mod pallet {
 				_ => return Ok(()),
 			};
 
+			// [materios-patch: idp-none-fallback] If the verifier's IDP also
+			// reports "no data" (matching the proposer's view), there is
+			// nothing to reverify. Accept the call on the assumption that
+			// the proposer made the same decision our IDP would have. This
+			// mirrors the proposer-side skip in `create_inherent` above
+			// and closes the peer-ban fork loop the first v1.5.1 patch
+			// attempt hit (see feedback_iog_idp_none_panic.md §"How we
+			// recovered").
 			let (authority_selection_inputs, computed_selection_inputs_hash) =
-				Self::inherent_data_to_authority_selection_inputs(data);
+				match Self::inherent_data_to_authority_selection_inputs(data) {
+					Some(inputs) => inputs,
+					None => {
+						log::warn!(
+							target: "runtime::session-validator-management",
+							"[materios-patch] validator inherent data unavailable on verifier; accepting set() call for epoch {} without recomputation",
+							for_epoch_number_param
+						);
+						return Ok(());
+					},
+				};
 			let validators =
 				T::select_authorities(authority_selection_inputs, *for_epoch_number_param)
 					.unwrap_or_else(|| {
@@ -232,12 +265,28 @@ pub mod pallet {
 			matches!(call, Call::set { .. })
 		}
 
-		fn is_inherent_required(_: &InherentData) -> Result<Option<Self::Error>, Self::Error> {
-			if !NextCommittee::<T>::exists() {
-				Ok(Some(InherentError::CommitteeNeedsToBeStoredOneEpochInAdvance)) // change error
-			} else {
-				Ok(None)
+		// [materios-patch: idp-none-fallback] Only demand the inherent when
+		// the IDP has data AND NextCommittee is missing. Without this
+		// change, verifiers would reject blocks the authors correctly
+		// skipped (because THEIR IDP saw None), causing peer-ban fork
+		// loops. This was the bug the first recovery attempt missed;
+		// keeping it tight here. See feedback_iog_idp_none_panic.md.
+		fn is_inherent_required(
+			data: &InherentData,
+		) -> Result<Option<Self::Error>, Self::Error> {
+			if NextCommittee::<T>::exists() {
+				return Ok(None);
 			}
+			if Self::inherent_data_to_authority_selection_inputs(data).is_none() {
+				// Proposer's IDP had no data; verifiers must not demand
+				// the inherent either.
+				log::warn!(
+					target: "runtime::session-validator-management",
+					"[materios-patch] is_inherent_required: IDP data absent AND NextCommittee missing; reporting not-required so honest skippers aren't banned"
+				);
+				return Ok(None);
+			}
+			Ok(Some(InherentError::CommitteeNeedsToBeStoredOneEpochInAdvance)) // change error
 		}
 	}
 
@@ -330,16 +379,29 @@ pub mod pallet {
 			))
 		}
 
+		// [materios-patch: idp-none-fallback] Return Option<_> instead of
+		// unwrapping via `.expect(...)`. The Ariadne IDP returns Ok(None)
+		// at every sc_epoch boundary where `data_epoch >= mc_reference_epoch`
+		// (see feedback_iog_idp_none_panic.md). Propagating that None lets
+		// callers (create_inherent / check_inherent / is_inherent_required)
+		// handle the absence of inherent data gracefully instead of panicking.
+		//
+		// The `.ok()??` chain:
+		//   - `.ok()` converts the outer `Result<Option<T>, Error>` into
+		//     `Option<Option<T>>`, treating codec errors as "data absent"
+		//     which is the safest fallback — a malformed inherent at the
+		//     encoding layer should not panic the runtime either.
+		//   - The first `?` unwraps that outer Option (codec outcome).
+		//   - The second `?` unwraps the inner Option (IDP data presence).
 		fn inherent_data_to_authority_selection_inputs(
 			data: &InherentData,
-		) -> (T::AuthoritySelectionInputs, SizedByteString<32>) {
-			let decoded_data = data
+		) -> Option<(T::AuthoritySelectionInputs, SizedByteString<32>)> {
+			let decoded_data: T::AuthoritySelectionInputs = data
 				.get_data::<T::AuthoritySelectionInputs>(&INHERENT_IDENTIFIER)
-				.expect("Validator inherent data not correctly encoded")
-				.expect("Validator inherent data must be provided");
+				.ok()??;
 			let data_hash = SizedByteString(blake2_256(&decoded_data.encode()));
 
-			(decoded_data, data_hash)
+			Some((decoded_data, data_hash))
 		}
 
 		pub fn calculate_committee(
