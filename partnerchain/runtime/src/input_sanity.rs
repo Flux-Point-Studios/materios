@@ -394,6 +394,49 @@ mod tests {
         matches!(err, SanityError::DParamTooLarge { .. });
     }
 
+    /// Boundary test: a d_parameter whose permissioned+registered seats sum
+    /// exactly to 64 must PASS sanitation. Guards against regressions where
+    /// `MAX_COMMITTEE_SIZE` gets silently decoupled from the orinq-receipts
+    /// pallet cap. Spec 203 raised both to 64.
+    #[test]
+    fn input_sanity_accepts_d_param_summing_to_64() {
+        let mut i = inputs_ok();
+        i.d_parameter.num_permissioned_candidates = 40;
+        i.d_parameter.num_registered_candidates = 24;
+        assert_eq!(
+            i.d_parameter.num_permissioned_candidates + i.d_parameter.num_registered_candidates,
+            64,
+            "test precondition: d-param must sum to 64"
+        );
+        let (cleaned, _report) = sanitize_authority_selection_inputs(i).unwrap();
+        assert_eq!(cleaned.d_parameter.num_permissioned_candidates, 40);
+        assert_eq!(cleaned.d_parameter.num_registered_candidates, 24);
+    }
+
+    /// Boundary test: a d_parameter summing to 65 (one over the cap) must
+    /// fail. Complements `input_sanity_accepts_d_param_summing_to_64`; the
+    /// pair pins the cap at exactly 64.
+    #[test]
+    fn input_sanity_rejects_d_param_summing_to_65() {
+        let mut i = inputs_ok();
+        i.d_parameter.num_permissioned_candidates = 40;
+        i.d_parameter.num_registered_candidates = 25;
+        assert_eq!(
+            i.d_parameter.num_permissioned_candidates + i.d_parameter.num_registered_candidates,
+            65,
+            "test precondition: d-param must sum to 65"
+        );
+        let err = sanitize_authority_selection_inputs(i).unwrap_err();
+        match err {
+            SanityError::DParamTooLarge { permissioned, registered, cap } => {
+                assert_eq!(permissioned, 40);
+                assert_eq!(registered, 25);
+                assert_eq!(cap, 64, "cap must report as 64 in the error");
+            }
+            other => panic!("expected DParamTooLarge, got {other:?}"),
+        }
+    }
+
     #[test]
     fn rejects_oversized_epoch_nonce() {
         let mut i = inputs_ok();
