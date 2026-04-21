@@ -245,3 +245,77 @@ fn tx_payment_rpc_weight_to_fee_still_callable() {
         assert!(nominal > 0, "WeightToFee still computes a nominal figure for RPC");
     });
 }
+
+// ---------------------------------------------------------------------------
+// 4) Integration-style invariant: MATRA total_issuance is conserved across a
+//    run of real signed `Balances::transfer_keep_alive` calls through the
+//    dispatch pipeline. This is the behavior-as-called replacement for the
+//    three trait-direct tests above — those exercise the
+//    `OnChargeTransaction` hook in isolation; this one exercises actual
+//    Balances-pallet extrinsics, which is what users submit.
+//
+//    Survives the HIGH #1 deletion of `pallet_transaction_payment`: this
+//    test does not reference `TxCharge`, `OnChargeTransaction`, or
+//    `TransactionPayment` at all — only `RuntimeCall::Balances(...)` and
+//    `Dispatchable::dispatch`, which remain valid after the pallet goes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn matra_total_issuance_conserved_across_n_extrinsics() {
+    use frame_support::dispatch::Dispatchable;
+
+    let recipient = sp_keyring::Sr25519Keyring::Eve.to_account_id();
+
+    new_test_ext().execute_with(|| {
+        let pre_issuance = pallet_balances::Pallet::<Runtime>::total_issuance();
+        let pre_payer = pallet_balances::Pallet::<Runtime>::free_balance(&fee_payer());
+        let pre_recipient = pallet_balances::Pallet::<Runtime>::free_balance(&recipient);
+
+        // 25 real Balances::transfer_keep_alive dispatches. Each call has
+        // the shape of a live user extrinsic (signed by Dave, transferring
+        // to Eve). Amounts are deliberately chosen to cover both dust-like
+        // and nominal transfers, so any fee-burn regression that applied
+        // a percentage would immediately show up as cumulative drift.
+        let amounts: [Balance; 5] = [1, 7, 97, 1_000, 33_333];
+        let total_transferred: Balance = amounts.iter().sum::<Balance>() * 5;
+        for _ in 0..5 {
+            for &amount in &amounts {
+                let call = RuntimeCall::Balances(
+                    pallet_balances::Call::<Runtime>::transfer_keep_alive {
+                        dest: sp_runtime::MultiAddress::Id(recipient.clone()),
+                        value: amount,
+                    },
+                );
+                // Dispatch through the signed-origin path — this is the
+                // same dispatch `Executive::apply_extrinsic` reaches after
+                // SignedExtensions run. The SignedExtension chain in this
+                // runtime (post-202) doesn't touch MATRA balances —
+                // `ChargeMotra` operates on the MOTRA pallet only — so
+                // skipping the SE chain here is equivalent from a MATRA-
+                // issuance standpoint. If a future SE re-introduces a
+                // MATRA burn anywhere, the right fix is to plumb that SE
+                // into this test harness, not to paper over the drift.
+                call.dispatch(RuntimeOrigin::signed(fee_payer()))
+                    .expect("transfer_keep_alive dispatch must succeed");
+            }
+        }
+
+        let post_issuance = pallet_balances::Pallet::<Runtime>::total_issuance();
+        let post_payer = pallet_balances::Pallet::<Runtime>::free_balance(&fee_payer());
+        let post_recipient = pallet_balances::Pallet::<Runtime>::free_balance(&recipient);
+
+        assert_eq!(
+            pre_issuance, post_issuance,
+            "MATRA total_issuance must be conserved across 25 real transfer_keep_alive dispatches (drift = {})",
+            (pre_issuance as i128) - (post_issuance as i128),
+        );
+        assert_eq!(
+            pre_payer.saturating_sub(post_payer), total_transferred,
+            "payer must lose exactly the sum transferred (no MATRA tx-fee burn)"
+        );
+        assert_eq!(
+            post_recipient.saturating_sub(pre_recipient), total_transferred,
+            "recipient must gain exactly the sum transferred"
+        );
+    });
+}
