@@ -1997,4 +1997,63 @@ mod era_emission_drip {
             );
         });
     }
+
+    #[test]
+    fn era_emission_respects_configurable_treasury_share() {
+        // HIGH #2: `TreasuryEmissionShare` must be a real runtime-tunable
+        // `Get<Perbill>` — NOT a hardcoded `Perbill::from_percent(15)` in
+        // the pallet hook. Proof: override the share in the mock runtime
+        // and assert the validator/treasury split tracks the new value.
+        //
+        // This test drives the Config-trait refactor per TDD: it sets
+        // `TreasuryEmissionShare` to 20% (and then 10%) via a mutable
+        // `parameter_types!` static and verifies the math follows.
+        //
+        // If `TreasuryEmissionShare` is hardcoded at 15% anywhere in the
+        // hook, both sub-cases below will fail with validator_delta ==
+        // floor(reward * 85 / 100) regardless of the configured share.
+        use sp_runtime::Perbill;
+
+        // Sub-case 1: 20% treasury share ⇒ 80% validator.
+        TreasuryEmissionShareValue::set(Perbill::from_percent(20));
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+            let (validator_delta, treasury_delta) = run_one_era_with_single_author();
+            let expected_validator = REWARD_PER_ERA.saturating_mul(80) / 100;
+            let expected_treasury = REWARD_PER_ERA.saturating_sub(expected_validator);
+            assert_eq!(
+                validator_delta, expected_validator,
+                "at 20% treasury share, sole validator must receive floor(reward * 80 / 100)"
+            );
+            assert_eq!(
+                treasury_delta, expected_treasury,
+                "at 20% treasury share, treasury must receive reward - validator_pool"
+            );
+            assert_eq!(
+                validator_delta + treasury_delta, REWARD_PER_ERA,
+                "split at 20% must still conserve the full era reward"
+            );
+        });
+
+        // Sub-case 2: 10% treasury share ⇒ 90% validator.
+        TreasuryEmissionShareValue::set(Perbill::from_percent(10));
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&treasury_pot(), 1_000);
+            let (validator_delta, treasury_delta) = run_one_era_with_single_author();
+            let expected_validator = REWARD_PER_ERA.saturating_mul(90) / 100;
+            let expected_treasury = REWARD_PER_ERA.saturating_sub(expected_validator);
+            assert_eq!(
+                validator_delta, expected_validator,
+                "at 10% treasury share, sole validator must receive floor(reward * 90 / 100)"
+            );
+            assert_eq!(
+                treasury_delta, expected_treasury,
+                "at 10% treasury share, treasury must receive reward - validator_pool"
+            );
+        });
+
+        // Reset to the documented default so subsequent tests (if any run
+        // after this in the same process) observe the 15/85 baseline.
+        TreasuryEmissionShareValue::set(Perbill::from_percent(15));
+    }
 }
