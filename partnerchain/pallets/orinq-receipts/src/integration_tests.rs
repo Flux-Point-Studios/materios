@@ -114,7 +114,8 @@ impl crate::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = crate::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
-    type MaxCommitteeSize = ConstU32<16>;
+    // Integration-test mock mirrors the spec-203 runtime cap (64).
+    type MaxCommitteeSize = ConstU32<64>;
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;

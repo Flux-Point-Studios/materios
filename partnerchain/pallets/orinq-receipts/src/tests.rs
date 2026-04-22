@@ -112,7 +112,11 @@ impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = crate::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
-    type MaxCommitteeSize = ConstU32<16>;
+    // Mock mirrors the spec-203 runtime cap (64). Tests under this mock
+    // must therefore be tolerant of a larger committee than spec-202's
+    // 16-seat ceiling. See `committee_can_hold_up_to_64_distinct_members`
+    // and `sixty_fifth_member_join_fails_with_committee_full`.
+    type MaxCommitteeSize = ConstU32<64>;
     type Currency = Balances;
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
@@ -512,9 +516,10 @@ fn era_cap_baseline_attestor_count_has_default() {
 #[test]
 fn era_cap_auto_scales_with_attestor_count() {
     // With baseline_count = 16, doubling the committee size should double
-    // the effective era cap. We can't add more than 16 (MaxCommitteeSize)
-    // in the test mock, so verify linear scaling at two representative
-    // sub-baseline counts (4 and 8).
+    // the effective era cap. We verify linear scaling at two representative
+    // sub-baseline counts (4 and 8). In spec 203 the mock MaxCommitteeSize
+    // is ConstU32<64> so we could go higher, but two sub-baseline points
+    // are enough to pin the linear-scaling contract.
     new_test_ext().execute_with(|| {
         let base_cap = OrinqReceipts::era_cap_base();
         let baseline = OrinqReceipts::era_cap_baseline_attestor_count() as u128;
@@ -1804,6 +1809,91 @@ fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
         assert!(
             matched,
             "event must report treasury_amount=0 when the pot was below ED"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// MaxCommitteeSize cap behaviour (spec 203, committee 16 → 64)
+// ---------------------------------------------------------------------------
+//
+// Real user GoFigure's second attestor hit `CommitteeFull` on 2026-04-21 when
+// attempting `join_committee` because the committee had filled its
+// `MaxCommitteeSize = 16` cap. These tests assert the raised cap of 64 actually
+// accepts 64 distinct joiners and that the 65th correctly hard-fails. They
+// invoke `join_committee` through the dispatchable with a signed origin (not a
+// direct storage mutate) so they test the extrinsic path end-to-end.
+
+#[test]
+fn committee_can_hold_up_to_64_distinct_members() {
+    new_test_ext().execute_with(|| {
+        // 64 distinct accounts, each funded + bonded, then joining the
+        // committee. All 64 must succeed.
+        for i in 1u16..=64 {
+            let a = AccountId32::new({
+                let mut b = [0u8; 32];
+                b[0] = (i & 0xff) as u8;
+                b[1] = ((i >> 8) & 0xff) as u8;
+                b
+            });
+            Balances::make_free_balance_be(&a, 10_000_000_000);
+            assert_ok!(OrinqReceipts::bond(
+                RuntimeOrigin::signed(a.clone()),
+                1_000_000_000
+            ));
+            assert!(
+                OrinqReceipts::join_committee(RuntimeOrigin::signed(a.clone())).is_ok(),
+                "member #{i} must be able to join"
+            );
+        }
+        // Confirm the storage bound actually holds all 64.
+        assert_eq!(
+            pallet::CommitteeMembers::<Test>::get().len(),
+            64,
+            "committee must contain exactly 64 members after 64 successful joins"
+        );
+    });
+}
+
+#[test]
+fn sixty_fifth_member_join_fails_with_committee_full() {
+    new_test_ext().execute_with(|| {
+        // Fill 64 seats first.
+        for i in 1u16..=64 {
+            let a = AccountId32::new({
+                let mut b = [0u8; 32];
+                b[0] = (i & 0xff) as u8;
+                b[1] = ((i >> 8) & 0xff) as u8;
+                b
+            });
+            Balances::make_free_balance_be(&a, 10_000_000_000);
+            assert_ok!(OrinqReceipts::bond(
+                RuntimeOrigin::signed(a.clone()),
+                1_000_000_000
+            ));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(a)));
+        }
+        // 65th join must fail with `CommitteeFull`.
+        let overflow = AccountId32::new({
+            let mut b = [0u8; 32];
+            b[0] = 65;
+            b[1] = 0;
+            b
+        });
+        Balances::make_free_balance_be(&overflow, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(overflow.clone()),
+            1_000_000_000
+        ));
+        assert_noop!(
+            OrinqReceipts::join_committee(RuntimeOrigin::signed(overflow)),
+            pallet::Error::<Test>::CommitteeFull
+        );
+        // Storage bound still at 64.
+        assert_eq!(
+            pallet::CommitteeMembers::<Test>::get().len(),
+            64,
+            "committee must still be exactly 64 after the 65th reject"
         );
     });
 }

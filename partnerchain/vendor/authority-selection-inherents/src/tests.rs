@@ -204,7 +204,12 @@ fn ariadne_all_permissioned_test() {
 	let committee = calculated_committee.unwrap();
 	let committee_names =
 		committee.iter().map(|(id, _)| account_id_to_name(id)).collect::<Vec<_>>();
-	let expected_committee_names = vec!["bob", "bob", "alice", "bob", "bob", "alice", "bob", "bob"];
+	// [materios-patch: ariadne-output-dedup] Expected vector updated post-dedup.
+	// Pre-dedup (upstream with-replacement output):
+	//   vec!["bob", "bob", "alice", "bob", "bob", "alice", "bob", "bob"]
+	// The 8-seat committee collapses to 2 distinct validators in first-seen
+	// order (bob first, then alice).
+	let expected_committee_names = vec!["bob", "alice"];
 
 	assert_eq!(committee_names, expected_committee_names);
 }
@@ -232,7 +237,10 @@ fn ariadne_only_permissioned_candidates_are_present_test() {
 	let committee = calculated_committee.unwrap();
 	let committee_names =
 		committee.iter().map(|(id, _)| account_id_to_name(id)).collect::<Vec<_>>();
-	let expected_committee_names = vec!["bob", "bob", "alice", "bob", "bob", "alice", "bob", "bob"];
+	// [materios-patch: ariadne-output-dedup] Expected vector updated post-dedup.
+	// Pre-dedup (upstream with-replacement output):
+	//   vec!["bob", "bob", "alice", "bob", "bob", "alice", "bob", "bob"]
+	let expected_committee_names = vec!["bob", "alice"];
 
 	assert_eq!(committee_names, expected_committee_names);
 }
@@ -260,7 +268,11 @@ fn ariadne_3_to_2_test() {
 	let committee = calculated_committee.unwrap();
 	let committee_names =
 		committee.iter().map(|(id, _)| account_id_to_name(id)).collect::<Vec<_>>();
-	let expected_committee_names = vec!["bob", "charlie", "charlie", "alice", "bob"];
+	// [materios-patch: ariadne-output-dedup] Expected vector updated post-dedup.
+	// Pre-dedup (upstream with-replacement output):
+	//   vec!["bob", "charlie", "charlie", "alice", "bob"]
+	// First-seen order preserved: bob (seat 0), charlie (seat 1), alice (seat 3).
+	let expected_committee_names = vec!["bob", "charlie", "alice"];
 
 	assert_eq!(committee_names, expected_committee_names);
 }
@@ -288,7 +300,11 @@ fn ariadne_3_to_2_with_more_available_candidates_test() {
 	let committee = calculated_committee.unwrap();
 	let committee_names =
 		committee.iter().map(|(id, _)| account_id_to_name(id)).collect::<Vec<_>>();
-	let expected_committee_names = vec!["bob", "bob", "bob", "alice", "henry"];
+	// [materios-patch: ariadne-output-dedup] Expected vector updated post-dedup.
+	// Pre-dedup (upstream with-replacement output):
+	//   vec!["bob", "bob", "bob", "alice", "henry"]
+	// 3× bob collapsed to 1, first-seen ordering keeps bob ahead of alice/henry.
+	let expected_committee_names = vec!["bob", "alice", "henry"];
 
 	assert_eq!(committee_names, expected_committee_names);
 }
@@ -316,9 +332,13 @@ fn ariadne_4_to_7_test() {
 	let committee = calculated_committee.unwrap();
 	let committee_names =
 		committee.iter().map(|(id, _)| account_id_to_name(id)).collect::<Vec<_>>();
-	let expected_committee_names = vec![
-		"bob", "charlie", "henry", "ida", "kim", "bob", "alice", "greg", "ida", "ferdie", "henry",
-	];
+	// [materios-patch: ariadne-output-dedup] Expected vector updated post-dedup.
+	// Pre-dedup (upstream with-replacement output):
+	//   vec!["bob", "charlie", "henry", "ida", "kim", "bob", "alice", "greg",
+	//        "ida", "ferdie", "henry"]
+	// First-seen ordering preserved; duplicates of bob, ida, henry collapse.
+	let expected_committee_names =
+		vec!["bob", "charlie", "henry", "ida", "kim", "alice", "greg", "ferdie"];
 
 	assert_eq!(committee_names, expected_committee_names);
 }
@@ -328,6 +348,20 @@ fn ariadne_selection_statistics_test() {
 	// P: [alice, bob]
 	// R: [charlie, dave]
 	// D-param: (20000, 10000)
+	//
+	// [materios-patch: ariadne-output-dedup] This test was originally a
+	// distribution check over 30000 with-replacement samples. Under the
+	// dedup patch the output is DISTINCT-valued, so the distribution-style
+	// assertion is no longer meaningful (each candidate appears at most
+	// once). Converted to a presence + no-duplicate check. The underlying
+	// weight-proportional sampling invariant still holds at the `selection`
+	// crate layer (pre-dedup) and is covered by that crate's own tests.
+	//
+	// Pre-dedup assertions (preserved for audit):
+	//   assert!((9950..=10050).contains(&alice_count));
+	//   assert!((9950..=10050).contains(&bob_count));
+	//   assert!((4235..=4335).contains(&charlie_count));
+	//   assert!((5665..=5765).contains(&dave_count));
 	let permissioned_validators = vec![ALICE, BOB];
 	let registered_validators = vec![CHARLIE, DAVE];
 	let d_parameter =
@@ -343,20 +377,32 @@ fn ariadne_selection_statistics_test() {
 		ScEpochNumber::zero(),
 	);
 	let committee = calculated_committee.unwrap();
+
+	// Post-dedup: every selected candidate appears exactly once (no duplicates).
 	let mut map = HashMap::new();
 	for (id, _) in &committee {
 		*map.entry(id).or_insert(0u32) += 1;
 	}
+	for (id, count) in &map {
+		assert_eq!(
+			*count, 1,
+			"post-dedup committee must have no duplicates, got {} for {:?}",
+			count, id
+		);
+	}
+
+	// All four candidates should be present given the large target size and
+	// the deterministic seed — the pre-dedup sampler hit them all thousands
+	// of times; post-dedup, each appears exactly once.
 	let alice_count = *map.get(&ALICE.account_id()).unwrap_or(&0);
 	let bob_count = *map.get(&BOB.account_id()).unwrap_or(&0);
 	let charlie_count = *map.get(&CHARLIE.account_id()).unwrap_or(&0);
 	let dave_count = *map.get(&DAVE.account_id()).unwrap_or(&0);
-	// on average 10000 for each of ALICE and BOB, because there are 20000 expected seats for permissioned
-	assert!((9950..=10050).contains(&alice_count));
-	assert!((9950..=10050).contains(&bob_count));
-	// on average 3/7 of 10000 (4285) for CHARLIE, because its stake is 300 of 700 total stake, and 10000 expected seats for registered
-	assert!((4235..=4335).contains(&charlie_count));
-	assert!((5665..=5765).contains(&dave_count));
+	assert_eq!(alice_count, 1);
+	assert_eq!(bob_count, 1);
+	assert_eq!(charlie_count, 1);
+	assert_eq!(dave_count, 1);
+	assert_eq!(committee.len(), 4);
 }
 
 #[test]
@@ -372,6 +418,50 @@ fn ariadne_does_not_return_empty_committee() {
 		ScEpochNumber::zero(),
 	);
 	assert_eq!(calculated_committee, None);
+}
+
+#[test]
+fn ariadne_pathological_integration_no_duplicates_in_output() {
+	// [materios-patch: ariadne-output-dedup] End-to-end check that the
+	// dedup is applied INSIDE `select_authorities` (not just at the helper
+	// level). Exercises the real select_authorities path with a small
+	// committee of 4 seats over 2 candidates with very skewed weights, so
+	// the with-replacement sampler is likely to double-pick — we don't
+	// care about the exact draw, only that the post-dedup output contains
+	// no duplicates and is within the safety floor.
+	let permissioned_validators = vec![ALICE, BOB];
+	let registered_validators = vec![];
+	let d_parameter = DParameter { num_permissioned_candidates: 4, num_registered_candidates: 0 };
+	let authority_selection_inputs = create_authority_selection_inputs(
+		&permissioned_validators,
+		&registered_validators,
+		d_parameter,
+	);
+	let calculated_committee = select_authorities::<AccountId, AccountKeys, ConstU32<32>>(
+		UtxoId::default(),
+		authority_selection_inputs,
+		ScEpochNumber::zero(),
+	);
+	let committee = calculated_committee.expect("committee should be produced");
+
+	let mut seen: HashMap<&AccountId, u32> = HashMap::new();
+	for (id, _) in &committee {
+		*seen.entry(id).or_insert(0u32) += 1;
+	}
+	for (id, count) in &seen {
+		assert_eq!(
+			*count, 1,
+			"post-dedup committee must contain no duplicate validators (seen {} × {})",
+			count,
+			account_id_to_name(id)
+		);
+	}
+	// Safety floor: at least MIN_DISTINCT_COMMITTEE (=2) distinct validators.
+	assert!(
+		committee.len() >= 2,
+		"deduped committee should satisfy the safety floor, got {}",
+		committee.len()
+	);
 }
 
 // helpers

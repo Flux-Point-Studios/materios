@@ -193,7 +193,14 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     // 202 = v5.1 Midnight-style fees (MATRA no longer charged, MOTRA-only;
     //        85/15 validator/treasury emission split; one-shot sweep of
     //        residual mat/auth + mat/attr balances into mat/trsy, 2026-04-21).
-    spec_version: 202,
+    // 203 = MaxCommitteeSize raised 16 → 64 so the attestor committee can
+    //        grow past the original 16-seat cap (GoFigure hit CommitteeFull
+    //        at member #17 on 2026-04-21). Same bump also widens
+    //        input_sanity::MAX_COMMITTEE_SIZE to 64 (decoupled from
+    //        MAX_VALIDATORS) so Ariadne d-parameter sanitation does not
+    //        silently reject d-params > 32 while the pallet would accept
+    //        them. Transaction version unchanged.
+    spec_version: 203,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -517,7 +524,14 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = pallet_orinq_receipts::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
-    type MaxCommitteeSize = ConstU32<16>;
+    // Raised 16 → 64 in spec 203. The old 16-seat ceiling was the
+    // original preprod bootstrap cap; the network grew past it when
+    // GoFigure's 17th attestor hit CommitteeFull on 2026-04-21.
+    // 64 is chosen as a comfortable ~4x headroom over the current active
+    // set while staying within a single 64-bit bitset's worth of seat
+    // bookkeeping. The paired `input_sanity::MAX_COMMITTEE_SIZE` must
+    // match — see runtime/src/input_sanity.rs.
+    type MaxCommitteeSize = ConstU32<64>;
     // Component 8: attestor bonds are held as reserved MATRA on Balances.
     type Currency = Balances;
     // Slashed bonds repatriate to the attestor reserve pot (`mat/attr`),

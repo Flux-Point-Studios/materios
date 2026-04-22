@@ -5,12 +5,41 @@ use crate::filter_invalid_candidates::{
 	filter_invalid_permissioned_candidates, filter_trustless_candidates_registrations, Candidate,
 	CandidateWithStake,
 };
+use alloc::vec::Vec;
 use frame_support::BoundedVec;
 use log::{info, warn};
 use plutus::*;
 use selection::{Weight, WeightedRandomSelectionConfig};
 use sidechain_domain::{DParameter, ScEpochNumber, UtxoId};
 use sp_core::{ecdsa, ed25519, sr25519, Get};
+
+// [materios-patch: ariadne-output-dedup]
+// The IOG weighted_selection sampler samples WITH REPLACEMENT, which can emit
+// the same validator multiple times in a single committee. GRANDPA treats
+// duplicates as one voter, so pathological draws like [MacBook×3, Node-3×1]
+// reduce the effective threshold to 1-of-distinct against 2f+1, causing
+// finality stalls when the duplicated validator is offline. Observed in
+// production 2026-04-21 (finality stuck at #26197 for 4h30m).
+//
+// Safety floor: if dedup would leave fewer than this many distinct validators,
+// `select_authorities` returns None so the pallet's fallback path reuses
+// `CurrentCommittee` instead of installing an unsafe rotation.
+pub const MIN_DISTINCT_COMMITTEE: usize = 2;
+
+/// Collapse duplicate entries, keeping first occurrence. Order-preserving,
+/// deterministic, idempotent. Used to fix Ariadne's with-replacement sampler
+/// output before passing to the session pallet.
+///
+/// [materios-patch: ariadne-output-dedup]
+pub fn dedup_committee<K: PartialEq + Clone, V: Clone>(input: Vec<(K, V)>) -> Vec<(K, V)> {
+	let mut out: Vec<(K, V)> = Vec::with_capacity(input.len());
+	for entry in input {
+		if !out.iter().any(|(k, _)| k == &entry.0) {
+			out.push(entry);
+		}
+	}
+	out
+}
 
 type CandidateWithWeight<A, B> = (Candidate<A, B>, Weight);
 
@@ -67,6 +96,34 @@ pub fn select_authorities<
 	if let Some(validators) =
 		weighted_selection(candidates_with_weight, committee_size, random_seed)
 	{
+		let raw_len = validators.len();
+		// [materios-patch: ariadne-output-dedup] Collapse duplicate validators
+		// produced by the with-replacement weighted-random sampler. GRANDPA
+		// treats duplicates as a single voter; pathological draws such as the
+		// 2026-04-21 [MacBook×3, Node-3×1] seat assignment must not reach the
+		// session pallet as-is.
+		let validators = dedup_committee(validators);
+		if validators.len() < raw_len {
+			warn!(
+				"[materios-patch] ariadne output for epoch {} had {} duplicate seats; deduped to {} distinct validators",
+				sidechain_epoch,
+				raw_len - validators.len(),
+				validators.len()
+			);
+		}
+		// [materios-patch: ariadne-output-dedup] Safety floor. If the distinct
+		// set is too small to form a safe committee, refuse the rotation —
+		// the pallet fallback reuses `CurrentCommittee`, mirroring the
+		// IDP-None behavior documented in feedback_iog_idp_none_panic.md.
+		if validators.len() < MIN_DISTINCT_COMMITTEE {
+			warn!(
+				"[materios-patch] ariadne output for epoch {} has only {} distinct validators (< MIN_DISTINCT_COMMITTEE={}); refusing rotation, pallet will reuse current committee",
+				sidechain_epoch,
+				validators.len(),
+				MIN_DISTINCT_COMMITTEE
+			);
+			return None;
+		}
 		let validators = BoundedVec::truncate_from(validators);
 		info!("💼 Selected committee of {} seats for epoch {} from {} permissioned and {} registered candidates", validators.len(), sidechain_epoch, valid_permissioned_candidates.len(), valid_trustless_candidates.len());
 		Some(validators)
@@ -118,4 +175,107 @@ fn weighted_selection<TAccountId: Clone + Ord, TAccountKeys: Clone>(
 			.map(|c| (c.account_id, c.account_keys))
 			.collect(),
 	)
+}
+
+#[cfg(test)]
+mod dedup_tests {
+	//! Tests for `dedup_committee`. These tests pin down the exact semantics
+	//! required by the Ariadne-output-dedup [materios-patch]:
+	//!   - order-preserving (first occurrence wins)
+	//!   - deterministic (no randomness)
+	//!   - idempotent (dedup(dedup(x)) == dedup(x))
+	//!   - length-non-increasing
+	//!   - the pathological 2026-04-21 draw `[MacBook×3, Node-3×1]` collapses
+	//!     to `[MacBook, Node-3]`, preserving first-occurrence order.
+	use super::dedup_committee;
+
+	type K = &'static str;
+	type V = u32;
+
+	#[test]
+	fn empty_input_returns_empty() {
+		let input: Vec<(K, V)> = vec![];
+		assert_eq!(dedup_committee(input), Vec::<(K, V)>::new());
+	}
+
+	#[test]
+	fn no_duplicates_passes_through() {
+		let input: Vec<(K, V)> = vec![("alice", 1), ("bob", 2), ("charlie", 3)];
+		let expected = input.clone();
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn all_same_pubkey_collapses_to_one() {
+		let input: Vec<(K, V)> =
+			vec![("mac", 1), ("mac", 1), ("mac", 1), ("mac", 1)];
+		let expected: Vec<(K, V)> = vec![("mac", 1)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn pathological_macbook_times_three_collapses_to_two() {
+		// Exact 2026-04-21 Ariadne output that caused the finality stall.
+		// MacBook seat #1, #2, #3 (same pubkey) + Node-3 seat #1.
+		// Expected: distinct-validator committee = [MacBook, Node-3]
+		let input: Vec<(K, V)> =
+			vec![("macbook", 10), ("macbook", 10), ("macbook", 10), ("node-3", 20)];
+		let expected: Vec<(K, V)> = vec![("macbook", 10), ("node-3", 20)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn mixed_interleaved_keeps_first_occurrence() {
+		// Alice, Bob, Alice, Charlie, Bob — first-occurrence wins.
+		let input: Vec<(K, V)> =
+			vec![("alice", 1), ("bob", 2), ("alice", 1), ("charlie", 3), ("bob", 2)];
+		let expected: Vec<(K, V)> = vec![("alice", 1), ("bob", 2), ("charlie", 3)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn dedup_is_idempotent() {
+		let input: Vec<(K, V)> =
+			vec![("alice", 1), ("bob", 2), ("alice", 1), ("charlie", 3), ("bob", 2)];
+		let once = dedup_committee(input.clone());
+		let twice = dedup_committee(once.clone());
+		assert_eq!(once, twice);
+	}
+
+	#[test]
+	fn dedup_preserves_first_occurrence_order() {
+		// Insert duplicates scattered; the output must keep the first-seen
+		// positional order — not alphabetical, not stable-sort, not last-wins.
+		let input: Vec<(K, V)> = vec![
+			("zebra", 1),
+			("alpha", 2),
+			("zebra", 1),
+			("mike", 3),
+			("alpha", 2),
+			("mike", 3),
+		];
+		let expected: Vec<(K, V)> = vec![("zebra", 1), ("alpha", 2), ("mike", 3)];
+		assert_eq!(dedup_committee(input), expected);
+	}
+
+	#[test]
+	fn dedup_never_increases_length() {
+		let inputs: Vec<Vec<(K, V)>> = vec![
+			vec![],
+			vec![("a", 1)],
+			vec![("a", 1), ("b", 2)],
+			vec![("a", 1), ("a", 1)],
+			vec![("a", 1), ("b", 2), ("a", 1), ("c", 3), ("b", 2)],
+		];
+		for input in inputs {
+			let original_len = input.len();
+			let out_len = dedup_committee(input).len();
+			assert!(
+				out_len <= original_len,
+				"dedup output length {} exceeds input length {}",
+				out_len,
+				original_len
+			);
+		}
+	}
 }

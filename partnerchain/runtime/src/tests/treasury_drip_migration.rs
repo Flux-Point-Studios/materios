@@ -277,11 +277,21 @@ fn migration_with_empty_source_pots_is_noop() {
 }
 
 #[test]
-fn spec_version_bumped_to_202() {
-    // The spec_version MUST bump 201 -> 202 so off-chain consumers know to
-    // expect the new fee semantics. This asserts the exact version the
-    // migration gate keys off of.
-    assert_eq!(VERSION.spec_version, 202);
+fn spec_version_at_least_202_and_tx_version_pinned() {
+    // Treasury-drip + MOTRA-only-fees migration landed at spec 202.
+    // Subsequent upgrades (spec 203: MaxCommitteeSize 16 → 64) must not
+    // silently revert the spec below 202 — otherwise the one-shot
+    // migration gate would re-run. `transaction_version` is pinned at 1
+    // because no change since 202 has introduced a breaking wire format.
+    //
+    // Historical note: this test was previously `spec_version_bumped_to_202`
+    // pinning `spec_version == 202` exactly; it was relaxed to `>= 202` in
+    // spec 203 (MaxCommitteeSize bump). See PR feat/runtime-max-committee-64.
+    assert!(
+        VERSION.spec_version >= 202,
+        "spec_version must never drop below 202 (treasury-drip migration gate); got {}",
+        VERSION.spec_version
+    );
     assert_eq!(
         VERSION.transaction_version, 1,
         "transaction_version must stay at 1 — no breaking wire format change"
