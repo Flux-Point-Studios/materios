@@ -99,6 +99,12 @@ orinq-receipts-primitives = { path = "pallets/orinq-receipts/primitives", defaul
 orinq-receipts-rpc = { path = "pallets/orinq-receipts/rpc" }
 materios-runtime = { path = "runtime" }
 
+# Wave 2 W2.2: external pallet pinned by git rev. Lives in
+# Flux-Point-Studios/materios-intent-settlement. The pallet Cargo pins the
+# same `polkadot-stable2409-4` SDK tag as this workspace so no version dance
+# is required. Pin by `rev` (not `branch = "main"`) for reproducibility.
+pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "53e88efb", default-features = false }
+
 # MOTRA
 sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 pallet-motra = { path = "pallets/motra", default-features = false }

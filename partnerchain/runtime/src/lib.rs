@@ -200,7 +200,14 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        MAX_VALIDATORS) so Ariadne d-parameter sanitation does not
     //        silently reject d-params > 32 while the pallet would accept
     //        them. Transaction version unchanged.
-    spec_version: 203,
+    // 204 = Wave 2 W2.2: integrate `pallet_intent_settlement` at index 19
+    //        (Aegis intent/claim layer). No storage migrations: the pallet
+    //        starts with empty maps + zero-valued singletons. Committee
+    //        membership is READ-ONLY, mirrored from OrinqReceipts via the
+    //        `OrinqCommitteeAdapter` below — pallet_committee_governance is
+    //        intentionally skipped (Option 2, user-confirmed 2026-04-24).
+    //        Transaction version unchanged.
+    spec_version: 204,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -551,6 +558,97 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Intent Settlement (Aegis Wave 2 W2.2)
+// ---------------------------------------------------------------------------
+//
+// The `pallet_intent_settlement` pallet implements user-intent lifecycle,
+// M-of-N committee attestation, Cardano-side settlement mirroring, and the
+// per-account ADA credit ledger. Per user-confirmed Option 2 (2026-04-24)
+// we do NOT wire `pallet_committee_governance`; instead the pallet's
+// `CommitteeMembership` abstraction is satisfied by a READ-ONLY adapter
+// over the existing `pallet_orinq_receipts` committee-set + threshold
+// storage. The OrinqReceipts pallet remains the sole writer of committee
+// membership; intent-settlement is a pure consumer.
+
+/// Adapter exposing the on-chain `OrinqReceipts` committee set to
+/// `pallet_intent_settlement`. Implements the full `IsCommitteeMember`
+/// contract (membership predicate, size, threshold, and the
+/// bidirectional `AccountId <-> [u8;32]` pubkey mapping).
+///
+/// For `AccountId = AccountId32` (this runtime's shape, derived from
+/// `MultiSignature`) the pubkey IS the raw 32 bytes of the account, so
+/// the mapping is injective and round-trips without registry storage.
+pub struct OrinqCommitteeAdapter;
+
+impl pallet_intent_settlement::IsCommitteeMember<AccountId> for OrinqCommitteeAdapter {
+    fn is_member(who: &AccountId) -> bool {
+        pallet_orinq_receipts::CommitteeMembers::<Runtime>::get().contains(who)
+    }
+
+    fn threshold() -> u32 {
+        // OrinqReceipts threshold defaults to 1 for single-member bootstraps
+        // (see pallet_orinq_receipts::AttestationThreshold docs). Clamp to
+        // 1 so the intent-settlement M-of-N gate never reads as "0 sigs
+        // required".
+        pallet_orinq_receipts::AttestationThreshold::<Runtime>::get().max(1)
+    }
+
+    fn member_count() -> u32 {
+        pallet_orinq_receipts::CommitteeMembers::<Runtime>::get().len() as u32
+    }
+
+    fn pubkey_of(who: &AccountId) -> [u8; 32] {
+        // AccountId32 stores its pubkey as the inner `[u8; 32]`. `AsRef<[u8;32]>`
+        // is implemented by `sp_runtime::AccountId32`, so this is a zero-copy view.
+        let bytes: &[u8; 32] = who.as_ref();
+        *bytes
+    }
+
+    fn account_of_pubkey(pubkey: &[u8; 32]) -> Option<AccountId> {
+        // Reverse mapping: AccountId32::from([u8;32]) is infallible; we gate
+        // the return on current committee membership so callers can't forge
+        // a non-member account by supplying an arbitrary pubkey.
+        let candidate = AccountId::from(*pubkey);
+        if <Self as pallet_intent_settlement::IsCommitteeMember<AccountId>>::is_member(&candidate) {
+            Some(candidate)
+        } else {
+            None
+        }
+    }
+}
+
+parameter_types! {
+    /// Matches the widened MaxCommitteeSize=64 pinned in OrinqReceipts (spec
+    /// 203). Keeping the intent-settlement cap in lockstep avoids an adapter
+    /// mismatch where OrinqReceipts admits a 64th member but intent-settlement
+    /// BoundedVec overflows.
+    pub const IntentSettlementMaxCommittee: u32 = 64;
+    /// TTL-sweep bound per block; bounds the on_initialize cost.
+    pub const IntentSettlementMaxExpirePerBlock: u32 = 64;
+    /// Default intent TTL: 600 blocks ≈ 1h @ 6s. Matches spec v1 §3.3.
+    pub const IntentSettlementDefaultIntentTTL: BlockNumber = 600;
+    /// Default claim TTL: 28_800 blocks ≈ 48h @ 6s. Matches spec v1 §3.3.
+    pub const IntentSettlementDefaultClaimTTL: BlockNumber = 28_800;
+    /// Upper bound on `PendingBatches` index (keeper polls in chunks).
+    pub const IntentSettlementMaxPendingBatches: u32 = 10_000;
+    /// Wave 2 interim M=1. Governance can bump via `set_min_signer_threshold`
+    /// without a code upgrade once the multi-signer keeper rolls out.
+    pub const IntentSettlementDefaultMinSignerThreshold: u32 = 1;
+}
+
+impl pallet_intent_settlement::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type MaxCommittee = IntentSettlementMaxCommittee;
+    type MaxExpirePerBlock = IntentSettlementMaxExpirePerBlock;
+    type DefaultIntentTTL = IntentSettlementDefaultIntentTTL;
+    type DefaultClaimTTL = IntentSettlementDefaultClaimTTL;
+    type CommitteeMembership = OrinqCommitteeAdapter;
+    type MaxPendingBatches = IntentSettlementMaxPendingBatches;
+    type DefaultMinSignerThreshold = IntentSettlementDefaultMinSignerThreshold;
+    type SigVerifier = pallet_intent_settlement::Sr25519Verifier;
+}
+
+// ---------------------------------------------------------------------------
 // MOTRA (capacity token)
 // ---------------------------------------------------------------------------
 
@@ -717,6 +815,10 @@ construct_runtime! {
         // pallet_partner_chains_session must come last for correct initialization order
         Session: pallet_partner_chains_session = 17,
         NativeTokenManagement: pallet_native_token_management = 18,
+        // Wave 2 W2.2 (spec 204): Aegis intent-settlement layer. Appended at
+        // index 19 — all preceding indices remain pinned to defend metadata
+        // stability for wallets / explorers / SDK type generators.
+        IntentSettlement: pallet_intent_settlement = 19,
     }
 }
 
