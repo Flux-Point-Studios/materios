@@ -4666,6 +4666,7 @@ dependencies = [
  "pallet-balances",
  "pallet-block-rewards",
  "pallet-grandpa",
+ "pallet-intent-settlement",
  "pallet-motra",
  "pallet-multisig",
  "pallet-native-token-management",
@@ -5609,6 +5610,25 @@ dependencies = [
  "sp-runtime",
  "sp-session",
  "sp-staking",
+]
+
+[[package]]
+name = "pallet-intent-settlement"
+version = "0.1.0"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=53e88efb#53e88efba072aa51387f8b33ffc31828488409f0"
+dependencies = [
+ "frame-support",
+ "frame-system",
+ "log",
+ "pallet-balances",
+ "parity-scale-codec",
+ "scale-info",
+ "serde",
+ "sp-api",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "sp-std",
 ]
 
 [[package]]

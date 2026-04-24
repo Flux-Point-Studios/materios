@@ -59,6 +59,8 @@ pallet-orinq-receipts = { workspace = true }
 orinq-receipts-primitives = { workspace = true }
 pallet-motra = { workspace = true }
 motra-primitives = { workspace = true }
+# Wave 2 W2.2: Aegis intent-settlement pallet (external, git-pinned).
+pallet-intent-settlement = { workspace = true }
 sp-arithmetic = { workspace = true }
 frame-system-rpc-runtime-api = { workspace = true }
 getrandom = { workspace = true }
@@ -132,6 +134,7 @@ std = [
     "orinq-receipts-primitives/std",
     "pallet-motra/std",
     "motra-primitives/std",
+    "pallet-intent-settlement/std",
     "sp-arithmetic/std",
     "frame-system-rpc-runtime-api/std",
     "substrate-wasm-builder",
@@ -187,5 +190,6 @@ try-runtime = [
     "pallet-vesting/try-runtime",
     "pallet-orinq-receipts/try-runtime",
     "pallet-motra/try-runtime",
+    "pallet-intent-settlement/try-runtime",
     "sp-runtime/try-runtime",
 ]
