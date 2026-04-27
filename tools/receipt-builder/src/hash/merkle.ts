@@ -1,26 +1,45 @@
-import { sha256 } from "./sha256.js";
+import { sha256, sha256Bytes } from "./sha256.js";
 import type { MerkleTree } from "../types.js";
 
 /**
  * Build a Merkle tree from an array of leaf hex strings.
  *
- * Default hash function: sha256(a + b) where a and b are hex strings concatenated.
+ * Algorithm — byte-for-byte identical to cert-daemon's `daemon/merkle.py`,
+ * which is the consensus source of truth for the on-chain
+ * `base_root_sha256` field:
  *
- * Edge cases:
- * - 0 leaves: root = sha256 of empty string
- * - 1 leaf: root = that leaf
- * - Odd number of leaves at any level: duplicate the last leaf
+ *   - 0 leaves:                root = 32 zero bytes (Python: `b'\\x00' * 32`)
+ *   - 1 leaf:                  root = that leaf, returned as-is (no hashing)
+ *   - N > 1:                   pair `sha256(left || right)` as RAW bytes
+ *                              (NOT hex-string concat); duplicate last on
+ *                              odd levels; recurse upward.
+ *
+ * The previous implementation used `sha256(a + b)` over hex-string concat,
+ * which produces a different value than cert-daemon for any tree with more
+ * than one leaf. The 1-leaf case coincidentally worked because of the
+ * `return leaves[0]` shortcut.
+ *
+ * Note on `hashFn`: kept for API compat (e.g. the test suite passing a
+ * reversed-order hash). Default still uses cert-daemon-canonical raw-byte
+ * concat. Pass a custom `hashFn` only if you need a non-canonical tree.
  */
 export function buildMerkleTree(
   leaves: string[],
   hashFn?: (a: string, b: string) => string,
 ): MerkleTree {
-  const hash = hashFn ?? ((a: string, b: string) => sha256(a + b));
+  // Default: cert-daemon-canonical raw-byte concat then sha256.
+  const hash =
+    hashFn ??
+    ((a: string, b: string) =>
+      sha256Bytes(Buffer.concat([Buffer.from(a, "hex"), Buffer.from(b, "hex")]))
+        .toString("hex"));
 
   if (leaves.length === 0) {
+    // cert-daemon returns 32 zero bytes for empty input. Keeping the legacy
+    // `sha256("")` here would silently disagree with the chain-side check.
     return {
       leaves: [],
-      root: sha256(""),
+      root: "0".repeat(64),
     };
   }
 
@@ -54,3 +73,7 @@ export function buildMerkleTree(
     root: currentLevel[0],
   };
 }
+
+// `sha256` is re-imported here only for backward compatibility for callers
+// that imported it from this module. Nothing in this file uses it anymore.
+void sha256;
