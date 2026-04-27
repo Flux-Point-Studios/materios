@@ -25,3 +25,7 @@ mod block_weights_throughput;
 // Spec 205 consolidated upgrade (2026-04-26): IntentSettlement default-
 // signer-threshold bump 1 → 2 to match Aegis 2-of-4 expectation.
 mod intent_settlement_threshold;
+
+// Spec 208 / Track-B B3 (2026-04-27): MaxXBatch widening 256 → 1024 with
+// per-call worst-case weight assertions against the live class budgets.
+mod intent_settlement_max_batch;

@@ -252,29 +252,43 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        call_indexes per project convention bumps `transaction_version`
     //        2 → 3 to refuse stale-format clients that don't recognise the
     //        new dispatchables.
-    // 208 = Spec-208 (Task #229, 2026-04-27): widen all four batch bounds
-    //        from 256 → 512.
-    //          MaxSubmitBatch  : 256 → 512
-    //          MaxAttestBatch  : 256 → 512
-    //          MaxVoucherBatch : 256 → 512
-    //          MaxSettleBatch  : 256 → 512
-    //        Justification: post-spec-207 rebench landed at 11.74 settled-TPS
-    //        with 256 entries consuming 12.66% block proof_size and ~0.07%
-    //        ref_time — clear headroom for 2x. No storage migration; no new
-    //        call_indexes; the wire format is unchanged (BoundedVec encoding
-    //        is identical for any T whose capacity exceeds the actual length).
-    //        REVIEWER QUESTION: bumping `transaction_version` 3 → 4 is the
-    //        conservative call. The on-wire SCALE encoding of the four batch
-    //        extrinsics is byte-identical at any payload size that fit under
-    //        the old bound (the BoundedVec generic only constrains decode-side
-    //        rejection). A purist read says tx_version SHOULD stay at 3
-    //        because no client written for spec-207 will fail to decode a
-    //        spec-208 chain's tx. The conservative read says any time the
-    //        accepted-set of extrinsics changes (here: 257..=512-entry
-    //        batches now decode where they previously rejected) we should
-    //        bump tx_version so old wallets refuse to sign things they
-    //        couldn't have signed under the old runtime. Defaulting to the
-    //        latter; flip back to 3 if reviewer prefers.
+    // 208 = Spec-208 (Task #233 / B3, 2026-04-27): widen all four batch
+    //        bounds from 256 → 1024 (Track-B step B3, 4× lift in one shot).
+    //          MaxSubmitBatch  : 256 → 1024
+    //          MaxAttestBatch  : 256 → 1024
+    //          MaxVoucherBatch : 256 → 1024
+    //          MaxSettleBatch  : 256 → 1024
+    //        Justification: empirical measurement on the live spec-207 chain
+    //        (block 0xef7f7113…, 2026-04-27) recorded `submit_batch_intents`
+    //        at N=256 producing dispatch_info.weight.proof_size = 1,327,104 B
+    //        (= 12.66 % of the 10 MiB max_block / 16.88 % of the 7.5 MiB
+    //        Normal-class budget). The pallet weight expression is exact and
+    //        linear: proof_size = 16,384 + N · 5,120 B; ref_time = 50M + N · 5M.
+    //        Linear extrapolation against the live BlockWeights:
+    //          N= 512  →   2.64 MB  (25.16 % block, 33.54 % Normal)
+    //          N=1024  →   5.26 MB  (50.16 % block, 66.88 % Normal)  <-- target
+    //          N=2048  →  10.50 MB  (100.16 % block, 133.54 % Normal) DOES NOT FIT
+    //        N=1024 is the largest power-of-two that fits the Normal-class
+    //        proof_size budget with comfortable headroom (~8 % below the 75 %
+    //        rule-of-thumb). N=2048 structurally exceeds even the 10 MiB
+    //        whole-block budget. Going further would require lifting BlockWeights
+    //        proof_size first (separate ceremony, not in scope for B3).
+    //        No storage migration; no new call_indexes; the wire format is
+    //        unchanged (BoundedVec encoding is identical for any T whose
+    //        capacity exceeds the actual length).
+    //        REVIEWER QUESTION (carried from the 512 staging): bumping
+    //        `transaction_version` 3 → 4 is the conservative call. The on-wire
+    //        SCALE encoding of the four batch extrinsics is byte-identical at
+    //        any payload size that fit under the old bound (the BoundedVec
+    //        generic only constrains decode-side rejection). A purist read
+    //        says tx_version SHOULD stay at 3 because no client written for
+    //        spec-207 will fail to decode a spec-208 chain's tx. The
+    //        conservative read says any time the accepted-set of extrinsics
+    //        changes (here: 257..=1024-entry batches now decode where they
+    //        previously rejected) we should bump tx_version so old wallets
+    //        refuse to sign things they couldn't have signed under the old
+    //        runtime. Defaulting to the latter; flip back to 3 if reviewer
+    //        prefers.
     spec_version: 208,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
@@ -737,44 +751,49 @@ parameter_types! {
     /// normal-class block budget alongside the M-of-N signature bundle —
     /// benchmark-verified at N ∈ {1, 8, 64, 256}.
     ///
-    /// Spec 208 (Task #229, 2026-04-27): widened 256 → 512. Post-spec-207
-    /// rebench showed 256-entry batches at 12.66% block proof_size and
-    /// ~0.07% ref_time — 2x headroom is comfortable. The pallet's
+    /// Spec 208 (Task #233 / B3, 2026-04-27): widened 256 → 1024. Empirical
+    /// measurement on live spec-207 (block 0xef7f7113…, N=256) recorded
+    /// `submit_batch_intents` proof_size = 1,327,104 B (12.66 % block /
+    /// 16.88 % Normal). Linear extrapolation puts N=1024 at 50.16 % block /
+    /// 66.88 % Normal — comfortable under the 75 % rule-of-thumb. N=2048
+    /// would exceed 100 % block budget (133.54 % Normal). The pallet's
     /// `types::MAX_SETTLE_BATCH` constant is documentation-only and is
     /// not modified by this widening (the pallet uses the runtime's
     /// `<T as Config>::MaxSettleBatch` for the actual BoundedVec bound).
-    pub const IntentSettlementMaxSettleBatch: u32 = 512;
+    pub const IntentSettlementMaxSettleBatch: u32 = 1024;
     /// Spec 207 (Task #210): maximum number of `SubmitIntentEntry` items in a
     /// single `submit_batch_intents` call (call_index=10). Canonical default
     /// `types::MAX_SUBMIT_BATCH = 256` — only constrained by per-block
     /// normal-class extrinsic budget plus PendingBatches index headroom.
     ///
-    /// Spec 208 (Task #229, 2026-04-27): widened 256 → 512. At 256 entries
-    /// the worst-case proof footprint is ~16KB base + 256 * 5KB = ~1.3MB
-    /// (per the per-call weight comment in the pallet); 512 entries take
-    /// it to ~2.6MB, still well under the 10MB normal-class proof_size
-    /// ceiling set in spec-205.
-    pub const IntentSettlementMaxSubmitBatch: u32 = 512;
+    /// Spec 208 (Task #233 / B3, 2026-04-27): widened 256 → 1024. The pallet
+    /// weight expression is exact and linear:
+    ///   proof_size = 16,384 + N · 5,120 B
+    ///   ref_time   = 50M + N · 5M ps
+    /// At N=1024: proof_size = 5,259,264 B = 50.16 % of the 10 MiB max_block /
+    /// 66.88 % of the 7.5 MiB Normal-class budget; ref_time = 5.17 B ps =
+    /// 0.13 % of the 4 s block budget. submit_batch_intents is the
+    /// proof_size-dominant call (the M-of-N committee batches dispatch as
+    /// Operational and report proof_size 0 in spec-207).
+    pub const IntentSettlementMaxSubmitBatch: u32 = 1024;
     /// Spec 207 (Task #211): maximum number of intents attested in a single
     /// `attest_batch_intents` call (call_index=11). Canonical default
     /// `types::MAX_ATTEST_BATCH = 256`. Collapses M*N per-epoch committee
     /// extrinsics into ONE batch call.
     ///
-    /// Spec 208 (Task #229): widened 256 → 512. Per-intent attestation
-    /// cost is dominated by storage I/O, ~3M ref_time per entry; at 512
-    /// entries the base 50M + 512 * 3M ≈ 1.59B ref_time, ~0.04% of the
-    /// 4 s normal-class budget.
-    pub const IntentSettlementMaxAttestBatch: u32 = 512;
+    /// Spec 208 (Task #233 / B3): widened 256 → 1024. Per-intent attestation
+    /// is dominated by storage I/O, ~3M ref_time per entry; at 1024 entries
+    /// base 50M + 1024 · 3M ≈ 3.12 B ref_time, ~0.08 % of the 4 s budget.
+    /// Operational class so the proof_size budget is the full 10 MiB.
+    pub const IntentSettlementMaxAttestBatch: u32 = 1024;
     /// Spec 207 (Task #212): maximum number of vouchers issued in a single
     /// `request_batch_vouchers` call (call_index=12). Canonical default
     /// `types::MAX_VOUCHER_BATCH = 256`.
     ///
-    /// Spec 208 (Task #229): widened 256 → 512. Voucher-batch is the
-    /// heaviest stage — base 50M + 512 * 10M ≈ 5.17B ref_time. Still
-    /// ~0.13% of the 4 s normal-class budget; proof_size grows linearly
-    /// from spec-207's 12.66% measured at 256 entries to ~25% at 512,
-    /// well under the 75% normal-class share of the 10MB ceiling.
-    pub const IntentSettlementMaxVoucherBatch: u32 = 512;
+    /// Spec 208 (Task #233 / B3): widened 256 → 1024. Voucher-batch is the
+    /// ref_time-heaviest stage — base 50M + 1024 · 10M ≈ 10.3 B ref_time,
+    /// still only ~0.26 % of the 4 s block budget. Operational class.
+    pub const IntentSettlementMaxVoucherBatch: u32 = 1024;
 }
 
 impl pallet_intent_settlement::Config for Runtime {
