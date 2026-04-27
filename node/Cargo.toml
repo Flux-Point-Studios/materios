@@ -1,0 +1,99 @@
+[package]
+name = "materios-node"
+version = "0.1.0"
+description = "Materios Partner Chain node"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "materios-node"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+serde_json = { workspace = true }
+jsonrpsee = { workspace = true }
+
+# Substrate client
+sc-basic-authorship = { workspace = true }
+sc-cli = { workspace = true }
+sc-service = { workspace = true }
+sc-executor = { workspace = true }
+sc-consensus = { workspace = true }
+sc-consensus-aura = { workspace = true }
+sc-consensus-grandpa = { workspace = true }
+sc-transaction-pool = { workspace = true }
+sc-transaction-pool-api = { workspace = true }
+sc-network = { workspace = true }
+sc-client-api = { workspace = true }
+sc-telemetry = { workspace = true }
+sc-offchain = { workspace = true }
+sc-rpc = { workspace = true }
+sc-rpc-api = { workspace = true }
+
+# Substrate primitives
+sp-core = { workspace = true, features = ["std"] }
+sp-runtime = { workspace = true, features = ["std"] }
+sp-io = { workspace = true, features = ["std"] }
+sp-consensus-aura = { workspace = true, features = ["std"] }
+sp-consensus-grandpa = { workspace = true, features = ["std"] }
+sp-keyring = { workspace = true }
+sp-blockchain = { workspace = true }
+sp-api = { workspace = true, features = ["std"] }
+sp-block-builder = { workspace = true, features = ["std"] }
+sp-transaction-pool = { workspace = true, features = ["std"] }
+sp-inherents = { workspace = true, features = ["std"] }
+sp-timestamp = { workspace = true }
+
+# FRAME RPC
+substrate-frame-rpc-system = { workspace = true }
+# pallet-transaction-payment-rpc and its -runtime-api were removed at spec
+# 202 (HIGH #1 follow-up to PR #9, 2026-04-21). See runtime/Cargo.toml and
+# node/src/rpc.rs for the rationale.
+frame-system = { workspace = true, features = ["std"] }
+
+# IOG Partner Chains toolkit
+sidechain-domain = { workspace = true, features = ["std"] }
+sidechain-slots = { workspace = true, features = ["std"] }
+sp-sidechain = { workspace = true, features = ["std"] }
+sp-block-rewards = { workspace = true, features = ["std"] }
+pallet-sidechain = { workspace = true, features = ["std"] }
+pallet-block-rewards = { workspace = true, features = ["std"] }
+pallet-partner-chains-session = { workspace = true, features = ["std"] }
+pallet-session-validator-management = { workspace = true, features = ["std"] }
+sp-session-validator-management = { workspace = true, features = ["std"] }
+session-manager = { workspace = true, features = ["std"] }
+
+# IOG Partner Chains mainchain follower
+sidechain-mc-hash = { workspace = true, features = ["mock"] }
+sc-partner-chains-consensus-aura = { workspace = true }
+sp-partner-chains-consensus-aura = { workspace = true }
+time-source = { workspace = true }
+db-sync-follower = { workspace = true, features = ["block-source", "candidate-source", "native-token", "mc-hash", "sidechain-rpc"] }
+main-chain-follower-mock = { workspace = true, features = ["block-source", "candidate-source", "native-token", "mc-hash", "sidechain-rpc"] }
+authority-selection-inherents = { workspace = true }
+sp-native-token-management = { workspace = true, features = ["std"] }
+pallet-sidechain-rpc = { workspace = true }
+sp-session-validator-management-query = { workspace = true }
+pallet-session-validator-management-rpc = { workspace = true }
+sc-consensus-grandpa-rpc = { workspace = true }
+
+# Async / concurrency
+futures = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+derive-new = { workspace = true }
+log = { workspace = true }
+
+# Local
+materios-runtime = { workspace = true, features = ["std"] }
+orinq-receipts-rpc = { workspace = true }
+orinq-receipts-primitives = { workspace = true, features = ["std"] }
+motra-rpc = { workspace = true }
+motra-primitives = { workspace = true, features = ["std"] }
+
+[build-dependencies]
+substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }

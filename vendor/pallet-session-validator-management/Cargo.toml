@@ -1,0 +1,56 @@
+[package]
+name = "pallet-session-validator-management"
+version = "1.5.1"
+description = "FRAME pallet for setting validators with InherentData using pallet-session"
+edition = "2021"
+license = "Unlicense"
+publish = false
+
+# Vendored fork of IOG partner-chains `pallet-session-validator-management`
+# at tag v1.5.1 (20e607f). Carries the [materios-patch: idp-none-fallback]
+# that prevents a runtime panic at every sc_epoch boundary when the Ariadne
+# IDP returns Ok(None) (see feedback_iog_idp_none_panic.md).
+#
+# All dependencies point at the same upstream tag used elsewhere in
+# partnerchain/Cargo.toml so the compiled artifact is ABI-compatible with
+# the rest of the partner-chains vendored pallets.
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+parity-scale-codec = { version = "3.6.12", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11", default-features = false, features = ["derive"] }
+log = { version = "0.4", default-features = false }
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-std = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-session-validator-management = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false, optional = true }
+sidechain-domain = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+
+[dev-dependencies]
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false, features = ["std"] }
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "log/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "sp-session-validator-management/std",
+    "sp-session-validator-management/serde",
+    "sidechain-domain/std",
+    "sidechain-domain/serde",
+]
+try-runtime = ["frame-support/try-runtime"]
+mock = [
+     "sp-io"
+]

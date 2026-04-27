@@ -1,0 +1,27 @@
+[package]
+name = "orinq-receipts-primitives"
+version = "0.1.0"
+description = "Runtime API primitives for orinq-receipts pallet"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+parity-scale-codec = { workspace = true }
+scale-info = { workspace = true }
+sp-api = { workspace = true }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+serde = { version = "1.0", default-features = false, features = ["derive"], optional = true }
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "sp-api/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "serde/std",
+]

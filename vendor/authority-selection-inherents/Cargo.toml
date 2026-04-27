@@ -1,0 +1,61 @@
+[package]
+name = "authority-selection-inherents"
+version = "1.5.1"
+edition = "2021"
+license = "Apache-2.0"
+
+# Vendored fork of IOG partner-chains `authority-selection-inherents` with a
+# one-character patch to src/ariadne_inherent_data_provider.rs (`<` -> `<=`).
+# All dependencies except the patch target come from the upstream v1.5.1 tag.
+
+[dependencies]
+async-trait = { version = "0.1", optional = true }
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+log = { version = "0.4", default-features = false }
+minicbor = { version = "0.20", default-features = false, features = ["alloc"] }
+sp-session-validator-management = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+parity-scale-codec = { version = "3.6.12", default-features = false, features = ["derive"] }
+plutus = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+plutus-datum-derive = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+scale-info = { version = "2.11.1", default-features = false, features = ["derive"] }
+selection = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sidechain-domain = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sidechain-slots = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false, optional = true }
+sp-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-inherents = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-std = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+thiserror = { version = "1.0.48", optional = true }
+serde = { version = "1.0.197", default-features = false, features = ["derive"], optional = true }
+sp-consensus-slots = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+
+[dev-dependencies]
+hex = "0.4"
+hex-literal = "0.4"
+num-bigint = "0.4"
+num-traits = "0.2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+
+[features]
+default = ["std"]
+std = [
+	"frame-support/std",
+	"sidechain-domain/std",
+	"parity-scale-codec/std",
+	"serde/std",
+	"sidechain-slots",
+	"sidechain-slots/std",
+	"sidechain-slots/serde",
+	"sp-api/std",
+	"sp-session-validator-management/std",
+	"sp-session-validator-management/serde",
+	"sp-core/std",
+	"sp-inherents/std",
+	"sp-runtime/std",
+	"sp-std/std",
+	"thiserror",
+	"async-trait",
+	"selection/std",
+]
+mock = []

@@ -1,0 +1,20 @@
+[package]
+name = "orinq-receipts-rpc"
+version = "0.1.0"
+description = "JSON-RPC server extension for orinq-receipts pallet"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+jsonrpsee = { workspace = true }
+parity-scale-codec = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true }
+sp-api = { workspace = true, features = ["std"] }
+sp-core = { workspace = true, features = ["std"] }
+sp-runtime = { workspace = true, features = ["std"] }
+sp-blockchain = { workspace = true }
+sc-client-api = { workspace = true }
+orinq-receipts-primitives = { workspace = true, features = ["std"] }

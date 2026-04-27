@@ -1,0 +1,11 @@
+# SECURITY NOTE (see security_followups #4):
+# Pinned to 1.85.0 because IOG partner-chains SDK v1.5.1 does not compile on
+# newer rustc (trait-solver regressions + macro_rules edition drift on >=1.86).
+# Current stable is in the 1.90+ range, so this build is missing ~9 months of
+# compiler-level security patches (miri UB fixes, wasm sandbox hardening,
+# codegen soundness). Re-upgrade to latest stable as soon as IOG SDK >1.5
+# lands with newer rustc support. Revisit at every IOG release.
+[toolchain]
+channel = "1.85.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

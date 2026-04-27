@@ -1,0 +1,235 @@
+[workspace]
+resolver = "2"
+members = [
+    "node",
+    "runtime",
+    "pallets/orinq-receipts",
+    "pallets/orinq-receipts/primitives",
+    "pallets/orinq-receipts/rpc",
+    "pallets/motra",
+    "pallets/motra/primitives",
+    "pallets/motra/rpc",
+    # Vendored IOG crates carrying materios-patch[es]. Included so
+    # `cargo test --workspace` exercises the patched sources and so dev-
+    # dependencies (hex-literal, tokio, etc.) are resolved correctly.
+    "vendor/authority-selection-inherents",
+    "vendor/pallet-session-validator-management",
+]
+
+[workspace.package]
+authors = ["Materios Contributors"]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/materios/materios"
+
+[workspace.dependencies]
+base64ct = "<1.7"
+# Parity SCALE
+parity-scale-codec = { version = "3.6.12", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11", default-features = false, features = ["derive"] }
+
+# Substrate / polkadot-sdk (pinned to match Partner Chains v1.8.x)
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-timestamp = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-std = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-blockchain = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-client-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+
+# Node-side
+sc-basic-authorship = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-cli = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-service = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-executor = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-consensus = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-consensus-aura = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-consensus-grandpa = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-transaction-pool = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-transaction-pool-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-network = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sp-consensus-aura = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-consensus-grandpa = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-keyring = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-genesis-builder = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-inherents = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-block-builder = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-transaction-pool = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-offchain = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-session = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-version = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+frame-executive = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-balances = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-sudo = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+# pallet-transaction-payment* removed at spec 202 — runtime never wired it
+# into SignedExtra, so OnChargeTransaction was dead code. ChargeMotra is
+# the sole tx-fee mechanism. See runtime/src/lib.rs and node/src/rpc.rs.
+# v5.1 tokenomics: treasury + vesting
+pallet-treasury = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-vesting = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-aura = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-grandpa = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-multisig = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-utility = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+substrate-frame-rpc-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+frame-system-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+# pallet-transaction-payment-rpc removed at spec 202 — see note above.
+substrate-wasm-builder = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+
+sp-timestamp = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-telemetry = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-offchain = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-rpc = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+sc-rpc-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+
+# JSON-RPC
+jsonrpsee = { version = "0.24", features = ["server", "macros"] }
+
+# Serde
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde_json = { version = "1.0", default-features = false }
+
+# Local crates
+pallet-orinq-receipts = { path = "pallets/orinq-receipts", default-features = false }
+orinq-receipts-primitives = { path = "pallets/orinq-receipts/primitives", default-features = false }
+orinq-receipts-rpc = { path = "pallets/orinq-receipts/rpc" }
+materios-runtime = { path = "runtime" }
+
+# Wave 2 W2.2: external pallet pinned by git rev. Lives in
+# Flux-Point-Studios/materios-intent-settlement. The pallet Cargo pins the
+# same `polkadot-stable2409-4` SDK tag as this workspace so no version dance
+# is required. Pin by `rev` (not `branch = "main"`) for reproducibility.
+pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", tag = "spec207-bundle", default-features = false }
+
+# MOTRA
+sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-motra = { path = "pallets/motra", default-features = false }
+motra-primitives = { path = "pallets/motra/primitives", default-features = false }
+motra-rpc = { path = "pallets/motra/rpc" }
+# Getrandom: custom backend for wasm32-unknown-unknown (needed for Substrate WASM runtime)
+getrandom = { version = "0.2", default-features = false, features = ["custom"] }
+
+# Additional Substrate deps needed by IOG partner-chains pallets
+sp-staking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-weights = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-storage = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-consensus-slots = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-session = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+sp-crypto-hashing = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+log = { version = "0.4.22", default-features = false }
+derive-new = { version = "0.7.0" }
+hex-literal = "0.4.1"
+
+# IOG Partner Chains v1.5.1 pallets and primitives
+pallet-sidechain = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+pallet-session-validator-management = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+pallet-block-rewards = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+pallet-partner-chains-session = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+pallet-native-token-management = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+pallet-session-runtime-stub = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sp-sidechain = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sp-block-rewards = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sp-session-validator-management = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sp-native-token-management = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sidechain-domain = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sidechain-slots = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+session-manager = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+authority-selection-inherents = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+
+# IOG Partner Chains node-side (mainchain follower, consensus, mc-hash)
+sidechain-mc-hash = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+sc-partner-chains-consensus-aura = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+sp-partner-chains-consensus-aura = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+time-source = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+db-sync-follower = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+main-chain-follower-mock = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+pallet-sidechain-rpc = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+sp-session-validator-management-query = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+pallet-session-validator-management-rpc = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+sc-consensus-grandpa-rpc = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+
+# Async / futures
+futures = "0.3"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+
+# ---------------------------------------------------------------------------
+# Version pins for Rust 1.85.0 compatibility
+# ---------------------------------------------------------------------------
+
+# Pin `url` to 2.5.x so the resolver picks idna <1.0 (no icu_* v2 which needs Rust 1.86+)
+url = ">=2.5, <2.6"
+
+# Pin `idna` to 0.x  (the 1.x line pulls icu_* v2)
+idna = ">=0.5, <1"
+
+# Pin ahash to 0.8.11 which uses getrandom 0.2 (0.8.12 uses getrandom 0.3 -> wasip2)
+ahash = ">=0.8, <0.8.12"
+
+# Pin jobserver to avoid getrandom 0.3
+jobserver = ">=0.1, <0.1.33"
+
+# Pin tempfile to avoid getrandom 0.4
+tempfile = ">=3, <3.19"
+
+# ---------------------------------------------------------------------------
+# Patch: provide yanked `core2` crate from git
+# ---------------------------------------------------------------------------
+[patch.crates-io]
+core2 = { path = "vendor/core2" }
+
+# ---------------------------------------------------------------------------
+# Patch: vendored forks of IOG partner-chains crates carrying the Materios
+# [materios-patch] runtime patches. Every entry below is required to preserve
+# production chain stability AND must be revisited before mainnet.
+#
+# 1. `authority-selection-inherents` — two patches:
+#    a. ariadne data_epoch early-launch relax (`<` → `<=`). Lets Materios
+#       preprod start producing blocks in the same Cardano epoch the
+#       D-parameter / permissioned-candidates txs were submitted, instead
+#       of waiting 10 days for the upstream `- 2` stability offset.
+#    b. [materios-patch: ariadne-output-dedup] — collapse duplicate
+#       validators produced by IOG's with-replacement weighted-random
+#       sampler. Fixes the 2026-04-21 MacBook×3+Node-3×1 finality stall
+#       at Materios block #26197 (4h30m stall). Applied inside
+#       `select_authorities` after the sampler and before the pallet
+#       receives the committee vec. See Task #60 handoff.
+#
+# 2. `db-sync-follower` — drop the `- 2` Cardano-epoch offset in
+#    get_epoch_of_data_storage. The 2-epoch settling window provides zero
+#    marginal safety on preprod in permissioned-only mode (D=1.0) because
+#    `get_latest_stable_block_for` already enforces k=432-blocks depth.
+#
+# 3. `pallet-session-validator-management` —
+#    [materios-patch: idp-none-fallback]. Prevents a runtime panic at every
+#    sc_epoch boundary where the Ariadne IDP returns Ok(None). Patches 4
+#    functions so create_inherent skips (returns None) instead of
+#    panicking, check_inherent accepts a missing-inherent block,
+#    is_inherent_required reports "not required" when the IDP has no data,
+#    and inherent_data_to_authority_selection_inputs returns Option
+#    instead of panicking via `.expect(...)`. See
+#    feedback_iog_idp_none_panic.md for the full 2026-04-19 incident
+#    analysis.
+#
+# MAINNET POSTURE:
+#   - Patches 1a and 2 (early-launch relaxations): MUST REVERT for mainnet.
+#     Upstream's conservative stability offset is the correct posture for
+#     production partner-chains with non-permissioned SPOs.
+#   - Patch 1b (ariadne-output-dedup): safe for mainnet as-is. Should ALSO
+#     be upstreamed; the with-replacement sampler bug is not preprod-
+#     specific.
+#   - Patch 3 (idp-none-fallback): preserve until task #123 lands the
+#     upstream "last-known-good Ariadne IDP cache" (tracked in IOG issue
+#     #1154). The workaround is safe but masks an architectural mismatch
+#     between short sc_epochs (1h) and long mc_epochs (5d). The mainnet
+#     plan is the upstream IDP cache — see feedback_iog_idp_none_panic.md
+#     §"Durable fix roadmap".
+# ---------------------------------------------------------------------------
+[patch."https://github.com/input-output-hk/partner-chains.git"]
+authority-selection-inherents = { path = "vendor/authority-selection-inherents" }
+db-sync-follower = { path = "vendor/db-sync-follower" }
+pallet-session-validator-management = { path = "vendor/pallet-session-validator-management" }

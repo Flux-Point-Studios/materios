@@ -1,0 +1,50 @@
+[package]
+name = "db-sync-follower"
+version = "1.5.1"
+edition = "2021"
+license = "Apache-2.0"
+
+# Vendored fork of IOG partner-chains `db-sync-follower` with a one-line patch
+# in src/candidates/mod.rs (drop the `- 2` stability offset in
+# get_epoch_of_data_storage) so Materios can consume D-parameter /
+# permissioned-candidate data from the same Cardano epoch it was inserted,
+# instead of waiting 2 Cardano epochs for stability. All other deps come from
+# the upstream v1.5.1 tag.
+
+[dependencies]
+sqlx = { version = "0.7.4", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "chrono", "migrate", "bigdecimal"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "full"] }
+futures = { version = "0.3.30", features = ["thread-pool"] }
+chrono = "0.4.31"
+hex = { version = "0.4.3", default-features = false, features = ["alloc"] }
+hex-literal = "0.4.1"
+itertools = "0.13.0"
+sidechain-domain = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false, features = ["std", "serde"] }
+serde = { version = "1.0.209", default-features = false, features = ["derive", "alloc"] }
+serde_json = { version = "1.0.132", default-features = false, features = ["alloc"] }
+bigdecimal = "0.4.3"
+async-trait = "0.1"
+num-traits = { version = "0.2.17", default-features = false }
+num-bigint = { version = "0.4.3", default-features = false }
+log = { version = "0.4.22", default-features = false }
+thiserror = "1.0.48"
+blake2b_simd = { version = "1.0.2", default-features = false }
+figment = { version = "0.10.19", features = ["env", "test"] }
+substrate-prometheus-endpoint = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
+derive-new = "0.7.0"
+lru = "0.12.4"
+sp-timestamp = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false, features = ["std"] }
+sp-native-token-management = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false, features = ["std"], optional = true }
+sidechain-mc-hash = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false, optional = true }
+pallet-sidechain-rpc = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false, optional = true }
+authority-selection-inherents = { path = "../authority-selection-inherents", default-features = false, features = ["std"], optional = true }
+cardano-serialization-lib = { version = "13.2.1", default-features = false }
+partner-chains-plutus-data = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
+
+[features]
+default = []
+block-source = []
+candidate-source = ["authority-selection-inherents"]
+native-token = ["sp-native-token-management"]
+mc-hash = ["sidechain-mc-hash", "block-source"]
+sidechain-rpc = ["pallet-sidechain-rpc", "block-source"]
