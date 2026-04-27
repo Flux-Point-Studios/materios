@@ -178,11 +178,24 @@ describe("chunker", () => {
 
 // ---------------------------------------------------------------------------
 // 3. Merkle Tree Tests
+//
+// Algorithm parity with cert-daemon's `daemon/merkle.py`:
+//   - 0 leaves -> 32 zero bytes
+//   - 1 leaf   -> leaf as-is
+//   - N > 1    -> sha256(RAW(a) || RAW(b)); duplicate last on odd levels
 // ---------------------------------------------------------------------------
+
+// Helper: cert-daemon-canonical pair hash over hex-string leaves.
+function pairHashHex(a: string, b: string): string {
+  return sha256Bytes(
+    Buffer.concat([Buffer.from(a, "hex"), Buffer.from(b, "hex")]),
+  ).toString("hex");
+}
+
 describe("Merkle tree", () => {
-  it("should return sha256 of empty string for 0 leaves", () => {
+  it("should return 32 zero bytes for 0 leaves (cert-daemon parity)", () => {
     const tree = buildMerkleTree([]);
-    expect(tree.root).toBe(sha256(""));
+    expect(tree.root).toBe("0".repeat(64));
     expect(tree.leaves).toHaveLength(0);
   });
 
@@ -192,12 +205,12 @@ describe("Merkle tree", () => {
     expect(tree.root).toBe(leaf);
   });
 
-  it("should compute correct root for 2 leaves", () => {
+  it("should compute correct root for 2 leaves (raw-byte concat)", () => {
     const a = sha256("a");
     const b = sha256("b");
     const tree = buildMerkleTree([a, b]);
 
-    const expectedRoot = sha256(a + b);
+    const expectedRoot = pairHashHex(a, b);
     expect(tree.root).toBe(expectedRoot);
   });
 
@@ -209,9 +222,9 @@ describe("Merkle tree", () => {
 
     // Level 1: hash(a,b), hash(c,c)
     // Level 2: hash(hash(a,b), hash(c,c))
-    const left = sha256(a + b);
-    const right = sha256(c + c);
-    const expectedRoot = sha256(left + right);
+    const left = pairHashHex(a, b);
+    const right = pairHashHex(c, c);
+    const expectedRoot = pairHashHex(left, right);
     expect(tree.root).toBe(expectedRoot);
   });
 
@@ -219,9 +232,9 @@ describe("Merkle tree", () => {
     const leaves = ["a", "b", "c", "d"].map((x) => sha256(x));
     const tree = buildMerkleTree(leaves);
 
-    const l01 = sha256(leaves[0] + leaves[1]);
-    const l23 = sha256(leaves[2] + leaves[3]);
-    const expectedRoot = sha256(l01 + l23);
+    const l01 = pairHashHex(leaves[0], leaves[1]);
+    const l23 = pairHashHex(leaves[2], leaves[3]);
+    const expectedRoot = pairHashHex(l01, l23);
     expect(tree.root).toBe(expectedRoot);
   });
 
@@ -233,12 +246,45 @@ describe("Merkle tree", () => {
   });
 
   it("should accept custom hash function", () => {
-    const customHash = (a: string, b: string) => sha256(b + a); // reversed
+    // Custom hash: reversed raw-byte concat.
+    const customHash = (a: string, b: string) =>
+      sha256Bytes(
+        Buffer.concat([Buffer.from(b, "hex"), Buffer.from(a, "hex")]),
+      ).toString("hex");
     const leaves = [sha256("a"), sha256("b")];
 
     const tree = buildMerkleTree(leaves, customHash);
-    const expected = sha256(leaves[1] + leaves[0]);
+    const expected = customHash(leaves[0], leaves[1]);
     expect(tree.root).toBe(expected);
+  });
+
+  // Regression test pinning cert-daemon parity for the 3-chunk default-chunk
+  // fixture used by the SDK's anchors-materios package. Computed by running
+  // `daemon/merkle.py` against the same input — see fixtures comment.
+  it("matches cert-daemon for 3-chunk @ 256 KiB fixture", () => {
+    const CHUNK_SIZE = 256 * 1024;
+    const leafBuf0 = Buffer.alloc(CHUNK_SIZE, 0);
+    const leafBuf1 = Buffer.alloc(CHUNK_SIZE, 1);
+    const leafBuf2 = Buffer.alloc(CHUNK_SIZE, 2);
+    const leaves = [
+      sha256Bytes(leafBuf0).toString("hex"),
+      sha256Bytes(leafBuf1).toString("hex"),
+      sha256Bytes(leafBuf2).toString("hex"),
+    ];
+    expect(leaves[0]).toBe(
+      "8a39d2abd3999ab73c34db2476849cddf303ce389b35826850f9a700589b4a90",
+    );
+    expect(leaves[1]).toBe(
+      "f317dd9d6ba01c465d82e4c4d55d01d270dda69db4a01a64c587a5593ac6084d",
+    );
+    expect(leaves[2]).toBe(
+      "b1026d9249014c863c3a8daf11dec61bd4d4abcfdc7f1a62181cf743d4b6a12e",
+    );
+
+    const tree = buildMerkleTree(leaves);
+    expect(tree.root).toBe(
+      "cff7222bfb3b15ac46d49664992dea6d9bd55ec3da34f0bf12fe255e49c354f6",
+    );
   });
 });
 
