@@ -1,0 +1,118 @@
+{
+  "$schema_note": "Shared cross-chain digest anchors for Materios intent-settlement. Each entry is a fixed input + expected blake2b_256 output. Team A's Rust pallet, Team B's Aiken validator, and Team C's TS SDK MUST ALL produce byte-for-byte identical outputs for each vector. If any side diverges, investigate all three before patching \u2014 silent drift will cause committee signature mismatches that look like 'voucher invalid' but are actually serialisation bugs.",
+  "version": "1.1",
+  "last_updated": "2026-04-21",
+  "reference_impls": {
+    "aiken": "validators/aegis-policy-v1/lib/aegis/test_vectors.ak (see vec_pinned_* tests)",
+    "rust": "pallets/materios-intent-settlement/src/digests.rs (pending Team A follow-up PR for _with_address helper)",
+    "ts": "sdk/src/digests.ts (Team C, existing)"
+  },
+  "intt_empty_body": {
+    "_description": "IntentId digest for an empty body. Blake2b-256 of b\"INTT\".",
+    "pre_image_hex": "494e5454",
+    "expected_hex": "0baf44a136533f3a4f4425450b13cfb1e48d97ddcb2b64204b9f2f3ae14288aa"
+  },
+  "vchr_empty_body": {
+    "_description": "Voucher digest for an empty body. Blake2b-256 of b\"VCHR\".",
+    "pre_image_hex": "56434852",
+    "expected_hex": "25da1b71e4d650051ce3dbd3c41914b81067e1ce1c6f12d26591d285362d2b7c"
+  },
+  "bfpr_empty_body": {
+    "_description": "BatchFairnessProof digest for an empty body. Blake2b-256 of b\"BFPR\".",
+    "pre_image_hex": "42465052",
+    "expected_hex": "c03cbe26f35d0ad180c5840528ab78cf19354183a924833073af0aa8c623fd21"
+  },
+  "cmtt_one_member": {
+    "_description": "Committee digest for a single-member committee with threshold = 1. Body = pubkey(32B) ++ u32_le(threshold).",
+    "pubkey_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "threshold": 1,
+    "pre_image_hex": "434d5454aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa01000000",
+    "expected_hex": "df7c5be63fcd785e5afaa358eb0b4519c0c5cf54108969d7305524ba780ab0bb"
+  },
+  "clam_32_ones": {
+    "_description": "ClaimId digest for a 32-byte body of all 0x11s. Blake2b-256 of b\"CLAM\" ++ 32*0x11.",
+    "pre_image_hex": "434c414d1111111111111111111111111111111111111111111111111111111111111111",
+    "expected_hex": "8c59bcf52eabf6db9d5ccd382aa7cbdb67b6a6acee1551b7724a9ddf6872d813"
+  },
+  "voucher_digest_with_address": {
+    "_description": "THREE-WAY CROSS-CHAIN ANCHOR for voucher bodies that include a serialised Cardano Address. The beneficiary_address_cbor_hex below is what Aiken's `builtin.serialise_data(Address)` produces in Plutus V3 for the given bech32 address. Rust must reproduce this via `pallas_codec::plutus_data::PlutusData::encode_cbor(&address_data)` with the same indefinite-length constr CBOR shape; TS must reproduce it via Lucid's `Data.to(address, Address)` encoder. If any encoder produces a different `beneficiary_address_cbor_hex`, every BatchClaimVoucher / RefundCredit / RefundDeposit tx will silently reject on-chain.",
+    "_address_bech32": "addr1qx2h3pcsp6l9lxc0nujfdrczrmmstvju024xxvjcu2ywptslud3z94x5tgw8p0aefdjm8wxwrt0j49y384nuxgsjd9xq89stdk",
+    "_address_shape": "CIP-0019 type-0 (payment VK + stake VK inline)",
+    "payment_vk_hash_hex": "957887100ebe5f9b0f9f24968f021ef705b25c7aaa633258e288e0ae",
+    "stake_vk_hash_hex": "1fe36222d4d45a1c70bfb94b65b3b8ce1adf2a94913d67c32212694c",
+    "beneficiary_address_cbor_hex": "d8799fd8799f581c957887100ebe5f9b0f9f24968f021ef705b25c7aaa633258e288e0aeffd8799fd8799fd8799f581c1fe36222d4d45a1c70bfb94b65b3b8ce1adf2a94913d67c32212694cffffffff",
+    "_beneficiary_address_cbor_note": "Plutus V3 CBOR: constr-0 of [constr-0(VK payment_hash), constr-0(constr-0(constr-0(VK stake_hash)))]. Uses INDEFINITE-LENGTH array encoding (0xd8799f...ff), NOT definite (0xd87982...). Length = 80 bytes.",
+    "claim_id_hex": "cc00000000000000000000000000000000000000000000000000000000000000",
+    "policy_id_hex": "abcd000000000000000000000000000000000000000000000000000000000000",
+    "amount_ada": 10000000,
+    "_amount_ada_note": "Encoded as u64 little-endian: 8096980000000000 (0x989680 = 10_000_000).",
+    "bfpr_digest_hex": "deadadadadadadadadadadadadadadadadadadadadadadadadadadadadadadad",
+    "issued_block": 42,
+    "_issued_block_note": "Encoded as u32 little-endian: 2a000000.",
+    "expiry_slot_cardano": 99999,
+    "_expiry_slot_note": "Encoded as u64 little-endian: 9f86010000000000.",
+    "fee_lovelace": 500000,
+    "_fee_lovelace_note": "Not in the canonical voucher pre-image (fee is a separate keeper-fee redeemer field). Included here for Team A/C builder reference only.",
+    "_canonical_body_layout": "claim_id(32B) || policy_id(32B) || beneficiary_address_cbor(80B) || amount_ada_u64_le(8B) || bfpr_digest(32B) || issued_block_u32_le(4B) || expiry_slot_cardano_u64_le(8B) = 196B total",
+    "expected_hex": "ae73d78970eb486376fb9d5e4d00cba0a5b2a2200c935d942cc258b12a7f8405",
+    "_expected_hex_note": "blake2b_256(tag_voucher ++ canonical_body) = blake2b_256(b\"VCHR\" ++ body). Aiken pinned source-of-truth: test_vectors.ak::vec_pinned_vchr_with_address."
+  },
+  "teamA_realistic_vectors": {
+    "_note": "Realistic test cases Team A's pallet uses \u2014 same Blake2b-256 primitive, different (more substantive) pre-image bodies. All 6 vectors reproduce byte-for-byte via hashlib.blake2b(digest_size=32).",
+    "intent_id": {
+      "_description": "IntentKind::BuyPolicy variant. Pre-image: b'INTT' || submitter || nonce(LE64) || scale(kind) || submitted_block(LE32).",
+      "submitter_hex": "0707070707070707070707070707070707070707070707070707070707070707",
+      "nonce": 42,
+      "submitted_block": 100,
+      "kind": {
+        "variant": "BuyPolicy",
+        "product_id_hex": "abababababababababababababababababababababababababababababababab",
+        "strike": 500000,
+        "term_slots": 86400,
+        "premium_ada": 2000000,
+        "addr_hex": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+      },
+      "expected_hex": "b454028020a329e99955950396e0bd8cfe397e3fbcca73839ddcc72b47d8fd12"
+    },
+    "committee_set_digest": {
+      "_description": "Pre-image: b'CMTT' || scale(Vec<[u8;32]>) || threshold(LE32).",
+      "pubkeys_hex": [
+        "0101010101010101010101010101010101010101010101010101010101010101",
+        "0202020202020202020202020202020202020202020202020202020202020202",
+        "0303030303030303030303030303030303030303030303030303030303030303"
+      ],
+      "threshold": 2,
+      "expected_hex": "601ec5129f7e1c7324155c5c7f6a455ede0fa1514ac22620f99a277d95ea58cb"
+    },
+    "bfpr_digest": {
+      "_description": "Pre-image: b'BFPR' || scale(BatchFairnessProof). Fields per \u00a71.6.",
+      "batch_block_range": [
+        1,
+        3
+      ],
+      "sorted_intent_ids_hex": [
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "requested_amounts_ada": [
+        1000000
+      ],
+      "pool_balance_ada": 100000000,
+      "pro_rata_scale_bps": 10000,
+      "awarded_amounts_ada": [
+        1000000
+      ],
+      "expected_hex": "72f31833636eac4e54908cb1597c7ebb4d5a99838e7645833262f729b65f891a"
+    },
+    "voucher_digest": {
+      "_description": "Pre-image: b'VCHR' || claim_id || policy_id || scale(addr) || amount(LE64) || bfpr_digest || issued_block(LE32) || expiry_slot(LE64). Per \u00a71.7, addr is SCALE-encoded as BoundedVec<u8> (compact-len prefix).",
+      "claim_id_hex": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "policy_id_hex": "9999999999999999999999999999999999999999999999999999999999999999",
+      "addr_hex": "b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "amount_ada": 2000000,
+      "bfpr_digest_hex": "72f31833636eac4e54908cb1597c7ebb4d5a99838e7645833262f729b65f891a",
+      "issued_block": 4,
+      "expiry_slot_cardano": 100000,
+      "expected_hex": "7c58312ac808c92e089d0f16d1a58939b009aefffeb4a125acd96088726c479e"
+    }
+  }
+}

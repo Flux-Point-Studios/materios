@@ -289,7 +289,37 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        refuse to sign things they couldn't have signed under the old
     //        runtime. Defaulting to the latter; flip back to 3 if reviewer
     //        prefers.
-    spec_version: 208,
+    // 209 = Spec-209 (Task #245 / #254, 2026-04-27): bundles ONE pallet fix
+    //        and confirms (does not re-add) the IDP-None patch.
+    //        (a) [materios-patch: ttl-fallback-sweep] — pallet-intent-settlement
+    //            now ships an on_initialize fallback sweep that round-robins
+    //            through `PendingBatches` (64 entries/block via new
+    //            `FallbackSweepCursor`), terminalising past-TTL
+    //            Pending/Attested intents that the fast-path
+    //            `ExpiryQueue[ttl_block]` BoundedVec dropped on overflow.
+    //            Root cause: `do_submit_intent` used best-effort `try_push`
+    //            into a `MAX_EXPIRE_PER_BLOCK = 256` bucket, so any batch
+    //            with N>256 entries sharing one ttl_block silently leaked
+    //            768/1024 entries at spec-208's MaxBatch. 9_861/10_000
+    //            `PendingBatches` were saturated by the time we caught it.
+    //            Adds storage: `FallbackSweepCursor: u32` (ValueQuery=0),
+    //            `FallbackSweepCount: u64` (ValueQuery=0). No migration —
+    //            both default to 0 on first read post-upgrade.
+    //            New event-reason variant `ExpiryReason::TTLFallback = 2`
+    //            (additive). Recovery time at 10k saturation ≈ 16 min.
+    //            See feedback_pallet_expiry_queue_overflow_silent.md.
+    //        (b) [materios-patch: idp-none-fallback] — VERIFIED already
+    //            inlined since spec-201 via the `[patch."partner-chains.git"]`
+    //            redirect to `vendor/pallet-session-validator-management`.
+    //            The wasm-runtime-overrides file in
+    //            `materios-preprod/runtime-overrides/` has been DORMANT since
+    //            the spec-202 cutover; the running on-chain WASM has carried
+    //            the patch directly since then. Spec-209 keeps the same
+    //            vendored fork (no source changes). This is the safety net
+    //            for the upcoming mock→real Cardano follower transition.
+    //        Pure additive change. No storage migration. `transaction_version`
+    //        stays at 4 — call surface unchanged from spec-208.
+    spec_version: 209,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 4,

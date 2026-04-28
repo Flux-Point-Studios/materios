@@ -14,6 +14,13 @@ members = [
     # dependencies (hex-literal, tokio, etc.) are resolved correctly.
     "vendor/authority-selection-inherents",
     "vendor/pallet-session-validator-management",
+    # [materios-patch: ttl-fallback-sweep] (spec 209, Task #245)
+    # Vendored pallet-intent-settlement carrying the on_initialize fallback
+    # PendingBatches sweep that fixes silent ExpiryQueue overflow at
+    # MaxBatch>256. See feedback_pallet_expiry_queue_overflow_silent.md.
+    # Source: Flux-Point-Studios/materios-intent-settlement @ 58c26aa
+    # (one commit ahead of `spec207-bundle`).
+    "vendor/pallet-intent-settlement",
 ]
 
 [workspace.package]
@@ -103,7 +110,11 @@ materios-runtime = { path = "runtime" }
 # Flux-Point-Studios/materios-intent-settlement. The pallet Cargo pins the
 # same `polkadot-stable2409-4` SDK tag as this workspace so no version dance
 # is required. Pin by `rev` (not `branch = "main"`) for reproducibility.
-pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", tag = "spec207-bundle", default-features = false }
+# [materios-patch: ttl-fallback-sweep] (spec 209, Task #245)
+# Was: git = "...", tag = "spec207-bundle". Switched to local vendored copy
+# that carries the on_initialize fallback PendingBatches sweep
+# (commit 58c26aa = spec207-bundle + #245 fix). See vendor/pallet-intent-settlement.
+pallet-intent-settlement = { path = "vendor/pallet-intent-settlement", default-features = false }
 
 # MOTRA
 sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
