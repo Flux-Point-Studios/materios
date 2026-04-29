@@ -529,6 +529,16 @@ pub mod pallet {
         /// `expire_receipt_fee` called before `ReceiptExpiryBlocks` have
         /// elapsed since submission. Wait for the deadline to pass.
         ReceiptNotExpired,
+        /// `bond(amount)` would leave the caller's free balance below
+        /// `ExistentialDeposit` post-reserve, which `pallet_balances` rejects
+        /// silently at mempool pre-validation per `feedback_bond_dust_bug.md`.
+        /// We surface this explicitly so daemons can react to the error
+        /// instead of looping forever on `bond() failed: None`. (W-15.)
+        BondLeavesAccountDusty,
+        /// `set_bond_requirement(value)` rejected because `value` is below
+        /// `MIN_VIABLE_BOND` (100 MATRA at 6-dec). Prevents accidentally
+        /// nuking attestor security via a sudo typo. (W-12.)
+        BondRequirementTooLow,
         /// `expire_receipt_fee` called on a receipt that has already been
         /// certified — the escrow was already drained via the signer
         /// payout path. No action is required.
@@ -1394,66 +1404,21 @@ pub mod pallet {
         /// `new_aura` — sr25519 public keys for block production.
         /// `new_grandpa` — (ed25519 public key, weight) pairs for finality.
         /// `delay_blocks` — blocks before Grandpa change takes effect (min 1).
-        #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(50_000, 0)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(4)))]
-        pub fn rotate_authorities(
-            origin: OriginFor<T>,
-            new_aura: Vec<<T as pallet_aura::Config>::AuthorityId>,
-            new_grandpa: sp_consensus_grandpa::AuthorityList,
-            delay_blocks: u32,
-        ) -> DispatchResult {
-            ensure_root(origin)?;
-
-            // Validate inputs
-            ensure!(!new_aura.is_empty(), Error::<T>::EmptyAuthoritySet);
-            ensure!(!new_grandpa.is_empty(), Error::<T>::EmptyAuthoritySet);
-            ensure!(
-                new_aura.len() == new_grandpa.len(),
-                Error::<T>::AuthorityCountMismatch
-            );
-
-            // --- Update Aura authorities (immediate) ---
-            let bounded_aura: BoundedVec<
-                <T as pallet_aura::Config>::AuthorityId,
-                <T as pallet_aura::Config>::MaxAuthorities,
-            > = new_aura
-                .try_into()
-                .map_err(|_| Error::<T>::TooManyAuthorities)?;
-            pallet_aura::Authorities::<T>::put(bounded_aura);
-
-            // --- Schedule Grandpa authority change via the pallet's public API ---
-            // Using pallet_grandpa::Pallet::schedule_change() ensures correct
-            // SCALE encoding of StoredPendingChange (including WeakBoundedVec
-            // for authorities). Raw storage writes caused "Invalid authority set"
-            // errors due to encoding mismatches.
-            let delay: BlockNumberFor<T> = delay_blocks.max(2).into();
-            pallet_grandpa::Pallet::<T>::schedule_change(
-                new_grandpa.clone(),
-                delay,
-                Some(delay), // FORCED — applies at block height regardless of finality
-            )?;
-
-            // Increment CurrentSetId so GRANDPA voters track the new authority set.
-            // schedule_change() does not do this (it's normally done by pallet_session).
-            let set_id_key = frame_support::storage::storage_prefix(b"Grandpa", b"CurrentSetId");
-            let new_set_id: u64 = frame_support::storage::unhashed::get(&set_id_key)
-                .unwrap_or(0u64)
-                .saturating_add(1);
-            frame_support::storage::unhashed::put(&set_id_key, &new_set_id);
-
-            let current_block = frame_system::Pallet::<T>::block_number();
-            let apply_at = current_block + delay;
-            Self::deposit_event(Event::AuthoritiesRotated {
-                aura_count: new_grandpa.len() as u32,
-                grandpa_count: new_grandpa.len() as u32,
-                grandpa_set_id: new_set_id,
-                apply_at_block: apply_at,
-            });
-
-            Ok(())
-        }
+        ///
+        /// REMOVED in spec-210 (2026-04-28) per wedge audit W-1. This extrinsic
+        /// directly mutated the GRANDPA authority set, bypassing the partner-
+        /// chain session pallet, and desynced `Grandpa::CurrentSetId` from
+        /// `Grandpa::SetIdSession`. Every prior use triggered a forced-change
+        /// loop firing every ~18s and finality stalled — see
+        /// `feedback_rotate_authorities_wedge.md`. Authority rotation now
+        /// flows EXCLUSIVELY through Cardano permissioned_candidates (the
+        /// proper IOG path). Any operator reaching for emergency rotation
+        /// should instead call `partner-chains-node smart-contracts
+        /// upsert-permissioned-candidates` against Cardano.
+        ///
+        /// call_index(5) is intentionally left unused — DO NOT REUSE for
+        /// future extrinsics, since clients may have cached the old encoding
+        /// and would silently dispatch the wrong call.
 
         /// Submit a receipt with player-attributable anti-cheat signature.
         /// The studio wallet (origin) pays fees, while the player's sr25519
@@ -1653,6 +1618,38 @@ pub mod pallet {
             // will simply succeed as a no-op — the bookkeeping below records
             // 0, keeping the extrinsic infallible rather than panicking.
             let balance: BalanceOf<T> = amount.try_into().unwrap_or_default();
+
+            // W-15 fix (spec-210, 2026-04-28): explicit dust check BEFORE
+            // calling reserve(). Without this, when the caller's free balance
+            // == BondRequirement exactly, reserve()'s post-condition would
+            // leave free=0 < ExistentialDeposit (500 base), and `pallet_balances`
+            // refuses the reserve. Crucially that refusal happens at mempool
+            // pre-validation, so the tx is silently DROPPED rather than landing
+            // with an error event — the daemon's `wait_for_inclusion` returns
+            // is_success=False with error_message=None, and auto-bond loops
+            // forever burning MOTRA. Surfacing as a pallet error means the
+            // tx now lands with ExtrinsicFailed{Error::BondLeavesAccountDusty}
+            // and the daemon's catch path can react. See
+            // `feedback_bond_dust_bug.md` for the operator-rescue history.
+            //
+            // Currency import follows existing inline-import pattern (cf.
+            // lines 736, 763, 1305 in this same file).
+            //
+            // Dust check ONLY fires when `balance <= free` — otherwise we
+            // skip and let `reserve()` return the more-specific
+            // `InsufficientBalance` error. This keeps the existing test
+            // `bond_rejects_insufficient_balance` semantics intact.
+            use frame_support::traits::Currency;
+            let free = T::Currency::free_balance(&who);
+            let ed = T::Currency::minimum_balance();
+            if free >= balance {
+                let post_reserve = free.saturating_sub(balance);
+                ensure!(
+                    post_reserve >= ed,
+                    Error::<T>::BondLeavesAccountDusty
+                );
+            }
+
             T::Currency::reserve(&who, balance)?;
 
             let new_total = AttestorBonds::<T>::mutate(&who, |total| {
@@ -1786,6 +1783,18 @@ pub mod pallet {
             value: u128,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            // W-12 fix (spec-210, 2026-04-28): defensive floor. A sudo dispatch
+            // that accidentally sets BondRequirement = 0 (or near-0) would
+            // let new joiners bond(0) and pass join_committee with no real
+            // stake — Sybil flood. 100 MATRA is the conservative floor:
+            // high enough to require meaningful stake, low enough to never
+            // legitimately need to be undercut. Existing bonds are unaffected
+            // by this check (only the new-requirement value matters).
+            const MIN_VIABLE_BOND: u128 = 100_000_000; // 100 MATRA at 6-dec
+            ensure!(
+                value >= MIN_VIABLE_BOND,
+                Error::<T>::BondRequirementTooLow
+            );
             BondRequirement::<T>::put(value);
             Self::deposit_event(Event::BondRequirementUpdated { new_value: value });
             Ok(())

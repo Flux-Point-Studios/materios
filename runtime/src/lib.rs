@@ -319,7 +319,50 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //            for the upcoming mock→real Cardano follower transition.
     //        Pure additive change. No storage migration. `transaction_version`
     //        stays at 4 — call surface unchanged from spec-208.
-    spec_version: 209,
+    //
+    // spec-210 (Task #59 / Phase-1 wedge audit): three small pallet patches
+    // closing W-12, W-15, W-1.
+    //   * pallet-orinq-receipts::bond() now does an explicit dust check
+    //     before calling Currency::reserve(); silent mempool drop becomes
+    //     a clear ExtrinsicFailed{Error::BondLeavesAccountDusty} (W-15).
+    //   * pallet-orinq-receipts::set_bond_requirement() now refuses values
+    //     below MIN_VIABLE_BOND=100 MATRA (Error::BondRequirementTooLow);
+    //     prevents accidental sudo-zeroing → Sybil flood (W-12).
+    //   * pallet-orinq-receipts::rotate_authorities REMOVED. Direct GRANDPA
+    //     mutation via root extrinsic was the v3-era footgun that wedged
+    //     finality every prior use (`feedback_rotate_authorities_wedge.md`).
+    //     call_index(5) intentionally left unused — DO NOT REUSE for new
+    //     extrinsics; clients may have cached the old encoding (W-1).
+    // Pure additive (W-12/W-15) + removal (W-1). No storage migration.
+    // `transaction_version` stays at 4 — removing an extrinsic doesn't
+    // change encoding of others (call_index gap is harmless).
+    //
+    // spec-211 (Task #61 / Phase-1 wedge audit): GuardedSessionManager
+    // wraps ValidatorManagementSessionManager. When pallet_grandpa's
+    // PendingChange has been stuck for >100 blocks (~10 min at 6s),
+    // ShouldEndSession returns false to refuse advancing the session —
+    // prevents pallet_grandpa from overwriting SetIdSession[current_set_id]
+    // on a subsequent failed schedule_change. Closes W-5 prevention; pairs
+    // with the W-5 watchdog alert (#57) at the same threshold.
+    // No storage migration needed. transaction_version still 4 — extrinsic
+    // surface unchanged.
+    //
+    // spec-212 (Task #90): MaxCommitteeSize 64 → 256.
+    //   On 2026-04-29 the network hit 63/64 attestors when txseppe's RISE
+    //   team came in with 9 ARM64 HyperAI boxes. Spec-203's 64-seat cap
+    //   was sized for ~4× headroom over the original 16-seat ceiling; we
+    //   need similar headroom over today's 63 active. 256 gives 4× over
+    //   current usage. Three constants tracked together (assertion-paired
+    //   in source comments): pallet-orinq-receipts MaxCommitteeSize,
+    //   IntentSettlement MaxCommittee, and input_sanity MAX_COMMITTEE_SIZE.
+    //   Cap-only bump — BoundedBTreeSet/BoundedVec accept the larger bound
+    //   without storage migration. Verified pre-merge: no committee-signed
+    //   pre-image hash includes the cap value (would have caused
+    //   CertHashMismatch per feedback_mofn_hash_determinism.md). Sig-verify
+    //   weight upper-bound rises ~26ms per attest_availability_cert at
+    //   max-fanout — well inside the 6s block budget.
+    //   transaction_version stays at 4 — call surface unchanged.
+    spec_version: 212,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 4,
@@ -651,14 +694,14 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = pallet_orinq_receipts::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
-    // Raised 16 → 64 in spec 203. The old 16-seat ceiling was the
-    // original preprod bootstrap cap; the network grew past it when
-    // GoFigure's 17th attestor hit CommitteeFull on 2026-04-21.
-    // 64 is chosen as a comfortable ~4x headroom over the current active
-    // set while staying within a single 64-bit bitset's worth of seat
-    // bookkeeping. The paired `input_sanity::MAX_COMMITTEE_SIZE` must
-    // match — see runtime/src/input_sanity.rs.
-    type MaxCommitteeSize = ConstU32<64>;
+    // Raised 16 → 64 in spec 203, then 64 → 256 in spec 212 (the network
+    // hit 63/64 on 2026-04-29 when txseppe's 9-box HyperAI fleet asked to
+    // join). 256 gives ~4× headroom over the spec-211 ceiling while keeping
+    // sig-verify cost under one block budget (256 sr25519 verifies ≈ 26ms;
+    // block budget is 6s). The paired `input_sanity::MAX_COMMITTEE_SIZE` and
+    // `IntentSettlementMaxCommittee` below must track this — see
+    // runtime/src/input_sanity.rs and the IntentSettlement parameter_types.
+    type MaxCommitteeSize = ConstU32<256>;
     // Component 8: attestor bonds are held as reserved MATRA on Balances.
     type Currency = Balances;
     // Slashed bonds repatriate to the attestor reserve pot (`mat/attr`),
@@ -738,11 +781,11 @@ impl pallet_intent_settlement::IsCommitteeMember<AccountId> for OrinqCommitteeAd
 }
 
 parameter_types! {
-    /// Matches the widened MaxCommitteeSize=64 pinned in OrinqReceipts (spec
-    /// 203). Keeping the intent-settlement cap in lockstep avoids an adapter
-    /// mismatch where OrinqReceipts admits a 64th member but intent-settlement
-    /// BoundedVec overflows.
-    pub const IntentSettlementMaxCommittee: u32 = 64;
+    /// Matches the widened MaxCommitteeSize=256 pinned in OrinqReceipts (raised
+    /// 16 → 64 in spec 203, then 64 → 256 in spec 212). Keeping the
+    /// intent-settlement cap in lockstep avoids an adapter mismatch where
+    /// OrinqReceipts admits a member past intent-settlement's BoundedVec cap.
+    pub const IntentSettlementMaxCommittee: u32 = 256;
     /// TTL-sweep bound per block; bounds the on_initialize cost.
     pub const IntentSettlementMaxExpirePerBlock: u32 = 64;
     /// Default intent TTL: 600 blocks ≈ 1h @ 6s. Matches spec v1 §3.3.
@@ -928,15 +971,125 @@ impl pallet_session_validator_management::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
-// IOG Partner Chains: Partner Chains Session
+// IOG Partner Chains: Partner Chains Session — guarded for W-5 prevention
 // ---------------------------------------------------------------------------
+//
+// W-5 prevention (spec-211, 2026-04-28): wrap ValidatorManagementSessionManager
+// with a guard that REFUSES to end the session if `pallet_grandpa::PendingChange`
+// has been stuck for more than `MAX_PENDING_CHANGE_STALL_BLOCKS` blocks.
+//
+// Rationale: when `should_end_session` returns true, partner-chains-session
+// dispatches `SessionHandler.on_new_session` → pallet_grandpa.on_new_session
+// → pallet_grandpa.schedule_change. If a previous PendingChange hasn't
+// finalized, schedule_change returns Err(ChangePending) — but pallet_grandpa
+// STILL overwrites `SetIdSession[current_set_id]` with the new session_index
+// (substrate/frame/grandpa/src/lib.rs:622, unconditional after the if/else).
+// Voters then dereference current_set_id → wrong session_index → wrong
+// authorities → finality stalls. THIS is the v5→v6 reset trigger class.
+//
+// The fix: refuse to end the session at all while a stuck PendingChange
+// exists. The committee transition is delayed (operator must resolve the
+// finality stall, e.g. by sudo-clearing PendingChange), but no SetIdSession
+// corruption occurs. Combined with the watchdog detection alert (#57)
+// firing at 10 min, this gives operators a time-window to react before any
+// state corruption and a hard guard if they miss the alert.
+
+/// Threshold (blocks) above which a `pallet_grandpa::PendingChange` is
+/// considered stuck. 100 blocks ≈ 10 min at 6s/block — same threshold
+/// as the W-5 watchdog alert in `materios-watchdog`.
+pub const MAX_PENDING_CHANGE_STALL_BLOCKS: BlockNumber = 100;
+
+/// Mirror of `pallet_grandpa::StoredPendingChange` (which is `pub(super)`
+/// in v38.0.0 so we cannot import it directly). Keeping the layout
+/// in lock-step with substrate is asserted by the existing
+/// `grandpa_pending_change_layout_compatibility` test in
+/// `pallets/orinq-receipts/src/tests.rs`. If this fails to decode after
+/// an SDK upgrade, inspect the new StoredPendingChange definition in
+/// `substrate/frame/grandpa/src/lib.rs` and update both this struct and
+/// the test fixture in lockstep.
+#[derive(parity_scale_codec::Encode, parity_scale_codec::Decode)]
+struct GrandpaPendingChangeMirror {
+    scheduled_at: BlockNumber,
+    delay: BlockNumber,
+    next_authorities: sp_consensus_grandpa::AuthorityList,
+    forced: Option<BlockNumber>,
+}
+
+/// Helper: returns true iff Grandpa::PendingChange has been waiting longer
+/// than `MAX_PENDING_CHANGE_STALL_BLOCKS` at the given block height.
+fn grandpa_pending_change_stuck(now: BlockNumber) -> bool {
+    let pending_key =
+        frame_support::storage::storage_prefix(b"Grandpa", b"PendingChange");
+    if let Some(pending) =
+        frame_support::storage::unhashed::get::<GrandpaPendingChangeMirror>(&pending_key)
+    {
+        let elapsed = now.saturating_sub(pending.scheduled_at);
+        if elapsed > MAX_PENDING_CHANGE_STALL_BLOCKS {
+            log::warn!(
+                target: "materios::grandpa-guard",
+                "W-5 GUARD: Grandpa::PendingChange stuck for {} blocks \
+                 (scheduled_at={}, current={}, threshold={}). \
+                 Resolve the finality stall (sudo-clear PendingChange or wait for \
+                 a finalization that catches up the queue) before the next session \
+                 can advance. See feedback_grandpa.md.",
+                elapsed, pending.scheduled_at, now, MAX_PENDING_CHANGE_STALL_BLOCKS,
+            );
+            return true;
+        }
+    }
+    false
+}
+
+/// Wrapper around `ValidatorManagementSessionManager` that refuses to end
+/// the session if `pallet_grandpa::PendingChange` is stuck. See
+/// `MAX_PENDING_CHANGE_STALL_BLOCKS` doc + the long comment above.
+///
+/// Bound to the concrete `Runtime` type (rather than generic `T`) because
+/// the `BlockNumber = u32` concrete decode of `GrandpaPendingChangeMirror`
+/// only makes sense at the runtime layer.
+pub struct GuardedSessionManager;
+
+impl pallet_partner_chains_session::ShouldEndSession<BlockNumber>
+    for GuardedSessionManager
+{
+    fn should_end_session(n: BlockNumber) -> bool {
+        if grandpa_pending_change_stuck(n) {
+            return false;
+        }
+        ValidatorManagementSessionManager::<Runtime>::should_end_session(n)
+    }
+}
+
+impl
+    pallet_partner_chains_session::SessionManager<
+        <Runtime as frame_system::Config>::AccountId,
+        opaque::SessionKeys,
+    > for GuardedSessionManager
+{
+    fn new_session_genesis(
+        new_index: sp_staking::SessionIndex,
+    ) -> Option<sp_std::vec::Vec<(<Runtime as frame_system::Config>::AccountId, opaque::SessionKeys)>> {
+        ValidatorManagementSessionManager::<Runtime>::new_session_genesis(new_index)
+    }
+    fn new_session(
+        new_index: sp_staking::SessionIndex,
+    ) -> Option<sp_std::vec::Vec<(<Runtime as frame_system::Config>::AccountId, opaque::SessionKeys)>> {
+        ValidatorManagementSessionManager::<Runtime>::new_session(new_index)
+    }
+    fn end_session(end_index: sp_staking::SessionIndex) {
+        ValidatorManagementSessionManager::<Runtime>::end_session(end_index)
+    }
+    fn start_session(start_index: sp_staking::SessionIndex) {
+        ValidatorManagementSessionManager::<Runtime>::start_session(start_index)
+    }
+}
 
 impl pallet_partner_chains_session::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type ValidatorId = <Self as frame_system::Config>::AccountId;
-    type ShouldEndSession = ValidatorManagementSessionManager<Runtime>;
+    type ShouldEndSession = GuardedSessionManager;
     type NextSessionRotation = ();
-    type SessionManager = ValidatorManagementSessionManager<Runtime>;
+    type SessionManager = GuardedSessionManager;
     type SessionHandler = <opaque::SessionKeys as OpaqueKeys>::KeyTypeIdProviders;
     type Keys = opaque::SessionKeys;
 }

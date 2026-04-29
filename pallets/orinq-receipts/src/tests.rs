@@ -329,128 +329,12 @@ fn timestamp_comes_from_pallet_timestamp() {
 }
 
 // ---------------------------------------------------------------------------
-// rotate_authorities tests
+// rotate_authorities tests REMOVED in spec-210 — extrinsic deleted per wedge
+// audit W-1 (see feedback_rotate_authorities_wedge.md). Authority rotation
+// now flows EXCLUSIVELY through Cardano permissioned_candidates. Tests
+// retained in git history for the call_index(5) shape if ever needed for
+// reverse-compat archaeology.
 // ---------------------------------------------------------------------------
-
-fn make_aura_ids(count: u8) -> Vec<sp_consensus_aura::sr25519::AuthorityId> {
-    use sp_core::crypto::UncheckedFrom;
-    (1..=count)
-        .map(|i| sp_consensus_aura::sr25519::AuthorityId::unchecked_from([i; 32]))
-        .collect()
-}
-
-fn make_grandpa_ids(count: u8) -> sp_consensus_grandpa::AuthorityList {
-    use sp_core::crypto::UncheckedFrom;
-    (1..=count)
-        .map(|i| (sp_consensus_grandpa::AuthorityId::unchecked_from([i; 32]), 1))
-        .collect()
-}
-
-#[test]
-fn rotate_authorities_works() {
-    new_test_ext().execute_with(|| {
-        let aura_ids = make_aura_ids(3);
-        let grandpa_ids = make_grandpa_ids(3);
-
-        assert_ok!(OrinqReceipts::rotate_authorities(
-            RuntimeOrigin::root(),
-            aura_ids.clone(),
-            grandpa_ids.clone(),
-            5,
-        ));
-
-        // Aura authorities updated immediately
-        let stored_aura = pallet_aura::Authorities::<Test>::get();
-        assert_eq!(stored_aura.len(), 3);
-
-        // Grandpa PendingChange was written (raw storage — type alias is pub(crate))
-        let pending_key = frame_support::storage::storage_prefix(b"Grandpa", b"PendingChange");
-        assert!(frame_support::storage::unhashed::exists(&pending_key));
-
-        // Stalled marker cleared (raw storage — type alias is pub(crate))
-        let stalled_key = frame_support::storage::storage_prefix(b"Grandpa", b"Stalled");
-        assert!(!frame_support::storage::unhashed::exists(&stalled_key));
-    });
-}
-
-#[test]
-fn rotate_authorities_rejects_non_root() {
-    new_test_ext().execute_with(|| {
-        assert_noop!(
-            OrinqReceipts::rotate_authorities(
-                RuntimeOrigin::signed(acc(1)),
-                make_aura_ids(2),
-                make_grandpa_ids(2),
-                5,
-            ),
-            frame_support::error::BadOrigin
-        );
-    });
-}
-
-#[test]
-fn rotate_authorities_rejects_empty_set() {
-    new_test_ext().execute_with(|| {
-        assert_noop!(
-            OrinqReceipts::rotate_authorities(
-                RuntimeOrigin::root(),
-                vec![],
-                vec![],
-                5,
-            ),
-            pallet::Error::<Test>::EmptyAuthoritySet
-        );
-    });
-}
-
-#[test]
-fn rotate_authorities_rejects_mismatched_counts() {
-    new_test_ext().execute_with(|| {
-        assert_noop!(
-            OrinqReceipts::rotate_authorities(
-                RuntimeOrigin::root(),
-                make_aura_ids(3),
-                make_grandpa_ids(2),
-                5,
-            ),
-            pallet::Error::<Test>::AuthorityCountMismatch
-        );
-    });
-}
-
-#[test]
-fn rotate_authorities_rejects_double_pending() {
-    new_test_ext().execute_with(|| {
-        // First rotation succeeds
-        assert_ok!(OrinqReceipts::rotate_authorities(
-            RuntimeOrigin::root(),
-            make_aura_ids(2),
-            make_grandpa_ids(2),
-            5,
-        ));
-
-        // Second rotation must fail — PendingChange already exists.
-        //
-        // Which error fires depends on the SDK version: our pallet's own
-        // `AuthorityChangeAlreadyPending` wins only if we can inspect the
-        // Grandpa state before calling `schedule_change`. Newer
-        // pallet-grandpa returns its own `ChangePending` from
-        // `schedule_change` first. Either way the invariant holds — the
-        // second rotation is rejected — so assert on the rejection, not on
-        // the specific discriminant.
-        let result = OrinqReceipts::rotate_authorities(
-            RuntimeOrigin::root(),
-            make_aura_ids(3),
-            make_grandpa_ids(3),
-            5,
-        );
-        assert!(
-            result.is_err(),
-            "Second rotation must fail while a change is pending; got {:?}",
-            result
-        );
-    });
-}
 
 // ---------------------------------------------------------------------------
 // Component 5 — dynamic attestation reward + era cap
@@ -762,6 +646,45 @@ fn bond_accumulates_on_repeat_calls() {
 }
 
 #[test]
+fn bond_rejects_dust_creating_amount() {
+    // W-15: bond() must NOT leave caller's free balance below ED. Without the
+    // explicit pallet check, pallet_balances rejects the reserve at MEMPOOL
+    // pre-validation, the tx is silently dropped, and the daemon's auto-bond
+    // loops forever on `bond() failed: None`. Explicit Error::BondLeavesAccountDusty
+    // surfaces in ExtrinsicFailed event so the daemon can react.
+    // Per `feedback_bond_dust_bug.md` (real operators Libero + GoFigure 2026-04-24).
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        // Mock ED = 1 (mock.rs:53). Free=1000, bond 1000 → post-reserve free=0 < ED=1.
+        Balances::make_free_balance_be(&attestor, 1000);
+        assert_noop!(
+            OrinqReceipts::bond(RuntimeOrigin::signed(attestor.clone()), 1000),
+            pallet::Error::<Test>::BondLeavesAccountDusty
+        );
+        // No reservation must have happened.
+        assert_eq!(Balances::reserved_balance(&attestor), 0);
+        assert_eq!(OrinqReceipts::attestor_bonds(&attestor), 0);
+    });
+}
+
+#[test]
+fn bond_succeeds_when_above_dust_threshold() {
+    // Inverse of bond_rejects_dust_creating_amount — confirms the dust check
+    // doesn't accidentally reject legitimate bonds with adequate headroom.
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        // Free=1001, bond 1000 → post-reserve free=1 == ED, accepted.
+        Balances::make_free_balance_be(&attestor, 1001);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            1000
+        ));
+        assert_eq!(Balances::reserved_balance(&attestor), 1000);
+        assert_eq!(OrinqReceipts::attestor_bonds(&attestor), 1000);
+    });
+}
+
+#[test]
 fn unbond_while_in_committee_fails() {
     new_test_ext().execute_with(|| {
         let attestor = acc(1);
@@ -948,6 +871,38 @@ fn bond_requirement_has_default() {
     new_test_ext().execute_with(|| {
         // Default = 1_000_000_000 base units (1K MATRA at 6 decimals).
         assert_eq!(OrinqReceipts::bond_requirement(), 1_000_000_000);
+    });
+}
+
+#[test]
+fn set_bond_requirement_rejects_below_min_viable() {
+    // W-12: defensive floor on the BondRequirement governance setter. Without
+    // this, sudo could accidentally drop BondRequirement to 0 (or near-0),
+    // letting new joiners pass `bond(0)` + `join_committee` with no real
+    // stake — Sybil flood vector. MIN_VIABLE_BOND = 100 MATRA (100_000_000
+    // base) is the conservative floor.
+    new_test_ext().execute_with(|| {
+        // 0 is rejected
+        assert_noop!(
+            OrinqReceipts::set_bond_requirement(RuntimeOrigin::root(), 0),
+            pallet::Error::<Test>::BondRequirementTooLow
+        );
+        // MIN_VIABLE_BOND - 1 is rejected
+        assert_noop!(
+            OrinqReceipts::set_bond_requirement(RuntimeOrigin::root(), 99_999_999),
+            pallet::Error::<Test>::BondRequirementTooLow
+        );
+        // Any reasonable (mid-range, etc.) value is rejected if < floor
+        assert_noop!(
+            OrinqReceipts::set_bond_requirement(RuntimeOrigin::root(), 50_000_000),
+            pallet::Error::<Test>::BondRequirementTooLow
+        );
+        // Exactly MIN_VIABLE_BOND is accepted (boundary)
+        assert_ok!(OrinqReceipts::set_bond_requirement(RuntimeOrigin::root(), 100_000_000));
+        assert_eq!(OrinqReceipts::bond_requirement(), 100_000_000);
+        // Above floor accepted
+        assert_ok!(OrinqReceipts::set_bond_requirement(RuntimeOrigin::root(), 5_000_000_000));
+        assert_eq!(OrinqReceipts::bond_requirement(), 5_000_000_000);
     });
 }
 
