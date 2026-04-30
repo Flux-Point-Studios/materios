@@ -1094,10 +1094,24 @@ async function renderCommitteeHealth() {
             const connIcon = m.substrate_connected ? '\u25CF' : '\u25CB';
             const connClass = m.substrate_connected ? 'conn-yes' : 'conn-no';
 
+            // Task #94: aura \u2192 cert-daemon-signer binding hint. Operators
+            // running validator + cert-daemon on SEPARATE keys (security
+            // best practice) get their heartbeat surfaced under the aura
+            // SS58 via the off-chain binding cache. The badge gets a
+            // "via cert-daemon ..." suffix so operators can verify the
+            // mapping is correct.
+            let badgeWithHint = badge;
+            if (m.bound_cert_daemon) {
+                const shortSs58 = m.bound_cert_daemon.slice(0, 6) + '\u2026' + m.bound_cert_daemon.slice(-4);
+                const labelPart = m.bound_cert_daemon_label ? `${m.bound_cert_daemon_label} ` : '';
+                const tooltip = `Heartbeat from bound cert-daemon ${m.bound_cert_daemon}`;
+                badgeWithHint = `${badge} <span class="hint-bound-cert-daemon" title="${tooltip}">via ${labelPart}${shortSs58}</span>`;
+            }
+
             rows += `<tr>
                 <td>${addrLink(m.address)}</td>
                 <td>${m.label || '\u2014'}</td>
-                <td>${badge}</td>
+                <td>${badgeWithHint}</td>
                 <td class="${verifiedClass}">${verifiedIcon}</td>
                 <td>${ageSecs}</td>
                 <td>${m.best_block || '\u2014'}</td>

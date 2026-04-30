@@ -605,6 +605,20 @@ a:hover { text-decoration: underline; }
     border: 1px solid rgba(139, 148, 158, 0.3);
 }
 
+/* Task #94: aura → cert-daemon-signer binding hint shown next to the
+ * status badge when a validator's heartbeat is being surfaced via a
+ * SEPARATE cert-daemon SS58 (security-correct setup). Subdued so the
+ * primary status badge stays the eye-catcher. */
+.hint-bound-cert-daemon {
+    display: inline-block;
+    margin-left: 6px;
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: ui-monospace, SFMono-Regular, monospace;
+    cursor: help;
+    border-bottom: 1px dotted rgba(139, 148, 158, 0.4);
+}
+
 .verified-yes { color: var(--green); font-weight: 600; }
 .verified-no { color: var(--yellow); font-weight: 600; }
 .verified-na { color: var(--text-dim); }
