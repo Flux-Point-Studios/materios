@@ -597,22 +597,80 @@ async def committee_health():
                 except Exception:
                     pass
 
+            # Task #94: aura → cert-daemon-signer bindings.
+            #
+            # Off-chain cache from blob-gateway: when an operator runs the
+            # security-correct setup (validator authoring/aura key SEPARATE
+            # from the cert-daemon signer key), the heartbeat for that
+            # operator lives under the cert-daemon SS58 — not under the aura
+            # SS58 the explorer is iterating. Without this binding the row
+            # would say "No heartbeat" forever even though the operator is
+            # healthy. We JOIN: aura → cert-daemon SS58 → heartbeat.
+            #
+            # The bindings field is forward-compatible: missing on old
+            # gateway builds (treated as empty), present on new ones.
+            bindings = heartbeat_data.get("bindings") or {}
+            # Normalize the bindings map by raw pubkey too — operators
+            # might issue the binding with prefix 42 while the on-chain
+            # committee returns prefix 0 for the same key.
+            bindings_by_pubkey = {}
+            for aura_addr, info in bindings.items():
+                try:
+                    pk = ss58_decode(aura_addr)
+                    bindings_by_pubkey[pk] = info
+                except Exception:
+                    pass
+
+            def _resolve_heartbeat(aura_addr: str):
+                """Return (hb_dict, bound_info_or_None).
+
+                Tries direct aura lookup first; if no heartbeat is found,
+                follows the binding (if any) to the cert-daemon SS58 and
+                returns that heartbeat instead, with a non-None bound_info
+                so the UI can render the "via cert-daemon X" hint.
+                """
+                # Direct lookup by raw pubkey first (covers degenerate
+                # case where aura == cert-daemon signer).
+                try:
+                    pk = ss58_decode(aura_addr)
+                    direct = hb_by_pubkey.get(pk)
+                except Exception:
+                    direct = validators_hb.get(aura_addr)
+                if direct:
+                    return direct, None
+
+                # No direct heartbeat. Follow the binding.
+                try:
+                    pk = ss58_decode(aura_addr)
+                    bound_info = bindings_by_pubkey.get(pk) or bindings.get(aura_addr)
+                except Exception:
+                    bound_info = bindings.get(aura_addr)
+                if not bound_info:
+                    return {}, None
+
+                cert_daemon_ss58 = bound_info.get("certDaemonSs58")
+                if not cert_daemon_ss58:
+                    return {}, bound_info
+                # Look up the bound cert-daemon's heartbeat (by raw pubkey
+                # so prefix mismatch doesn't bite us a second time).
+                try:
+                    cd_pk = ss58_decode(cert_daemon_ss58)
+                    cd_hb = hb_by_pubkey.get(cd_pk) or validators_hb.get(cert_daemon_ss58, {})
+                except Exception:
+                    cd_hb = validators_hb.get(cert_daemon_ss58, {})
+                return cd_hb, bound_info
+
             # Merge on-chain committee with heartbeat data
             member_list = []
             online_count = 0
             for m in members:
                 addr = str(m)
-                # Look up by raw public key to handle different SS58 prefixes
-                try:
-                    pk = ss58_decode(addr)
-                    hb = hb_by_pubkey.get(pk, {})
-                except Exception:
-                    hb = validators_hb.get(addr, {})
+                hb, bound_info = _resolve_heartbeat(addr)
                 status = hb.get("status", "no_heartbeat")
                 if status == "online":
                     online_count += 1
 
-                member_list.append({
+                row = {
                     "address": addr,
                     "label": hb.get("label", ""),
                     "status": status,
@@ -629,7 +687,17 @@ async def committee_health():
                     "version": hb.get("version", ""),
                     "uptime_seconds": hb.get("uptime_seconds", 0),
                     "clock_skew_secs": hb.get("clock_skew_secs", 0),
-                })
+                }
+                # Task #94: include the bound-cert-daemon hint when the
+                # heartbeat we surfaced came via a different SS58. Skip
+                # the hint for the degenerate aura == cert-daemon case so
+                # the UI doesn't show "via cert-daemon <self>".
+                if bound_info:
+                    cert_daemon_ss58 = bound_info.get("certDaemonSs58")
+                    if cert_daemon_ss58 and cert_daemon_ss58 != addr:
+                        row["bound_cert_daemon"] = cert_daemon_ss58
+                        row["bound_cert_daemon_label"] = bound_info.get("label", "")
+                member_list.append(row)
 
             threshold_met = online_count >= threshold
 
