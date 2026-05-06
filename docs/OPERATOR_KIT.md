@@ -1,78 +1,28 @@
 # Materios External Operator Kit
 
-Run your own cert-daemon to participate in the Materios attestation committee — no VPN, Tailscale, or cluster access needed.
+The cert-daemon and operator tooling are maintained in their own repository:
 
-## Prerequisites
+> **[github.com/Flux-Point-Studios/materios-operator-kit](https://github.com/Flux-Point-Studios/materios-operator-kit)**
 
-- Docker (or Podman) with compose
-- 1 vCPU, 512 MB RAM, 1 GB disk
-- Public internet access (HTTPS + WSS)
+## Recommended path: bootstrap script
 
-## Quick Start
-
-### Step 1: Generate Your Committee Key
+For nearly every operator, the single-shot installer is the right entry point:
 
 ```bash
-pip install substrate-interface mnemonic
-python cert-daemon/scripts/generate_committee_key.py
+curl -fsSL https://materios.fluxpointstudios.com/releases/bootstrap-validator.sh | bash
 ```
 
-This outputs:
-- **Mnemonic** (24 words) — save securely, never share
-- **SS58 Address** — your public identity
+The script provisions a validator + cert-daemon, registers heartbeat publishing, and prints the SS58 address you'll send to the FPS team for committee onboarding.
 
-### Step 2: Register with FPS
+## Manual path
 
-Send the following to the FPS team:
-- Your SS58 address
-- Your preferred label (e.g., "MyOrg-Validator")
+If you'd rather assemble the pieces yourself, follow the README in the operator-kit repo. It covers:
 
-You will receive:
-- An API key for the blob gateway
-- Confirmation that your address was added to the committee
-- Confirmation that your account was funded with MATRA
-
-### Step 3: Configure the Daemon
-
-```bash
-cp cert-daemon/docker-compose.external.yml docker-compose.yml
-```
-
-Edit `docker-compose.yml` and fill in:
-- `SIGNER_URI`: Your 24-word mnemonic
-- `BLOB_GATEWAY_API_KEY`: API key from FPS team
-- `LOCATOR_REGISTRY_API_KEY`: Same API key
-
-### Step 4: Start the Daemon
-
-```bash
-docker compose up -d
-```
-
-### Step 5: Verify
-
-Check your heartbeat appears on the explorer:
-- Visit: https://materios.fluxpointstudios.com/explorer/#/committee
-- Your validator should show "Online" with a green badge
-- The "Verified" column should show a checkmark (sr25519 signature verified)
-
-Check health locally:
-```bash
-curl http://localhost:8080/health
-curl http://localhost:8080/status
-```
-
-### Step 6: (Optional) Run Your Own Watchtower
-
-Monitor committee health independently:
-
-```bash
-BLOB_GATEWAY_URL=https://materios.fluxpointstudios.com/blobs \
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/YOUR_WEBHOOK \
-python -m daemon.watchtower
-```
-
-The watchtower uses the **public** `/heartbeats/status` endpoint — no API key needed.
+- generating a committee key,
+- registering with the FPS team (SS58 address + label),
+- configuring `docker-compose.external.yml` (mnemonic + API keys),
+- starting the daemon and verifying via the explorer + local `/health`/`/status` endpoints,
+- (optional) running an independent watchtower against the public `/heartbeats/status` endpoint.
 
 ## Architecture
 
@@ -81,16 +31,16 @@ Your Machine                          FPS Infrastructure
 +--------------+                      +----------------------+
 | cert-daemon  |--WSS(/rpc)---------->| Materios RPC Node    |
 |              |--HTTPS(/blobs)------>| Blob Gateway         |
-|              |  (heartbeats +      | (heartbeat store +   |
-|              |   blob verification)|  blob storage)       |
+|              |  (heartbeats +       |  (heartbeat store +  |
+|              |   blob verification) |   blob storage)      |
 +--------------+                      +----------------------+
 ```
 
 - **RPC**: `wss://materios.fluxpointstudios.com/rpc` — read chain state, submit attestation transactions
 - **Blob Gateway**: `https://materios.fluxpointstudios.com/blobs` — fetch blob data for verification, send heartbeats
-- **Heartbeats**: Signed with your sr25519 committee key — independently verifiable by anyone
+- **Heartbeats**: signed with your sr25519 committee key — independently verifiable by anyone
 
-## Security Model
+## Security model
 
 - Your **mnemonic** never leaves your machine
 - **API keys** are for rate limiting only — not authentication
@@ -102,6 +52,6 @@ Your Machine                          FPS Infrastructure
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | Heartbeat not appearing | API key invalid | Verify API key with FPS team |
-| "substrate_connected: false" | RPC unreachable | Check WSS connectivity to materios.fluxpointstudios.com |
-| High finality gap (>10) | Chain stalled | Check if block production is healthy on explorer |
+| `substrate_connected: false` | RPC unreachable | Check WSS connectivity to `materios.fluxpointstudios.com` |
+| High finality gap (>10) | Chain stalled | Check if block production is healthy on the explorer |
 | Cert not submitted | Account not funded | Ask FPS team to verify MATRA balance |

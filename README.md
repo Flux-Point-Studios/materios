@@ -106,34 +106,8 @@ materios/
 │           ├── primitives/               #     Shared types for RPC
 │           └── rpc/                      #     motra_* JSON-RPC methods
 │
-├── cert-daemon/                          # Certification daemon (Python)
-│   ├── Dockerfile
-│   ├── requirements.txt
-│   ├── schemas/
-│   │   └── registry.json                 #   Content validation schema registry
-│   ├── daemon/
-│   │   ├── main.py                       #     Entry point
-│   │   ├── config.py                     #     Configuration (env vars)
-│   │   ├── cert_daemon.py                #     Main poll loop and attestation logic
-│   │   ├── cert_builder.py               #     dCBOR certificate construction
-│   │   ├── cert_store.py                 #     Certificate persistence
-│   │   ├── content_validator.py          #     Schema-driven content validation
-│   │   ├── checkpoint.py                 #     Cardano L1 checkpoint batching
-│   │   ├── heartbeat.py                  #     sr25519-signed heartbeats (30s interval)
-│   │   ├── locator_registry.py           #     Blob locator resolution via gateway
-│   │   ├── blob_verifier.py              #     SHA-256 chunk verification
-│   │   ├── merkle.py                     #     Merkle tree construction
-│   │   ├── models.py                     #     Data models
-│   │   ├── health_server.py              #     HTTP health endpoints
-│   │   ├── substrate_client.py           #     Substrate RPC client
-│   │   └── watchtower.py                 #     Committee health monitoring
-│   ├── tests/                            #   Unit tests
-│   ├── scripts/
-│   │   └── verify.py                     #   8-step chain-of-custody verification
-│   ├── docs/
-│   │   └── verification-guide.md         #   Verification walkthrough
-│   ├── docker-compose.external.yml       #   External operator compose template
-│   └── e2e_test.py                       #   End-to-end test
+│   (cert-daemon now lives in its own repo:
+│    https://github.com/Flux-Point-Studios/materios-operator-kit)
 │
 ├── tools/
 │   ├── receipt-builder/                  # Off-chain receipt construction (TypeScript)
@@ -209,7 +183,7 @@ materios/
 | **Node.js** | 22+ | LTS recommended (for receipt-builder) |
 | **pnpm** | latest | For receipt-builder and midnight client |
 | **Docker** | 24+ | Docker Compose v2 plugin required |
-| **Python** | 3.12+ | For cert-daemon and verification tools |
+| **Python** | 3.12+ | For verification tools (cert-daemon lives in [materios-operator-kit](https://github.com/Flux-Point-Studios/materios-operator-kit)) |
 | **Nix** | optional | Reproducible dev shell via `partnerchain/flake.nix` |
 
 ---
@@ -251,27 +225,17 @@ curl -s -X POST http://localhost:9944 \
 
 ## Running the Cert Daemon
 
-The cert daemon verifies blob integrity and attests receipt availability. It connects to a Materios node via WebSocket RPC.
+The cert daemon verifies blob integrity and attests receipt availability. It is maintained in its own repository:
+
+> **[github.com/Flux-Point-Studios/materios-operator-kit](https://github.com/Flux-Point-Studios/materios-operator-kit)**
+
+For most operators, the canonical install path is the single-shot bootstrap script:
 
 ```bash
-cd cert-daemon
-pip install -r requirements.txt
-python -m daemon.main
+curl -fsSL https://materios.fluxpointstudios.com/releases/bootstrap-validator.sh | bash
 ```
 
-Configure via environment variables (see `daemon/config.py` for the full list):
-
-| Variable | Purpose |
-|----------|---------|
-| `MATERIOS_RPC_URL` | WebSocket endpoint for the Materios node |
-| `SIGNER_URI` | BIP39 mnemonic or `//Alice` for dev |
-| `BLOB_GATEWAY_URL` | Blob gateway URL for fetching blob data |
-| `CONTENT_VALIDATION_ENABLED` | Enable schema-based content validation |
-| `SCHEMA_REGISTRY_PATH` | Path to schema registry JSON (default: `schemas/registry.json`) |
-
-### Schema Registry
-
-Content validation uses a JSON schema registry (`schemas/registry.json`). Each game defines required fields, types, bounds, and computed plausibility checks. See the registry file for the format and the Clay Monster Dash v1 schema as a reference.
+See [docs/OPERATOR_KIT.md](docs/OPERATOR_KIT.md) for the full external-operator onboarding flow.
 
 ---
 
@@ -303,10 +267,7 @@ pnpm test:watch    # watch mode
 
 ### Cert Daemon (Python)
 
-```bash
-cd cert-daemon
-python -m pytest tests/
-```
+The cert daemon and its test suite live in [materios-operator-kit](https://github.com/Flux-Point-Studios/materios-operator-kit). Clone that repo and run `python -m pytest daemon/tests/` from its root.
 
 ---
 
@@ -409,7 +370,7 @@ Materios is newly open-source and we're actively looking for feedback from devel
 **Ways to get involved:**
 
 - **Found a bug or vulnerability?** [Open an issue](https://github.com/Flux-Point-Studios/materios/issues) — security reports are especially appreciated
-- **Have a game you want to integrate?** Check the [Game Integration Guide](https://docs.fluxpointstudios.com/materios-partner-chain/game-integration) and open a PR to add your schema to `cert-daemon/schemas/registry.json`
+- **Have a game you want to integrate?** Check the [Game Integration Guide](https://docs.fluxpointstudios.com/materios-partner-chain/game-integration) and open a PR to add your schema to [`schemas/registry.json` in materios-operator-kit](https://github.com/Flux-Point-Studios/materios-operator-kit/blob/main/schemas/registry.json)
 - **Want to improve the pallets?** The pallet weights are hand-estimated (not benchmarked), player signatures aren't verified on-chain yet, and there's room for gas optimization — PRs welcome
 - **Run an attestor node** and help secure the network — takes 1 minute, no approval needed (see [Becoming an Operator](#becoming-an-operator))
 - **Questions or ideas?** Join us in the [Flux Point Studios Discord](https://discord.gg/MfYUMnfrJM) (#materios channel)
