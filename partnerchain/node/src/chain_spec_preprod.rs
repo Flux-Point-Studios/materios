@@ -21,8 +21,41 @@ const PREPROD_SLOTS_PER_EPOCH: u32 = 600;
 /// Preprod chain spec — Gemtek + Node-2 + Node-3 + MacBook as initial 4-validator authority set.
 /// Sudo is a 2-of-3 multisig. All fixes baked in from genesis.
 ///
+/// v6 reset 2026-04-28: GRANDPA finality wedge recovery. Same 4 founding
+/// validators (NOT 6 — SuNewbie/Hetzner onboard post-launch via standard
+/// upsert-permissioned-candidates once v6 is stable). Spec-208 runtime
+/// preserved (no new runtime build for genesis). Real Cardano follower from
+/// genesis (no mock mode toggle anywhere in chain-spec; USE_MAIN_CHAIN_FOLLOWER_MOCK
+/// is a runtime env var only and is left unset / forced false in start scripts).
+/// Initial Cardano D-parameter set to (8, 0) post-genesis to dodge stock
+/// Ariadne with-replacement-sampling shrink bug; bumped to (8, 2) only after
+/// spec-209 ceremony (TTL + finality circuit breaker + without-replacement
+/// sampling fix) lands.
+///
+/// 2026-04-28 governance bake-in (lesson from v5 → v6 reset): every governance-
+/// tuned constant set via post-genesis sudo on v5 (block 70941 multisig batch:
+/// AttestationRewardPerSigner=1M, EraCapBaselineAttestorCount=32, plus
+/// AttestationThreshold=3 via setCommittee) was wiped at v6 reset because chain-
+/// spec defaults baked in at compile time override runtime storage. Every cert
+/// then overpaid ~99.3% MATRA per cert (~430 instead of ~3) until the same
+/// multisig batch was re-fired post-v6. Permanent fix: every governance-tuned
+/// value now lives in this file's `orinqReceipts` genesis patch so the next
+/// reset (or fresh bootstrap, e.g. mainnet) inherits them. Founders are now
+/// pre-endowed with `BondRequirement + dust + fee_buffer` to avoid the bond-
+/// starvation loop that required //Alice rescue transfers post-v6 reset. See
+/// `feedback_chain_reset_committee_bond_starvation.md` for the gory recovery
+/// details.
+///
+/// NOTE: AttestationThreshold + initial CommitteeMembers are NOT yet exposed
+/// in pallet-orinq-receipts GenesisConfig (only attestation_reward_per_signer,
+/// era_cap_baseline_attestor_count, bond_requirement, etc. are settable at
+/// genesis). A follow-up PR extends GenesisConfig to expose initial_committee_
+/// members + initial_attestation_threshold so they can be baked in here too.
+/// Until then, restore those two via post-genesis multisig sudo per
+/// `reference_multisig_sudo.md`.
+///
 /// Now includes IOG partner-chain pallet genesis configuration for permissioned-only
-/// mode (D=1.0).  Cardano mainchain follower placeholders will be replaced when the
+/// mode. Cardano mainchain follower placeholders will be replaced when the
 /// bridge is activated.
 pub fn preprod_config() -> Result<ChainSpec, String> {
     // -- Accounts --
@@ -71,11 +104,30 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         0x17, 0x8d, 0x1a, 0x68, 0x04, 0x83, 0x45, 0x3d,
         0xcd, 0x3f, 0x32, 0x09, 0xe6, 0x3a, 0xf6, 0x92,
     ]); // 5D1AnhuDNuvHbRzMeLGt235BMMcNSaB4wAad6us55xLGxUfM (2-of-3 multisig of Nate+K2+K3)
+    // MacBook AURA pubkey — the block-author key, used in `aura.authorities` and
+    // `session.initialValidators`. Derived from the MacBook validator's keystore
+    // (separate Sr25519 key from the cert-daemon key below). SS58 prefix-42:
+    // 5CoiW8b5wm45shiSagjxyFgpz7DS8pZiESQRVUcxJU1W687J.
     let macbook_account = account([
         0x20, 0xcd, 0xba, 0x0a, 0x5d, 0x36, 0x8c, 0x5e,
         0xb0, 0xee, 0x11, 0x9d, 0x25, 0xf4, 0x40, 0xf8,
         0xc2, 0x61, 0xeb, 0xd5, 0x0f, 0x23, 0x63, 0xda,
         0xe4, 0xeb, 0x3e, 0xd6, 0x07, 0xf6, 0x4c, 0x08,
+    ]);
+    // MacBook CERT-DAEMON account — distinct from the aura key on MacBook
+    // (Linux validators reuse the aura key for cert-daemon by design; MacBook
+    // uses a separate mnemonic so the validator/attestor responsibilities can
+    // be rotated independently). SS58 prefix-42:
+    // 5GgCBrKDwMCWckd8P7CNLxy2ARmPHRVE4yjXuTP1vfwNtYzX.
+    // This account needs `BondRequirement + buffer` MATRA at genesis so the
+    // daemon can auto-bond + join_committee on first run, instead of looping
+    // forever on "Insufficient free MATRA" until an out-of-band //Alice transfer
+    // (the recovery dance we had to do post-v6 reset, 2026-04-28).
+    let macbook_cert_daemon = account([
+        0xcc, 0x01, 0xe4, 0x88, 0x13, 0x48, 0x01, 0x4c,
+        0xc4, 0x14, 0xcd, 0x33, 0xc9, 0xa3, 0x97, 0xd5,
+        0xd6, 0xed, 0xb1, 0x1c, 0x6c, 0x9d, 0x92, 0x9e,
+        0x37, 0xb6, 0xaf, 0x76, 0x08, 0x93, 0x2f, 0x71,
     ]);
     // Gemtek rotated keys (post-v3-mnemonic-leak, 2026-04-17). SS58 =
     // 5Dd7WuLMyb71NT1Bea6oEZH8Je3MkQzamHVeU4tmQbtPWq2v. Old pre-rotation key
@@ -154,10 +206,10 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         WASM_BINARY.ok_or("WASM binary not available")?,
         None,
     )
-    .with_name("Materios Preprod v5")
-    .with_id("materios_preprod_v5")
+    .with_name("Materios Preprod v6")
+    .with_id("materios_preprod_v6")
     .with_chain_type(ChainType::Live)
-    .with_protocol_id("materios-preprod-v5")
+    .with_protocol_id("materios-preprod-v6")
     .with_properties({
         // Token metadata — required so explorers / wallets display correct units.
         // MATRA = 6 decimals (matches cMATRA on Cardano; constrained by u64).
@@ -171,19 +223,37 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
     .with_genesis_config_patch(serde_json::json!({
         "balances": {
             "balances": [
-                // Faucet signer (//Alice) — 10M MATRA for drips
+                // Faucet signer (//Alice) — 10M MATRA for drips + ongoing rescues.
                 [alice_faucet, 10_000_000_000_000u128],
-                // Multisig sudo account — 1,000 MATRA for governance ops
+                // Multisig sudo account (2-of-3 keyholder pseudo) — 1,000 MATRA
+                // for governance ops + multisig deposits (DepositBase=1000+factor).
                 [multisig_sudo, 1_000_000_000u128],
-                // 3 multisig keyholders — 100 MATRA each for governance TXs
-                [keyholder_1, 100_000_000u128],
-                [keyholder_2, 100_000_000u128],
-                [keyholder_3, 100_000_000u128],
-                // 4 validator accounts — 100 MATRA each for MOTRA generation
+                // 3 multisig keyholders — 1,000 MATRA each. Bumped from 100 to 1,000
+                // 2026-04-28 so MOTRA can accumulate fast enough at fresh-chain
+                // genesis to dispatch the first multisig sudo without needing a
+                // //Alice MOTRA-bootstrap dance per `reference_multisig_sudo.md`.
+                [keyholder_1, 1_000_000_000u128],
+                [keyholder_2, 1_000_000_000u128],
+                [keyholder_3, 1_000_000_000u128],
+                // 4 cert-daemon / attestor accounts — 1,100 MATRA each
+                // (`BondRequirement` 1,000 + 100 buffer for fees + above-ED).
+                // For Linux nodes (Gemtek/Node-2/Node-3), the cert-daemon reuses
+                // the aura key, so the same account holds bond + authors blocks.
+                // For MacBook, the cert-daemon uses a separate mnemonic — see
+                // `macbook_cert_daemon` constant above.
+                //
+                // Pre-endowing avoids the bond-starvation wedge we hit post-v6
+                // reset (2026-04-28) where founders had only 100M base each
+                // (1/10 of BondRequirement) and looped forever on "Insufficient
+                // free MATRA" until rescued by //Alice. Per
+                // `feedback_chain_reset_committee_bond_starvation.md`.
+                [gemtek_account, 1_100_000_000u128],
+                [node2_account, 1_100_000_000u128],
+                [node3_account, 1_100_000_000u128],
+                [macbook_cert_daemon, 1_100_000_000u128],
+                // MacBook AURA account — 100 MATRA (block-author key only;
+                // doesn't bond, doesn't pay fees, just needs to exist + above-ED).
                 [macbook_account, 100_000_000u128],
-                [gemtek_account, 100_000_000u128],
-                [node2_account, 100_000_000u128],
-                [node3_account, 100_000_000u128],
             ]
         },
         "sudo": {
@@ -211,6 +281,45 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "lengthFeePerByte": 1_000_000u128,
             "congestionSmoothingPpm": 100_000_000
         },
+        // -- OrinqReceipts genesis (v5.1 tokenomics tune-down baked in) --
+        // Every value here matches the post-2026-04-24 v5 tune-down that was
+        // deployed via 2-of-3 multisig sudo (`OrinqReceipts.set_attestation_*`
+        // + setEraCapBaselineAttestorCount) and got wiped at the v6 reset
+        // 2026-04-28. Baking them into chain-spec genesis means future resets
+        // (or fresh bootstraps) inherit the intended preprod economics by
+        // default, no post-genesis dispatch needed.
+        //
+        // INNER FIELDS use snake_case because pallet-orinq-receipts
+        // GenesisConfig has plain serde derive with no rename_all (verified
+        // 2026-04-28 in pallets/orinq-receipts/src/lib.rs:550-573). The OUTER
+        // pallet key ("orinqReceipts") is camelCase per the runtime aggregate
+        // GenesisConfig's rename_all="camelCase" (see comment on
+        // `sessionCommitteeManagement` below for the same pattern).
+        //
+        // NOT YET EXPOSED IN GENESIS: attestation_threshold + initial committee
+        // members. These still need a post-genesis multisig sudo dispatch (one
+        // call to `OrinqReceipts.setCommittee(<4 founder cert-daemon SS58s>, 3)`)
+        // until pallet-orinq-receipts GenesisConfig is extended. Tracked as a
+        // follow-up task.
+        "orinqReceipts": {
+            // 1 MATRA (6 decimals) per signer — matches v5.1 tokenomics target.
+            // Without this, default is 10 MATRA → ~99.3% over-payment per cert.
+            "attestation_reward_per_signer": 1_000_000u128,
+            // 50K MATRA cap per era — default value, made explicit.
+            "era_cap_base": 50_000_000_000u128,
+            // 32 attestor baseline for cap auto-scaling — matches v5.1 setting
+            // (default is 16, which under-allocates for our 64-cap committee).
+            "era_cap_baseline_attestor_count": 32u32,
+            // 1,000 MATRA bond requirement — default value, made explicit so a
+            // future chain-spec change can't silently drop it to 0 and open a
+            // committee-dilution attack.
+            "bond_requirement": 1_000_000_000u128,
+            // Per-receipt submission fee 1 MATRA, floor 0.1 MATRA (defaults).
+            "receipt_submission_fee": 1_000_000u128,
+            "receipt_submission_fee_floor": 100_000u128,
+            // ~24 hours expiry at 6s blocks (default).
+            "receipt_expiry_blocks": 14_400u32
+        },
         // -- IOG partner-chain pallets (permissioned-only mode, D=1.0) --
         // Serialization rules learned the hard way:
         //  * pallet-level keys are camelCase (sessionCommitteeManagement, mainChainScripts)
@@ -220,7 +329,12 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         //    is silently dropped as "unknown field" and leaves Default (all zeros).
         // Real deployed contract values from project_cardano_preprod_contracts.md.
         "sidechain": {
-            "genesisUtxo": "0bacdb7e50ba61a1f9e28007a4f9543fa0e8e31ce10027b2f1dda8ab3438d388#0",
+            // v6 reset 2026-04-28: fresh genesis UTXO consumed by
+            // `partner-chains-node smart-contracts governance init` against the
+            // operator payment.skey on Cardano preprod. Source UTXO selected
+            // for being the smallest clean (no datum, no native assets) entry
+            // at addr_test1vp5q4y7afh45sulup233v78tqtzhykr309flljdx2jc277qw5eapd.
+            "genesisUtxo": "13313ea0119e0c4330f64f1809159064a371a1bbf2050b1fe13d5492280dca50#0",
             "slotsPerEpoch": PREPROD_SLOTS_PER_EPOCH,
         },
         "session": {
@@ -234,12 +348,16 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         "sessionCommitteeManagement": {
             "initialAuthorities": [],
             "mainChainScripts": {
+                // v6 partner-chain script identifiers — emitted by
+                // `partner-chains-node smart-contracts get-scripts` against the
+                // v6 genesis UTXO 13313ea0...#0 (Cardano preprod tx
+                // 0x8afee608cbf6ef633c4d8aac47b72cbd6eeec1e498eca9ba374313eb651f43fc).
                 // MainchainAddress serializes as hex of UTF-8 bytes of the bech32 string
                 // (the follower queries db-sync for the literal address string).
-                // Hex below = "addr_test1wzr6en3y43437qps5wscegufxw0euspmy0c3976mjm95j0cwuvezm"
-                "committee_candidate_address": "0x616464725f7465737431777a7236656e337934333433377170733577736365677566787730657573706d793063333937366d6a6d39356a3063777576657a6d",
-                "d_parameter_policy_id": "0x7f57bb675447c65ba0d68270a6b9b93aecc8dfdacaa3aa8cd081f9f3",
-                "permissioned_candidates_policy_id": "0x70cd1c6fbbbd7b1e855f589abd842f433ec0d7b46c7a9e437194e931",
+                // Hex below = "addr_test1wrld9uhaepas48twjy3qevncsyrhjdqnkz2wzu4yzjc2qhq24f4v4"
+                "committee_candidate_address": "0x616464725f746573743177726c643975686165706173343874776a79337165766e63737972686a64716e6b7a32777a7534797a6a6332716871323466347634",
+                "d_parameter_policy_id": "0x38dddaf5198b927b19dac9b28226ab29eddad176d5d81c7748bc2c31",
+                "permissioned_candidates_policy_id": "0xef2890d1e98247819abcf2df6e891824ed950a4216d36c71ee6f9974",
             },
         },
         "palletSession": {},
