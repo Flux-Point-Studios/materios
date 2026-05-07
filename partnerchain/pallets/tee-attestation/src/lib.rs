@@ -181,8 +181,17 @@ pub mod pallet {
         /// `CompositeTrustScore` is recomputed and stored. Raw evidence
         /// bytes are NOT persisted — only the verifier's extracted
         /// `attest_key_hash` + `raw_level` survive the call.
+        // Interim weight (H-1). The original value (10M ref_time, 0 proof
+        // bytes) is wildly under-priced for what `submit_evidence` does —
+        // the verifier walks an X.509 chain (RSA + P-256 + P-384
+        // signature verifies, ASN.1 decode, SHA-256 hashing) plus
+        // re-encodes the SPKI for the chip-id hash. Realistic cost is
+        // ~500M-1B ref_time + ~32 KB proof_size. Hard-coding 1B / 32 KB
+        // here as an interim until the FRAME benchmarking wiring lands
+        // (tasks #32 / #33). TODO(#32, #33): replace with generated
+        // `WeightInfo::submit_evidence()` from `weights.rs`.
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(10_000_000, 0))]
+        #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
         pub fn submit_evidence(
             origin: OriginFor<T>,
             receipt_id: ReceiptId,
