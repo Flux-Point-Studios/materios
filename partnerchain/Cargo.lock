@@ -4697,6 +4697,7 @@ dependencies = [
  "pallet-session-validator-management",
  "pallet-sidechain",
  "pallet-sudo",
+ "pallet-tee-attestation",
  "pallet-timestamp",
  "pallet-treasury",
  "pallet-utility",

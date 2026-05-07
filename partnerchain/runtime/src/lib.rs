@@ -207,7 +207,15 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        `OrinqCommitteeAdapter` below — pallet_committee_governance is
     //        intentionally skipped (Option 2, user-confirmed 2026-04-24).
     //        Transaction version unchanged.
-    spec_version: 204,
+    // 205 = Wave 3 Phase 2: integrate `pallet_tee_attestation` at index 20
+    //        (TEE attestation primitive, ARM TrustZone via vendored Acurast
+    //        verifier — see PR #17). Purely additive — no storage migrations,
+    //        all maps start empty, the kill-switch `Disabled` defaults `true`
+    //        at genesis via the pallet's `DefaultDisabled<T>` type-value.
+    //        Sudo flips the switch via `set_disabled` post-deploy once Phase
+    //        2.5 ships challenge-binding (security-review H-3 mitigation).
+    //        Transaction version unchanged (purely additive call surface).
+    spec_version: 205,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -772,6 +780,30 @@ impl pallet_native_token_management::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// TEE Attestation (Wave 3 Phase 2)
+// ---------------------------------------------------------------------------
+//
+// `pallet-tee-attestation` provides the TEE attestation primitive used by
+// the cert-daemon's tier-1+ trust scoring. Phase 2 ships ARM TrustZone (via
+// the vendored Acurast Android Key Attestation verifier) only; AMD SEV-SNP,
+// Intel TDX, reproducible-build co-attestation and zk-VM execution proofs
+// are typed but stubbed (`VerifyFailReason::NotImplemented`).
+//
+// Phase 2 deploys with the kill-switch ENABLED at genesis (`Disabled = true`
+// via the pallet's `DefaultDisabled<T>`). Sudo flips it via `set_disabled`
+// once Phase 2.5 binds `attestation_challenge` to the receipt's content
+// hash (security-review H-3). This wiring PR does NOT activate the pallet —
+// the runtime upgrade lands disabled, governance flips it post-deploy.
+//
+// Config trait surface (per pallets/tee-attestation/src/lib.rs L105-107) is
+// minimal: the standard `RuntimeEvent` aggregator hookup. No bespoke
+// parameters, no off-chain origin, no currency.
+
+impl pallet_tee_attestation::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+}
+
+// ---------------------------------------------------------------------------
 // Construct runtime
 // ---------------------------------------------------------------------------
 
@@ -819,6 +851,12 @@ construct_runtime! {
         // index 19 — all preceding indices remain pinned to defend metadata
         // stability for wallets / explorers / SDK type generators.
         IntentSettlement: pallet_intent_settlement = 19,
+        // Wave 3 Phase 2 (spec 205): TEE attestation primitive (ARM
+        // TrustZone via vendored Acurast verifier — see PR #17). Appended
+        // at index 20. Disabled at genesis via the pallet's
+        // `DefaultDisabled<T>`; sudo flips the kill-switch via
+        // `set_disabled` once Phase 2.5 ships challenge-binding.
+        TeeAttestation: pallet_tee_attestation = 20,
     }
 }
 
