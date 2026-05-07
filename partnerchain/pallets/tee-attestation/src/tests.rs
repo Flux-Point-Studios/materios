@@ -370,6 +370,10 @@ mod pallet {
     fn submit_evidence_pixel_chain_writes_storage_and_score() {
         new_test_ext().execute_with(|| {
             System::set_block_number(1);
+            // Phase 2 kill-switch: enable the verifier via root before any
+            // submit_evidence call. See `submit_evidence_when_disabled_fails`
+            // for the genesis-default behaviour.
+            assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
             let id = receipt_id(1);
             let entry = arm_entry(&[
                 test_vectors::PIXEL_ROOT_CERT,
@@ -397,6 +401,7 @@ mod pallet {
     fn submit_evidence_with_tampered_chain_fails_extrinsic() {
         new_test_ext().execute_with(|| {
             System::set_block_number(1);
+            assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
             let id = receipt_id(2);
             let entry = arm_entry(&[
                 test_vectors::PIXEL_ROOT_CERT,
@@ -433,6 +438,7 @@ mod pallet {
     fn stub_evidence_type_records_rejection_event() {
         new_test_ext().execute_with(|| {
             System::set_block_number(1);
+            assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
             let id = receipt_id(4);
             let entry = EvidenceEntry {
                 evidence_type: EvidenceType::AmdSevSnp,
@@ -462,6 +468,9 @@ mod pallet {
     fn verified_entries_is_the_only_per_receipt_evidence_store() {
         new_test_ext().execute_with(|| {
             System::set_block_number(1);
+            // Phase 2 ships the verifier disabled at genesis; tests of the
+            // verify path must explicitly flip the kill switch first.
+            assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
             let id = receipt_id(8);
             for _ in 0..8 {
                 let entry = arm_entry(&[
@@ -479,6 +488,79 @@ mod pallet {
             }
             let entries = TeeAttestation::verified_entries(&id);
             assert_eq!(entries.len(), 8);
+        });
+    }
+
+    // ---- H-3 interim mitigation: genesis-disabled kill-switch ----
+
+    /// Genesis: the pallet is disabled. submit_evidence with a valid Pixel
+    /// chain must fail with PalletDisabled — the H-3 challenge-binding
+    /// followup ships in Phase 2.5; until then the verifier accepts replays
+    /// of any well-formed Google-rooted chain, so the kill-switch keeps the
+    /// extrinsic dormant.
+    #[test]
+    fn submit_evidence_when_disabled_fails() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            let id = receipt_id(20);
+            let entry = arm_entry(&[
+                test_vectors::PIXEL_ROOT_CERT,
+                test_vectors::PIXEL_INTERMEDIATE_2_CERT,
+                test_vectors::PIXEL_INTERMEDIATE_1_CERT,
+                test_vectors::PIXEL_KEY_CERT,
+            ]);
+            assert_noop!(
+                TeeAttestation::submit_evidence(
+                    RuntimeOrigin::signed(1),
+                    id,
+                    fake_content_hash(),
+                    entry,
+                ),
+                crate::Error::<Test>::PalletDisabled
+            );
+            // No state change.
+            let score = TeeAttestation::trust_score(&id);
+            assert_eq!(score, CompositeTrustScore::COMMITTEE_ATTESTED_BASELINE);
+            let entries = TeeAttestation::verified_entries(&id);
+            assert_eq!(entries.len(), 0);
+        });
+    }
+
+    /// Sudo flips Disabled=false; submit_evidence with a valid Pixel chain
+    /// then succeeds and writes VerifiedEntries.
+    #[test]
+    fn submit_evidence_after_enable_succeeds() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
+            let id = receipt_id(21);
+            let entry = arm_entry(&[
+                test_vectors::PIXEL_ROOT_CERT,
+                test_vectors::PIXEL_INTERMEDIATE_2_CERT,
+                test_vectors::PIXEL_INTERMEDIATE_1_CERT,
+                test_vectors::PIXEL_KEY_CERT,
+            ]);
+            assert_ok!(TeeAttestation::submit_evidence(
+                RuntimeOrigin::signed(1),
+                id,
+                fake_content_hash(),
+                entry,
+            ));
+            let entries = TeeAttestation::verified_entries(&id);
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].evidence_type, EvidenceType::ArmTrustZone);
+        });
+    }
+
+    /// set_disabled requires root; a signed-by-account-1 origin must be
+    /// rejected with BadOrigin.
+    #[test]
+    fn set_disabled_requires_root() {
+        new_test_ext().execute_with(|| {
+            assert_noop!(
+                TeeAttestation::set_disabled(RuntimeOrigin::signed(1), false),
+                sp_runtime::DispatchError::BadOrigin
+            );
         });
     }
 }

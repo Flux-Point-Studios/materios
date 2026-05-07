@@ -28,6 +28,9 @@
 //!
 //! ## Storage layout
 //!
+//! - `Disabled: StorageValue<bool>` — kill-switch for `submit_evidence`.
+//!   Defaults `true` at genesis; sudo flips it via `set_disabled` once
+//!   Phase 2.5 ships challenge binding (see "Phase 2 status" below).
 //! - `CompositeTrustScores: StorageMap<ReceiptId, CompositeTrustScore>` —
 //!   the cumulative score after every successful verification.
 //! - `VerifiedEntries: StorageMap<ReceiptId, BoundedVec<VerifiedEvidence>>`
@@ -38,6 +41,16 @@
 //!   submitter bloat state with arbitrary `receipt_id`s — see security
 //!   review H-2). The verifier runs in-pallet on the extrinsic input and
 //!   only the extracted `VerifiedEvidence` is persisted.
+//!
+//! ## Phase 2 status (kill-switch)
+//!
+//! Phase 2 ships the verifier with the extrinsic disabled at genesis.
+//! Phase 2.5 will bind `attestation_challenge` to the receipt's
+//! `content_hash`, at which point this flag is flipped permanently.
+//! Without challenge binding the verifier accepts replays of any
+//! well-formed Google-rooted chain — a single attestation captured from
+//! any compliant Android device can be re-submitted against arbitrary
+//! receipt_ids and pass. See the security review of PR #17, finding H-3.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -93,6 +106,19 @@ pub mod pallet {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
     }
 
+    /// Kill-switch for `submit_evidence`. Defaults `true` at genesis; sudo
+    /// flips via `set_disabled` once Phase 2.5 ships challenge binding.
+    /// See lib-level "Phase 2 status" docstring + security review H-3.
+    #[pallet::storage]
+    pub type Disabled<T: Config> = StorageValue<_, bool, ValueQuery, DefaultDisabled<T>>;
+
+    /// Genesis default for `Disabled`: the verifier starts disabled. Phase
+    /// 2.5 governance flips it.
+    #[pallet::type_value]
+    pub fn DefaultDisabled<T: Config>() -> bool {
+        true
+    }
+
     /// Successful verifier outputs per receipt. Canonical per-receipt
     /// evidence store; raw evidence bytes are NOT persisted (see lib-level
     /// docstring on the H-2 hardening).
@@ -126,6 +152,10 @@ pub mod pallet {
             evidence_type: EvidenceType,
             reason: u8,
         },
+        /// Phase 2 kill-switch flipped via `set_disabled`. Sudo-only.
+        DisabledChanged {
+            disabled: bool,
+        },
     }
 
     #[pallet::error]
@@ -136,6 +166,10 @@ pub mod pallet {
         /// The submitted evidence failed verification. The verbose reason
         /// is in the emitted `EvidenceRejected` event.
         VerificationFailed,
+        /// The pallet is disabled at genesis (Phase 2 kill-switch). Sudo
+        /// flips `Disabled=false` via `set_disabled` once Phase 2.5 ships
+        /// challenge binding.
+        PalletDisabled,
     }
 
     #[pallet::call]
@@ -156,6 +190,11 @@ pub mod pallet {
             entry: EvidenceEntry,
         ) -> DispatchResult {
             let _who = ensure_signed(origin)?;
+
+            // Phase 2 kill-switch (H-3 interim mitigation). Disabled at
+            // genesis; sudo flips via `set_disabled` once Phase 2.5 binds
+            // attestation_challenge to content_hash.
+            ensure!(!Disabled::<T>::get(), Error::<T>::PalletDisabled);
 
             let outcome = verify_evidence(&content_hash, &entry);
 
@@ -192,6 +231,19 @@ pub mod pallet {
                     Err(Error::<T>::VerificationFailed.into())
                 }
             }
+        }
+
+        /// Sudo-only: flip the Phase 2 kill-switch. Set `disabled=false`
+        /// once Phase 2.5 ships challenge binding (the H-3 interim
+        /// mitigation can come off then). The pallet is disabled at
+        /// genesis — see lib-level "Phase 2 status" docstring.
+        #[pallet::call_index(1)]
+        #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
+        pub fn set_disabled(origin: OriginFor<T>, disabled: bool) -> DispatchResult {
+            ensure_root(origin)?;
+            Disabled::<T>::put(disabled);
+            Self::deposit_event(Event::DisabledChanged { disabled });
+            Ok(())
         }
     }
 
