@@ -452,4 +452,33 @@ mod pallet {
             assert_eq!(score, CompositeTrustScore::COMMITTEE_ATTESTED_BASELINE);
         });
     }
+
+    /// H-2 hardening: the pallet MUST NOT keep a parallel `EvidenceEntries`
+    /// storage map of raw evidence — `VerifiedEntries` is canonical. Submit
+    /// 8 valid Pixel chains for the same receipt and assert that the only
+    /// surviving per-receipt vector is `VerifiedEntries` (length 8). The
+    /// raw-evidence storage map has been dropped.
+    #[test]
+    fn verified_entries_is_the_only_per_receipt_evidence_store() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            let id = receipt_id(8);
+            for _ in 0..8 {
+                let entry = arm_entry(&[
+                    test_vectors::PIXEL_ROOT_CERT,
+                    test_vectors::PIXEL_INTERMEDIATE_2_CERT,
+                    test_vectors::PIXEL_INTERMEDIATE_1_CERT,
+                    test_vectors::PIXEL_KEY_CERT,
+                ]);
+                assert_ok!(TeeAttestation::submit_evidence(
+                    RuntimeOrigin::signed(1),
+                    id,
+                    fake_content_hash(),
+                    entry,
+                ));
+            }
+            let entries = TeeAttestation::verified_entries(&id);
+            assert_eq!(entries.len(), 8);
+        });
+    }
 }

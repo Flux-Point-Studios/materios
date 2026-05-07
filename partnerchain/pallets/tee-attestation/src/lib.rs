@@ -28,15 +28,16 @@
 //!
 //! ## Storage layout
 //!
-//! - `EvidenceEntries: StorageMap<ReceiptId, BoundedVec<EvidenceEntry>>` —
-//!   the off-chain submitter writes the raw evidence here. The verifier runs
-//!   inside `submit_evidence` so this storage map only ever contains
-//!   well-formed (decodable) entries.
 //! - `CompositeTrustScores: StorageMap<ReceiptId, CompositeTrustScore>` —
 //!   the cumulative score after every successful verification.
 //! - `VerifiedEntries: StorageMap<ReceiptId, BoundedVec<VerifiedEvidence>>`
-//!   — extracted chip_id_hash + raw_level per receipt for audit. Sorted by
-//!   `EvidenceType` discriminant (canonical ordering).
+//!   — extracted attest_key_hash + raw_level per receipt for audit. Sorted
+//!   by `EvidenceType` discriminant (canonical ordering). This is the
+//!   canonical per-receipt evidence store; the pallet does NOT keep a
+//!   parallel raw-bytes map (the v1 PR-#17 design did, which let any
+//!   submitter bloat state with arbitrary `receipt_id`s — see security
+//!   review H-2). The verifier runs in-pallet on the extrinsic input and
+//!   only the extracted `VerifiedEvidence` is persisted.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -92,18 +93,9 @@ pub mod pallet {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
     }
 
-    /// Off-chain-submitted evidence per receipt. Anyone can submit; the
-    /// verifier runs in-pallet.
-    #[pallet::storage]
-    pub type EvidenceEntries<T: Config> = StorageMap<
-        _,
-        Blake2_128Concat,
-        ReceiptId,
-        BoundedVec<EvidenceEntry, ConstU32<MAX_EVIDENCE_ENTRIES_PER_RECEIPT>>,
-        ValueQuery,
-    >;
-
-    /// Successful verifier outputs per receipt.
+    /// Successful verifier outputs per receipt. Canonical per-receipt
+    /// evidence store; raw evidence bytes are NOT persisted (see lib-level
+    /// docstring on the H-2 hardening).
     #[pallet::storage]
     pub type VerifiedEntries<T: Config> = StorageMap<
         _,
@@ -139,25 +131,22 @@ pub mod pallet {
     #[pallet::error]
     pub enum Error<T> {
         /// `submit_evidence` called when this `ReceiptId` already has the
-        /// `MAX_EVIDENCE_ENTRIES_PER_RECEIPT` cap of entries.
+        /// `MAX_EVIDENCE_ENTRIES_PER_RECEIPT` cap of verified entries.
         TooManyEntries,
         /// The submitted evidence failed verification. The verbose reason
         /// is in the emitted `EvidenceRejected` event.
         VerificationFailed,
-        /// The submitter would have exceeded the verified-entries cap. This
-        /// is internal and should not happen in normal flow because
-        /// VerifiedEntries.len() <= EvidenceEntries.len().
-        VerifiedCapExceeded,
     }
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// Submit one evidence entry for a receipt. Anyone can call.
         ///
-        /// On success: the verifier runs, the entry is appended to
-        /// `EvidenceEntries`, the `VerifiedEvidence` record is appended to
-        /// `VerifiedEntries`, and the new `CompositeTrustScore` is recomputed
-        /// and stored.
+        /// On success: the verifier runs, the extracted `VerifiedEvidence`
+        /// record is appended to `VerifiedEntries`, and the new
+        /// `CompositeTrustScore` is recomputed and stored. Raw evidence
+        /// bytes are NOT persisted — only the verifier's extracted
+        /// `attest_key_hash` + `raw_level` survive the call.
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(10_000_000, 0))]
         pub fn submit_evidence(
@@ -168,12 +157,6 @@ pub mod pallet {
         ) -> DispatchResult {
             let _who = ensure_signed(origin)?;
 
-            // Cap input.
-            let mut entries = EvidenceEntries::<T>::get(receipt_id);
-            entries
-                .try_push(entry.clone())
-                .map_err(|_| Error::<T>::TooManyEntries)?;
-
             let outcome = verify_evidence(&content_hash, &entry);
 
             match outcome {
@@ -181,13 +164,12 @@ pub mod pallet {
                     let mut verified_entries = VerifiedEntries::<T>::get(receipt_id);
                     verified_entries
                         .try_push(verified.clone())
-                        .map_err(|_| Error::<T>::VerifiedCapExceeded)?;
+                        .map_err(|_| Error::<T>::TooManyEntries)?;
                     // Canonical ordering: keep verified-entries sorted by
                     // EvidenceType discriminant. Determinism + stable hashing.
                     sort_verified_entries(&mut verified_entries);
 
                     let score = compose_score(verified_entries.as_slice());
-                    EvidenceEntries::<T>::insert(receipt_id, &entries);
                     VerifiedEntries::<T>::insert(receipt_id, &verified_entries);
                     CompositeTrustScores::<T>::insert(receipt_id, score);
 
