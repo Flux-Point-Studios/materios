@@ -270,7 +270,7 @@ fn tee_attestation_disabled_at_genesis() {
 
 #[test]
 fn runtime_dispatches_submit_evidence_returns_pallet_disabled() {
-    use frame_support::dispatch::Dispatchable;
+    use sp_runtime::traits::Dispatchable;
 
     new_test_ext().execute_with(|| {
         let alice = sp_keyring::Sr25519Keyring::Alice.to_account_id();
@@ -300,7 +300,7 @@ fn runtime_dispatches_submit_evidence_returns_pallet_disabled() {
 
 #[test]
 fn runtime_dispatches_set_disabled_requires_root() {
-    use frame_support::dispatch::Dispatchable;
+    use sp_runtime::traits::Dispatchable;
 
     new_test_ext().execute_with(|| {
         // Non-root signer must be rejected with BadOrigin.
