@@ -48,6 +48,42 @@ header comment block (search for `[materios-patch]`). Re-vendoring procedure:
    blocks marked at the top of the file.
 3. Run `cargo test -p pallet-tee-attestation` — must stay green.
 
+## Divergence from upstream — P-384 SEC1 parsing
+
+Upstream Acurast and Materios reach the same answer ("verify a P-384
+ECDSA cert chain") via different APIs because Materios drops Acurast's
+vendored `p384` fork (~40 000 LOC, parameterised with `expose-field` so
+that `p384::AffinePoint` exposes its internal `x`/`y` field bytes
+publicly) in favour of upstream `p384 = 0.13` from crates.io.
+
+| | Upstream Acurast | Materios |
+|---|---|---|
+| P-384 public-key parse | `AffinePoint{x, y, infinity: false}` direct construction from raw 48-byte field elements (no curve-membership validation) | `p384::ecdsa::VerifyingKey::from_sec1_bytes(...)` — parses the SEC1-encoded uncompressed point and validates it's on the P-384 curve |
+| Error code on garbage X/Y bytes | `ValidationError::InvalidSignature` (deferred — verification just produces a wrong sig comparison and fails) | `ValidationError::ParseP384PublicKey` (rejected at parse time — point isn't on the curve) |
+| Where rejection happens | Late, inside the signature verification step | Early, during cert parse |
+| Verifier output for malformed inputs | Reject | Reject |
+| Verifier output for well-formed inputs | Accept | Accept |
+
+Net behaviour for security is identical: malformed inputs are rejected
+in both cases. The only observable difference is which `ValidationError`
+variant the call site sees, and `pallet-tee-attestation` collapses both
+into `VerifyFailReason::ChainOfTrustBroken` at the pallet boundary, so
+the on-chain failure signal is identical too.
+
+The Materios path is strictly safer in the abstract — a bogus
+"public key" that's not on the curve cannot be constructed at all —
+but the upstream Acurast path is not exploitable in practice because
+the subsequent ECDSA `verify_prehash` over the same `VerifyingKey`
+catches the same invalid input later. We prefer the strictly-safer
+form because (a) it reduces the attack-surface argument we have to
+make, and (b) it keeps the verifier reasoning local: "if `parse`
+returns `Ok`, the key is on the curve" is a stronger postcondition
+than the upstream's "if `parse` returns `Ok`, the bytes were 96 bytes
+long".
+
+See `attestation.rs` lines marked `[materios-patch]` for the exact
+lines that switched.
+
 ## Why not relicense to MIT?
 
 The upstream `LICENSE` is Unlicense (more permissive than MIT). The crate-level
