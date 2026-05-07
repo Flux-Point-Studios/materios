@@ -9,6 +9,7 @@ members = [
     "pallets/motra",
     "pallets/motra/primitives",
     "pallets/motra/rpc",
+    "pallets/tee-attestation",
     # Vendored IOG crates carrying materios-patch[es]. Included so
     # `cargo test --workspace` exercises the patched sources and so dev-
     # dependencies (hex-literal, tokio, etc.) are resolved correctly.
@@ -98,6 +99,20 @@ pallet-orinq-receipts = { path = "pallets/orinq-receipts", default-features = fa
 orinq-receipts-primitives = { path = "pallets/orinq-receipts/primitives", default-features = false }
 orinq-receipts-rpc = { path = "pallets/orinq-receipts/rpc" }
 materios-runtime = { path = "runtime" }
+pallet-tee-attestation = { path = "pallets/tee-attestation", default-features = false }
+
+# Wave 3 Phase 2: ARM Key Attestation verification crates (RustCrypto upstream).
+# Acurast's verifier (vendored under pallets/tee-attestation/vendor/acurast-attestation/)
+# was originally built against forked p256/p384 crates. We use upstream RustCrypto
+# crates here — they expose the same SEC1 / DER APIs the verifier needs.
+asn1 = { version = "0.15.5", default-features = false }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
+p384 = { version = "0.13", default-features = false, features = ["ecdsa", "arithmetic"] }
+ecdsa = { version = "0.16", default-features = false, features = ["der"] }
+rsa = { version = "0.9", default-features = false, features = ["sha2"] }
+num-bigint = { version = "0.4", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+chrono = { version = "0.4", default-features = false }
 
 # Wave 2 W2.2: external pallet pinned by git rev. Lives in
 # Flux-Point-Studios/materios-intent-settlement. The pallet Cargo pins the

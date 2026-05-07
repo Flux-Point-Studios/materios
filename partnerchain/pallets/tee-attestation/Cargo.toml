@@ -1,0 +1,66 @@
+[package]
+name = "pallet-tee-attestation"
+version = "0.1.0"
+description = "Materios TEE attestation pallet (Wave 3 / Phase 2 — ARM TrustZone via vendored Acurast verifier)"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+parity-scale-codec = { workspace = true }
+scale-info = { workspace = true }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-core = { workspace = true }
+sp-runtime = { workspace = true }
+sp-std = { workspace = true }
+log = { workspace = true }
+
+# ARM Key Attestation verifier dependencies. Vendored Acurast logic under
+# `vendor/acurast-attestation/` is rewritten to use the upstream RustCrypto
+# crates rather than Acurast's forks (see vendor/README.md).
+asn1 = { workspace = true }
+p256 = { workspace = true }
+p384 = { workspace = true }
+ecdsa = { workspace = true }
+rsa = { workspace = true }
+num-bigint = { workspace = true }
+sha2 = { workspace = true }
+chrono = { workspace = true }
+
+[dev-dependencies]
+sp-io = { workspace = true, features = ["std"] }
+hex-literal = { workspace = true }
+base64ct = { workspace = true, features = ["alloc"] }
+
+[features]
+default = ["std"]
+std = [
+    "parity-scale-codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-core/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "log/std",
+    "asn1/std",
+    "p256/std",
+    "p384/std",
+    "ecdsa/std",
+    "rsa/std",
+    "num-bigint/std",
+    "sha2/std",
+    "chrono/std",
+]
+runtime-benchmarks = [
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+    "sp-runtime/runtime-benchmarks",
+]
+try-runtime = [
+    "frame-support/try-runtime",
+    "frame-system/try-runtime",
+    "sp-runtime/try-runtime",
+]
