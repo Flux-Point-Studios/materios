@@ -651,6 +651,44 @@ mod verifier_internal {
         let level = key_description_security_level(&kd);
         assert_eq!(level, 2);
     }
+
+    // ---- M-4: positive allowlist {TEE=1, StrongBox=2} ----
+
+    use crate::verifier::is_security_level_allowed;
+
+    #[test]
+    fn allowlist_accepts_trusted_environment() {
+        assert!(is_security_level_allowed(1));
+    }
+
+    #[test]
+    fn allowlist_accepts_strongbox() {
+        assert!(is_security_level_allowed(2));
+    }
+
+    #[test]
+    fn allowlist_rejects_software() {
+        assert!(!is_security_level_allowed(0));
+    }
+
+    /// M-4: the 4th SecurityLevel in the AOSP KeyMint enum is KEYSTORE (3),
+    /// which means the key lives in the Android Keystore daemon's
+    /// userspace process and isn't TEE-rooted. Old code was a negative
+    /// list (`!= 0` reject) so it would accept KEYSTORE; the positive
+    /// allowlist must reject anything not in {1, 2}.
+    #[test]
+    fn allowlist_rejects_keystore_level_3() {
+        assert!(!is_security_level_allowed(3));
+    }
+
+    /// And anything beyond the AOSP-defined enum (future values, parsing
+    /// errors, etc) must also be rejected.
+    #[test]
+    fn allowlist_rejects_unknown_high_values() {
+        assert!(!is_security_level_allowed(4));
+        assert!(!is_security_level_allowed(99));
+        assert!(!is_security_level_allowed(u32::MAX));
+    }
 }
 
 /// M-2 rename: VerifiedEvidence's identity field is now `attest_key_hash`

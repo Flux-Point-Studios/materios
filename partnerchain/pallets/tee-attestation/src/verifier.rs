@@ -119,9 +119,16 @@ impl EvidenceVerifier for ArmTrustZoneVerifier {
             }
         };
 
-        // Software-only attested keys are not "TrustZone-rooted" and we
-        // reject them. raw_level == 0 is the Software level.
-        if raw_level == 0 {
+        // M-4: positive allowlist of the AOSP `SecurityLevel` values that
+        // mean "the key actually lives in attested hardware":
+        //   1 = TrustedEnvironment (TEE / TrustZone)
+        //   2 = StrongBox (hardware-isolated security chip)
+        // Reject everything else, including:
+        //   0 = Software (key in a userspace process — not attested HW)
+        //   3 = Keystore (key in the Android Keystore daemon's userspace —
+        //       not attested HW; the previous `!= 0` reject leaked it)
+        //   anything outside the AOSP-defined enum range
+        if !is_security_level_allowed(raw_level) {
             return VerifyOutcome::Failed(VerifyFailReason::PolicyViolation);
         }
 
@@ -164,6 +171,18 @@ impl EvidenceVerifier for ArmTrustZoneVerifier {
 ///
 /// `SecurityLevel` is `asn1::Enumerated` whose `value()` is the raw
 /// ASN.1 ENUMERATED integer; we surface that integer directly.
+/// Positive allowlist of AOSP `SecurityLevel` raw integer values that
+/// represent attested hardware-rooted keys. Returns true ONLY for:
+///   1 = TrustedEnvironment (TEE / TrustZone)
+///   2 = StrongBox (hardware-isolated security chip)
+///
+/// Everything else — Software (0), Keystore (3), and any future or
+/// out-of-range values — is rejected. Ref AOSP Keystore attestation
+/// spec: <https://source.android.com/docs/security/features/keystore/attestation>
+pub(crate) fn is_security_level_allowed(raw_level: u32) -> bool {
+    raw_level == 1 || raw_level == 2
+}
+
 pub(crate) fn key_description_security_level(kd: &KeyDescription<'_>) -> u32 {
     let sl_value = match kd {
         KeyDescription::V1(v) => v.key_mint_security_level.value(),
