@@ -564,3 +564,91 @@ mod pallet {
         });
     }
 }
+
+// ---- Verifier-internal unit tests ---------------------------------------
+//
+// These tests bypass the full X.509 chain validation and exercise the
+// security-level extraction logic directly via a synthetic
+// `KeyDescription` value. They cover M-1 (read key_mint, not attestation)
+// and M-4 (allowlist {TEE, StrongBox}) directly — the reference Pixel +
+// Samsung chains both have key_mint == attestation == TEE/StrongBox so
+// they don't distinguish the two.
+
+mod verifier_internal {
+    use crate::vendor::acurast_attestation::asn::{
+        AuthorizationListV1, KeyDescription, KeyDescriptionV1, SecurityLevel,
+    };
+    use crate::verifier::key_description_security_level;
+
+    /// Build an `AuthorizationListV1` with every field None — sufficient
+    /// for testing the security-level reader, which only reads top-level
+    /// `KeyDescription` fields.
+    fn empty_auth_list() -> AuthorizationListV1<'static> {
+        AuthorizationListV1 {
+            purpose: None,
+            algorithm: None,
+            key_size: None,
+            digest: None,
+            padding: None,
+            ec_curve: None,
+            rsa_public_exponent: None,
+            rollback_resistance: None,
+            active_date_time: None,
+            origination_expire_date_time: None,
+            usage_expire_date_time: None,
+            no_auth_required: None,
+            user_auth_type: None,
+            auth_timeout: None,
+            allow_while_on_body: None,
+            trusted_user_presence_required: None,
+            trusted_confirmation_required: None,
+            unlocked_device_required: None,
+            all_applications: None,
+            application_id: None,
+            creation_date_time: None,
+            origin: None,
+            root_of_trust: None,
+            os_version: None,
+            os_patch_level: None,
+        }
+    }
+
+    fn kd_v1_with_levels(attestation_level: u32, key_mint_level: u32) -> KeyDescription<'static> {
+        KeyDescription::V1(KeyDescriptionV1 {
+            attestation_version: 1,
+            attestation_security_level: SecurityLevel::new(attestation_level),
+            key_mint_version: 1,
+            key_mint_security_level: SecurityLevel::new(key_mint_level),
+            attestation_challenge: &[],
+            unique_id: &[],
+            software_enforced: empty_auth_list(),
+            tee_enforced: empty_auth_list(),
+        })
+    }
+
+    /// M-1: key_description_security_level MUST read `key_mint_security_level`
+    /// (where the KEY actually lives), NOT `attestation_security_level` (the
+    /// SIGNER's level). When attestation=1 (TEE) and key_mint=0 (SOFTWARE),
+    /// the helper must surface `0` so the verifier rejects the entry.
+    #[test]
+    fn security_level_reads_key_mint_not_attestation() {
+        // attestation = TEE (1), key_mint = SOFTWARE (0)
+        let kd = kd_v1_with_levels(1, 0);
+        let level = key_description_security_level(&kd);
+        assert_eq!(
+            level, 0,
+            "expected key_mint_security_level (=0/SOFTWARE), got {} \
+             (verifier is reading attestation_security_level instead — M-1)",
+            level
+        );
+    }
+
+    /// M-1 sanity check: when key_mint is StrongBox (2) and attestation is
+    /// TEE (1), the helper must surface 2 (the key's level), not 1.
+    #[test]
+    fn security_level_surfaces_strongbox_when_key_mint_is_strongbox() {
+        let kd = kd_v1_with_levels(1, 2);
+        let level = key_description_security_level(&kd);
+        assert_eq!(level, 2);
+    }
+}

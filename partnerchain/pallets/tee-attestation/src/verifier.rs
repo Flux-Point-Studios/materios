@@ -144,21 +144,34 @@ impl EvidenceVerifier for ArmTrustZoneVerifier {
 
 /// Map a parsed `KeyDescription` to the `raw_level` integer the pallet
 /// stores. The mapping mirrors Android's `SecurityLevel` enum:
-///   0 = Software-only attestation (rejected by the verifier)
+///   0 = Software (rejected by the verifier)
 ///   1 = TrustedEnvironment / TEE (TrustZone)
 ///   2 = StrongBox (hardware-isolated security chip)
 ///
-/// Acurast's `SecurityLevel` is `asn1::Enumerated` whose `value()` is the
-/// raw ASN.1 ENUMERATED integer; we surface that integer directly.
-fn key_description_security_level(kd: &KeyDescription<'_>) -> u32 {
+/// We read `key_mint_security_level` — the level where the **attested
+/// KEY actually lives** — NOT `attestation_security_level`, which is the
+/// level of the SIGNER that emitted the attestation cert. The two can
+/// differ: a TEE-attested chain that mints the key in software produces
+/// `attestation_security_level=1, key_mint_security_level=0` and must be
+/// rejected. The earlier code read the wrong field (M-1 of the PR-#17
+/// security review).
+///
+/// Reference: AOSP Keystore attestation spec —
+/// <https://source.android.com/docs/security/features/keystore/attestation>
+/// (`KeyDescription.keyMintSecurityLevel` vs
+///  `KeyDescription.attestationSecurityLevel`).
+///
+/// `SecurityLevel` is `asn1::Enumerated` whose `value()` is the raw
+/// ASN.1 ENUMERATED integer; we surface that integer directly.
+pub(crate) fn key_description_security_level(kd: &KeyDescription<'_>) -> u32 {
     let sl_value = match kd {
-        KeyDescription::V1(v) => v.attestation_security_level.value(),
-        KeyDescription::V2(v) => v.attestation_security_level.value(),
-        KeyDescription::V3(v) => v.attestation_security_level.value(),
-        KeyDescription::V4(v) => v.attestation_security_level.value(),
-        KeyDescription::V100(v) => v.attestation_security_level.value(),
-        KeyDescription::V200(v) => v.attestation_security_level.value(),
-        KeyDescription::V300(v) => v.attestation_security_level.value(),
+        KeyDescription::V1(v) => v.key_mint_security_level.value(),
+        KeyDescription::V2(v) => v.key_mint_security_level.value(),
+        KeyDescription::V3(v) => v.key_mint_security_level.value(),
+        KeyDescription::V4(v) => v.key_mint_security_level.value(),
+        KeyDescription::V100(v) => v.key_mint_security_level.value(),
+        KeyDescription::V200(v) => v.key_mint_security_level.value(),
+        KeyDescription::V300(v) => v.key_mint_security_level.value(),
     };
     sl_value
 }
