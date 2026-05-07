@@ -18,3 +18,6 @@ mod vesting_schedule;
 // Midnight-style fees (2026-04-21): MATRA no longer charged, MOTRA only.
 mod motra_only_fees;
 mod treasury_drip_migration;
+
+// Wave 3 / Phase 2: pallet-tee-attestation runtime wiring (PR #17 follow-up).
+mod tee_attestation_integration;
