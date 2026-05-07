@@ -61,6 +61,9 @@ pallet-motra = { workspace = true }
 motra-primitives = { workspace = true }
 # Wave 2 W2.2: Aegis intent-settlement pallet (external, git-pinned).
 pallet-intent-settlement = { workspace = true }
+# Wave 3 / Phase 2: TEE attestation pallet (PR #17). Disabled at genesis
+# until Phase 2.5 challenge-binding ships; kill-switch flips via sudo.
+pallet-tee-attestation = { workspace = true }
 sp-arithmetic = { workspace = true }
 frame-system-rpc-runtime-api = { workspace = true }
 getrandom = { workspace = true }
@@ -135,6 +138,7 @@ std = [
     "pallet-motra/std",
     "motra-primitives/std",
     "pallet-intent-settlement/std",
+    "pallet-tee-attestation/std",
     "sp-arithmetic/std",
     "frame-system-rpc-runtime-api/std",
     "substrate-wasm-builder",
@@ -172,6 +176,12 @@ runtime-benchmarks = [
     "pallet-vesting/runtime-benchmarks",
     "pallet-orinq-receipts/runtime-benchmarks",
     "pallet-motra/runtime-benchmarks",
+    # pallet-tee-attestation declares the runtime-benchmarks feature flag
+    # (PR #17) but ships no benchmarks file yet — the runtime still
+    # compiles with --features runtime-benchmarks because the feature only
+    # propagates downstream crate switches. Stub benchmarks are tracked in
+    # tee-attestation tasks #32 / #33.
+    "pallet-tee-attestation/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
 ]
 try-runtime = [
@@ -191,5 +201,6 @@ try-runtime = [
     "pallet-orinq-receipts/try-runtime",
     "pallet-motra/try-runtime",
     "pallet-intent-settlement/try-runtime",
+    "pallet-tee-attestation/try-runtime",
     "sp-runtime/try-runtime",
 ]
