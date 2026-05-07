@@ -143,7 +143,7 @@ pub mod pallet {
         EvidenceVerified {
             receipt_id: ReceiptId,
             evidence_type: EvidenceType,
-            chip_id_hash: [u8; 32],
+            attest_key_hash: [u8; 32],
             raw_level: u32,
             new_score: CompositeTrustScore,
         },
@@ -185,7 +185,7 @@ pub mod pallet {
         // bytes) is wildly under-priced for what `submit_evidence` does —
         // the verifier walks an X.509 chain (RSA + P-256 + P-384
         // signature verifies, ASN.1 decode, SHA-256 hashing) plus
-        // re-encodes the SPKI for the chip-id hash. Realistic cost is
+        // re-encodes the SPKI for the attest-key hash. Realistic cost is
         // ~500M-1B ref_time + ~32 KB proof_size. Hard-coding 1B / 32 KB
         // here as an interim until the FRAME benchmarking wiring lands
         // (tasks #32 / #33). TODO(#32, #33): replace with generated
@@ -224,7 +224,7 @@ pub mod pallet {
                     Self::deposit_event(Event::EvidenceVerified {
                         receipt_id,
                         evidence_type: verified.evidence_type,
-                        chip_id_hash: verified.chip_id_hash,
+                        attest_key_hash: verified.attest_key_hash,
                         raw_level: verified.raw_level,
                         new_score: score,
                     });

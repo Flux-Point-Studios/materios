@@ -99,12 +99,17 @@ pub struct EvidenceEntry {
 #[derive(Clone, PartialEq, Eq, Encode, Decode, TypeInfo, MaxEncodedLen, RuntimeDebug)]
 pub struct VerifiedEvidence {
     pub evidence_type: EvidenceType,
-    /// 32-byte SHA-256 hash of the leaf attestation key. For ARM TrustZone,
-    /// this is `sha256(leaf_cert_subject_public_key_info_DER)`. The CHIP_ID
-    /// field of an ARM Key Attestation chain is not separately exposed by
-    /// the standard; the leaf SubjectPublicKey is the canonical chip-bound
-    /// identifier present at the on-chain receipt level.
-    pub chip_id_hash: [u8; 32],
+    /// 32-byte SHA-256 hash of the **leaf attestation key's**
+    /// SubjectPublicKeyInfo (canonical DER). NOT a stable per-device
+    /// identifier — each new KeyStore key produces a new leaf cert, hence
+    /// a new SPKI, hence a new hash. The ARM Key Attestation standard
+    /// does not expose a chip-stable serial at the leaf level; for
+    /// per-chip identity the upstream submitter would have to hash the
+    /// chip-stable intermediate cert serial, which is not implemented in
+    /// Phase 2. Renamed from `chip_id_hash` (M-2 of the PR-#17 review)
+    /// because the old name implied stable per-device identity that this
+    /// hash does not provide.
+    pub attest_key_hash: [u8; 32],
     /// Vendor-specific level extracted from the attestation extension.
     /// For ARM TrustZone:
     ///   0 = software (rejected by the verifier)

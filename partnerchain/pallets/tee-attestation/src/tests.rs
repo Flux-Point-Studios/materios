@@ -91,7 +91,7 @@ mod compose {
     fn mk(evidence_type: EvidenceType) -> VerifiedEvidence {
         VerifiedEvidence {
             evidence_type,
-            chip_id_hash: [0u8; 32],
+            attest_key_hash: [0u8; 32],
             raw_level: 1,
         }
     }
@@ -181,8 +181,8 @@ mod reference_vectors {
                 assert_eq!(v.evidence_type, EvidenceType::ArmTrustZone);
                 // StrongBox = 2; TEE = 1. The Pixel test vector is StrongBox.
                 assert!(v.raw_level >= 1, "raw_level was {}", v.raw_level);
-                // chip_id_hash should be 32 non-zero bytes.
-                assert_ne!(v.chip_id_hash, [0u8; 32]);
+                // attest_key_hash should be 32 non-zero bytes.
+                assert_ne!(v.attest_key_hash, [0u8; 32]);
             }
             VerifyOutcome::Failed(r) => panic!("Pixel chain should verify, got {:?}", r),
         }
@@ -651,4 +651,18 @@ mod verifier_internal {
         let level = key_description_security_level(&kd);
         assert_eq!(level, 2);
     }
+}
+
+/// M-2 rename: VerifiedEvidence's identity field is now `attest_key_hash`
+/// (32-byte SHA-256 of the leaf attestation key's SPKI DER) — NOT a
+/// stable per-device "chip id". This test exists purely to fail at
+/// compile-time if the field is reverted to `chip_id_hash` or removed.
+#[test]
+fn verified_evidence_field_is_named_attest_key_hash() {
+    use crate::types::VerifiedEvidence;
+    let _v = VerifiedEvidence {
+        evidence_type: crate::types::EvidenceType::ArmTrustZone,
+        attest_key_hash: [0u8; 32],
+        raw_level: 1,
+    };
 }

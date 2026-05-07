@@ -18,8 +18,8 @@
 //!     `not_after` — committee members in different time zones / drifted
 //!     clocks would otherwise diverge. The chain's chain-of-trust validation
 //!     is the only signature check.
-//!   - The `chip_id_hash` extraction is deterministic — SHA-256 of the leaf
-//!     cert's SubjectPublicKeyInfo bytes (canonical DER).
+//!   - The `attest_key_hash` extraction is deterministic — SHA-256 of the
+//!     leaf cert's SubjectPublicKeyInfo bytes (canonical DER).
 //!
 //! ## Wire format
 //!
@@ -73,7 +73,7 @@ pub trait EvidenceVerifier {
 ///      the leaf is a Key-Attestation cert (vs unrelated leaf).
 ///   4. Reads the security level (TEE / StrongBox) from the
 ///      `KeyDescription`.
-///   5. Computes `chip_id_hash = sha256(leaf_subject_public_key_info DER)`.
+///   5. Computes `attest_key_hash = sha256(leaf_subject_public_key_info DER)`.
 pub struct ArmTrustZoneVerifier;
 
 impl EvidenceVerifier for ArmTrustZoneVerifier {
@@ -125,18 +125,19 @@ impl EvidenceVerifier for ArmTrustZoneVerifier {
             return VerifyOutcome::Failed(VerifyFailReason::PolicyViolation);
         }
 
-        // 4. Derive chip_id_hash = sha256 of the leaf SubjectPublicKeyInfo.
-        // Re-encode the SPKI to canonical DER for hashing — matches Android's
-        // per-device key serial used in upstream Acurast pallet integration.
+        // 4. Derive attest_key_hash = sha256 of the leaf SubjectPublicKeyInfo.
+        // Re-encode the SPKI to canonical DER for hashing. NOT a stable
+        // per-device identifier — see VerifiedEvidence::attest_key_hash
+        // doc — but stable for the lifetime of one Android KeyStore key.
         let spki_der = match asn1::write_single(&leaf_tbs.subject_public_key_info) {
             Ok(b) => b,
             Err(_) => return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed),
         };
-        let chip_id_hash = sha256_array(&spki_der);
+        let attest_key_hash = sha256_array(&spki_der);
 
         VerifyOutcome::Verified(VerifiedEvidence {
             evidence_type: EvidenceType::ArmTrustZone,
-            chip_id_hash,
+            attest_key_hash,
             raw_level,
         })
     }
