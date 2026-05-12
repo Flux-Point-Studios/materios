@@ -104,6 +104,20 @@ pub mod pallet {
         #[pallet::constant]
         type RequestIdRetentionBlocks: Get<BlockNumberFor<Self>>;
 
+        /// Maximum batch size for `prune_paid_requests`. Bounds the per-call
+        /// weight to a known cap — without this, a keeper could submit an
+        /// unbounded `Vec<(AccountId, H256)>` whose declared weight exceeds
+        /// the per-block normal-class budget. Recommend 256 in the runtime.
+        ///
+        /// PR #20 security review L-2: an attacker (or a buggy keeper) could
+        /// pass a Vec sized to overflow the BlockWeights cap, forcing the
+        /// node to spend a full block executing a single extrinsic (or
+        /// outright failing with `Overweight`). The cap closes the DoS lever
+        /// without changing legitimate keeper behavior (a 256-entry batch is
+        /// already an order of magnitude above what production keepers send).
+        #[pallet::constant]
+        type MaxPruneBatch: Get<u32>;
+
         /// Weight information for extrinsics in this pallet.
         type WeightInfo: WeightInfo;
     }
@@ -264,6 +278,9 @@ pub mod pallet {
         /// `request_withdrawal` was called with `amount = 0`. Use
         /// `cancel_withdrawal` to clear a prior pending entry instead.
         ZeroWithdrawal,
+        /// `prune_paid_requests` was called with more entries than
+        /// `MaxPruneBatch`.
+        PruneBatchTooLarge,
     }
 
     // -----------------------------------------------------------------------
@@ -549,6 +566,15 @@ pub mod pallet {
             ids: Vec<(T::AccountId, H256)>,
         ) -> DispatchResult {
             let _who = ensure_signed(origin)?;
+            // PR #20 security review L-2: bound the batch size so the
+            // declared weight (computed from `ids.len()` in the #[pallet::
+            // weight] attribute above) cannot exceed the per-block normal-
+            // class budget. The cap is enforced before any iteration so a
+            // malicious caller can't burn even a partial pass.
+            ensure!(
+                (ids.len() as u32) <= T::MaxPruneBatch::get(),
+                Error::<T>::PruneBatchTooLarge,
+            );
             let current_block = frame_system::Pallet::<T>::block_number();
             let retention = T::RequestIdRetentionBlocks::get();
             let cutoff = current_block.saturating_sub(retention);

@@ -102,6 +102,9 @@ impl pallet_billing::Config for TestRuntime {
     type MatraCurrency = Balances;
     type GovernanceOrigin = frame_system::EnsureRoot<u64>;
     type RequestIdRetentionBlocks = RequestIdRetentionBlocks;
+    // Small cap so the positive/negative tests can exercise the boundary
+    // without standing up 256 dummy entries. Real runtime uses 256.
+    type MaxPruneBatch = ConstU32<8>;
     type WeightInfo = ();
 }
 
@@ -842,5 +845,63 @@ fn cancel_withdrawal_with_nothing_pending_is_a_no_op() {
         // No pending entry exists — should not error.
         assert_ok!(Billing::cancel_withdrawal(RuntimeOrigin::signed(ALICE)));
         assert!(Billing::pending_withdrawal(&ALICE).is_none());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// L-2 — prune_paid_requests MaxPruneBatch cap (PR #20 review, task #226)
+// ---------------------------------------------------------------------------
+//
+// MaxPruneBatch bounds the per-call weight: the declared weight in the
+// #[pallet::weight] attribute scales linearly with ids.len(), so without
+// this cap a single extrinsic could declare more weight than the per-block
+// normal-class budget allows and force the node to spend a full block on
+// one tx (or fail with `Overweight`). The test runtime sets MaxPruneBatch
+// to 8 so we can exercise both sides of the boundary cheaply.
+
+#[test]
+fn prune_paid_requests_accepts_batch_at_max_size() {
+    new_test_ext().execute_with(|| {
+        // Build a batch of exactly MaxPruneBatch (= 8) entries. The entries
+        // don't have to actually exist on chain — `prune_paid_requests`
+        // silently skips non-existent keys, so the call still succeeds.
+        let ids: Vec<(u64, H256)> = (0..8u8)
+            .map(|i| (ALICE, H256::repeat_byte(0xc0 | i)))
+            .collect();
+        assert_eq!(ids.len(), 8);
+
+        assert_ok!(Billing::prune_paid_requests(
+            RuntimeOrigin::signed(BOB),
+            ids,
+        ));
+    });
+}
+
+#[test]
+fn prune_paid_requests_rejects_batch_over_max_size() {
+    new_test_ext().execute_with(|| {
+        // 9 entries — one over the cap. Must reject BEFORE iterating so
+        // a malicious keeper can't burn even a partial pass of work.
+        let ids: Vec<(u64, H256)> = (0..9u8)
+            .map(|i| (ALICE, H256::repeat_byte(0xd0 | i)))
+            .collect();
+        assert_eq!(ids.len(), 9);
+
+        assert_noop!(
+            Billing::prune_paid_requests(RuntimeOrigin::signed(BOB), ids),
+            Error::<TestRuntime>::PruneBatchTooLarge
+        );
+    });
+}
+
+#[test]
+fn prune_paid_requests_accepts_empty_batch() {
+    new_test_ext().execute_with(|| {
+        // 0 ≤ cap, no-op success. Keepers polling with nothing to prune
+        // shouldn't have to special-case the empty input.
+        assert_ok!(Billing::prune_paid_requests(
+            RuntimeOrigin::signed(BOB),
+            Vec::new(),
+        ));
     });
 }
