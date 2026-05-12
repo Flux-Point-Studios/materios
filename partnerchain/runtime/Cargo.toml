@@ -64,6 +64,10 @@ pallet-intent-settlement = { workspace = true }
 # Wave 3 / Phase 2: TEE attestation pallet (PR #17). Disabled at genesis
 # until Phase 2.5 challenge-binding ships; kill-switch flips via sudo.
 pallet-tee-attestation = { workspace = true }
+# Phase 2.A: prepaid MATRA balance + 402 billing pallet (PRs #19, #20).
+# `DebitsEnabled` defaults `false` — purely additive call surface until
+# governance flips the kill-switch in Phase 2.B.
+pallet-billing = { workspace = true }
 sp-arithmetic = { workspace = true }
 frame-system-rpc-runtime-api = { workspace = true }
 getrandom = { workspace = true }
@@ -139,6 +143,7 @@ std = [
     "motra-primitives/std",
     "pallet-intent-settlement/std",
     "pallet-tee-attestation/std",
+    "pallet-billing/std",
     "sp-arithmetic/std",
     "frame-system-rpc-runtime-api/std",
     "substrate-wasm-builder",
@@ -182,6 +187,9 @@ runtime-benchmarks = [
     # propagates downstream crate switches. Stub benchmarks are tracked in
     # tee-attestation tasks #32 / #33.
     "pallet-tee-attestation/runtime-benchmarks",
+    # pallet-billing declares the runtime-benchmarks feature flag (PR #19)
+    # with skeletal benchmarks; runtime compiles with the feature gated.
+    "pallet-billing/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
 ]
 try-runtime = [
@@ -202,5 +210,6 @@ try-runtime = [
     "pallet-motra/try-runtime",
     "pallet-intent-settlement/try-runtime",
     "pallet-tee-attestation/try-runtime",
+    "pallet-billing/try-runtime",
     "sp-runtime/try-runtime",
 ]

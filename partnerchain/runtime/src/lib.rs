@@ -70,6 +70,7 @@ use sp_version::NativeVersion;
 // Re-export pallets so they can be used in construct_runtime.
 pub use frame_system;
 pub use pallet_balances;
+pub use pallet_billing;
 pub use pallet_motra;
 pub use pallet_session_validator_management;
 pub use pallet_timestamp;
@@ -215,7 +216,14 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        Sudo flips the switch via `set_disabled` post-deploy once Phase
     //        2.5 ships challenge-binding (security-review H-3 mitigation).
     //        Transaction version unchanged (purely additive call surface).
-    spec_version: 205,
+    // 206 = Phase 2.A: add `pallet_billing` at index 21 (prepaid MATRA
+    //        balance + 402 billing — see PRs #19 + #20). `DebitsEnabled`
+    //        defaults `false` at genesis — purely additive call surface,
+    //        no behavior change until governance flips the kill-switch in
+    //        Phase 2.B. `RequestIdRetentionBlocks` = 14_400 (~1 day at 6s
+    //        blocks) bounds idempotency-replay storage growth.
+    //        Transaction version unchanged (purely additive call surface).
+    spec_version: 206,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 1,
@@ -804,6 +812,47 @@ impl pallet_tee_attestation::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Billing (Phase 2.A — prepaid MATRA balance + 402 billing)
+// ---------------------------------------------------------------------------
+//
+// `pallet-billing` (PRs #19 + #20) provides the on-chain home for the
+// prepaid MATRA balance model that backs the gateway's 402 middleware:
+// `topup` escrows from `Balances` into a per-account credit, governance
+// sets per-endpoint prices, the gateway records paid requests via
+// `record_paid_request` (idempotency-keyed by `(payer, request_id)`), and
+// `execute_withdrawal` returns the unspent escrow.
+//
+// The pallet lands with `DebitsEnabled` defaulted `false`: every call
+// surface is reachable but no MATRA actually moves on `record_paid_request`
+// until governance flips the kill-switch in Phase 2.B. Gateway middleware
+// already on `main` (PRs #43 + #44) calls `queryBillingBalance` /
+// `queryEndpointPrice` against this pallet — without runtime wiring those
+// reads return null and the middleware silently bypasses.
+//
+// `RequestIdRetentionBlocks = 14_400` (~1 day at 6s blocks) bounds the
+// idempotency-replay storage. Long enough to absorb gateway retry storms
+// + network reordering, short enough that misbehaving clients spamming
+// unique request_ids cannot grow `PaidRequests` unboundedly — the
+// `prune_paid_requests` extrinsic drops entries past this window.
+
+parameter_types! {
+    /// Phase 2.A — how long a `PaidRequests[(payer, request_id)]` entry is
+    /// retained for idempotency replay protection. 14_400 blocks ≈ 1 day
+    /// at 6s block time. Generous enough for client retries / network
+    /// reordering; short enough that storage bloat is bounded if a
+    /// misbehaving client spams unique request_ids.
+    pub const BillingRequestIdRetentionBlocks: BlockNumber = 14_400;
+}
+
+impl pallet_billing::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type MatraCurrency = Balances;
+    type GovernanceOrigin = EnsureRoot<AccountId>;
+    type RequestIdRetentionBlocks = BillingRequestIdRetentionBlocks;
+    type WeightInfo = pallet_billing::weights::SubstrateWeight;
+}
+
+// ---------------------------------------------------------------------------
 // Construct runtime
 // ---------------------------------------------------------------------------
 
@@ -857,6 +906,13 @@ construct_runtime! {
         // `DefaultDisabled<T>`; sudo flips the kill-switch via
         // `set_disabled` once Phase 2.5 ships challenge-binding.
         TeeAttestation: pallet_tee_attestation = 20,
+        // Phase 2.A (spec 206): prepaid MATRA balance + 402 billing — see
+        // PRs #19 (scaffold) + #20 (2.B-flip blockers). Appended at index
+        // 21. `DebitsEnabled` defaults `false` via the pallet's
+        // `DefaultDebitsDisabled<T>` type-value; governance flips it in
+        // Phase 2.B. Until then every call surface is reachable but no
+        // MATRA moves on `record_paid_request` — purely additive.
+        Billing: pallet_billing = 21,
     }
 }
 
