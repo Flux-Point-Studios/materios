@@ -20,7 +20,7 @@ use crate::Error;
 use frame_support::{
     assert_err, assert_noop, assert_ok,
     parameter_types,
-    traits::{ConstU16, ConstU32, ConstU64, Hooks},
+    traits::{ConstU16, ConstU32, ConstU64},
 };
 use frame_system as system;
 use sp_core::H256;
@@ -92,10 +92,16 @@ impl pallet_balances::Config for TestRuntime {
     type RuntimeFreezeReason = ();
 }
 
+parameter_types! {
+    // Short retention for tests — 100 blocks. Real runtime uses 14_400.
+    pub const RequestIdRetentionBlocks: u64 = 100;
+}
+
 impl pallet_billing::Config for TestRuntime {
     type RuntimeEvent = RuntimeEvent;
     type MatraCurrency = Balances;
     type GovernanceOrigin = frame_system::EnsureRoot<u64>;
+    type RequestIdRetentionBlocks = RequestIdRetentionBlocks;
     type WeightInfo = ();
 }
 
@@ -199,7 +205,7 @@ fn pay_request_is_dry_run_when_debits_disabled() {
         // Balance unchanged.
         assert_eq!(Billing::balance_of(&ALICE), before);
         // Idempotency record was written even in dry-run.
-        assert!(Billing::paid_request(req_id).is_some());
+        assert!(Billing::paid_request(ALICE, req_id).is_some());
     });
 }
 
@@ -572,5 +578,269 @@ fn quote_price_returns_computed_price_without_charging() {
 
         let unpriced = Billing::quote_price(b"unknown_endpoint", 1_000).unwrap();
         assert_eq!(unpriced, 0);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// H1 — PaidRequests namespacing: cross-account squatting is impossible
+// ---------------------------------------------------------------------------
+
+#[test]
+fn pay_request_idempotency_is_per_payer_not_global() {
+    // The defect: previously, any signed account could pre-occupy a global
+    // request_id slot and turn a different payer's subsequent pay_request
+    // into a no-op success. With the (payer, request_id) DoubleMap, Bob
+    // claiming a slot cannot prevent Alice from being independently charged.
+    new_test_ext().execute_with(|| {
+        enable_debits();
+
+        assert_ok!(Billing::topup_self(RuntimeOrigin::signed(ALICE), 100_000));
+        assert_ok!(Billing::topup_self(RuntimeOrigin::signed(BOB), 100_000));
+        assert_ok!(Billing::governance_set_endpoint_price(
+            RuntimeOrigin::root(),
+            b"receipt_submit".to_vec(),
+            PricingModel::PerCall(2_500),
+        ));
+
+        // Same request_id for both accounts — would have collided under the
+        // old single-map design.
+        let req_id = H256::repeat_byte(0xaa);
+
+        // Bob front-runs Alice with this request_id.
+        assert_ok!(Billing::pay_request(
+            RuntimeOrigin::signed(BOB),
+            b"receipt_submit".to_vec(),
+            0,
+            10_000,
+            req_id,
+        ));
+        assert_eq!(Billing::balance_of(&BOB), 100_000 - 2_500);
+
+        // Alice still gets charged independently — Bob did NOT consume her
+        // idempotency slot.
+        assert_ok!(Billing::pay_request(
+            RuntimeOrigin::signed(ALICE),
+            b"receipt_submit".to_vec(),
+            0,
+            10_000,
+            req_id,
+        ));
+        assert_eq!(Billing::balance_of(&ALICE), 100_000 - 2_500);
+
+        // Both PaidRequests entries exist and are distinct.
+        assert!(Billing::paid_request(ALICE, req_id).is_some());
+        assert!(Billing::paid_request(BOB, req_id).is_some());
+
+        // Alice resubmitting her own (payer, request_id) is still idempotent.
+        assert_ok!(Billing::pay_request(
+            RuntimeOrigin::signed(ALICE),
+            b"receipt_submit".to_vec(),
+            0,
+            10_000,
+            req_id,
+        ));
+        // No double-charge.
+        assert_eq!(Billing::balance_of(&ALICE), 100_000 - 2_500);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// H2 — prune_paid_requests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prune_paid_requests_removes_entries_older_than_retention() {
+    new_test_ext().execute_with(|| {
+        enable_debits();
+        assert_ok!(Billing::topup_self(RuntimeOrigin::signed(ALICE), 100_000));
+        assert_ok!(Billing::governance_set_endpoint_price(
+            RuntimeOrigin::root(),
+            b"receipt_submit".to_vec(),
+            PricingModel::PerCall(100),
+        ));
+
+        let req_id = H256::repeat_byte(0xbb);
+        assert_ok!(Billing::pay_request(
+            RuntimeOrigin::signed(ALICE),
+            b"receipt_submit".to_vec(),
+            0,
+            10_000,
+            req_id,
+        ));
+        assert!(Billing::paid_request(ALICE, req_id).is_some());
+
+        // Advance past the 100-block retention window (test config).
+        System::set_block_number(System::block_number() + 200);
+
+        // Anyone can call prune — use BOB to prove it's permissionless.
+        assert_ok!(Billing::prune_paid_requests(
+            RuntimeOrigin::signed(BOB),
+            vec![(ALICE, req_id)],
+        ));
+
+        // Entry gone.
+        assert!(Billing::paid_request(ALICE, req_id).is_none());
+    });
+}
+
+#[test]
+fn prune_paid_requests_skips_entries_still_within_retention() {
+    new_test_ext().execute_with(|| {
+        enable_debits();
+        assert_ok!(Billing::topup_self(RuntimeOrigin::signed(ALICE), 100_000));
+        assert_ok!(Billing::governance_set_endpoint_price(
+            RuntimeOrigin::root(),
+            b"receipt_submit".to_vec(),
+            PricingModel::PerCall(100),
+        ));
+
+        let req_id = H256::repeat_byte(0xbc);
+        assert_ok!(Billing::pay_request(
+            RuntimeOrigin::signed(ALICE),
+            b"receipt_submit".to_vec(),
+            0,
+            10_000,
+            req_id,
+        ));
+
+        // Only advance 50 blocks — still inside the 100-block retention.
+        System::set_block_number(System::block_number() + 50);
+
+        // Prune is a no-op for entries inside the window.
+        assert_ok!(Billing::prune_paid_requests(
+            RuntimeOrigin::signed(BOB),
+            vec![(ALICE, req_id)],
+        ));
+
+        // Entry still present.
+        assert!(Billing::paid_request(ALICE, req_id).is_some());
+    });
+}
+
+#[test]
+fn prune_paid_requests_silently_skips_nonexistent_entries() {
+    new_test_ext().execute_with(|| {
+        // No entries written at all — pruning a made-up (payer, request_id)
+        // should be a clean no-op, not an error.
+        let bogus = H256::repeat_byte(0xff);
+        assert_ok!(Billing::prune_paid_requests(
+            RuntimeOrigin::signed(BOB),
+            vec![(ALICE, bogus), (BOB, bogus)],
+        ));
+        // Nothing to assert beyond non-error — neither key was ever there.
+        assert!(Billing::paid_request(ALICE, bogus).is_none());
+        assert!(Billing::paid_request(BOB, bogus).is_none());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// M1 — execute_withdrawal mint-failure resilience
+// ---------------------------------------------------------------------------
+//
+// We exercise the deposit-saturation path by constructing a topup that drains
+// almost the entire genesis pool into the user, requesting a withdrawal that
+// would push pallet-balances total issuance past u128::MAX. In practice the
+// existing balances impl saturates u128 arithmetic on max-value inputs.
+//
+// The simplest reliable trigger that doesn't require a separate mock-Currency
+// crate is: corrupt the pending entry such that the stored amount cannot be
+// converted to BalanceOf<T>. Here BalanceOf<T> IS u128, so try_into never
+// fails — instead we directly stage the saturation case via TotalIssuance
+// pre-set + a large pending amount. The cleanest path is to override the
+// pending entry post-request via storage::insert to a value whose deposit
+// would exceed total-issuance headroom.
+
+#[test]
+fn execute_withdrawal_restores_pending_on_mint_failure() {
+    // Reproduce the M1 hazard: deposit_creating silently returns
+    // PositiveImbalance::zero() on per-account free_balance overflow
+    // (see pallet-balances impl_currency.rs:434 — checked_add returns None
+    // → Zero imbalance, no event, no state change). With Alice's account
+    // pre-loaded near u128::MAX, any non-zero deposit will saturate, and
+    // the OLD code would have silently cleared PendingWithdrawals without
+    // crediting the MATRA — losing the user's funds from both ledgers.
+    new_test_ext().execute_with(|| {
+        // First do the legitimate setup.
+        assert_ok!(Billing::topup_self(RuntimeOrigin::signed(ALICE), 100_000));
+        assert_ok!(Billing::request_withdrawal(
+            RuntimeOrigin::signed(ALICE),
+            30_000
+        ));
+
+        let pre_pending = Billing::pending_withdrawal(&ALICE)
+            .expect("pending should exist post-request");
+        assert_eq!(pre_pending.0, 30_000);
+
+        // Now force Alice's free_balance to u128::MAX — any subsequent
+        // deposit_creating(non-zero) will overflow account.free and the
+        // PositiveImbalance returned will be Zero.
+        let _ = pallet_balances::Pallet::<TestRuntime>::force_set_balance(
+            RuntimeOrigin::root(),
+            ALICE,
+            u128::MAX,
+        );
+        let pre_free = Balances::free_balance(&ALICE);
+        assert_eq!(pre_free, u128::MAX);
+
+        // Advance past cooldown.
+        System::set_block_number(System::block_number() + WITHDRAWAL_COOLDOWN_BLOCKS as u64);
+
+        // execute_withdrawal must detect the silent saturation and bail.
+        assert_err!(
+            Billing::execute_withdrawal(RuntimeOrigin::signed(ALICE)),
+            Error::<TestRuntime>::WithdrawalAmountOverflow
+        );
+
+        // (a) extrinsic errored — verified by assert_err above.
+        // (b) PendingWithdrawals preserved — user can retry without losing escrow.
+        let post_pending = Billing::pending_withdrawal(&ALICE)
+            .expect("pending should still be present after mint failure");
+        assert_eq!(post_pending.0, 30_000);
+        // (c) free_balance unchanged — no partial credit landed.
+        assert_eq!(Balances::free_balance(&ALICE), pre_free);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// M2 — request_withdrawal(amount=0) is rejected; cancel_withdrawal exists
+// ---------------------------------------------------------------------------
+
+#[test]
+fn request_withdrawal_rejects_zero_amount() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Billing::topup_self(RuntimeOrigin::signed(ALICE), 100_000));
+        assert_noop!(
+            Billing::request_withdrawal(RuntimeOrigin::signed(ALICE), 0),
+            Error::<TestRuntime>::ZeroWithdrawal
+        );
+    });
+}
+
+#[test]
+fn cancel_withdrawal_credits_prior_pending_back_and_does_not_start_a_new_one() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Billing::topup_self(RuntimeOrigin::signed(ALICE), 100_000));
+        assert_ok!(Billing::request_withdrawal(
+            RuntimeOrigin::signed(ALICE),
+            40_000
+        ));
+        assert_eq!(Billing::balance_of(&ALICE), 60_000);
+        assert!(Billing::pending_withdrawal(&ALICE).is_some());
+
+        assert_ok!(Billing::cancel_withdrawal(RuntimeOrigin::signed(ALICE)));
+
+        // Full credit back to billing balance.
+        assert_eq!(Billing::balance_of(&ALICE), 100_000);
+        // Nothing pending afterward.
+        assert!(Billing::pending_withdrawal(&ALICE).is_none());
+    });
+}
+
+#[test]
+fn cancel_withdrawal_with_nothing_pending_is_a_no_op() {
+    new_test_ext().execute_with(|| {
+        // No pending entry exists — should not error.
+        assert_ok!(Billing::cancel_withdrawal(RuntimeOrigin::signed(ALICE)));
+        assert!(Billing::pending_withdrawal(&ALICE).is_none());
     });
 }

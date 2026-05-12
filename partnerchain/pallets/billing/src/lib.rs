@@ -25,9 +25,25 @@
 //!
 //! ## Idempotency
 //!
-//! `pay_request` records `PaidRequests[request_id] = current_block` after a
-//! successful debit. Re-submitting the same `request_id` succeeds without
-//! re-charging. This makes the gateway's retry-on-network-error safe.
+//! `pay_request` records `PaidRequests[(payer, request_id)] = current_block`
+//! after a successful debit. Re-submitting the same `(payer, request_id)`
+//! succeeds without re-charging. This makes the gateway's retry-on-network-
+//! error safe.
+//!
+//! **Why double-map keyed by `(payer, request_id)`:** an earlier single-map
+//! keyed only by `request_id` allowed cross-account squatting — Bob could
+//! front-run by paying for a `request_id` he saw in Alice's mempool, then
+//! Alice's subsequent submit would be a no-op success because the slot was
+//! already occupied. Namespacing by payer means each account has its own
+//! idempotency lane and cannot interfere with another's.
+//!
+//! ## Storage growth
+//!
+//! `PaidRequests` is the only unbounded storage in this pallet. We bound it
+//! via `Config::RequestIdRetentionBlocks` + a permissionless
+//! `prune_paid_requests` extrinsic — any account can pay gas to drop entries
+//! older than the retention window. This keeps the prune cost off the
+//! consensus weight budget; a keeper script runs it.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -43,10 +59,10 @@ mod tests;
 #[frame_support::pallet]
 pub mod pallet {
     use frame_support::pallet_prelude::*;
-    use frame_support::traits::{Currency, ExistenceRequirement};
+    use frame_support::traits::{Currency, ExistenceRequirement, Imbalance};
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
-    use sp_runtime::Saturating;
+    use sp_runtime::{traits::Zero, Saturating};
     use sp_std::vec::Vec;
 
     use crate::types::{PricingModel, MAX_ENDPOINT_CLASS_LEN, WITHDRAWAL_COOLDOWN_BLOCKS};
@@ -77,6 +93,17 @@ pub mod pallet {
         /// governance) on production; in tests `EnsureSignedBy<Alice>`.
         type GovernanceOrigin: EnsureOrigin<Self::RuntimeOrigin>;
 
+        /// How many blocks a `PaidRequests[(payer, request_id)]` entry is
+        /// kept around for idempotency replay protection. After this window
+        /// elapses, anyone can call `prune_paid_requests` to drop the entry.
+        ///
+        /// Default suggested by the runtime: 14_400 blocks (~1 day at 6s
+        /// blocks). Long enough that a retry storm from a gateway can still
+        /// hit the idempotency check; short enough that storage doesn't grow
+        /// unbounded with traffic.
+        #[pallet::constant]
+        type RequestIdRetentionBlocks: Get<BlockNumberFor<Self>>;
+
         /// Weight information for extrinsics in this pallet.
         type WeightInfo: WeightInfo;
     }
@@ -97,6 +124,14 @@ pub mod pallet {
     /// Per-endpoint-class pricing model. Governance-set via
     /// `governance_set_endpoint_price`. An unset class returns
     /// `PricingModel::FREE` (PerCall(0)) via ValueQuery's Default impl.
+    ///
+    /// **Canonical endpoint_class form:** lowercase snake_case ASCII, no
+    /// whitespace, no path separators, ≤ 64 bytes. Examples: `receipt_submit`,
+    /// `chunk_upload`, `anchor_query`. The pallet does NOT enforce this — the
+    /// gateway is the trust boundary that normalizes inbound request paths
+    /// into endpoint_class before calling `pay_request`. Operators adding new
+    /// endpoint classes via governance MUST follow this convention so the
+    /// gateway can hash-table-lookup without ambiguity.
     #[pallet::storage]
     #[pallet::getter(fn endpoint_price)]
     pub type EndpointPrices<T: Config> = StorageMap<
@@ -107,14 +142,30 @@ pub mod pallet {
         ValueQuery,
     >;
 
-    /// Idempotency guard for `pay_request`. Maps request_id → block at which
-    /// it was first paid. Re-submission of a known request_id is a no-op
-    /// success. We bound this map's growth via `RequestIdRetentionBlocks` —
-    /// a chore extrinsic prunes entries older than that.
+    /// Idempotency guard for `pay_request`. Maps `(payer, request_id)` → block
+    /// at which it was first paid. Re-submission of a known
+    /// `(payer, request_id)` is a no-op success. We bound this map's growth
+    /// via `Config::RequestIdRetentionBlocks` — the permissionless
+    /// `prune_paid_requests` extrinsic drops entries older than that.
+    ///
+    /// **Why `(payer, request_id)` and not bare `request_id`:** a single-key
+    /// map let any signed account pre-occupy a slot they observed in another
+    /// payer's mempool tx — Bob signs `pay_request(req_id_X)`, lands first,
+    /// and Alice's subsequent `pay_request(req_id_X)` becomes a no-op success
+    /// without ever debiting her account. Double-map per-payer namespacing
+    /// closes the squatting hole: each account has its own slot for any
+    /// given request_id, and cross-account interference is impossible.
     #[pallet::storage]
     #[pallet::getter(fn paid_request)]
-    pub type PaidRequests<T: Config> =
-        StorageMap<_, Blake2_128Concat, H256, BlockNumberFor<T>, OptionQuery>;
+    pub type PaidRequests<T: Config> = StorageDoubleMap<
+        _,
+        Blake2_128Concat,
+        T::AccountId,
+        Blake2_128Concat,
+        H256,
+        BlockNumberFor<T>,
+        OptionQuery,
+    >;
 
     /// Pending withdrawals — must wait `WITHDRAWAL_COOLDOWN_BLOCKS` after
     /// `request_withdrawal` before `execute_withdrawal` can mint MATRA back.
@@ -178,6 +229,8 @@ pub mod pallet {
         WithdrawalExecuted { who: T::AccountId, amount: u128 },
         /// Governance flipped the debit kill-switch.
         DebitsEnabledChanged { enabled: bool },
+        /// `prune_paid_requests` removed `count` stale idempotency entries.
+        PaidRequestsPruned { count: u32 },
     }
 
     // -----------------------------------------------------------------------
@@ -201,7 +254,16 @@ pub mod pallet {
         TopupTransferFailed,
         /// Withdrawal would mint more MATRA than was held in escrow — should
         /// be impossible if invariants hold; defense-in-depth.
+        ///
+        /// **Also raised by `execute_withdrawal`** when
+        /// `MatraCurrency::deposit_creating` saturates (i.e. total issuance
+        /// would overflow) and the free-balance post-condition fails. In that
+        /// case the pending withdrawal entry is restored so the caller can
+        /// retry without losing their escrowed balance.
         WithdrawalAmountOverflow,
+        /// `request_withdrawal` was called with `amount = 0`. Use
+        /// `cancel_withdrawal` to clear a prior pending entry instead.
+        ZeroWithdrawal,
     }
 
     // -----------------------------------------------------------------------
@@ -249,9 +311,12 @@ pub mod pallet {
         ) -> DispatchResult {
             let payer = ensure_signed(origin)?;
 
-            // Idempotency check first — if already paid, return success
-            // without re-emitting or re-charging.
-            if PaidRequests::<T>::contains_key(request_id) {
+            // Idempotency check first — if this (payer, request_id) has
+            // already been paid, return success without re-emitting or
+            // re-charging. Namespacing by payer prevents cross-account
+            // squatting: another account paying for the same request_id
+            // does NOT consume this payer's slot.
+            if PaidRequests::<T>::contains_key(&payer, request_id) {
                 return Ok(());
             }
 
@@ -272,7 +337,7 @@ pub mod pallet {
             }
 
             let current_block = frame_system::Pallet::<T>::block_number();
-            PaidRequests::<T>::insert(request_id, current_block);
+            PaidRequests::<T>::insert(&payer, request_id, current_block);
 
             Self::deposit_event(Event::RequestPaid {
                 payer,
@@ -289,6 +354,15 @@ pub mod pallet {
         /// Setting a class to `PricingModel::FREE` is equivalent to deleting
         /// it (both produce zero charge); we keep the explicit set as a
         /// governance audit trail.
+        ///
+        /// **Canonical `endpoint_class` form:** lowercase snake_case ASCII,
+        /// no whitespace, no path separators, ≤ 64 bytes. Examples:
+        /// `receipt_submit`, `chunk_upload`, `anchor_query`. The pallet does
+        /// NOT enforce this — the gateway is the trust boundary that
+        /// normalizes inbound request paths into endpoint_class before
+        /// calling `pay_request`. Operators submitting this extrinsic via
+        /// governance MUST follow this convention so the gateway's
+        /// hash-table-lookup is unambiguous.
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::governance_set_endpoint_price())]
         pub fn governance_set_endpoint_price(
@@ -325,6 +399,9 @@ pub mod pallet {
         #[pallet::weight(T::WeightInfo::request_withdrawal())]
         pub fn request_withdrawal(origin: OriginFor<T>, amount: u128) -> DispatchResult {
             let who = ensure_signed(origin)?;
+            // Zero-amount makes no sense — would just cancel any pending entry
+            // silently. Force the caller to use `cancel_withdrawal` for that.
+            ensure!(amount > 0, Error::<T>::ZeroWithdrawal);
 
             // Cancel any prior pending withdrawal: credit its amount back.
             if let Some((prev_amount, _)) = PendingWithdrawals::<T>::take(&who) {
@@ -353,6 +430,20 @@ pub mod pallet {
         /// Execute a previously-requested withdrawal. Errors if the cooldown
         /// has not elapsed, or if no withdrawal is pending. On success, mints
         /// MATRA back to the caller's pallet-balances account.
+        ///
+        /// **Saturation-safety:** `deposit_creating` can saturate silently
+        /// if pallet-balances' `TotalIssuance` would overflow. The user's
+        /// billing `Balances[who]` was already debited at `request_withdrawal`
+        /// time, so if the mint silently no-ops the MATRA disappears from
+        /// both ledgers. We defend by snapshotting `free_balance` before the
+        /// deposit, comparing afterward, and on mismatch:
+        ///   (a) re-burn whatever partial credit landed (keeps total issuance
+        ///       consistent),
+        ///   (b) leave `PendingWithdrawals[who]` intact so the caller can
+        ///       immediately retry,
+        ///   (c) return `Error::WithdrawalAmountOverflow`.
+        /// The pending entry is removed only after we have proven the deposit
+        /// landed in full.
         #[pallet::call_index(5)]
         #[pallet::weight(T::WeightInfo::execute_withdrawal())]
         pub fn execute_withdrawal(origin: OriginFor<T>) -> DispatchResult {
@@ -366,15 +457,115 @@ pub mod pallet {
                 Error::<T>::WithdrawalCooldownActive
             );
 
-            PendingWithdrawals::<T>::remove(&who);
-
-            // Mint MATRA back to the caller's pallet-balances account.
+            // Convert the u128 amount to the currency Balance type up-front
+            // so we can fail cleanly before mutating any state.
             let amount_balance: BalanceOf<T> = amount
                 .try_into()
                 .map_err(|_| Error::<T>::WithdrawalAmountOverflow)?;
-            let _ = T::MatraCurrency::deposit_creating(&who, amount_balance);
+
+            // Snapshot pre-deposit free balance for defense-in-depth.
+            let pre_balance = T::MatraCurrency::free_balance(&who);
+
+            // Mint MATRA back to the caller's pallet-balances account.
+            // `deposit_creating` returns a PositiveImbalance whose `peek()`
+            // tells us how much TotalIssuance was actually increased. On
+            // saturation, the imbalance is zero (or short of the requested
+            // amount) and TotalIssuance is left at its cap — while the user's
+            // free_balance MAY have been incremented anyway, leaving the
+            // (sum-of-balances == TotalIssuance) invariant violated.
+            //
+            // We do NOT touch PendingWithdrawals here yet. If anything in the
+            // mint path falls short of the full amount, we want the pending
+            // entry intact so the caller can retry.
+            let imbalance = T::MatraCurrency::deposit_creating(&who, amount_balance);
+            let credited_issuance = imbalance.peek();
+            // Drop the imbalance — its existence is what bumps TotalIssuance.
+            drop(imbalance);
+
+            let post_balance = T::MatraCurrency::free_balance(&who);
+            let credited_free = post_balance.saturating_sub(pre_balance);
+
+            // Two defense layers: both the imbalance returned AND the free-
+            // balance delta must equal the requested amount. Any short-fall
+            // means the mint saturated somewhere and we must bail to keep
+            // sum(free_balances) == TotalIssuance.
+            if credited_issuance < amount_balance || credited_free < amount_balance {
+                // Re-burn whatever partial credit may have landed in the
+                // user's account, so we don't hand them free MATRA on top of
+                // their preserved pending withdrawal entry.
+                if credited_free > Zero::zero() {
+                    let _ = T::MatraCurrency::withdraw(
+                        &who,
+                        credited_free,
+                        frame_support::traits::WithdrawReasons::TRANSFER,
+                        ExistenceRequirement::AllowDeath,
+                    );
+                }
+                return Err(Error::<T>::WithdrawalAmountOverflow.into());
+            }
+
+            // Deposit succeeded fully — now safe to clear the pending entry.
+            PendingWithdrawals::<T>::remove(&who);
 
             Self::deposit_event(Event::WithdrawalExecuted { who, amount });
+
+            Ok(())
+        }
+
+        /// Cancel a pending withdrawal: credit any prior pending amount back
+        /// to the caller's billing balance. No-op if nothing is pending.
+        ///
+        /// This is the explicit form of the cancel-side-effect baked into
+        /// `request_withdrawal`. Use this when you simply want your funds
+        /// back in billing — without immediately starting a new withdrawal.
+        #[pallet::call_index(7)]
+        #[pallet::weight(T::WeightInfo::cancel_withdrawal())]
+        pub fn cancel_withdrawal(origin: OriginFor<T>) -> DispatchResult {
+            let who = ensure_signed(origin)?;
+            if let Some((prev_amount, _)) = PendingWithdrawals::<T>::take(&who) {
+                Balances::<T>::mutate(&who, |b| *b = b.saturating_add(prev_amount));
+                Self::deposit_event(Event::WithdrawalCancelled { who });
+            }
+            Ok(())
+        }
+
+        /// Permissionless prune: drop `PaidRequests` entries older than
+        /// `Config::RequestIdRetentionBlocks`. Caller pays the gas.
+        ///
+        /// Each `(payer, request_id)` in `ids` is checked: if the stored
+        /// block is older than `current_block - retention`, the entry is
+        /// removed; otherwise it is silently skipped (no error — keepers
+        /// over-eagerly batching is fine). Non-existent entries are no-ops.
+        ///
+        /// This is intentionally NOT an `on_initialize` hook: we don't want
+        /// to pay this cost out of the consensus weight budget, and we don't
+        /// want sudden traffic spikes to back up the prune queue. A keeper
+        /// script can target the oldest entries it observes via storage
+        /// iteration and amortize the work at its own pace.
+        #[pallet::call_index(8)]
+        #[pallet::weight(T::WeightInfo::prune_paid_requests(ids.len() as u32))]
+        pub fn prune_paid_requests(
+            origin: OriginFor<T>,
+            ids: Vec<(T::AccountId, H256)>,
+        ) -> DispatchResult {
+            let _who = ensure_signed(origin)?;
+            let current_block = frame_system::Pallet::<T>::block_number();
+            let retention = T::RequestIdRetentionBlocks::get();
+            let cutoff = current_block.saturating_sub(retention);
+
+            let mut removed: u32 = 0;
+            for (payer, request_id) in ids.iter() {
+                if let Some(paid_at) = PaidRequests::<T>::get(payer, request_id) {
+                    if paid_at <= cutoff {
+                        PaidRequests::<T>::remove(payer, request_id);
+                        removed = removed.saturating_add(1);
+                    }
+                }
+            }
+
+            if removed > 0 {
+                Self::deposit_event(Event::PaidRequestsPruned { count: removed });
+            }
 
             Ok(())
         }
@@ -382,7 +573,7 @@ pub mod pallet {
         /// Phase 2.A → 2.B switch. Governance flips this to `true` to make
         /// `pay_request` actually debit. Idempotent.
         #[pallet::call_index(6)]
-        #[pallet::weight(T::WeightInfo::governance_set_endpoint_price())]
+        #[pallet::weight(T::WeightInfo::governance_set_debits_enabled())]
         pub fn governance_set_debits_enabled(
             origin: OriginFor<T>,
             enabled: bool,
