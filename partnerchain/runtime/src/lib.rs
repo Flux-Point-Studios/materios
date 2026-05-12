@@ -216,17 +216,28 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        Sudo flips the switch via `set_disabled` post-deploy once Phase
     //        2.5 ships challenge-binding (security-review H-3 mitigation).
     //        Transaction version unchanged (purely additive call surface).
-    // 206 = Phase 2.A: add `pallet_billing` at index 21 (prepaid MATRA
-    //        balance + 402 billing — see PRs #19 + #20). `DebitsEnabled`
-    //        defaults `false` at genesis — purely additive call surface,
-    //        no behavior change until governance flips the kill-switch in
-    //        Phase 2.B. `RequestIdRetentionBlocks` = 14_400 (~1 day at 6s
-    //        blocks) bounds idempotency-replay storage growth.
-    //        Transaction version unchanged (purely additive call surface).
-    spec_version: 206,
+    // 206-215 = source-tree baseline diverged from deployed preprod during
+    //        the spec-209..215 in-flight patch series. The deployed runtime
+    //        on preprod is currently at `spec_version: 215, tx_version: 2`
+    //        via `--wasm-runtime-overrides`. The source-tree baseline this
+    //        PR branches from (origin/main) was 205. Bumping directly to
+    //        216 below re-takes the lead from the deployed override chain
+    //        — substrate refuses runtime upgrades whose version is <= the
+    //        running version (the W-2 pitfall, see feedback_large_runtime
+    //        _upgrade.md), so a 206 source-bump would be DOA on preprod.
+    //        `tx_version` follows the deployed 2.
+    // 216 = Phase 2.A: add `pallet_billing` at index 21 (prepaid MATRA
+    //        balance + 402 billing — see PRs #19 + #20 + #21).
+    //        `DebitsEnabled` defaults `false` at genesis — purely additive
+    //        call surface, no behavior change until governance flips the
+    //        kill-switch in Phase 2.B. `RequestIdRetentionBlocks` = 14_400
+    //        (~1 day at 6s blocks) bounds idempotency-replay storage
+    //        growth. Transaction version unchanged from deployed 2 (no
+    //        existing extrinsic signature changed, only new ones added).
+    spec_version: 216,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
-    transaction_version: 1,
+    transaction_version: 2,
     state_version: 1,
 };
 
@@ -847,6 +858,12 @@ parameter_types! {
 impl pallet_billing::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type MatraCurrency = Balances;
+    // GovernanceOrigin gates `governance_set_endpoint_price` and the 2.B
+    // kill-switch `governance_set_debits_enabled`. On preprod this is Sudo
+    // (Alice) via `sudo.sudo(billing.governanceSetDebitsEnabled(true))`.
+    // **Mainnet migration:** switch to `EitherOf<EnsureRoot, MultisigOrigin>`
+    // (or a Council collective threshold) before mainnet launch — Sudo is
+    // not an acceptable production governance origin for money flows.
     type GovernanceOrigin = EnsureRoot<AccountId>;
     type RequestIdRetentionBlocks = BillingRequestIdRetentionBlocks;
     type WeightInfo = pallet_billing::weights::SubstrateWeight;
