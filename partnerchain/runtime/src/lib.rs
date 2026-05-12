@@ -234,7 +234,20 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        (~1 day at 6s blocks) bounds idempotency-replay storage
     //        growth. Transaction version unchanged from deployed 2 (no
     //        existing extrinsic signature changed, only new ones added).
-    spec_version: 216,
+    // 217 = pallet-billing PR #20 security review L-2 (task #226): add
+    //        `MaxPruneBatch = 256` Config constant + matching
+    //        `PruneBatchTooLarge` error, and gate `prune_paid_requests`
+    //        with `ensure!(ids.len() <= MaxPruneBatch)`. Closes a DoS
+    //        lever where a malicious keeper could submit an unbounded
+    //        Vec<(AccountId, H256)> whose linear-in-n declared weight
+    //        exceeds the per-block normal-class budget. Behavior change
+    //        is one-sided (existing legitimate keepers send batches <<
+    //        256, so they're unaffected); only new failure path is the
+    //        explicit reject above the cap. New `#[pallet::constant]`
+    //        bumps runtime metadata → spec_version bump required even
+    //        though the call signature itself is unchanged. tx_version
+    //        stays at 2 — no existing extrinsic signature changed.
+    spec_version: 217,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -853,6 +866,14 @@ parameter_types! {
     /// reordering; short enough that storage bloat is bounded if a
     /// misbehaving client spams unique request_ids.
     pub const BillingRequestIdRetentionBlocks: BlockNumber = 14_400;
+    /// Maximum `(payer, request_id)` entries a single `prune_paid_requests`
+    /// call may carry. Caps per-call declared weight so a keeper (honest
+    /// or malicious) cannot submit a batch whose linear-in-`n` weight
+    /// exceeds the per-block normal-class budget — PR #20 security review
+    /// L-2, task #226. 256 is an order of magnitude above what production
+    /// keeper scripts batch in practice and well inside one block's budget
+    /// at the pallet's 5M ref_time / 256 proof_size per-entry rate.
+    pub const BillingMaxPruneBatch: u32 = 256;
 }
 
 impl pallet_billing::Config for Runtime {
@@ -866,6 +887,7 @@ impl pallet_billing::Config for Runtime {
     // not an acceptable production governance origin for money flows.
     type GovernanceOrigin = EnsureRoot<AccountId>;
     type RequestIdRetentionBlocks = BillingRequestIdRetentionBlocks;
+    type MaxPruneBatch = BillingMaxPruneBatch;
     type WeightInfo = pallet_billing::weights::SubstrateWeight;
 }
 
