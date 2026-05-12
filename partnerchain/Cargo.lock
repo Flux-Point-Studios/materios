@@ -4684,6 +4684,7 @@ dependencies = [
  "orinq-receipts-primitives",
  "pallet-aura",
  "pallet-balances",
+ "pallet-billing",
  "pallet-block-rewards",
  "pallet-grandpa",
  "pallet-intent-settlement",
