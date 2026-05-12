@@ -10,6 +10,7 @@ members = [
     "pallets/motra/primitives",
     "pallets/motra/rpc",
     "pallets/tee-attestation",
+    "pallets/billing",
     # Vendored IOG crates carrying materios-patch[es]. Included so
     # `cargo test --workspace` exercises the patched sources and so dev-
     # dependencies (hex-literal, tokio, etc.) are resolved correctly.
@@ -100,6 +101,7 @@ orinq-receipts-primitives = { path = "pallets/orinq-receipts/primitives", defaul
 orinq-receipts-rpc = { path = "pallets/orinq-receipts/rpc" }
 materios-runtime = { path = "runtime" }
 pallet-tee-attestation = { path = "pallets/tee-attestation", default-features = false }
+pallet-billing = { path = "pallets/billing", default-features = false }
 
 # Wave 3 Phase 2: ARM Key Attestation verification crates (RustCrypto upstream).
 # Acurast's verifier (vendored under pallets/tee-attestation/vendor/acurast-attestation/)
