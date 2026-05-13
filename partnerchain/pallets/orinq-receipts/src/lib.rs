@@ -500,6 +500,18 @@ pub mod pallet {
         },
         /// spec-219: governance updated `BadAttestSlashThreshold`.
         BadAttestSlashThresholdUpdated { new_value: u32 },
+        /// spec-219 bug_006: a committee member crossed
+        /// `BadAttestSlashThreshold` BUT the auto-slash failed (typically
+        /// because `mat/attr` reserve pot is below the existential deposit
+        /// — see task #233). The strike + threshold-clamp side effects
+        /// still commit; the attestor stays in the committee with a
+        /// non-zero bond. Operators must fund `mat/attr` above ED and
+        /// then manually call `slash_attestor` to complete the slash.
+        /// Carries the underlying `DispatchError` for forensic clarity.
+        AutoSlashFailed {
+            attester: T::AccountId,
+            reason: DispatchError,
+        },
     }
 
     // ── Errors ───────────────────────────────────────────────────────────
@@ -1032,22 +1044,28 @@ pub mod pallet {
         /// `mat/attr`, ejects from the committee, resets the strike
         /// counter, and emits `AutoSlashedForBadAttest` + `AutoEjected`.
         ///
-        /// Defensive posture: any `repatriate_reserved` shortfall is
-        /// swallowed (mirrors `slash_attestor`'s ignore-residue pattern).
-        /// Eject + strike-reset ALWAYS fire — even when the bond was 0 —
-        /// because the goal is to bound the poison window, not to make a
-        /// slash conditional on having something to slash.
+        /// spec-219 bug_006: `repatriate_reserved` is **fail-fast**, NOT
+        /// swallowed. If the `mat/attr` reserve pot is below ED, the
+        /// pallet-balances `DeadAccount` error would otherwise be silently
+        /// dropped by `let _ = …` AND the attestor's bond field zeroed —
+        /// permanently locking the reserved funds (every unreserve path
+        /// keys off `AttestorBonds`, so a zero entry means no recovery is
+        /// possible without sudo intervention). The `?` below makes the
+        /// failure surface to the caller, which emits an `AutoSlashFailed`
+        /// event and leaves the bond + committee state untouched so a
+        /// later `slash_attestor` (Root) call can retry once the pot is
+        /// funded.
         fn auto_slash_for_bad_attest(attester: &T::AccountId) -> DispatchResult {
             let bond = AttestorBonds::<T>::get(attester);
             if bond > 0 {
                 let reserve_acct = Self::attestor_reserve_account();
                 let balance: BalanceOf<T> = bond.try_into().unwrap_or_default();
-                let _ = T::Currency::repatriate_reserved(
+                T::Currency::repatriate_reserved(
                     attester,
                     &reserve_acct,
                     balance,
                     BalanceStatus::Free,
-                );
+                )?;
                 AttestorBonds::<T>::insert(attester, 0u128);
             }
             // Reset strikes — fresh slate after slash + re-bond.
@@ -1496,12 +1514,25 @@ pub mod pallet {
                 // design's aggressive flush posture, §7).
                 let threshold = BadAttestSlashThreshold::<T>::get().max(1);
                 if strikes >= threshold {
-                    // `auto_slash_for_bad_attest` is internally defensive
-                    // (swallows `repatriate_reserved` shortfalls; eject +
-                    // strike-reset always fire). Any inner Err is swallowed
-                    // — the slash side effects are observability, not a
-                    // precondition for completing the dispatch.
-                    let _ = Self::auto_slash_for_bad_attest(&attester);
+                    // spec-219 bug_006: `auto_slash_for_bad_attest` is
+                    // now fail-fast on `repatriate_reserved` shortfalls
+                    // (e.g. unfunded `mat/attr`, task #233). We MUST
+                    // still return `Ok(())` from this dispatchable so
+                    // the strike + threshold-clamp side effects commit
+                    // (bug_005: returning Err here would unwind them
+                    // via the `with_storage_layer` auto-wrap). When the
+                    // slash itself fails, emit a forensic
+                    // `AutoSlashFailed` event — operators fund `mat/attr`
+                    // and call `slash_attestor` manually to complete
+                    // the slash. The attestor remains in the committee
+                    // with their bond intact, but the strike has been
+                    // recorded so the operational signal is preserved.
+                    if let Err(e) = Self::auto_slash_for_bad_attest(&attester) {
+                        Self::deposit_event(Event::AutoSlashFailed {
+                            attester: attester.clone(),
+                            reason: e,
+                        });
+                    }
                 }
                 return Ok(());
             }

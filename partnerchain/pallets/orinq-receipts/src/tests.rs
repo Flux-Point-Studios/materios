@@ -2274,6 +2274,13 @@ fn bad_attest_threshold_one_slashes_and_ejects() {
     new_test_ext().execute_with(|| {
         let submitter_seed = 10;
         seed_submitter_and_committee(submitter_seed, &[1]);
+        // spec-219 bug_006: `auto_slash_for_bad_attest` now propagates
+        // `repatriate_reserved` errors via `?`, so the reserve pot
+        // MUST be funded above ED for the slash to actually move the
+        // bond. Pre-fund here to exercise the happy path.
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+        Balances::make_free_balance_be(&reserve_acct, 1);
         // BadAttestSlashThreshold is seeded to 1 by `on_runtime_upgrade` on
         // a live chain; in this mock the storage starts at the ValueQuery
         // default (0) but the call site clamps via `.max(1)`, so the
@@ -2344,6 +2351,106 @@ fn bad_attest_threshold_one_slashes_and_ejects() {
     });
 }
 
+/// bug_006 (auto-slash failure path): if the `mat/attr` reserve pot is
+/// below ED, `repatriate_reserved` errors with `DeadAccount`. The
+/// dispatchable must STILL return `Ok(())` so the strike side effect
+/// commits (otherwise the `with_storage_layer` auto-wrap would unwind
+/// bug_005's strike-on-Ok-path mechanism), but the slash itself
+/// reports via a new `AutoSlashFailed` event. Critically: the bond is
+/// NOT zeroed, the attestor is NOT ejected from the committee, and
+/// `AutoSlashedForBadAttest` is NOT emitted — exactly the inverse of
+/// the happy path above. Operators must fund `mat/attr` and call
+/// `slash_attestor` manually to complete the slash.
+#[test]
+fn bad_attest_threshold_one_with_unfunded_pot_emits_slash_failed() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        // DELIBERATELY DO NOT pre-fund the reserve pot — this is the
+        // bug_006 / task #233 condition we're exercising.
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+        assert_eq!(
+            Balances::free_balance(&reserve_acct),
+            0,
+            "test precondition: mat/attr must be below ED"
+        );
+
+        assert_ok!(OrinqReceipts::set_bad_attest_slash_threshold(
+            RuntimeOrigin::root(),
+            1
+        ));
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let bond_before = pallet::AttestorBonds::<Test>::get(&acc(1));
+        let reserved_before = Balances::reserved_balance(&acc(1));
+        assert!(bond_before > 0, "test precondition: attester must be bonded");
+        assert!(reserved_before >= bond_before);
+
+        let rid = H256::from([0xE2; 32]);
+        let ch = H256::from([0xE3; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        let wrong_claim = [0xDE; 32];
+        // Dispatch MUST succeed — bug_005 mechanism preserved.
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            wrong_claim,
+        ));
+
+        // Bond UNTOUCHED — the slash did not move the funds.
+        assert_eq!(
+            pallet::AttestorBonds::<Test>::get(&acc(1)),
+            bond_before,
+            "AttestorBonds must be untouched when auto-slash fails"
+        );
+        assert_eq!(
+            Balances::reserved_balance(&acc(1)),
+            reserved_before,
+            "reserved balance must be untouched when auto-slash fails"
+        );
+        // Attester still in committee — operator must call slash_attestor.
+        assert!(
+            pallet::CommitteeMembers::<Test>::get().contains(&acc(1)),
+            "attester must NOT be ejected when auto-slash fails"
+        );
+
+        let events = frame_system::Pallet::<Test>::events();
+        // Strike side-effect DID commit (bug_005 path).
+        let saw_strike = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::BadAttestStrike { attester, .. })
+                if attester == &acc(1)
+        ));
+        // AutoSlashFailed signals the deferred slash.
+        let saw_failed = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoSlashFailed { attester, .. })
+                if attester == &acc(1)
+        ));
+        // Happy-path events must NOT have fired.
+        let saw_slash = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoSlashedForBadAttest { attester, .. })
+                if attester == &acc(1)
+        ));
+        let saw_eject = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoEjected { who, .. })
+                if who == &acc(1)
+        ));
+        assert!(saw_strike, "BadAttestStrike event must be emitted");
+        assert!(saw_failed, "AutoSlashFailed event must be emitted");
+        assert!(!saw_slash, "AutoSlashedForBadAttest MUST NOT fire when slash failed");
+        assert!(!saw_eject, "AutoEjected MUST NOT fire when slash failed");
+    });
+}
+
 /// bug_003: shrinking the committee via auto-slash MUST clamp
 /// AttestationThreshold so the certification path stays satisfiable.
 /// Without the clamp a threshold-7-of-10 committee that loses two members
@@ -2356,6 +2463,10 @@ fn auto_slash_clamps_threshold_below_new_committee_size() {
         let submitter_seed = 10;
         let committee_seeds: Vec<u8> = (1u8..=5).collect();
         seed_submitter_and_committee(submitter_seed, &committee_seeds);
+        // spec-219 bug_006: auto-slash fail-fast on unfunded reserve pot.
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+        Balances::make_free_balance_be(&reserve_acct, 1);
         assert_ok!(OrinqReceipts::set_committee(
             RuntimeOrigin::root(),
             committee_seeds.iter().map(|&s| acc(s)).collect(),
