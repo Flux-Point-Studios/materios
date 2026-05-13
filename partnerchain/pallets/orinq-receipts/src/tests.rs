@@ -196,6 +196,17 @@ fn submit(
     )
 }
 
+/// spec-219: produce the canonical-cert hash for `rid` as it would be
+/// computed by the runtime. Existing tests that used to pass an arbitrary
+/// `[0xCE; 32]` to `attest_availability_cert` must now supply this exact
+/// value or take a `BadAttestStrike` event (with `Ok(())` dispatch —
+/// see the `bad_attest_*` regression suite for the call-level contract).
+fn canonical_for(rid: H256) -> [u8; 32] {
+    OrinqReceipts::canonical_cert_hash(rid)
+        .expect("receipt exists before attestation")
+        .0
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1107,7 +1118,10 @@ fn threshold_hit_splits_fee_80_20_three_signers() {
         let treasury_before = Balances::free_balance(&treasury_account());
 
         // Three signers attest — threshold hits on the third.
-        let cert_hash = [0xCE; 32];
+        // spec-219: must propose the canonical hash; otherwise the runtime
+        // records a `BadAttestStrike` (Ok dispatch + event) and the bad
+        // attest is dropped before reaching the `Attestations` map.
+        let cert_hash = canonical_for(rid);
         for &s in signer_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
@@ -1175,7 +1189,8 @@ fn threshold_hit_with_seven_signers_splits_cleanly() {
             committee_seeds.iter().map(|&s| Balances::free_balance(&acc(s))).collect();
         let treasury_before = Balances::free_balance(&treasury_account());
 
-        let cert_hash = [0xCE; 32];
+        // spec-219: canonical-only acceptance — see `canonical_for`.
+        let cert_hash = canonical_for(rid);
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
@@ -1224,10 +1239,11 @@ fn threshold_hit_single_signer_gets_full_80_percent() {
         let signer_before = Balances::free_balance(&acc(1));
         let treasury_before = Balances::free_balance(&treasury_account());
 
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
-            [0xCE; 32]
+            cert_hash
         ));
 
         // Whole 80% goes to the sole signer, 20% goes to treasury.
@@ -1256,11 +1272,12 @@ fn threshold_hit_emits_fee_distributed_event() {
         let rid = H256::from([0xD1; 32]);
         let ch = H256::from([0xD2; 32]);
         assert_ok!(submit_c4(submitter_seed, rid, ch));
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
                 rid,
-                [0xCE; 32]
+                cert_hash
             ));
         }
 
@@ -1308,17 +1325,19 @@ fn pre_component_4_receipt_skips_fee_payout() {
         let _ = Balances::unreserve(&submitter, DEFAULT_FEE);
 
         // Certify — must not error.
+        // spec-219: canonical-only acceptance.
+        let cert_hash = canonical_for(rid);
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
                 rid,
-                [0xCE; 32]
+                cert_hash
             ));
         }
 
         // Receipt is certified.
         let record = OrinqReceipts::receipts(rid).unwrap();
-        assert_eq!(record.availability_cert_hash, [0xCE; 32]);
+        assert_eq!(record.availability_cert_hash, cert_hash);
     });
 }
 
@@ -1395,10 +1414,11 @@ fn expire_after_certification_fails() {
         let rid = H256::from([0x21; 32]);
         let ch = H256::from([0x22; 32]);
         assert_ok!(submit_c4(submitter_seed, rid, ch));
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
-            [0xCE; 32]
+            cert_hash
         ));
 
         let expiry = OrinqReceipts::receipt_expiry_blocks();
@@ -1770,11 +1790,12 @@ fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
 
         // Three signers attest — threshold hits.
         let signer_seeds = [1u8, 2, 3];
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         for &s in signer_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
                 rid,
-                [0xCE; 32]
+                cert_hash
             ));
         }
 
@@ -2157,5 +2178,571 @@ mod era_emission_drip {
         // Reset to the documented default so subsequent tests (if any run
         // after this in the same process) observe the 15/85 baseline.
         TreasuryEmissionShareValue::set(Perbill::from_percent(15));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// spec-219 bug_005 / bug_003 / bug_011: regression suite
+// ---------------------------------------------------------------------------
+//
+// These tests guard against the four bugs surfaced by the ultrareview of
+// PR #23. If any of them flips red, the headline spec-219 mechanism
+// (auto-slash on cert mismatch) is silently regressing — re-check the
+// `with_transaction` / threshold-clamp / migration logic in lib.rs.
+
+/// bug_005: a bad attest must (a) increment `BadAttestStrikes` and (b)
+/// emit a `BadAttestStrike` event. The original PR returned
+/// `Err(CertHashMismatch)`, but the `#[pallet::call]` auto-wrap in
+/// `with_storage_layer` then rolled BOTH back — making the headline
+/// spec-219 mechanism a no-op. The fix changes the dispatch to return
+/// `Ok(())` so the writes commit normally; SDK callers detect
+/// misattestation via the event, not the error.
+#[test]
+fn bad_attest_strike_persists_after_err_return() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        // Raise the slash threshold so this first bad attest is just a
+        // strike (not an auto-slash). The slash path is exercised by the
+        // sibling test below.
+        assert_ok!(OrinqReceipts::set_bad_attest_slash_threshold(
+            RuntimeOrigin::root(),
+            5
+        ));
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let rid = H256::from([0xD0; 32]);
+        let ch = H256::from([0xD1; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        // Propose a deliberately-wrong claimed_hash.
+        let wrong_claim = [0xDE; 32];
+        let canonical = canonical_for(rid);
+        assert_ne!(
+            wrong_claim, canonical,
+            "test precondition: claimed hash must differ from canonical"
+        );
+
+        // Dispatch returns Ok(()) — the failure is signalled via the
+        // BadAttestStrike event, not a DispatchError. This is the only
+        // way to preserve the strike write under the auto-wrap.
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            wrong_claim,
+        ));
+
+        // CRITICAL: the strike MUST have persisted. This is the entire
+        // point of the bug_005 fix.
+        let strikes = pallet::BadAttestStrikes::<Test>::get(&acc(1));
+        assert_eq!(
+            strikes, 1,
+            "bad attest must increment BadAttestStrikes"
+        );
+
+        // The BadAttestStrike event must also have landed.
+        let events = frame_system::Pallet::<Test>::events();
+        let saw_strike = events.iter().any(|r| {
+            matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::BadAttestStrike { attester, strikes: 1, .. }
+                ) if attester == &acc(1)
+            )
+        });
+        assert!(saw_strike, "BadAttestStrike event must be emitted");
+
+        // The attestation record itself must NOT be populated — bad
+        // attests must never poison the receipt's threshold count.
+        assert!(
+            pallet::Attestations::<Test>::get(rid).is_none(),
+            "bad attest must NOT enter Attestations storage"
+        );
+    });
+}
+
+/// bug_005 (slash path): with threshold=1 the very first bad attest must
+/// (a) increment strikes, (b) zero the bond, (c) eject from committee,
+/// (d) reset strikes, (e) emit all three events. The dispatch returns
+/// `Ok(())`; callers detect misattestation by inspecting events.
+#[test]
+fn bad_attest_threshold_one_slashes_and_ejects() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        // spec-219 bug_006: `auto_slash_for_bad_attest` now propagates
+        // `repatriate_reserved` errors via `?`, so the reserve pot
+        // MUST be funded above ED for the slash to actually move the
+        // bond. Pre-fund here to exercise the happy path.
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+        Balances::make_free_balance_be(&reserve_acct, 1);
+        // BadAttestSlashThreshold is seeded to 1 by `on_runtime_upgrade` on
+        // a live chain; in this mock the storage starts at the ValueQuery
+        // default (0) but the call site clamps via `.max(1)`, so the
+        // effective threshold is 1 either way. Set it explicitly here so
+        // the test stays self-documenting.
+        assert_ok!(OrinqReceipts::set_bad_attest_slash_threshold(
+            RuntimeOrigin::root(),
+            1
+        ));
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let bond_before = pallet::AttestorBonds::<Test>::get(&acc(1));
+        assert!(bond_before > 0, "test precondition: attester must be bonded");
+
+        let rid = H256::from([0xE0; 32]);
+        let ch = H256::from([0xE1; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        let wrong_claim = [0xDE; 32];
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            wrong_claim,
+        ));
+
+        // Bond zeroed (auto-slash repatriated to mat/attr).
+        assert_eq!(
+            pallet::AttestorBonds::<Test>::get(&acc(1)),
+            0,
+            "auto-slash must zero the bond"
+        );
+        // Ejected from committee.
+        let committee = pallet::CommitteeMembers::<Test>::get();
+        assert!(
+            !committee.contains(&acc(1)),
+            "auto-slashed attester must be ejected from committee"
+        );
+        // Strikes reset to 0 post-slash (clean slate for re-bond).
+        assert_eq!(
+            pallet::BadAttestStrikes::<Test>::get(&acc(1)),
+            0,
+            "strikes must reset to 0 after auto-slash"
+        );
+        // All three events must have landed.
+        let events = frame_system::Pallet::<Test>::events();
+        let saw_strike = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::BadAttestStrike { attester, .. })
+                if attester == &acc(1)
+        ));
+        let saw_slash = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoSlashedForBadAttest { attester, .. })
+                if attester == &acc(1)
+        ));
+        let saw_eject = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoEjected { who, .. })
+                if who == &acc(1)
+        ));
+        assert!(saw_strike, "BadAttestStrike event must be emitted");
+        assert!(saw_slash, "AutoSlashedForBadAttest event must be emitted");
+        assert!(saw_eject, "AutoEjected event must be emitted");
+    });
+}
+
+/// bug_006 (auto-slash failure path): if the `mat/attr` reserve pot is
+/// below ED, `repatriate_reserved` errors with `DeadAccount`. The
+/// dispatchable must STILL return `Ok(())` so the strike side effect
+/// commits (otherwise the `with_storage_layer` auto-wrap would unwind
+/// bug_005's strike-on-Ok-path mechanism), but the slash itself
+/// reports via a new `AutoSlashFailed` event. Critically: the bond is
+/// NOT zeroed, the attestor is NOT ejected from the committee, and
+/// `AutoSlashedForBadAttest` is NOT emitted — exactly the inverse of
+/// the happy path above. Operators must fund `mat/attr` and call
+/// `slash_attestor` manually to complete the slash.
+#[test]
+fn bad_attest_threshold_one_with_unfunded_pot_emits_slash_failed() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        // DELIBERATELY DO NOT pre-fund the reserve pot — this is the
+        // bug_006 / task #233 condition we're exercising.
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+        assert_eq!(
+            Balances::free_balance(&reserve_acct),
+            0,
+            "test precondition: mat/attr must be below ED"
+        );
+
+        assert_ok!(OrinqReceipts::set_bad_attest_slash_threshold(
+            RuntimeOrigin::root(),
+            1
+        ));
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let bond_before = pallet::AttestorBonds::<Test>::get(&acc(1));
+        let reserved_before = Balances::reserved_balance(&acc(1));
+        assert!(bond_before > 0, "test precondition: attester must be bonded");
+        assert!(reserved_before >= bond_before);
+
+        let rid = H256::from([0xE2; 32]);
+        let ch = H256::from([0xE3; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        let wrong_claim = [0xDE; 32];
+        // Dispatch MUST succeed — bug_005 mechanism preserved.
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            wrong_claim,
+        ));
+
+        // Bond UNTOUCHED — the slash did not move the funds.
+        assert_eq!(
+            pallet::AttestorBonds::<Test>::get(&acc(1)),
+            bond_before,
+            "AttestorBonds must be untouched when auto-slash fails"
+        );
+        assert_eq!(
+            Balances::reserved_balance(&acc(1)),
+            reserved_before,
+            "reserved balance must be untouched when auto-slash fails"
+        );
+        // Attester still in committee — operator must call slash_attestor.
+        assert!(
+            pallet::CommitteeMembers::<Test>::get().contains(&acc(1)),
+            "attester must NOT be ejected when auto-slash fails"
+        );
+
+        let events = frame_system::Pallet::<Test>::events();
+        // Strike side-effect DID commit (bug_005 path).
+        let saw_strike = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::BadAttestStrike { attester, .. })
+                if attester == &acc(1)
+        ));
+        // AutoSlashFailed signals the deferred slash.
+        let saw_failed = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoSlashFailed { attester, .. })
+                if attester == &acc(1)
+        ));
+        // Happy-path events must NOT have fired.
+        let saw_slash = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoSlashedForBadAttest { attester, .. })
+                if attester == &acc(1)
+        ));
+        let saw_eject = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoEjected { who, .. })
+                if who == &acc(1)
+        ));
+        assert!(saw_strike, "BadAttestStrike event must be emitted");
+        assert!(saw_failed, "AutoSlashFailed event must be emitted");
+        assert!(!saw_slash, "AutoSlashedForBadAttest MUST NOT fire when slash failed");
+        assert!(!saw_eject, "AutoEjected MUST NOT fire when slash failed");
+    });
+}
+
+/// bug_003: shrinking the committee via auto-slash MUST clamp
+/// AttestationThreshold so the certification path stays satisfiable.
+/// Without the clamp a threshold-7-of-10 committee that loses two members
+/// would still need 7 attestations from the remaining 8 — but with the
+/// aggressive flush threshold=1 default it can quickly bottom out below
+/// the required count and wedge.
+#[test]
+fn auto_slash_clamps_threshold_below_new_committee_size() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        let committee_seeds: Vec<u8> = (1u8..=5).collect();
+        seed_submitter_and_committee(submitter_seed, &committee_seeds);
+        // spec-219 bug_006: auto-slash fail-fast on unfunded reserve pot.
+        let reserve_acct: MockAccountId =
+            AttestorReservePotId::get().into_account_truncating();
+        Balances::make_free_balance_be(&reserve_acct, 1);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            4
+        ));
+        assert_eq!(pallet::AttestationThreshold::<Test>::get(), 4);
+        assert_eq!(pallet::CommitteeMembers::<Test>::get().len(), 5);
+
+        // Submit a receipt so we have a canonical hash to attest against.
+        let rid = H256::from([0xF0; 32]);
+        let ch = H256::from([0xF1; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        // Slash two members by sending each one a bad attest with
+        // threshold=1 active. Each returns Ok(()) — strike+slash are
+        // signalled via events, not DispatchError.
+        let wrong_claim = [0xDE; 32];
+        for &s in &[1u8, 2u8] {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                wrong_claim,
+            ));
+        }
+
+        // Committee shrunk to 3; threshold must clamp to 3.
+        let new_size = pallet::CommitteeMembers::<Test>::get().len() as u32;
+        assert_eq!(new_size, 3, "committee must shrink by exactly 2");
+        assert_eq!(
+            pallet::AttestationThreshold::<Test>::get(),
+            3,
+            "AttestationThreshold must clamp from 4 to 3 (new committee size)"
+        );
+    });
+}
+
+/// bug_011: at spec-219 activation, `on_runtime_upgrade` must drain
+/// `Attestations` so honest attesters can re-attest under the canonical
+/// scheme. Pre-spec-219 mid-attestation entries would otherwise rot until
+/// expiry — their stored `existing_hash` is a legacy CBOR-style value that
+/// the canonical post-219 hash cannot match.
+#[test]
+fn on_runtime_upgrade_clears_stale_attestations() {
+    new_test_ext().execute_with(|| {
+        use frame_support::BoundedBTreeSet;
+        // Pre-populate Attestations with three legacy entries.
+        for byte in 0u8..3 {
+            let rid = H256::from([byte; 32]);
+            let legacy_hash = H256::from([0xFA; 32]);
+            let mut signers =
+                BoundedBTreeSet::<MockAccountId, <Test as pallet::Config>::MaxCommitteeSize>::new();
+            let _ = signers.try_insert(acc(byte + 1));
+            pallet::Attestations::<Test>::insert(rid, (legacy_hash, signers));
+        }
+        assert_eq!(pallet::Attestations::<Test>::iter().count(), 3);
+
+        // Wipe BadAttestSlashThreshold so we can verify the migration's
+        // existing init path still runs alongside the new clear-step.
+        pallet::BadAttestSlashThreshold::<Test>::kill();
+        assert!(!pallet::BadAttestSlashThreshold::<Test>::exists());
+
+        // Run the migration.
+        let _weight = <pallet::Pallet<Test> as frame_support::traits::Hooks<
+            frame_system::pallet_prelude::BlockNumberFor<Test>,
+        >>::on_runtime_upgrade();
+
+        // All three entries must be gone.
+        assert_eq!(
+            pallet::Attestations::<Test>::iter().count(),
+            0,
+            "on_runtime_upgrade must drain Attestations storage"
+        );
+        // BadAttestSlashThreshold init must still have run.
+        assert_eq!(
+            pallet::BadAttestSlashThreshold::<Test>::get(),
+            1,
+            "on_runtime_upgrade must seed BadAttestSlashThreshold=1"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
+// spec-219: SCALE-canonical Cert byte-parity tests
+// ---------------------------------------------------------------------------
+//
+// Three fixture vectors lifted VERBATIM from `materios-c-deep-design.md` §6.
+// The symmetric Python encoder lives in
+// `operator-kit/tests/test_scale_cert_parity.py`; both repos hash the same
+// 202-byte pre-image and assert identical SHA-256 cert hashes. Any drift in
+// either implementation flips CI red before the daemon image lands on prod.
+//
+// Vector 3 differs from Vector 2 ONLY in `chain_id` (a stale v5 chain
+// genesis) — this is the exact pattern of MacBook's 15-day silent failure
+// and faucet-attestor's confirmed-stale config. The fourth test
+// (`v3_hash_differs_from_v2_hash`) asserts the bug class IS detectable: any
+// implementation that ignores `chain_id` would collapse V2.hash == V3.hash
+// and immediately fail.
+#[cfg(test)]
+mod scale_cert_parity {
+    use crate::types::{
+        Cert, CERT_ATTESTATION_LEVEL, CERT_DOMAIN_BYTES, CERT_EPOCH_PLACEHOLDER,
+        CERT_RETENTION_DAYS, CERT_SCHEMA_VERSION,
+    };
+    use hex_literal::hex;
+    use parity_scale_codec::Encode;
+
+    /// Build a `Cert` from raw inputs using the spec-219 pinned constants.
+    fn build_cert(
+        chain_id: [u8; 32],
+        receipt_id: [u8; 32],
+        content_hash: [u8; 32],
+        base_root: [u8; 32],
+        storage_locator: [u8; 32],
+    ) -> Cert {
+        Cert {
+            domain: *CERT_DOMAIN_BYTES,
+            chain_id,
+            receipt_id,
+            content_hash,
+            base_root,
+            storage_locator,
+            epoch: CERT_EPOCH_PLACEHOLDER,
+            retention_days: CERT_RETENTION_DAYS,
+            attestation_level: CERT_ATTESTATION_LEVEL,
+            schema_version: CERT_SCHEMA_VERSION,
+        }
+    }
+
+    fn sha256(data: &[u8]) -> [u8; 32] {
+        sp_io::hashing::sha2_256(data)
+    }
+
+    /// Vector 1 — all-zeros (smoke / minimum). Verifies the domain
+    /// separator + constant trailer encode at the expected offsets even
+    /// when every hash field is zero.
+    #[test]
+    fn v1_all_zeros() {
+        let cert = build_cert([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
+        let encoded = cert.encode();
+        let expected_bytes: [u8; 202] = hex!(
+            "6d61746572696f732d617661696c6162696c6974792d636572742d7631000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "000000006d0100000201"
+        );
+        assert_eq!(encoded.len(), 202, "Cert encodes to exactly 202 bytes");
+        assert_eq!(
+            encoded.as_slice(),
+            expected_bytes.as_slice(),
+            "V1 bytes diverged from design §6",
+        );
+        let expected_hash: [u8; 32] =
+            hex!("667f01e11cb9a7502765ce51e92568322b292270cbcb4fa9be6fcb5363bc8d69");
+        assert_eq!(
+            sha256(&encoded),
+            expected_hash,
+            "V1 sha256 diverged from design §6"
+        );
+    }
+
+    /// Vector 2 — preprod v6 live `chain_id` + realistic receipt.
+    #[test]
+    fn v2_preprod_v6_chain_id() {
+        let chain_id: [u8; 32] =
+            hex!("0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf");
+        let receipt_id: [u8; 32] =
+            hex!("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+        let content_hash: [u8; 32] =
+            hex!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let base_root: [u8; 32] =
+            hex!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+        let storage_locator: [u8; 32] =
+            hex!("1111111111111111222222222222222233333333333333334444444444444444");
+        let cert = build_cert(chain_id, receipt_id, content_hash, base_root, storage_locator);
+        let encoded = cert.encode();
+        let expected_bytes: [u8; 202] = hex!(
+            "6d61746572696f732d617661696c6162696c6974792d636572742d7631000000"
+            "0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf"
+            "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+            "1111111111111111222222222222222233333333333333334444444444444444"
+            "000000006d0100000201"
+        );
+        assert_eq!(encoded.len(), 202);
+        assert_eq!(
+            encoded.as_slice(),
+            expected_bytes.as_slice(),
+            "V2 bytes diverged from design §6",
+        );
+        let expected_hash: [u8; 32] =
+            hex!("ba93d1287e96983e68edcf10c9b07ada515168c3e980609980c8d5a4ac48d667");
+        assert_eq!(
+            sha256(&encoded),
+            expected_hash,
+            "V2 sha256 diverged from design §6"
+        );
+    }
+
+    /// Vector 3 — STALE v5 `chain_id`, otherwise identical to V2. The
+    /// canonical hash MUST differ from V2 because `chain_id` is part of the
+    /// pre-image; this is what makes the stale-config bug class detectable.
+    #[test]
+    fn v3_stale_v5_chain_id() {
+        let chain_id: [u8; 32] =
+            hex!("bc0531cb311281565036fb397a376f0e0fa37005589655f97a7924b2729a164c");
+        let receipt_id: [u8; 32] =
+            hex!("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+        let content_hash: [u8; 32] =
+            hex!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let base_root: [u8; 32] =
+            hex!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+        let storage_locator: [u8; 32] =
+            hex!("1111111111111111222222222222222233333333333333334444444444444444");
+        let cert = build_cert(chain_id, receipt_id, content_hash, base_root, storage_locator);
+        let encoded = cert.encode();
+        let expected_bytes: [u8; 202] = hex!(
+            "6d61746572696f732d617661696c6162696c6974792d636572742d7631000000"
+            "bc0531cb311281565036fb397a376f0e0fa37005589655f97a7924b2729a164c"
+            "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+            "1111111111111111222222222222222233333333333333334444444444444444"
+            "000000006d0100000201"
+        );
+        assert_eq!(encoded.len(), 202);
+        assert_eq!(
+            encoded.as_slice(),
+            expected_bytes.as_slice(),
+            "V3 bytes diverged from design §6",
+        );
+        let expected_hash: [u8; 32] =
+            hex!("9fa7d1c2cbcb77079668a1bc828d16ab84c41c3939a907d6e93fb21090dddd47");
+        assert_eq!(
+            sha256(&encoded),
+            expected_hash,
+            "V3 sha256 diverged from design §6"
+        );
+    }
+
+    /// spec-219 invariant: V3.hash != V2.hash. If this fails, the
+    /// canonical-cert pre-image has dropped `chain_id` (or some other
+    /// distinguishing field) and the stale-config bug class is no longer
+    /// detectable — exactly the failure mode this entire spec aims to
+    /// close.
+    #[test]
+    fn v3_hash_differs_from_v2_hash() {
+        let receipt_id: [u8; 32] =
+            hex!("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+        let content_hash: [u8; 32] =
+            hex!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let base_root: [u8; 32] =
+            hex!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+        let storage_locator: [u8; 32] =
+            hex!("1111111111111111222222222222222233333333333333334444444444444444");
+        let v2 = build_cert(
+            hex!("0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf"),
+            receipt_id,
+            content_hash,
+            base_root,
+            storage_locator,
+        );
+        let v3 = build_cert(
+            hex!("bc0531cb311281565036fb397a376f0e0fa37005589655f97a7924b2729a164c"),
+            receipt_id,
+            content_hash,
+            base_root,
+            storage_locator,
+        );
+        assert_ne!(
+            sha256(&v2.encode()),
+            sha256(&v3.encode()),
+            "V2 and V3 hashes must differ (chain_id is part of the pre-image)"
+        );
     }
 }

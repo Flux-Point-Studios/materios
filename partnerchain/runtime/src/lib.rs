@@ -247,7 +247,32 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        bumps runtime metadata → spec_version bump required even
     //        though the call signature itself is unchanged. tx_version
     //        stays at 2 — no existing extrinsic signature changed.
-    spec_version: 217,
+    //        NOTE: spec-217 was ALSO hot-deployed via wasm-runtime-
+    //        override and accidentally reverted `MaxCommitteeSize`
+    //        96 → 64 (see 218 below). The MaxPruneBatch landing here
+    //        is the source-tree-correct version of the 217 bump.
+    // 218 = (deployed via wasm-runtime-override) — restored
+    //        `OrinqReceipts::MaxCommitteeSize` 64 → 96 (and
+    //        `input_sanity::MAX_COMMITTEE_SIZE` in lockstep). Hotfix for
+    //        the spec-217 cap regression.
+    // 219 = C-deep / SCALE-canonical availability cert. Moves cert-hash
+    //        canonicalisation from off-chain CBOR (Python `build_cert`,
+    //        already retired in operator-kit PR #23) onto chain via a
+    //        fixed-width 202-byte SCALE `Cert` struct (see
+    //        `pallets/orinq-receipts/src/types.rs::Cert`).
+    //        `attest_availability_cert` now requires `claimed_hash` to
+    //        equal `Pallet::canonical_cert_hash(receipt_id)`; any mismatch
+    //        increments `BadAttestStrikes<attester>` and, at threshold,
+    //        triggers `auto_slash_for_bad_attest`. `BadAttestSlashThreshold`
+    //        is seeded to 1 (aggressive flush) via `on_runtime_upgrade`;
+    //        governance raises to 3 once the flush wave settles (~24-48h
+    //        post-activation). Plus: pin `MaxCommitteeSize = 96` in source
+    //        tree to match the live spec-218 hotfix and prevent a second
+    //        96 → 64 regression — see the 217/218 comments above and
+    //        `feedback_large_runtime_upgrade.md`. Extrinsic signature is
+    //        type-stable (`(H256, [u8;32])` → `(H256, [u8;32])`, same
+    //        call_index 3) so `transaction_version` stays at 2.
+    spec_version: 219,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -571,14 +596,15 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = pallet_orinq_receipts::weights::SubstrateWeight;
     type MaxResubmits = ConstU32<64>;
-    // Raised 16 → 64 in spec 203. The old 16-seat ceiling was the
-    // original preprod bootstrap cap; the network grew past it when
-    // GoFigure's 17th attestor hit CommitteeFull on 2026-04-21.
-    // 64 is chosen as a comfortable ~4x headroom over the current active
-    // set while staying within a single 64-bit bitset's worth of seat
-    // bookkeeping. The paired `input_sanity::MAX_COMMITTEE_SIZE` must
-    // match — see runtime/src/input_sanity.rs.
-    type MaxCommitteeSize = ConstU32<64>;
+    // Raised 16 → 64 in spec 203 (original preprod cap had filled at the
+    // 17th attestor on 2026-04-21). spec-217 accidentally regressed this
+    // to 64 in the WASM (source had stayed at 64), ejecting 24 of 88
+    // committee members. spec-218 hot-restored to 96 on chain via the
+    // `wasm-runtime-overrides` chain; THIS source-tree edit lands the
+    // matching code-tree value so future spec bumps do not silently
+    // regress a SECOND time. Paired `input_sanity::MAX_COMMITTEE_SIZE`
+    // must stay in lockstep — see runtime/src/input_sanity.rs.
+    type MaxCommitteeSize = ConstU32<96>;
     // Component 8: attestor bonds are held as reserved MATRA on Balances.
     type Currency = Balances;
     // Slashed bonds repatriate to the attestor reserve pot (`mat/attr`),
@@ -658,11 +684,12 @@ impl pallet_intent_settlement::IsCommitteeMember<AccountId> for OrinqCommitteeAd
 }
 
 parameter_types! {
-    /// Matches the widened MaxCommitteeSize=64 pinned in OrinqReceipts (spec
-    /// 203). Keeping the intent-settlement cap in lockstep avoids an adapter
-    /// mismatch where OrinqReceipts admits a 64th member but intent-settlement
-    /// BoundedVec overflows.
-    pub const IntentSettlementMaxCommittee: u32 = 64;
+    /// Matches the widened MaxCommitteeSize=96 pinned in OrinqReceipts (spec
+    /// 203 raised to 64, spec-218 hotfix lifted to 96 — see `runtime/src/lib.rs`
+    /// spec_version log). Keeping the intent-settlement cap in lockstep avoids
+    /// an adapter mismatch where OrinqReceipts admits a member but
+    /// intent-settlement BoundedVec overflows.
+    pub const IntentSettlementMaxCommittee: u32 = 96;
     /// TTL-sweep bound per block; bounds the on_initialize cost.
     pub const IntentSettlementMaxExpirePerBlock: u32 = 64;
     /// Default intent TTL: 600 blocks ≈ 1h @ 6s. Matches spec v1 §3.3.

@@ -59,7 +59,11 @@ pub const MAX_COMMITTEE_SIZE: u16 = {
     // `select_authorities` return BoundedVec is bounded by MaxValidators
     // and downstream consumers treat counts as u16.
     assert!(crate::MAX_VALIDATORS <= u16::MAX as u32);
-    64
+    // 96 mirrors `OrinqReceipts::MaxCommitteeSize` after the spec-218
+    // hot-restore (see runtime/src/lib.rs spec_version log). The pair MUST
+    // stay in lockstep, otherwise Ariadne d-parameter sanitation will
+    // silently reject a value the pallet would otherwise accept.
+    96
 };
 
 /// Top-level invariant violations. When any of these fires we discard
@@ -413,43 +417,44 @@ mod tests {
     }
 
     /// Boundary test: a d_parameter whose permissioned+registered seats sum
-    /// exactly to 64 must PASS sanitation. Guards against regressions where
+    /// exactly to 96 must PASS sanitation. Guards against regressions where
     /// `MAX_COMMITTEE_SIZE` gets silently decoupled from the orinq-receipts
-    /// pallet cap. Spec 203 raised both to 64.
+    /// pallet cap. Spec 218 (C-deep hot-restore) raised both to 96; this
+    /// test pins the cap at exactly 96.
     #[test]
-    fn input_sanity_accepts_d_param_summing_to_64() {
+    fn input_sanity_accepts_d_param_summing_to_96() {
         let mut i = inputs_ok();
-        i.d_parameter.num_permissioned_candidates = 40;
-        i.d_parameter.num_registered_candidates = 24;
+        i.d_parameter.num_permissioned_candidates = 60;
+        i.d_parameter.num_registered_candidates = 36;
         assert_eq!(
             i.d_parameter.num_permissioned_candidates + i.d_parameter.num_registered_candidates,
-            64,
-            "test precondition: d-param must sum to 64"
+            96,
+            "test precondition: d-param must sum to 96"
         );
         let (cleaned, _report) = sanitize_authority_selection_inputs(i).unwrap();
-        assert_eq!(cleaned.d_parameter.num_permissioned_candidates, 40);
-        assert_eq!(cleaned.d_parameter.num_registered_candidates, 24);
+        assert_eq!(cleaned.d_parameter.num_permissioned_candidates, 60);
+        assert_eq!(cleaned.d_parameter.num_registered_candidates, 36);
     }
 
-    /// Boundary test: a d_parameter summing to 65 (one over the cap) must
-    /// fail. Complements `input_sanity_accepts_d_param_summing_to_64`; the
-    /// pair pins the cap at exactly 64.
+    /// Boundary test: a d_parameter summing to 97 (one over the cap) must
+    /// fail. Complements `input_sanity_accepts_d_param_summing_to_96`; the
+    /// pair pins the cap at exactly 96.
     #[test]
-    fn input_sanity_rejects_d_param_summing_to_65() {
+    fn input_sanity_rejects_d_param_summing_to_97() {
         let mut i = inputs_ok();
-        i.d_parameter.num_permissioned_candidates = 40;
-        i.d_parameter.num_registered_candidates = 25;
+        i.d_parameter.num_permissioned_candidates = 60;
+        i.d_parameter.num_registered_candidates = 37;
         assert_eq!(
             i.d_parameter.num_permissioned_candidates + i.d_parameter.num_registered_candidates,
-            65,
-            "test precondition: d-param must sum to 65"
+            97,
+            "test precondition: d-param must sum to 97"
         );
         let err = sanitize_authority_selection_inputs(i).unwrap_err();
         match err {
             SanityError::DParamTooLarge { permissioned, registered, cap } => {
-                assert_eq!(permissioned, 40);
-                assert_eq!(registered, 25);
-                assert_eq!(cap, 64, "cap must report as 64 in the error");
+                assert_eq!(permissioned, 60);
+                assert_eq!(registered, 37);
+                assert_eq!(cap, 96, "cap must report as 96 in the error");
             }
             other => panic!("expected DParamTooLarge, got {other:?}"),
         }
