@@ -199,7 +199,8 @@ fn submit(
 /// spec-219: produce the canonical-cert hash for `rid` as it would be
 /// computed by the runtime. Existing tests that used to pass an arbitrary
 /// `[0xCE; 32]` to `attest_availability_cert` must now supply this exact
-/// value or take a `CertHashMismatch` (and a `BadAttestStrike`).
+/// value or take a `BadAttestStrike` event (with `Ok(())` dispatch —
+/// see the `bad_attest_*` regression suite for the call-level contract).
 fn canonical_for(rid: H256) -> [u8; 32] {
     OrinqReceipts::canonical_cert_hash(rid)
         .expect("receipt exists before attestation")
@@ -1117,8 +1118,9 @@ fn threshold_hit_splits_fee_80_20_three_signers() {
         let treasury_before = Balances::free_balance(&treasury_account());
 
         // Three signers attest — threshold hits on the third.
-        // spec-219: must propose the canonical hash; the runtime rejects
-        // any other value with `CertHashMismatch` + `BadAttestStrike`.
+        // spec-219: must propose the canonical hash; otherwise the runtime
+        // records a `BadAttestStrike` (Ok dispatch + event) and the bad
+        // attest is dropped before reaching the `Attestations` map.
         let cert_hash = canonical_for(rid);
         for &s in signer_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
@@ -2177,6 +2179,262 @@ mod era_emission_drip {
         // after this in the same process) observe the 15/85 baseline.
         TreasuryEmissionShareValue::set(Perbill::from_percent(15));
     }
+}
+
+// ---------------------------------------------------------------------------
+// spec-219 bug_005 / bug_003 / bug_011: regression suite
+// ---------------------------------------------------------------------------
+//
+// These tests guard against the four bugs surfaced by the ultrareview of
+// PR #23. If any of them flips red, the headline spec-219 mechanism
+// (auto-slash on cert mismatch) is silently regressing — re-check the
+// `with_transaction` / threshold-clamp / migration logic in lib.rs.
+
+/// bug_005: a bad attest must (a) increment `BadAttestStrikes` and (b)
+/// emit a `BadAttestStrike` event. The original PR returned
+/// `Err(CertHashMismatch)`, but the `#[pallet::call]` auto-wrap in
+/// `with_storage_layer` then rolled BOTH back — making the headline
+/// spec-219 mechanism a no-op. The fix changes the dispatch to return
+/// `Ok(())` so the writes commit normally; SDK callers detect
+/// misattestation via the event, not the error.
+#[test]
+fn bad_attest_strike_persists_after_err_return() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        // Raise the slash threshold so this first bad attest is just a
+        // strike (not an auto-slash). The slash path is exercised by the
+        // sibling test below.
+        assert_ok!(OrinqReceipts::set_bad_attest_slash_threshold(
+            RuntimeOrigin::root(),
+            5
+        ));
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let rid = H256::from([0xD0; 32]);
+        let ch = H256::from([0xD1; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        // Propose a deliberately-wrong claimed_hash.
+        let wrong_claim = [0xDE; 32];
+        let canonical = canonical_for(rid);
+        assert_ne!(
+            wrong_claim, canonical,
+            "test precondition: claimed hash must differ from canonical"
+        );
+
+        // Dispatch returns Ok(()) — the failure is signalled via the
+        // BadAttestStrike event, not a DispatchError. This is the only
+        // way to preserve the strike write under the auto-wrap.
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            wrong_claim,
+        ));
+
+        // CRITICAL: the strike MUST have persisted. This is the entire
+        // point of the bug_005 fix.
+        let strikes = pallet::BadAttestStrikes::<Test>::get(&acc(1));
+        assert_eq!(
+            strikes, 1,
+            "bad attest must increment BadAttestStrikes"
+        );
+
+        // The BadAttestStrike event must also have landed.
+        let events = frame_system::Pallet::<Test>::events();
+        let saw_strike = events.iter().any(|r| {
+            matches!(
+                &r.event,
+                RuntimeEvent::OrinqReceipts(
+                    crate::Event::BadAttestStrike { attester, strikes: 1, .. }
+                ) if attester == &acc(1)
+            )
+        });
+        assert!(saw_strike, "BadAttestStrike event must be emitted");
+
+        // The attestation record itself must NOT be populated — bad
+        // attests must never poison the receipt's threshold count.
+        assert!(
+            pallet::Attestations::<Test>::get(rid).is_none(),
+            "bad attest must NOT enter Attestations storage"
+        );
+    });
+}
+
+/// bug_005 (slash path): with threshold=1 the very first bad attest must
+/// (a) increment strikes, (b) zero the bond, (c) eject from committee,
+/// (d) reset strikes, (e) emit all three events. The dispatch returns
+/// `Ok(())`; callers detect misattestation by inspecting events.
+#[test]
+fn bad_attest_threshold_one_slashes_and_ejects() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        seed_submitter_and_committee(submitter_seed, &[1]);
+        // BadAttestSlashThreshold is seeded to 1 by `on_runtime_upgrade` on
+        // a live chain; in this mock the storage starts at the ValueQuery
+        // default (0) but the call site clamps via `.max(1)`, so the
+        // effective threshold is 1 either way. Set it explicitly here so
+        // the test stays self-documenting.
+        assert_ok!(OrinqReceipts::set_bad_attest_slash_threshold(
+            RuntimeOrigin::root(),
+            1
+        ));
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1)],
+            1
+        ));
+
+        let bond_before = pallet::AttestorBonds::<Test>::get(&acc(1));
+        assert!(bond_before > 0, "test precondition: attester must be bonded");
+
+        let rid = H256::from([0xE0; 32]);
+        let ch = H256::from([0xE1; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        let wrong_claim = [0xDE; 32];
+        assert_ok!(OrinqReceipts::attest_availability_cert(
+            RuntimeOrigin::signed(acc(1)),
+            rid,
+            wrong_claim,
+        ));
+
+        // Bond zeroed (auto-slash repatriated to mat/attr).
+        assert_eq!(
+            pallet::AttestorBonds::<Test>::get(&acc(1)),
+            0,
+            "auto-slash must zero the bond"
+        );
+        // Ejected from committee.
+        let committee = pallet::CommitteeMembers::<Test>::get();
+        assert!(
+            !committee.contains(&acc(1)),
+            "auto-slashed attester must be ejected from committee"
+        );
+        // Strikes reset to 0 post-slash (clean slate for re-bond).
+        assert_eq!(
+            pallet::BadAttestStrikes::<Test>::get(&acc(1)),
+            0,
+            "strikes must reset to 0 after auto-slash"
+        );
+        // All three events must have landed.
+        let events = frame_system::Pallet::<Test>::events();
+        let saw_strike = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::BadAttestStrike { attester, .. })
+                if attester == &acc(1)
+        ));
+        let saw_slash = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoSlashedForBadAttest { attester, .. })
+                if attester == &acc(1)
+        ));
+        let saw_eject = events.iter().any(|r| matches!(
+            &r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::AutoEjected { who, .. })
+                if who == &acc(1)
+        ));
+        assert!(saw_strike, "BadAttestStrike event must be emitted");
+        assert!(saw_slash, "AutoSlashedForBadAttest event must be emitted");
+        assert!(saw_eject, "AutoEjected event must be emitted");
+    });
+}
+
+/// bug_003: shrinking the committee via auto-slash MUST clamp
+/// AttestationThreshold so the certification path stays satisfiable.
+/// Without the clamp a threshold-7-of-10 committee that loses two members
+/// would still need 7 attestations from the remaining 8 — but with the
+/// aggressive flush threshold=1 default it can quickly bottom out below
+/// the required count and wedge.
+#[test]
+fn auto_slash_clamps_threshold_below_new_committee_size() {
+    new_test_ext().execute_with(|| {
+        let submitter_seed = 10;
+        let committee_seeds: Vec<u8> = (1u8..=5).collect();
+        seed_submitter_and_committee(submitter_seed, &committee_seeds);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            4
+        ));
+        assert_eq!(pallet::AttestationThreshold::<Test>::get(), 4);
+        assert_eq!(pallet::CommitteeMembers::<Test>::get().len(), 5);
+
+        // Submit a receipt so we have a canonical hash to attest against.
+        let rid = H256::from([0xF0; 32]);
+        let ch = H256::from([0xF1; 32]);
+        assert_ok!(submit_c4(submitter_seed, rid, ch));
+
+        // Slash two members by sending each one a bad attest with
+        // threshold=1 active. Each returns Ok(()) — strike+slash are
+        // signalled via events, not DispatchError.
+        let wrong_claim = [0xDE; 32];
+        for &s in &[1u8, 2u8] {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                wrong_claim,
+            ));
+        }
+
+        // Committee shrunk to 3; threshold must clamp to 3.
+        let new_size = pallet::CommitteeMembers::<Test>::get().len() as u32;
+        assert_eq!(new_size, 3, "committee must shrink by exactly 2");
+        assert_eq!(
+            pallet::AttestationThreshold::<Test>::get(),
+            3,
+            "AttestationThreshold must clamp from 4 to 3 (new committee size)"
+        );
+    });
+}
+
+/// bug_011: at spec-219 activation, `on_runtime_upgrade` must drain
+/// `Attestations` so honest attesters can re-attest under the canonical
+/// scheme. Pre-spec-219 mid-attestation entries would otherwise rot until
+/// expiry — their stored `existing_hash` is a legacy CBOR-style value that
+/// the canonical post-219 hash cannot match.
+#[test]
+fn on_runtime_upgrade_clears_stale_attestations() {
+    new_test_ext().execute_with(|| {
+        use frame_support::BoundedBTreeSet;
+        // Pre-populate Attestations with three legacy entries.
+        for byte in 0u8..3 {
+            let rid = H256::from([byte; 32]);
+            let legacy_hash = H256::from([0xFA; 32]);
+            let mut signers =
+                BoundedBTreeSet::<MockAccountId, <Test as pallet::Config>::MaxCommitteeSize>::new();
+            let _ = signers.try_insert(acc(byte + 1));
+            pallet::Attestations::<Test>::insert(rid, (legacy_hash, signers));
+        }
+        assert_eq!(pallet::Attestations::<Test>::iter().count(), 3);
+
+        // Wipe BadAttestSlashThreshold so we can verify the migration's
+        // existing init path still runs alongside the new clear-step.
+        pallet::BadAttestSlashThreshold::<Test>::kill();
+        assert!(!pallet::BadAttestSlashThreshold::<Test>::exists());
+
+        // Run the migration.
+        let _weight = <pallet::Pallet<Test> as frame_support::traits::Hooks<
+            frame_system::pallet_prelude::BlockNumberFor<Test>,
+        >>::on_runtime_upgrade();
+
+        // All three entries must be gone.
+        assert_eq!(
+            pallet::Attestations::<Test>::iter().count(),
+            0,
+            "on_runtime_upgrade must drain Attestations storage"
+        );
+        // BadAttestSlashThreshold init must still have run.
+        assert_eq!(
+            pallet::BadAttestSlashThreshold::<Test>::get(),
+            1,
+            "on_runtime_upgrade must seed BadAttestSlashThreshold=1"
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------

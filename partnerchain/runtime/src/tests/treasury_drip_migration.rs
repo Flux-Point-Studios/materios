@@ -292,9 +292,15 @@ fn spec_version_at_least_202_and_tx_version_pinned() {
         "spec_version must never drop below 202 (treasury-drip migration gate); got {}",
         VERSION.spec_version
     );
-    assert_eq!(
-        VERSION.transaction_version, 1,
-        "transaction_version must stay at 1 — no breaking wire format change"
+    // transaction_version was bumped from 1 → 2 at spec 218/219 to signal
+    // the SCALE-canonical Cert pre-image change in `attest_availability_cert`
+    // (extrinsic signature is type-stable so SDK wire format is unchanged,
+    // but the SEMANTIC meaning of `claimed_hash` flipped from "any value
+    // the daemon computed" to "canonical-cert hash from on-chain state").
+    // Pin at >= 2 so a future regression that drops the bump fails CI.
+    assert!(
+        VERSION.transaction_version >= 2,
+        "transaction_version must be >= 2 since spec-218 (canonical cert semantic flip)"
     );
 }
 

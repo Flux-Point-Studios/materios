@@ -469,9 +469,19 @@ pub mod pallet {
         /// not match the runtime-computed canonical cert hash. The strike
         /// counter is incremented; if it crosses `BadAttestSlashThreshold`
         /// the attestor is auto-slashed on the same call (see
-        /// `AutoSlashedForBadAttest`). The extrinsic returns
-        /// `CertHashMismatch` regardless — bad attests never enter
-        /// `Attestations`.
+        /// `AutoSlashedForBadAttest`). Bad attests never enter
+        /// `Attestations`, so the receipt's threshold count is not
+        /// poisoned.
+        ///
+        /// The dispatch returns `Ok(())` on this path even though the
+        /// attestation was rejected — the alternative (returning `Err`)
+        /// would trip the `#[pallet::call]` auto-wrap in
+        /// `with_storage_layer` and roll back the strike/slash side
+        /// effects, defeating the entire spec-219 mechanism. SDK callers
+        /// MUST inspect emitted events (this `BadAttestStrike`) to detect
+        /// misattestation rather than relying on a non-zero
+        /// `DispatchError` — same pattern as how `pallet-balances`
+        /// surfaces slashing.
         BadAttestStrike {
             attester: T::AccountId,
             receipt_id: H256,
@@ -896,6 +906,36 @@ pub mod pallet {
                 writes += 1;
             }
 
+            // spec-219 bug_011: clear ALL mid-attestation entries at
+            // activation. Pre-spec-219 receipts had `Attestations[rid] =
+            // (cbor_hash, signers)` stored under the legacy CBOR scheme.
+            // Post-activation, honest attesters compute the SCALE-canonical
+            // hash, pass the new canonical gate, but then trip on the
+            // inner `*existing_hash == cert_h256` agreement check and
+            // receive a `CertHashMismatch` with no strike — the receipt
+            // would otherwise rot until the 14_400-block expiry.
+            //
+            // Tradeoff: a partially-attested receipt loses its prior signer
+            // credits. Accepted because (a) those signers can simply
+            // re-attest under the canonical scheme, (b) the alternative
+            // (rewriting each `existing_hash` to canonical in a loop) is
+            // more code and more risk for a one-shot migration.
+            //
+            // `clear(u32::MAX, None)` drains every entry in a single pass;
+            // the returned `MultiRemovalResults.backend` count is for
+            // observability only (logged below, not part of weight math —
+            // a cleared StorageMap is sparse and idempotent at re-run).
+            let cleared = Attestations::<T>::clear(u32::MAX, None).backend;
+            if cleared > 0 {
+                writes = writes.saturating_add(cleared as u64);
+                log::info!(
+                    target: "runtime::orinq-receipts",
+                    "spec-219 migration: cleared {} mid-attestation entries; \
+                     honest attesters will re-attest under canonical-cert scheme",
+                    cleared
+                );
+            }
+
             T::DbWeight::get().reads_writes(reads, writes)
         }
     }
@@ -1030,6 +1070,19 @@ pub mod pallet {
                 Self::deposit_event(Event::AutoEjected {
                     who: attester.clone(),
                     remaining_bond: 0,
+                });
+                // spec-219 bug_003: shrinking the committee without clamping
+                // the attestation threshold would wedge the certification
+                // path. Worst case under BadAttestSlashThreshold=1: an
+                // activation-wave flush could slash 7 of 10 members,
+                // leaving committee_size=3 and threshold=7 — `count >=
+                // threshold` then becomes unsatisfiable until governance
+                // intervenes. Clamp on every eject, defensive lower-bound
+                // of 1 so a 0-member committee can't trip a divide-by-zero
+                // downstream.
+                let new_size = CommitteeMembers::<T>::get().len() as u32;
+                AttestationThreshold::<T>::mutate(|t| {
+                    *t = (*t).min(new_size).max(1);
                 });
             }
             Ok(())
@@ -1399,6 +1452,31 @@ pub mod pallet {
                 .ok_or(Error::<T>::ReceiptNotFound)?;
             let cert_h256 = H256::from(claimed_hash);
             if cert_h256 != canonical {
+                // CRITICAL (spec-219 bug_005): `#[pallet::call]` dispatchables
+                // in polkadot-sdk stable2409 are auto-wrapped in
+                // `frame_support::storage::with_storage_layer`. A naive
+                // `Err(_)` return from this branch would unwind ALL
+                // strike/slash mutations (BadAttestStrikes increment,
+                // AutoSlashedForBadAttest side effects, committee ejection,
+                // event deposits) — rendering the headline spec-219
+                // mechanism a no-op, because the macro's rollback also
+                // rolls back any writes nested `with_transaction { Commit }`
+                // helpers tried to "save" (a nested Commit propagates to
+                // the PARENT layer, which is itself the rolled-back one).
+                //
+                // The clean fix is to record the strike and (if applicable)
+                // auto-slash on the SUCCESS path: the dispatchable returns
+                // `Ok(())`, the writes commit normally, and SDK callers
+                // detect the misattestation by inspecting the emitted
+                // `BadAttestStrike` event rather than the dispatch error.
+                // This is identical in spirit to how pallet-balances exposes
+                // slashing — slashing always succeeds at the dispatch level
+                // even though it implies counter-party failure.
+                //
+                // The attestation record itself is NOT updated: we still
+                // return early after recording the strike, so the receipt's
+                // `Attestations` storage is untouched and bad attests never
+                // poison the threshold count.
                 let strikes = BadAttestStrikes::<T>::mutate(&attester, |n| {
                     *n = n.saturating_add(1);
                     *n
@@ -1410,22 +1488,22 @@ pub mod pallet {
                     canonical,
                     strikes,
                 });
-                // `BadAttestSlashThreshold` is stored as `ValueQuery` (u32),
-                // so an empty storage slot reads as 0. Clamp via `.max(1)`
-                // so a genesis-empty / migration-skipped state cannot
-                // silently disable the gate — even at the cost of slashing
-                // on the very first bad attest (matches the design's
-                // aggressive flush posture, §7).
+                // `BadAttestSlashThreshold` is stored as `ValueQuery`
+                // (u32), so an empty storage slot reads as 0. Clamp via
+                // `.max(1)` so a genesis-empty / migration-skipped state
+                // cannot silently disable the gate — even at the cost of
+                // slashing on the very first bad attest (matches the
+                // design's aggressive flush posture, §7).
                 let threshold = BadAttestSlashThreshold::<T>::get().max(1);
                 if strikes >= threshold {
                     // `auto_slash_for_bad_attest` is internally defensive
-                    // (swallows `repatriate_reserved` shortfalls, eject +
-                    // strike-reset always fire). Propagate any error as a
-                    // defensive measure, though under current code it is
-                    // infallible.
-                    Self::auto_slash_for_bad_attest(&attester)?;
+                    // (swallows `repatriate_reserved` shortfalls; eject +
+                    // strike-reset always fire). Any inner Err is swallowed
+                    // — the slash side effects are observability, not a
+                    // precondition for completing the dispatch.
+                    let _ = Self::auto_slash_for_bad_attest(&attester);
                 }
-                return Err(Error::<T>::CertHashMismatch.into());
+                return Ok(());
             }
 
             // 3. Insert or update the attestation record.
@@ -1971,6 +2049,16 @@ pub mod pallet {
                     Self::deposit_event(Event::AutoEjected {
                         who: attestor,
                         remaining_bond,
+                    });
+                    // spec-219 bug_003 (defense-in-depth): mirror the
+                    // threshold-clamp from `auto_slash_for_bad_attest`. Even
+                    // though `slash_attestor` is Root-only and Root could
+                    // re-issue `set_committee` to fix a wedge, doing the
+                    // clamp here is one storage write and removes the
+                    // failure mode entirely.
+                    let new_size = CommitteeMembers::<T>::get().len() as u32;
+                    AttestationThreshold::<T>::mutate(|t| {
+                        *t = (*t).min(new_size).max(1);
                     });
                 }
             }
