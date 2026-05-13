@@ -196,6 +196,16 @@ fn submit(
     )
 }
 
+/// spec-219: produce the canonical-cert hash for `rid` as it would be
+/// computed by the runtime. Existing tests that used to pass an arbitrary
+/// `[0xCE; 32]` to `attest_availability_cert` must now supply this exact
+/// value or take a `CertHashMismatch` (and a `BadAttestStrike`).
+fn canonical_for(rid: H256) -> [u8; 32] {
+    OrinqReceipts::canonical_cert_hash(rid)
+        .expect("receipt exists before attestation")
+        .0
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1107,7 +1117,9 @@ fn threshold_hit_splits_fee_80_20_three_signers() {
         let treasury_before = Balances::free_balance(&treasury_account());
 
         // Three signers attest — threshold hits on the third.
-        let cert_hash = [0xCE; 32];
+        // spec-219: must propose the canonical hash; the runtime rejects
+        // any other value with `CertHashMismatch` + `BadAttestStrike`.
+        let cert_hash = canonical_for(rid);
         for &s in signer_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
@@ -1175,7 +1187,8 @@ fn threshold_hit_with_seven_signers_splits_cleanly() {
             committee_seeds.iter().map(|&s| Balances::free_balance(&acc(s))).collect();
         let treasury_before = Balances::free_balance(&treasury_account());
 
-        let cert_hash = [0xCE; 32];
+        // spec-219: canonical-only acceptance — see `canonical_for`.
+        let cert_hash = canonical_for(rid);
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
@@ -1224,10 +1237,11 @@ fn threshold_hit_single_signer_gets_full_80_percent() {
         let signer_before = Balances::free_balance(&acc(1));
         let treasury_before = Balances::free_balance(&treasury_account());
 
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
-            [0xCE; 32]
+            cert_hash
         ));
 
         // Whole 80% goes to the sole signer, 20% goes to treasury.
@@ -1256,11 +1270,12 @@ fn threshold_hit_emits_fee_distributed_event() {
         let rid = H256::from([0xD1; 32]);
         let ch = H256::from([0xD2; 32]);
         assert_ok!(submit_c4(submitter_seed, rid, ch));
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
                 rid,
-                [0xCE; 32]
+                cert_hash
             ));
         }
 
@@ -1308,17 +1323,19 @@ fn pre_component_4_receipt_skips_fee_payout() {
         let _ = Balances::unreserve(&submitter, DEFAULT_FEE);
 
         // Certify — must not error.
+        // spec-219: canonical-only acceptance.
+        let cert_hash = canonical_for(rid);
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
                 rid,
-                [0xCE; 32]
+                cert_hash
             ));
         }
 
         // Receipt is certified.
         let record = OrinqReceipts::receipts(rid).unwrap();
-        assert_eq!(record.availability_cert_hash, [0xCE; 32]);
+        assert_eq!(record.availability_cert_hash, cert_hash);
     });
 }
 
@@ -1395,10 +1412,11 @@ fn expire_after_certification_fails() {
         let rid = H256::from([0x21; 32]);
         let ch = H256::from([0x22; 32]);
         assert_ok!(submit_c4(submitter_seed, rid, ch));
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
-            [0xCE; 32]
+            cert_hash
         ));
 
         let expiry = OrinqReceipts::receipt_expiry_blocks();
@@ -1770,11 +1788,12 @@ fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
 
         // Three signers attest — threshold hits.
         let signer_seeds = [1u8, 2, 3];
+        let cert_hash = canonical_for(rid); // spec-219 canonical-only
         for &s in signer_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
                 rid,
-                [0xCE; 32]
+                cert_hash
             ));
         }
 
@@ -2157,5 +2176,204 @@ mod era_emission_drip {
         // Reset to the documented default so subsequent tests (if any run
         // after this in the same process) observe the 15/85 baseline.
         TreasuryEmissionShareValue::set(Perbill::from_percent(15));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// spec-219: SCALE-canonical Cert byte-parity tests
+// ---------------------------------------------------------------------------
+//
+// Three fixture vectors lifted VERBATIM from `materios-c-deep-design.md` §6.
+// The symmetric Python encoder lives in
+// `operator-kit/tests/test_scale_cert_parity.py`; both repos hash the same
+// 202-byte pre-image and assert identical SHA-256 cert hashes. Any drift in
+// either implementation flips CI red before the daemon image lands on prod.
+//
+// Vector 3 differs from Vector 2 ONLY in `chain_id` (a stale v5 chain
+// genesis) — this is the exact pattern of MacBook's 15-day silent failure
+// and faucet-attestor's confirmed-stale config. The fourth test
+// (`v3_hash_differs_from_v2_hash`) asserts the bug class IS detectable: any
+// implementation that ignores `chain_id` would collapse V2.hash == V3.hash
+// and immediately fail.
+#[cfg(test)]
+mod scale_cert_parity {
+    use crate::types::{
+        Cert, CERT_ATTESTATION_LEVEL, CERT_DOMAIN_BYTES, CERT_EPOCH_PLACEHOLDER,
+        CERT_RETENTION_DAYS, CERT_SCHEMA_VERSION,
+    };
+    use hex_literal::hex;
+    use parity_scale_codec::Encode;
+
+    /// Build a `Cert` from raw inputs using the spec-219 pinned constants.
+    fn build_cert(
+        chain_id: [u8; 32],
+        receipt_id: [u8; 32],
+        content_hash: [u8; 32],
+        base_root: [u8; 32],
+        storage_locator: [u8; 32],
+    ) -> Cert {
+        Cert {
+            domain: *CERT_DOMAIN_BYTES,
+            chain_id,
+            receipt_id,
+            content_hash,
+            base_root,
+            storage_locator,
+            epoch: CERT_EPOCH_PLACEHOLDER,
+            retention_days: CERT_RETENTION_DAYS,
+            attestation_level: CERT_ATTESTATION_LEVEL,
+            schema_version: CERT_SCHEMA_VERSION,
+        }
+    }
+
+    fn sha256(data: &[u8]) -> [u8; 32] {
+        sp_io::hashing::sha2_256(data)
+    }
+
+    /// Vector 1 — all-zeros (smoke / minimum). Verifies the domain
+    /// separator + constant trailer encode at the expected offsets even
+    /// when every hash field is zero.
+    #[test]
+    fn v1_all_zeros() {
+        let cert = build_cert([0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32]);
+        let encoded = cert.encode();
+        let expected_bytes: [u8; 202] = hex!(
+            "6d61746572696f732d617661696c6162696c6974792d636572742d7631000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "0000000000000000000000000000000000000000000000000000000000000000"
+            "000000006d0100000201"
+        );
+        assert_eq!(encoded.len(), 202, "Cert encodes to exactly 202 bytes");
+        assert_eq!(
+            encoded.as_slice(),
+            expected_bytes.as_slice(),
+            "V1 bytes diverged from design §6",
+        );
+        let expected_hash: [u8; 32] =
+            hex!("667f01e11cb9a7502765ce51e92568322b292270cbcb4fa9be6fcb5363bc8d69");
+        assert_eq!(
+            sha256(&encoded),
+            expected_hash,
+            "V1 sha256 diverged from design §6"
+        );
+    }
+
+    /// Vector 2 — preprod v6 live `chain_id` + realistic receipt.
+    #[test]
+    fn v2_preprod_v6_chain_id() {
+        let chain_id: [u8; 32] =
+            hex!("0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf");
+        let receipt_id: [u8; 32] =
+            hex!("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+        let content_hash: [u8; 32] =
+            hex!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let base_root: [u8; 32] =
+            hex!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+        let storage_locator: [u8; 32] =
+            hex!("1111111111111111222222222222222233333333333333334444444444444444");
+        let cert = build_cert(chain_id, receipt_id, content_hash, base_root, storage_locator);
+        let encoded = cert.encode();
+        let expected_bytes: [u8; 202] = hex!(
+            "6d61746572696f732d617661696c6162696c6974792d636572742d7631000000"
+            "0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf"
+            "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+            "1111111111111111222222222222222233333333333333334444444444444444"
+            "000000006d0100000201"
+        );
+        assert_eq!(encoded.len(), 202);
+        assert_eq!(
+            encoded.as_slice(),
+            expected_bytes.as_slice(),
+            "V2 bytes diverged from design §6",
+        );
+        let expected_hash: [u8; 32] =
+            hex!("ba93d1287e96983e68edcf10c9b07ada515168c3e980609980c8d5a4ac48d667");
+        assert_eq!(
+            sha256(&encoded),
+            expected_hash,
+            "V2 sha256 diverged from design §6"
+        );
+    }
+
+    /// Vector 3 — STALE v5 `chain_id`, otherwise identical to V2. The
+    /// canonical hash MUST differ from V2 because `chain_id` is part of the
+    /// pre-image; this is what makes the stale-config bug class detectable.
+    #[test]
+    fn v3_stale_v5_chain_id() {
+        let chain_id: [u8; 32] =
+            hex!("bc0531cb311281565036fb397a376f0e0fa37005589655f97a7924b2729a164c");
+        let receipt_id: [u8; 32] =
+            hex!("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+        let content_hash: [u8; 32] =
+            hex!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let base_root: [u8; 32] =
+            hex!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+        let storage_locator: [u8; 32] =
+            hex!("1111111111111111222222222222222233333333333333334444444444444444");
+        let cert = build_cert(chain_id, receipt_id, content_hash, base_root, storage_locator);
+        let encoded = cert.encode();
+        let expected_bytes: [u8; 202] = hex!(
+            "6d61746572696f732d617661696c6162696c6974792d636572742d7631000000"
+            "bc0531cb311281565036fb397a376f0e0fa37005589655f97a7924b2729a164c"
+            "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+            "1111111111111111222222222222222233333333333333334444444444444444"
+            "000000006d0100000201"
+        );
+        assert_eq!(encoded.len(), 202);
+        assert_eq!(
+            encoded.as_slice(),
+            expected_bytes.as_slice(),
+            "V3 bytes diverged from design §6",
+        );
+        let expected_hash: [u8; 32] =
+            hex!("9fa7d1c2cbcb77079668a1bc828d16ab84c41c3939a907d6e93fb21090dddd47");
+        assert_eq!(
+            sha256(&encoded),
+            expected_hash,
+            "V3 sha256 diverged from design §6"
+        );
+    }
+
+    /// spec-219 invariant: V3.hash != V2.hash. If this fails, the
+    /// canonical-cert pre-image has dropped `chain_id` (or some other
+    /// distinguishing field) and the stale-config bug class is no longer
+    /// detectable — exactly the failure mode this entire spec aims to
+    /// close.
+    #[test]
+    fn v3_hash_differs_from_v2_hash() {
+        let receipt_id: [u8; 32] =
+            hex!("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899");
+        let content_hash: [u8; 32] =
+            hex!("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+        let base_root: [u8; 32] =
+            hex!("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210");
+        let storage_locator: [u8; 32] =
+            hex!("1111111111111111222222222222222233333333333333334444444444444444");
+        let v2 = build_cert(
+            hex!("0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf"),
+            receipt_id,
+            content_hash,
+            base_root,
+            storage_locator,
+        );
+        let v3 = build_cert(
+            hex!("bc0531cb311281565036fb397a376f0e0fa37005589655f97a7924b2729a164c"),
+            receipt_id,
+            content_hash,
+            base_root,
+            storage_locator,
+        );
+        assert_ne!(
+            sha256(&v2.encode()),
+            sha256(&v3.encode()),
+            "V2 and V3 hashes must differ (chain_id is part of the pre-image)"
+        );
     }
 }

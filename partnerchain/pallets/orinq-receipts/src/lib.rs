@@ -24,9 +24,13 @@ pub mod pallet {
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
     use sp_runtime::Perbill;
-    use sp_runtime::traits::{AccountIdConversion, Saturating};
+    use sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
 
-    use crate::types::{AnchorRecord, PlayerSigRecord, ReceiptRecord, SlashReason};
+    use crate::types::{
+        AnchorRecord, Cert, PlayerSigRecord, ReceiptRecord, SlashReason,
+        CERT_ATTESTATION_LEVEL, CERT_DOMAIN_BYTES, CERT_EPOCH_PLACEHOLDER,
+        CERT_RETENTION_DAYS, CERT_SCHEMA_VERSION,
+    };
     use crate::weights::WeightInfo;
 
     /// Alias for the reservable balance type exposed by `T::Currency`.
@@ -315,6 +319,29 @@ pub mod pallet {
     pub type ReceiptSubmittedAt<T: Config> =
         StorageMap<_, Blake2_128Concat, H256, BlockNumberFor<T>, OptionQuery>;
 
+    // ── spec-219: bad-attestation strikes + slash threshold ──────────────
+    //
+    // Each `attest_availability_cert` whose `claimed_hash` disagrees with
+    // the runtime-computed `canonical_cert_hash` increments the caller's
+    // strike counter. When the counter crosses
+    // `BadAttestSlashThreshold` the attestor is auto-slashed for their full
+    // bond AND ejected from the committee. Strikes reset on slash so a
+    // re-bonded attestor starts fresh.
+
+    /// Per-attestor count of bad-cert attempts since last slash. Reset to 0
+    /// when `auto_slash_for_bad_attest` fires (clean slate for re-bond).
+    #[pallet::storage]
+    pub type BadAttestStrikes<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, u32, ValueQuery>;
+
+    /// Strikes-to-slash threshold. Initialised to `1` (aggressive flush) at
+    /// spec-219 activation via `on_runtime_upgrade`; governance can raise
+    /// via `set_bad_attest_slash_threshold` once the flush wave settles.
+    /// A read of `0` (never initialised) is clamped to `1` at call sites so
+    /// a genesis-empty value cannot silently disable the gate.
+    #[pallet::storage]
+    pub type BadAttestSlashThreshold<T: Config> = StorageValue<_, u32, ValueQuery>;
+
     // ── Events ───────────────────────────────────────────────────────────
 
     #[pallet::event]
@@ -438,6 +465,31 @@ pub mod pallet {
         ReceiptSubmissionFeeFloorUpdated { new_value: u128 },
         /// `ReceiptExpiryBlocks` was updated by governance.
         ReceiptExpiryBlocksUpdated { new_value: u32 },
+        /// spec-219: a committee member proposed a `claimed_hash` that does
+        /// not match the runtime-computed canonical cert hash. The strike
+        /// counter is incremented; if it crosses `BadAttestSlashThreshold`
+        /// the attestor is auto-slashed on the same call (see
+        /// `AutoSlashedForBadAttest`). The extrinsic returns
+        /// `CertHashMismatch` regardless — bad attests never enter
+        /// `Attestations`.
+        BadAttestStrike {
+            attester: T::AccountId,
+            receipt_id: H256,
+            claimed: H256,
+            canonical: H256,
+            strikes: u32,
+        },
+        /// spec-219: a committee member's `BadAttestStrikes` crossed
+        /// `BadAttestSlashThreshold` and their full bond was slashed +
+        /// repatriated to `mat/attr`. Strikes are reset to 0 post-slash so
+        /// a fresh re-bond is a clean slate.
+        AutoSlashedForBadAttest {
+            attester: T::AccountId,
+            amount: u128,
+            remaining_bond: u128,
+        },
+        /// spec-219: governance updated `BadAttestSlashThreshold`.
+        BadAttestSlashThresholdUpdated { new_value: u32 },
     }
 
     // ── Errors ───────────────────────────────────────────────────────────
@@ -796,7 +848,7 @@ pub mod pallet {
         /// migration short-circuits with three reads.
         fn on_runtime_upgrade() -> Weight {
             let mut writes = 0u64;
-            let reads = 7u64;
+            let reads = 8u64;
 
             if !AttestationRewardPerSigner::<T>::exists() {
                 AttestationRewardPerSigner::<T>::put(10_000_000u128);
@@ -831,6 +883,16 @@ pub mod pallet {
             }
             if !ReceiptExpiryBlocks::<T>::exists() {
                 ReceiptExpiryBlocks::<T>::put(14_400u32);
+                writes += 1;
+            }
+            // spec-219: seed the bad-cert slash threshold. Aggressive `1` is
+            // the deliberate spec-219 setting — the activation block is
+            // expected to flush stale-CHAIN_ID daemons within the first
+            // ~3 receipts. Governance raises to 3 post-flush via
+            // `set_bad_attest_slash_threshold`. See
+            // `materios-c-deep-design.md` §4e + §7.
+            if !BadAttestSlashThreshold::<T>::exists() {
+                BadAttestSlashThreshold::<T>::put(1u32);
                 writes += 1;
             }
 
@@ -874,6 +936,105 @@ pub mod pallet {
     // ── Component 5 + 8 helpers (no AccountId bound needed) ─────────────
 
     impl<T: Config> Pallet<T> {
+        /// spec-219: construct the canonical `Cert` for `receipt_id` and
+        /// return its `sha2_256`. Returns `None` when the receipt does not
+        /// exist. All inputs are sourced from on-chain state +
+        /// compile-time constants — no caller-supplied data influences the
+        /// result, so two correctly-implemented daemons computing this
+        /// off-chain MUST agree byte-for-byte with the runtime.
+        ///
+        /// See `materios-c-deep-design.md` §3 for the algorithm and §6 for
+        /// byte-pinned fixture vectors. Cost is ~one storage read + a
+        /// 202-byte SHA-256, intentionally re-computed on every call rather
+        /// than cached so there is no risk of serving a stale hash after a
+        /// future migration touches `ReceiptRecord`.
+        pub fn canonical_cert_hash(receipt_id: H256) -> Option<H256> {
+            let record = Receipts::<T>::get(receipt_id)?;
+            let genesis = frame_system::Pallet::<T>::block_hash(
+                BlockNumberFor::<T>::zero(),
+            );
+            // `block_hash(0)` returns a `T::Hash`. SCALE-encoding a `H256`
+            // and a `[u8; 32]` produce identical 32 raw bytes, so encode
+            // through the typed value to avoid hardcoding the underlying
+            // hash shape — robust against a future `Hashing` swap.
+            let genesis_bytes: [u8; 32] = {
+                let enc = parity_scale_codec::Encode::encode(&genesis);
+                // T::Hash is required to be 32 bytes in this runtime
+                // (BlakeTwo256 -> H256). Defensive: if a future runtime
+                // ever swaps to a non-32-byte hash, fall back to the all-
+                // zero genesis — caller would still get a deterministic
+                // canonical hash, just one that no honest daemon could
+                // forge unwittingly. This branch is dead code under the
+                // current runtime and exists for typesystem-completeness.
+                let mut out = [0u8; 32];
+                let n = enc.len().min(32);
+                out[..n].copy_from_slice(&enc[..n]);
+                out
+            };
+            let cert = Cert {
+                domain: *CERT_DOMAIN_BYTES,
+                chain_id: genesis_bytes,
+                receipt_id: receipt_id.0,
+                content_hash: record.content_hash,
+                base_root: record.base_root_sha256,
+                storage_locator: record.storage_locator_hash,
+                epoch: CERT_EPOCH_PLACEHOLDER,
+                retention_days: CERT_RETENTION_DAYS,
+                attestation_level: CERT_ATTESTATION_LEVEL,
+                schema_version: CERT_SCHEMA_VERSION,
+            };
+            let encoded = parity_scale_codec::Encode::encode(&cert);
+            Some(H256::from(sp_io::hashing::sha2_256(&encoded)))
+        }
+
+        /// spec-219: auto-slash an attestor for crossing
+        /// `BadAttestSlashThreshold`. Repatriates the full bond to
+        /// `mat/attr`, ejects from the committee, resets the strike
+        /// counter, and emits `AutoSlashedForBadAttest` + `AutoEjected`.
+        ///
+        /// Defensive posture: any `repatriate_reserved` shortfall is
+        /// swallowed (mirrors `slash_attestor`'s ignore-residue pattern).
+        /// Eject + strike-reset ALWAYS fire — even when the bond was 0 —
+        /// because the goal is to bound the poison window, not to make a
+        /// slash conditional on having something to slash.
+        fn auto_slash_for_bad_attest(attester: &T::AccountId) -> DispatchResult {
+            let bond = AttestorBonds::<T>::get(attester);
+            if bond > 0 {
+                let reserve_acct = Self::attestor_reserve_account();
+                let balance: BalanceOf<T> = bond.try_into().unwrap_or_default();
+                let _ = T::Currency::repatriate_reserved(
+                    attester,
+                    &reserve_acct,
+                    balance,
+                    BalanceStatus::Free,
+                );
+                AttestorBonds::<T>::insert(attester, 0u128);
+            }
+            // Reset strikes — fresh slate after slash + re-bond.
+            BadAttestStrikes::<T>::remove(attester);
+            // Auto-eject ALWAYS (even when bond was 0): the goal is to
+            // stop further bad attests from this account immediately.
+            let was_member = CommitteeMembers::<T>::mutate(|set| {
+                let was = set.contains(attester);
+                if was {
+                    set.remove(attester);
+                }
+                was
+            });
+            Self::deposit_event(Event::AutoSlashedForBadAttest {
+                attester: attester.clone(),
+                amount: bond,
+                remaining_bond: 0,
+            });
+            if was_member {
+                Self::deposit_event(Event::AutoEjected {
+                    who: attester.clone(),
+                    remaining_bond: 0,
+                });
+            }
+            Ok(())
+        }
+
         /// The derived attestor reserve pot account (`mat/attr`). Slashed
         /// bonds are repatriated here; the fee router also credits its
         /// 30% share to this account.
@@ -1218,7 +1379,7 @@ pub mod pallet {
         pub fn attest_availability_cert(
             origin: OriginFor<T>,
             receipt_id: H256,
-            cert_hash: [u8; 32],
+            claimed_hash: [u8; 32],
         ) -> DispatchResult {
             let attester = ensure_signed(origin)?;
 
@@ -1226,16 +1387,60 @@ pub mod pallet {
             let committee = CommitteeMembers::<T>::get();
             ensure!(committee.contains(&attester), Error::<T>::NotCommitteeMember);
 
-            // 2. Receipt must exist.
-            ensure!(Receipts::<T>::contains_key(receipt_id), Error::<T>::ReceiptNotFound);
-
-            let cert_h256 = H256::from(cert_hash);
+            // 2. spec-219: receipt must exist AND `claimed_hash` must equal
+            //    the runtime-computed `canonical_cert_hash`. The chain is
+            //    the arbiter of cert correctness, not a tiebreaker between
+            //    attestors — daemons running stale config produce a hash
+            //    that disagrees with the canonical value and take a
+            //    `BadAttestStrike` rather than poisoning the receipt's
+            //    `availability_cert_hash`. See `materios-c-deep-design.md`
+            //    §3 + §4d.
+            let canonical = Self::canonical_cert_hash(receipt_id)
+                .ok_or(Error::<T>::ReceiptNotFound)?;
+            let cert_h256 = H256::from(claimed_hash);
+            if cert_h256 != canonical {
+                let strikes = BadAttestStrikes::<T>::mutate(&attester, |n| {
+                    *n = n.saturating_add(1);
+                    *n
+                });
+                Self::deposit_event(Event::BadAttestStrike {
+                    attester: attester.clone(),
+                    receipt_id,
+                    claimed: cert_h256,
+                    canonical,
+                    strikes,
+                });
+                // `BadAttestSlashThreshold` is stored as `ValueQuery` (u32),
+                // so an empty storage slot reads as 0. Clamp via `.max(1)`
+                // so a genesis-empty / migration-skipped state cannot
+                // silently disable the gate — even at the cost of slashing
+                // on the very first bad attest (matches the design's
+                // aggressive flush posture, §7).
+                let threshold = BadAttestSlashThreshold::<T>::get().max(1);
+                if strikes >= threshold {
+                    // `auto_slash_for_bad_attest` is internally defensive
+                    // (swallows `repatriate_reserved` shortfalls, eject +
+                    // strike-reset always fire). Propagate any error as a
+                    // defensive measure, though under current code it is
+                    // infallible.
+                    Self::auto_slash_for_bad_attest(&attester)?;
+                }
+                return Err(Error::<T>::CertHashMismatch.into());
+            }
 
             // 3. Insert or update the attestation record.
+            //
+            // The `*existing_hash == cert_h256` belt-and-suspenders check
+            // below is now tautological — every entering caller has just
+            // proved their `cert_h256 == canonical` and the stored
+            // `existing_hash` was likewise written as the canonical value
+            // by a prior successful caller — but it is left in place so
+            // that any future schema drift (e.g. a migration that touches
+            // `Attestations` storage shape) cannot silently weaken the
+            // agreement invariant.
             let count = Attestations::<T>::try_mutate(receipt_id, |maybe_att| -> Result<u32, DispatchError> {
                 match maybe_att {
                     Some((existing_hash, ref mut signers)) => {
-                        // All attesters must agree on the same cert hash.
                         ensure!(*existing_hash == cert_h256, Error::<T>::CertHashMismatch);
                         // Insert is idempotent — re-attesting is a no-op.
                         let _ = signers.try_insert(attester.clone());
@@ -1319,7 +1524,7 @@ pub mod pallet {
 
                 Receipts::<T>::try_mutate(receipt_id, |maybe_record| {
                     let record = maybe_record.as_mut().ok_or(Error::<T>::ReceiptNotFound)?;
-                    record.availability_cert_hash = cert_hash;
+                    record.availability_cert_hash = claimed_hash;
                     Ok::<(), DispatchError>(())
                 })?;
 
@@ -1918,6 +2123,27 @@ pub mod pallet {
                 submitter,
                 amount: reserved_fee,
             });
+            Ok(())
+        }
+
+        /// spec-219: update the strikes-to-slash threshold for bad-cert
+        /// attestations. Root-only. Initialised to `1` (aggressive flush)
+        /// at spec-219 activation via `on_runtime_upgrade`; governance is
+        /// expected to raise to `3` once the post-activation flush wave
+        /// settles, to reduce operator-honest-mistake risk.
+        ///
+        /// A value of `0` is accepted but clamped to `1` at call sites — a
+        /// zero-threshold cannot disable the gate by design.
+        #[pallet::call_index(20)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_bad_attest_slash_threshold(
+            origin: OriginFor<T>,
+            value: u32,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            BadAttestSlashThreshold::<T>::put(value);
+            Self::deposit_event(Event::BadAttestSlashThresholdUpdated { new_value: value });
             Ok(())
         }
     }

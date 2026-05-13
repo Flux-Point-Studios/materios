@@ -59,7 +59,11 @@ pub const MAX_COMMITTEE_SIZE: u16 = {
     // `select_authorities` return BoundedVec is bounded by MaxValidators
     // and downstream consumers treat counts as u16.
     assert!(crate::MAX_VALIDATORS <= u16::MAX as u32);
-    64
+    // 96 mirrors `OrinqReceipts::MaxCommitteeSize` after the spec-218
+    // hot-restore (see runtime/src/lib.rs spec_version log). The pair MUST
+    // stay in lockstep, otherwise Ariadne d-parameter sanitation will
+    // silently reject a value the pallet would otherwise accept.
+    96
 };
 
 /// Top-level invariant violations. When any of these fires we discard
