@@ -36,6 +36,8 @@ sp-consensus-grandpa = { workspace = true }
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 frame-executive = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
+frame-system-benchmarking = { workspace = true, optional = true }
 
 # Pallets
 pallet-aura = { workspace = true }
@@ -127,6 +129,8 @@ std = [
     "frame-support/std",
     "frame-system/std",
     "frame-executive/std",
+    "frame-benchmarking?/std",
+    "frame-system-benchmarking?/std",
     "pallet-aura/std",
     "pallet-balances/std",
     "pallet-grandpa/std",
@@ -169,6 +173,8 @@ std = [
     "log/std",
 ]
 runtime-benchmarks = [
+    "frame-benchmarking/runtime-benchmarks",
+    "frame-system-benchmarking/runtime-benchmarks",
     "frame-support/runtime-benchmarks",
     "frame-system/runtime-benchmarks",
     "pallet-balances/runtime-benchmarks",
@@ -190,6 +196,9 @@ runtime-benchmarks = [
     # pallet-billing declares the runtime-benchmarks feature flag (PR #19)
     # with skeletal benchmarks; runtime compiles with the feature gated.
     "pallet-billing/runtime-benchmarks",
+    # pallet-intent-settlement (Wave 2 W2.2 + task #43 / #177) — ships real
+    # benchmarks for settle_batch_atomic + the other batch extrinsics.
+    "pallet-intent-settlement/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
 ]
 try-runtime = [

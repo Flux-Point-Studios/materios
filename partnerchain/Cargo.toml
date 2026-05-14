@@ -34,6 +34,7 @@ scale-info = { version = "2.11", default-features = false, features = ["derive"]
 frame-support = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 frame-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+frame-system-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 pallet-timestamp = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 sp-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 sp-core = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
@@ -120,7 +121,12 @@ chrono = { version = "0.4", default-features = false }
 # Flux-Point-Studios/materios-intent-settlement. The pallet Cargo pins the
 # same `polkadot-stable2409-4` SDK tag as this workspace so no version dance
 # is required. Pin by `rev` (not `branch = "main"`) for reproducibility.
-pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "53e88efb", default-features = false }
+#
+# Rev `1e4dc6c` adds the BenchmarkHelper hook, BenchAllowAnyVerifier, and
+# the auto-generated weights surface (task #43 / agent-a). The runtime
+# below wires `pallet_intent_settlement::Config` against the expanded type
+# list (MaxSettleBatch + MateriosChainId + NetworkMagic + ...).
+pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "1e4dc6cd94275824415097ac4a02b830d1c138b3", default-features = false }
 
 # MOTRA
 sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
@@ -250,3 +256,4 @@ core2 = { path = "vendor/core2" }
 authority-selection-inherents = { path = "vendor/authority-selection-inherents" }
 db-sync-follower = { path = "vendor/db-sync-follower" }
 pallet-session-validator-management = { path = "vendor/pallet-session-validator-management" }
+

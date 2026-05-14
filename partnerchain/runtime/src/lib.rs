@@ -701,6 +701,39 @@ parameter_types! {
     /// Wave 2 interim M=1. Governance can bump via `set_min_signer_threshold`
     /// without a code upgrade once the multi-signer keeper rolls out.
     pub const IntentSettlementDefaultMinSignerThreshold: u32 = 1;
+    /// Task #177: max claims in a single `settle_batch_atomic` call. The
+    /// pallet canon is `MAX_SETTLE_BATCH = 256`; the bound must fit in the
+    /// normal-class block budget alongside the M-of-N signature bundle.
+    pub const IntentSettlementMaxSettleBatch: u32 = 256;
+    /// Task #211: max intents per `attest_batch_intents` call.
+    pub const IntentSettlementMaxAttestBatch: u32 = 256;
+    /// Task #212: max vouchers per `request_batch_vouchers` call.
+    pub const IntentSettlementMaxVoucherBatch: u32 = 256;
+    /// Task #210: max intents per `submit_batch_intents` call. Bounded by the
+    /// per-block normal-class extrinsic budget AND by `MaxPendingBatches`
+    /// headroom, so 256 is the canonical cap.
+    pub const IntentSettlementMaxSubmitBatch: u32 = 256;
+    /// Task #73: 32-byte Materios chain identity (genesis hash). Bytes match
+    /// the preprod genesis `0e46e33f…0849f7bf` (canonical reference:
+    /// `feedback_cert_daemon_chain_id_must_be_set.md`). Pinning it here
+    /// domain-separates committee-signed bundles across networks/resets.
+    pub IntentSettlementMateriosChainId: sp_core::H256 = sp_core::H256([
+        0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc,
+        0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
+        0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07,
+        0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
+    ]);
+    /// Task #73: Cardano preprod network magic. Production runtime SHOULD
+    /// flip this to 764824073 for mainnet.
+    pub const IntentSettlementNetworkMagic: u32 = 1;
+    /// Task #73: 28-byte blake2b224 of the deployed `aegis_policy_v1` script.
+    /// Placeholder zeroes here — production runtime SHOULD pin the real
+    /// script hash from `aiken build` output. Domain-separates voucher
+    /// signatures across script redeploys.
+    pub const IntentSettlementAegisPolicyV1ScriptHash: [u8; 28] = [0u8; 28];
+    /// Task #73: Settlement-protocol semver. Bump on any breaking pre-image
+    /// change.
+    pub const IntentSettlementSettlementVersion: u32 = 1;
 }
 
 impl pallet_intent_settlement::Config for Runtime {
@@ -712,7 +745,49 @@ impl pallet_intent_settlement::Config for Runtime {
     type CommitteeMembership = OrinqCommitteeAdapter;
     type MaxPendingBatches = IntentSettlementMaxPendingBatches;
     type DefaultMinSignerThreshold = IntentSettlementDefaultMinSignerThreshold;
+    #[cfg(not(feature = "runtime-benchmarks"))]
     type SigVerifier = pallet_intent_settlement::Sr25519Verifier;
+    #[cfg(feature = "runtime-benchmarks")]
+    type SigVerifier = pallet_intent_settlement::BenchAllowAnyVerifier;
+    type MaxSettleBatch = IntentSettlementMaxSettleBatch;
+    type MaxAttestBatch = IntentSettlementMaxAttestBatch;
+    type MaxVoucherBatch = IntentSettlementMaxVoucherBatch;
+    type MaxSubmitBatch = IntentSettlementMaxSubmitBatch;
+    type MateriosChainId = IntentSettlementMateriosChainId;
+    type NetworkMagic = IntentSettlementNetworkMagic;
+    type AegisPolicyV1ScriptHash = IntentSettlementAegisPolicyV1ScriptHash;
+    type SettlementVersion = IntentSettlementSettlementVersion;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = IntentSettlementBenchmarkHelper;
+    type WeightInfo = pallet_intent_settlement::weights::SubstrateWeight<Runtime>;
+}
+
+/// Task #43: bench-only helper that bootstraps committee membership before
+/// the `pallet_intent_settlement` benchmarks run their extrinsic call. We
+/// reuse the OrinqReceipts committee membership store (since that's what
+/// `OrinqCommitteeAdapter` reads from in production), and we lower the
+/// attestation threshold to 1 so a single-signer benchmark bundle passes
+/// the M-of-N gate. Only compiled under `runtime-benchmarks`.
+#[cfg(feature = "runtime-benchmarks")]
+pub struct IntentSettlementBenchmarkHelper;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_intent_settlement::BenchmarkHelper<AccountId>
+    for IntentSettlementBenchmarkHelper
+{
+    fn whitelist_as_committee(who: &AccountId) {
+        let mut members =
+            pallet_orinq_receipts::CommitteeMembers::<Runtime>::get();
+        if !members.contains(who) {
+            // Capacity is bounded by MaxCommitteeSize; the bench seeds a
+            // single member so this is a no-overflow insert.
+            let _ = members.try_insert(who.clone());
+            pallet_orinq_receipts::CommitteeMembers::<Runtime>::put(members);
+        }
+        // Threshold defaults may be 0 (genesis) or higher; clamp to 1 so
+        // the single-signer bundle satisfies the M-of-N gate.
+        pallet_orinq_receipts::AttestationThreshold::<Runtime>::put(1u32);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1300,13 +1375,78 @@ impl_runtime_apis! {
         }
 
         fn get_preset(id: &Option<sp_genesis_builder::PresetId>) -> Option<Vec<u8>> {
-            get_preset::<RuntimeGenesisConfig>(id, |_| None)
+            get_preset::<RuntimeGenesisConfig>(id, |preset_id| {
+                // The `development` preset exists only to satisfy
+                // `frame-omni-bencher`'s default `--genesis-builder-preset=development`.
+                // Pallet benchmarks seed their own storage in `dispatch_benchmark`,
+                // so we return an empty JSON patch (`{}`) — the runtime fills in
+                // defaults via `RuntimeGenesisConfig::default()`. Several IOG
+                // partner-chains pallets ship `#[derive(DefaultNoBound)]` GenesisConfigs
+                // whose serialized form omits a `_marker: PhantomData<T>` field
+                // that the deserializer demands; serializing the default config
+                // therefore round-trips into a deserialize error. Returning `{}`
+                // sidesteps that by letting `build_state` apply each pallet's
+                // genesis-config defaults in isolation.
+                if preset_id.as_ref() == sp_genesis_builder::DEV_RUNTIME_PRESET.as_bytes() {
+                    Some(b"{}".to_vec())
+                } else {
+                    None
+                }
+            })
         }
 
         fn preset_names() -> Vec<sp_genesis_builder::PresetId> {
-            alloc::vec![]
+            alloc::vec![sp_genesis_builder::PresetId::from(
+                sp_genesis_builder::DEV_RUNTIME_PRESET,
+            )]
+        }
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    impl frame_benchmarking::Benchmark<Block> for Runtime {
+        fn benchmark_metadata(extra: bool) -> (
+            Vec<frame_benchmarking::BenchmarkList>,
+            Vec<frame_support::traits::StorageInfo>,
+        ) {
+            use frame_benchmarking::{Benchmarking, BenchmarkList};
+            use frame_support::traits::StorageInfoTrait;
+            use frame_system_benchmarking::Pallet as SystemBench;
+
+            let mut list = Vec::<BenchmarkList>::new();
+            list_benchmarks!(list, extra);
+
+            let storage_info = AllPalletsWithSystem::storage_info();
+            (list, storage_info)
+        }
+
+        fn dispatch_benchmark(
+            config: frame_benchmarking::BenchmarkConfig,
+        ) -> Result<Vec<frame_benchmarking::BenchmarkBatch>, sp_runtime::RuntimeString> {
+            use frame_benchmarking::{Benchmarking, BenchmarkBatch};
+            use frame_support::traits::WhitelistedStorageKeys;
+            use frame_system_benchmarking::Pallet as SystemBench;
+            use sp_storage::TrackedStorageKey;
+
+            impl frame_system_benchmarking::Config for Runtime {}
+
+            let whitelist: Vec<TrackedStorageKey> =
+                AllPalletsWithSystem::whitelisted_storage_keys();
+
+            let mut batches = Vec::<BenchmarkBatch>::new();
+            let params = (&config, &whitelist);
+            add_benchmarks!(params, batches);
+
+            Ok(batches)
         }
     }
 }
+
+#[cfg(feature = "runtime-benchmarks")]
+frame_benchmarking::define_benchmarks!(
+    [frame_system, SystemBench::<Runtime>]
+    [pallet_balances, Balances]
+    [pallet_timestamp, Timestamp]
+    [pallet_intent_settlement, IntentSettlement]
+);
 
 
