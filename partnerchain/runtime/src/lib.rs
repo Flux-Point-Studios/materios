@@ -1427,8 +1427,6 @@ impl_runtime_apis! {
             use frame_system_benchmarking::Pallet as SystemBench;
             use sp_storage::TrackedStorageKey;
 
-            impl frame_system_benchmarking::Config for Runtime {}
-
             let whitelist: Vec<TrackedStorageKey> =
                 AllPalletsWithSystem::whitelisted_storage_keys();
 
@@ -1440,6 +1438,12 @@ impl_runtime_apis! {
         }
     }
 }
+
+/// `frame_system_benchmarking::Config` is a zero-method marker trait; we
+/// implement it at crate root (rather than inside `dispatch_benchmark`) to
+/// avoid the rustc-1.80+ `non_local_definitions` warning.
+#[cfg(feature = "runtime-benchmarks")]
+impl frame_system_benchmarking::Config for Runtime {}
 
 #[cfg(feature = "runtime-benchmarks")]
 frame_benchmarking::define_benchmarks!(
