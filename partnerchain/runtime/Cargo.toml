@@ -70,6 +70,11 @@ pallet-tee-attestation = { workspace = true }
 # `DebitsEnabled` defaults `false` — purely additive call surface until
 # governance flips the kill-switch in Phase 2.B.
 pallet-billing = { workspace = true }
+# MON Phase 1: decentralized price oracle (PRs #35, #36 on
+# materios-intent-settlement). M-of-N attestor sigs over the canonical PRIC
+# payload aggregate into `Prices[pair_id]`. Sudo-managed attestor registry
+# in v1; v2 swaps to bonded permissionless registration.
+pallet-oracle = { workspace = true }
 sp-arithmetic = { workspace = true }
 frame-system-rpc-runtime-api = { workspace = true }
 getrandom = { workspace = true }
@@ -148,6 +153,7 @@ std = [
     "pallet-intent-settlement/std",
     "pallet-tee-attestation/std",
     "pallet-billing/std",
+    "pallet-oracle/std",
     "sp-arithmetic/std",
     "frame-system-rpc-runtime-api/std",
     "substrate-wasm-builder",
@@ -199,6 +205,10 @@ runtime-benchmarks = [
     # pallet-intent-settlement (Wave 2 W2.2 + task #43 / #177) — ships real
     # benchmarks for settle_batch_atomic + the other batch extrinsics.
     "pallet-intent-settlement/runtime-benchmarks",
+    # pallet-oracle (MON Phase 1) — ships skeletal benchmarks; weight
+    # placeholders bumped per /security-review F1 (PR #36) pending
+    # bench-cli-generated WeightInfo in Phase 1D.
+    "pallet-oracle/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
 ]
 try-runtime = [
@@ -220,5 +230,6 @@ try-runtime = [
     "pallet-intent-settlement/try-runtime",
     "pallet-tee-attestation/try-runtime",
     "pallet-billing/try-runtime",
+    "pallet-oracle/try-runtime",
     "sp-runtime/try-runtime",
 ]
