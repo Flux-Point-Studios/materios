@@ -72,6 +72,7 @@ pub use frame_system;
 pub use pallet_balances;
 pub use pallet_billing;
 pub use pallet_motra;
+pub use pallet_oracle;
 pub use pallet_session_validator_management;
 pub use pallet_timestamp;
 
@@ -272,7 +273,75 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        `feedback_large_runtime_upgrade.md`. Extrinsic signature is
     //        type-stable (`(H256, [u8;32])` → `(H256, [u8;32])`, same
     //        call_index 3) so `transaction_version` stays at 2.
-    spec_version: 219,
+    // 220 = (deployed via wasm-runtime-override 2026-05-13) — settle_claim
+    //        B+D L1 verification (task #78 mis-sec P0). Splits the legacy
+    //        unsigned `settle_claim` into two phases:
+    //          * `request_settle(claim_id, evidence)` — permissionless;
+    //            anyone can post once they observe the matching Cardano
+    //            `RequestVoucher` redeemer tx. Pins `SettlementEvidence`
+    //            (cardano_tx_hash, observed_at_depth, observed_slot,
+    //            mainchain_genesis_hash[32], policy_id_witness[32]).
+    //          * `attest_settle(claim_id, signatures)` — committee posts
+    //            M-of-N sigs over the canonical STCA payload (209-byte
+    //            preimage). Pallet rebuilds the digest from chain-state-
+    //            derived inputs at verify time. Closes the trust gap on
+    //            the legacy unsigned `settle_claim` extrinsic. New Config
+    //            items: `MinFinalityDepth = 15`, `SettlementRequestTtl =
+    //            2400` (~4h @ 6s), `MainchainGenesisHash = preprod 162d29c4`.
+    //        Legacy `settle_claim` returns `DeprecatedExtrinsic` after
+    //        `SettleClaimCutoverBlock = upgrade_block + 50` (grace window
+    //        for in-flight keepers to redeploy). This source bump catches
+    //        main up to the live spec-220 WASM — the source tree at origin/
+    //        main was at 219 with IS rev `1e4dc6c`; this PR bumps the IS
+    //        pin to `6125ae4` which includes both #266 (settle B+D) and
+    //        #267 (expire B+D).
+    // 221 = (deployed via wasm-runtime-override 2026-05-14) — expire_policy
+    //        B+D symmetric path (task #267 mis-sec P0 followup). Same
+    //        shape as spec-220 settle B+D but for `expire_policy_mirror`:
+    //          * `request_expire_policy(intent_id, tx_hash, evidence)`
+    //            — permissionless observer posts once they see the
+    //            Cardano `Expire` redeemer tx. Pins `ExpiryEvidence`.
+    //          * `attest_expire_policy(intent_id, signatures)` — committee
+    //            posts M-of-N sigs over the canonical EXPP payload
+    //            (172-byte preimage).
+    //        Legacy `expire_policy_mirror` returns `DeprecatedExtrinsic`
+    //        after `PolicyExpireCutoverBlock = upgrade_block + 50`. Reuses
+    //        the spec-220 Config items (`MinFinalityDepth`,
+    //        `SettlementRequestTtl`, `MainchainGenesisHash`,
+    //        `MateriosChainId`, `MaxCommittee`). New errors:
+    //        `ExpiryRequestMissing`, `ExpiryRequestExpired`,
+    //        `ExpiryRequestAlreadyExists`, `IntentNotEligibleForExpiry`,
+    //        `ExpiryEvidenceMismatch`. Source-bump same as 220 — this
+    //        version pinned only on chain via wasm-runtime-override; this
+    //        PR catches main up.
+    // 222 = MON Phase 1 — wire `pallet_oracle` into the runtime at index
+    //        22. M-of-N price oracle: committee attestors sign the
+    //        canonical PRIC payload (85-byte preimage, `blake2_256(b"PRIC"
+    //        || materios_chain_id(32B) || pair_id(32B) || price(LE u64,
+    //        8B) || decimals(u8, 1B) || slot_observed(LE u64, 8B))`) and
+    //        the pallet aggregates to `Prices[pair_id]` once the per-pair
+    //        threshold (`MinAttestorThreshold`) is crossed. Sudo-managed
+    //        attestor registry in v1 via `register_attestor(pair_id,
+    //        pubkey)`; v2 swaps to bonded permissionless. Config items:
+    //        `MateriosChainId` (live preprod genesis `0e46e33f...`),
+    //        `MinAttestorThreshold = 1` (Phase 1A single-publisher mode —
+    //        Aegis publisher submits and the value lands directly in
+    //        `Prices`; Phase 1B raises to ≥2 once a second publisher
+    //        identity boots), `MaxAttestors = 16` (per-pair roster cap),
+    //        `MaxStaleSlots = 60` (~6min @ 6s), `MaxFutureSlots = 10`
+    //        (~1min anti-front-run tolerance). `AttestorRegistry` is the
+    //        runtime-level `PalletOracleAttestorRegistry` adapter which
+    //        reads from `pallet_oracle::Attestors` storage and maps
+    //        `AccountId32 <-> [u8;32]` via `AsRef<[u8;32]>` (same zero-
+    //        copy pattern as `OrinqCommitteeAdapter::pubkey_of`). Closes
+    //        runtime side of task #268 (MON Phase 1) — see PRs #35 +
+    //        #36 on materios-intent-settlement, design memo at
+    //        `/home/deci/work/mon-phase1-aegis-extend-design.md`, and
+    //        Aegis publisher rail PR #9 on aegis-publisher (`publisher/
+    //        materios_rail.py` byte-pinned to the PRIC payload above).
+    //        Purely additive — no existing extrinsic signature changed,
+    //        `transaction_version` stays at 2.
+    spec_version: 222,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -734,6 +803,33 @@ parameter_types! {
     /// Task #73: Settlement-protocol semver. Bump on any breaking pre-image
     /// change.
     pub const IntentSettlementSettlementVersion: u32 = 1;
+    /// spec-220 (task #78 mis-sec P0): Cardano block depth that a
+    /// `request_settle` / `request_expire_policy` evidence blob MUST claim
+    /// before its `attest_*` counterpart is accepted. 15 Materios blocks
+    /// of Cardano depth is well past the historical-reorg ceiling per
+    /// design memo §4.4. Governance can retune via runtime upgrade.
+    pub const IntentSettlementMinFinalityDepth: u32 = 15;
+    /// spec-220 (task #78): TTL on a pending `request_settle` /
+    /// `request_expire_policy` record. After this many Materios blocks the
+    /// matching `attest_*` extrinsic rejects with
+    /// `Error::ClaimSettlementRequestExpired` / `Error::ExpiryRequestExpired`
+    /// and the storage entry is GC'd lazily on next touch. 2400 blocks @ 6s
+    /// = 4 hours. Matches the design memo §3.5 + §13.7 baseline value.
+    pub const IntentSettlementSettlementRequestTtl: u32 = 2400;
+    /// spec-220 (task #78): Cardano preprod Shelley genesis hash pin. The
+    /// pallet rejects any `SettlementEvidence` / `ExpiryEvidence` whose
+    /// `mainchain_genesis_hash` ≠ this constant. Prevents preprod sig
+    /// bundles from ever settling/expiring mainnet claims (and vice versa).
+    /// Provenance: IOG canonical preprod config.json `ShelleyGenesisHash`
+    /// field, verified against locally-fetched shelley-genesis.json via
+    /// `blake2b-256(file_bytes) -> 162d29c4...bd86`.
+    /// For mainnet flip: replace with mainnet `ShelleyGenesisHash`.
+    pub const IntentSettlementMainchainGenesisHash: [u8; 32] = [
+        0x16, 0x2d, 0x29, 0xc4, 0xe1, 0xcf, 0x6b, 0x8a,
+        0x84, 0xf2, 0xd6, 0x92, 0xe6, 0x7a, 0x3a, 0xc6,
+        0xbc, 0x78, 0x51, 0xbc, 0x3e, 0x6e, 0x4a, 0xfe,
+        0x64, 0xd1, 0x57, 0x78, 0xbe, 0xd8, 0xbd, 0x86,
+    ];
 }
 
 impl pallet_intent_settlement::Config for Runtime {
@@ -757,6 +853,10 @@ impl pallet_intent_settlement::Config for Runtime {
     type NetworkMagic = IntentSettlementNetworkMagic;
     type AegisPolicyV1ScriptHash = IntentSettlementAegisPolicyV1ScriptHash;
     type SettlementVersion = IntentSettlementSettlementVersion;
+    // spec-220 (task #78) + spec-221 (task #267) Config items.
+    type MinFinalityDepth = IntentSettlementMinFinalityDepth;
+    type SettlementRequestTtl = IntentSettlementSettlementRequestTtl;
+    type MainchainGenesisHash = IntentSettlementMainchainGenesisHash;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = IntentSettlementBenchmarkHelper;
     type WeightInfo = pallet_intent_settlement::weights::SubstrateWeight<Runtime>;
@@ -994,6 +1094,111 @@ impl pallet_billing::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Oracle (MON Phase 1)
+// ---------------------------------------------------------------------------
+// Decentralized M-of-N price oracle. Sudo-registers attestor sr25519
+// pubkeys per pair (Phase 1A: single Aegis publisher per pair; Phase 1B:
+// ≥2). Each `submit_price` call signs over the canonical PRIC payload
+// (85-byte preimage). The pallet aggregates observations and writes
+// `Prices[pair_id]` once `MinAttestorThreshold` is crossed. Sister
+// design at `/home/deci/work/mon-phase1-aegis-extend-design.md`.
+
+parameter_types! {
+    /// 32-byte materios chain identity — preprod v6 genesis hash. Pinned
+    /// into every PRIC preimage so a price signed on preprod is structurally
+    /// invalid post-reset / on mainnet. Same constant as
+    /// `IntentSettlementMateriosChainId` but exposed as a raw `[u8; 32]` to
+    /// match the oracle pallet's `Get<[u8; 32]>` Config bound (the IS
+    /// pallet's variant types it as `Get<sp_core::H256>` — both encode the
+    /// same 32 bytes).
+    /// Provenance: live preprod chain `chain_getBlockHash(0)` at deploy time.
+    ///   0x0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf
+    pub const OracleMateriosChainId: [u8; 32] = [
+        0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc,
+        0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
+        0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07,
+        0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
+    ];
+    /// Per-pair attestor roster cap. 16 leaves comfortable headroom over
+    /// the Phase 1A single-publisher mode while staying well inside one
+    /// block's normal-class budget. The pallet enforces this bound on
+    /// `Attestors[pair_id]` BoundedVec inserts via `register_attestor`.
+    pub const OracleMaxAttestors: u32 = 16;
+    /// Phase 1A: single-publisher mode. Materios runtime accepts the first
+    /// observation as the canonical `Prices[pair_id]` write because M = 1.
+    /// Governance raises this to ≥2 once a second sr25519 identity boots
+    /// (either a second Aegis publisher process or a peer operator). The
+    /// pallet rebuilds the aggregation gate on every `submit_price`, so
+    /// no migration is needed when the threshold tightens.
+    pub const OracleMinAttestorThreshold: u32 = 1;
+    /// Reject observations older than `current_block - 60` (≈6min @ 6s).
+    /// Phase 1A: Aegis publisher tick is 30s, so 60-block staleness is ≈12×
+    /// the publish cadence — enough to ride out gateway hiccups but tight
+    /// enough that stale prices can't accumulate. Governance tunes this
+    /// per market when pull-oracle consumers (perp-engine #259, mm-rebate
+    /// #257) start landing. Materios block counter is used in lieu of
+    /// `slot_observed` semantics — the Aegis publisher rail substitutes
+    /// `int(time.time())` for `slot_observed` per design memo §2 #4 so
+    /// the threshold is wall-clock-equivalent.
+    pub const OracleMaxStaleSlots: u64 = 60;
+    /// Reject observations claiming `slot_observed > current_block + 10`
+    /// (≈1min anti-front-run tolerance). Bounded above to keep a single
+    /// misconfigured publisher from poisoning a feed with future-dated
+    /// observations that pin to `Prices[pair_id]` for `MaxStaleSlots` of
+    /// real time.
+    pub const OracleMaxFutureSlots: u64 = 10;
+}
+
+/// Adapter exposing the on-chain `pallet_oracle::Attestors` storage to the
+/// `IsAttestorFor<AccountId>` trait that `pallet_oracle::Config` requires.
+///
+/// For `AccountId = AccountId32` (this runtime's shape, derived from
+/// `MultiSignature`) the sr25519 pubkey IS the raw 32 bytes of the account,
+/// so the mapping is injective and round-trips without per-account registry
+/// storage — same zero-copy pattern as `OrinqCommitteeAdapter::pubkey_of`.
+///
+/// `threshold_for` returns the runtime-level `OracleMinAttestorThreshold`
+/// uniformly across pairs in Phase 1; v2 (per-pair tuning) extends this
+/// to read from a `pallet_oracle::PairThreshold` storage map.
+pub struct PalletOracleAttestorRegistry;
+
+impl pallet_oracle::IsAttestorFor<AccountId> for PalletOracleAttestorRegistry {
+    fn is_attestor(pair_id: &pallet_oracle::PairId, who: &AccountId) -> bool {
+        // `pallet_oracle::Attestors[pair_id]` is a `BoundedVec<AttestorPubkey,
+        // MaxAttestors>` of sr25519 32-byte pubkeys. AccountId32 ↔ pubkey
+        // is the identity map for sr25519 on this runtime.
+        let pubkey: pallet_oracle::AttestorPubkey = *<AccountId as AsRef<[u8; 32]>>::as_ref(who);
+        pallet_oracle::Attestors::<Runtime>::get(pair_id).contains(&pubkey)
+    }
+
+    fn pubkey_of(who: &AccountId) -> pallet_oracle::AttestorPubkey {
+        // Zero-copy view: AccountId32 stores its pubkey as inner `[u8; 32]`.
+        *<AccountId as AsRef<[u8; 32]>>::as_ref(who)
+    }
+
+    fn threshold_for(_pair_id: &pallet_oracle::PairId) -> u32 {
+        // Phase 1: uniform global threshold (`MinAttestorThreshold` Config
+        // item). Phase 2 (v2 / mm-rebate consumer) replaces with per-pair
+        // tuning sourced from a new `pallet_oracle::PairThreshold`
+        // storage map. `.max(1)` defends against a misconfigured zero
+        // genesis value: the pallet's aggregation gate is "≥ threshold"
+        // and 0 would let a single attestor unilaterally write `Prices`
+        // without satisfying the M-of-N intent of the design.
+        <Runtime as pallet_oracle::Config>::MinAttestorThreshold::get().max(1)
+    }
+}
+
+impl pallet_oracle::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type MateriosChainId = OracleMateriosChainId;
+    type MinAttestorThreshold = OracleMinAttestorThreshold;
+    type MaxAttestors = OracleMaxAttestors;
+    type MaxStaleSlots = OracleMaxStaleSlots;
+    type MaxFutureSlots = OracleMaxFutureSlots;
+    type AttestorRegistry = PalletOracleAttestorRegistry;
+}
+
+// ---------------------------------------------------------------------------
 // Construct runtime
 // ---------------------------------------------------------------------------
 
@@ -1054,6 +1259,15 @@ construct_runtime! {
         // Phase 2.B. Until then every call surface is reachable but no
         // MATRA moves on `record_paid_request` — purely additive.
         Billing: pallet_billing = 21,
+        // MON Phase 1 (spec 222): decentralized price oracle — M-of-N
+        // attestor sigs over the canonical PRIC payload aggregated into
+        // `Prices[pair_id]`. Appended at index 22. Sudo registers
+        // attestor pubkeys per pair in Phase 1A; v2 swaps to bonded
+        // permissionless registration. Closes runtime side of MON Phase 1
+        // (task #268). Aegis publisher rail at
+        // `aegis-publisher/publisher/materios_rail.py` is byte-pinned to
+        // the PRIC preimage builder in `pallet_oracle::types`.
+        Oracle: pallet_oracle = 22,
     }
 }
 
