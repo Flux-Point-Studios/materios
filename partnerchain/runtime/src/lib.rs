@@ -359,7 +359,21 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        upgrade.
     //        NO new Config items, NO new extrinsic, NO new storage. Pure
     //        constant retune. `transaction_version` stays at 2.
-    spec_version: 223,
+    // 224 = MON Phase 1C — raise `OracleMinAttestorThreshold` from 2 to 3.
+    //        Third standalone sr25519 attestor came up on Node-3 alongside
+    //        Node-2's Aegis publisher and Gemtek's attestor-2 (ss58
+    //        `5FX4JQVhY…hPZL`, pubkey `0x98cde690…ce04`, registered at
+    //        block ~202430). All three attestors run with the
+    //        `_SLOT_BUCKET = 10` floor and tick every 60s — observations
+    //        from the three independent processes resolve to the same
+    //        `slot_observed` bucket within a ~60s window. Raising the
+    //        threshold from 2 to 3 turns on full-quorum aggregation:
+    //        every `Prices[pair_id]` update now carries the median of
+    //        three independent observations.
+    //        Same in-flight-safe semantics as spec-223 — the pallet
+    //        rebuilds the gate on every `submit_price`, no migration.
+    //        Pure constant retune. `transaction_version` stays at 2.
+    spec_version: 224,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -1154,7 +1168,7 @@ parameter_types! {
     /// identity (peer operator) boots. The pallet rebuilds the gate on
     /// every `submit_price` — no migration needed when the threshold
     /// tightens.
-    pub const OracleMinAttestorThreshold: u32 = 2;
+    pub const OracleMinAttestorThreshold: u32 = 3;
     /// Reject observations older than `current_block - 60` (≈6min @ 6s).
     /// Phase 1A: Aegis publisher tick is 30s, so 60-block staleness is ≈12×
     /// the publish cadence — enough to ride out gateway hiccups but tight
