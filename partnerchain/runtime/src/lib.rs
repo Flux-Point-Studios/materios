@@ -341,7 +341,25 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        materios_rail.py` byte-pinned to the PRIC payload above).
     //        Purely additive — no existing extrinsic signature changed,
     //        `transaction_version` stays at 2.
-    spec_version: 222,
+    // 223 = MON Phase 1B — raise `OracleMinAttestorThreshold` from 1 to 2.
+    //        Phase 1A shipped with M=1 single-publisher mode (live since
+    //        spec-222 / block 202156). On 2026-05-15 a second standalone
+    //        sr25519 attestor came up on Gemtek (ss58 `5DvG6sBxzRoSzgxMt6xu…`,
+    //        pubkey `0x5207cdcb…c910`, registered at block 202344). Both
+    //        attestors are now signing the same `(pair_id, slot_observed)`
+    //        observations thanks to the `_SLOT_BUCKET = 10` floor in
+    //        `materios_rail.py` (aegis-publisher PR #10, merged
+    //        `f81f1b42…`). Raising the threshold to 2 turns on the real
+    //        M-of-N aggregation gate: the pallet now demands ≥2 observations
+    //        in the same `PendingAttestations[pair_id, slot_observed]`
+    //        bundle before it writes `Prices[pair_id]` and emits
+    //        `PriceUpdated`. The pallet recomputes the gate on every
+    //        `submit_price` so no migration is needed — the threshold
+    //        change takes effect at the next bundled submission post-
+    //        upgrade.
+    //        NO new Config items, NO new extrinsic, NO new storage. Pure
+    //        constant retune. `transaction_version` stays at 2.
+    spec_version: 223,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -1124,13 +1142,19 @@ parameter_types! {
     /// block's normal-class budget. The pallet enforces this bound on
     /// `Attestors[pair_id]` BoundedVec inserts via `register_attestor`.
     pub const OracleMaxAttestors: u32 = 16;
-    /// Phase 1A: single-publisher mode. Materios runtime accepts the first
-    /// observation as the canonical `Prices[pair_id]` write because M = 1.
-    /// Governance raises this to ≥2 once a second sr25519 identity boots
-    /// (either a second Aegis publisher process or a peer operator). The
-    /// pallet rebuilds the aggregation gate on every `submit_price`, so
-    /// no migration is needed when the threshold tightens.
-    pub const OracleMinAttestorThreshold: u32 = 1;
+    /// Phase 1B (spec-223, 2026-05-15): M-of-N aggregation gate.
+    /// `submit_price` accumulates observations into the
+    /// `PendingAttestations[pair_id, slot_observed]` bundle until this
+    /// many distinct attestor pubkeys have submitted; only then does the
+    /// pallet aggregate and write `Prices[pair_id]`. Independent attestors
+    /// (currently: Aegis publisher on Node-2 + standalone attestor on
+    /// Gemtek) coordinate via the `_SLOT_BUCKET = 10` floor in
+    /// `materios_rail.py` so observations within ~60s converge on the
+    /// same `slot_observed`. Phase 1C raises to 3 once a third sr25519
+    /// identity (peer operator) boots. The pallet rebuilds the gate on
+    /// every `submit_price` — no migration needed when the threshold
+    /// tightens.
+    pub const OracleMinAttestorThreshold: u32 = 2;
     /// Reject observations older than `current_block - 60` (≈6min @ 6s).
     /// Phase 1A: Aegis publisher tick is 30s, so 60-block staleness is ≈12×
     /// the publish cadence — enough to ride out gateway hiccups but tight
