@@ -124,7 +124,18 @@ chrono = { version = "0.4", default-features = false }
 # `polkadot-stable2409-4` SDK tag as this workspace so no version dance is
 # required. Pin by `rev` (not `branch = "main"`) for reproducibility.
 #
-# Rev `6125ae4` is the post-PR-#36 merge tip and includes:
+# Rev `7334b61e` is the post-PR-#38 merge tip and includes:
+#   - #84 settle_claim bond + slash (PR #38, mis-sec P1): new extrinsics
+#     `post_settlement_bond`, `slash_bad_settlement_evidence`,
+#     `release_settlement_bond`. New Config items `SlashWatcherShareBps`,
+#     `BondReleaseDelayBlocks`, `MinSettlementBond`. v2→v3 migration
+#     adds `bond_amount: u128` to existing `SettlementRequestRecord`
+#     rows. Closes the audit P1 follow-up to spec-220 B+D.
+#   - pallet-perp-engine scaffold (PR #37, task #259) — types + storage +
+#     8 extrinsic stubs. Not wired in this runtime (Phase B impl bodies
+#     ship in a follow-up PR; the runtime wire lands in PR-D).
+#
+# Prior rev `6125ae4` was the post-PR-#36 merge tip and included:
 #   - spec-220 `request_settle` / `attest_settle` + B+D L1 verification
 #     (PRs #33, #266, mis-sec P0) — already live on-chain at spec_version
 #     221 via the spec-220 + spec-221 sudo ceremonies (runtime-overrides
@@ -134,8 +145,8 @@ chrono = { version = "0.4", default-features = false }
 #   - pallet-oracle scaffold + impl (PRs #35, #36) — the canonical PRIC
 #     payload + sudo-managed attestor registry + M-of-N price aggregation.
 #     New in this PR's runtime wire (Oracle = index 22).
-pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "6125ae458eb08cf74ac4cde55e9828f1c5a60681", default-features = false }
-pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "6125ae458eb08cf74ac4cde55e9828f1c5a60681", default-features = false }
+pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "7334b61ea42a857fa8fe8818384f8a02b9470567", default-features = false }
+pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "7334b61ea42a857fa8fe8818384f8a02b9470567", default-features = false }
 
 # MOTRA
 sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }

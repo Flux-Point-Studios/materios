@@ -373,7 +373,65 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        Same in-flight-safe semantics as spec-223 — the pallet
     //        rebuilds the gate on every `submit_price`, no migration.
     //        Pure constant retune. `transaction_version` stays at 2.
-    spec_version: 224,
+    // 225 = #84 mis-sec P1 — settle_claim bond + slash. New extrinsics on
+    //        `pallet_intent_settlement` at IS rev `7334b61e` (post PR #38
+    //        merge on materios-intent-settlement):
+    //          * `post_settlement_bond(claim_id, amount)` — requester
+    //            reserves `amount` via `Currency::reserve` while their
+    //            `request_settle` evidence sits pending. Opt-in by
+    //            default (`MinSettlementBond = 0`); production can raise
+    //            via governance once a credible MATRA-denominated value
+    //            surface lands.
+    //          * `slash_bad_settlement_evidence(claim_id, fraud_proof)` —
+    //            permissionless watcher posts a SCALE-encoded FRAU
+    //            preimage proving the bonded `SettlementEvidence` was
+    //            fraudulent. On verify, the bond is `slash_reserved`-d:
+    //            `SlashWatcherShareBps / 10_000` to the watcher and the
+    //            rest `repatriate_reserved`-d to the runtime treasury
+    //            (`TreasuryPalletId = PalletId(*b"mat/trsy")`).
+    //          * `release_settlement_bond(claim_id)` — gated by
+    //            `BondReleaseDelayBlocks` (= 2 × `MinFinalityDepth`) and
+    //            successful `attest_settle`. Returns the reserve to the
+    //            original poster.
+    //        Storage migration v2 → v3 chains on `OnRuntimeUpgrade`:
+    //        widens existing `ClaimSettlementRequests` records with a
+    //        new `bond_amount: u128` field (defaults to 0 for in-flight
+    //        records that pre-date the upgrade, so the legacy
+    //        permissionless `request_settle` flow keeps working
+    //        unchanged). Bundled `BondMigrationProgress` cursor caps
+    //        per-block migration work at `MAX_MIGRATE_REQUESTS = 50`.
+    //        Watcher-share basis points clamp at the call site to
+    //        `[0, 10_000]`; a misconfigured runtime can never pay out
+    //        more than the bond.
+    //        New `Config` items (4 new + 1 reuse):
+    //          * `Currency` = `Balances` — reuses pallet_balances surface
+    //            (same `ReservableCurrency<AccountId>` already used by
+    //            the runtime treasury + attestor reserve pot).
+    //          * `SlashWatcherShareBps = 5000` — 50% bounty per design
+    //            memo §6 #9 starting point. Governance-tunable.
+    //          * `BondReleaseDelayBlocks = 30` — 2 × `MinFinalityDepth`
+    //            (= 2 × 15) so Cardano has had two finality windows to
+    //            surface any reorg before the bond is returned.
+    //          * `MinSettlementBond = 0` — opt-in default; production
+    //            bumps via governance.
+    //          * `SettlementTreasuryPalletId` = existing
+    //            `TreasuryPalletId` (`PalletId(*b"mat/trsy")`). REUSE
+    //            of the runtime treasury convention — slashed-bond
+    //            destination matches every other slash flow in the
+    //            runtime.
+    //        Operational follow-ups queued before this WASM activates:
+    //          * #295 — pre-fund `mat/trsy` (derived account
+    //            `5EYCAeC2qY9TuwAccQS5Y6Q6FcFc7uM2cYKBGm4drbnGtaPv`)
+    //            with `ExistentialDeposit` so `repatriate_reserved` can't
+    //            stall on a non-existent destination at spec activation.
+    //          * #296 — SDK/keeper UX guard against bonding TTL-expired
+    //            `ClaimSettlementRequests`.
+    //          * #297 — widen `BondMigrationProgress` cursor bound vs
+    //            `MAX_MIGRATE_REQUESTS = 50` so a partial-migration
+    //            cursor can't overflow `u32::MAX`.
+    //        Pure additive — no existing extrinsic signature changed,
+    //        `transaction_version` stays at 2.
+    spec_version: 225,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -862,6 +920,28 @@ parameter_types! {
         0xbc, 0x78, 0x51, 0xbc, 0x3e, 0x6e, 0x4a, 0xfe,
         0x64, 0xd1, 0x57, 0x78, 0xbe, 0xd8, 0xbd, 0x86,
     ];
+    /// spec-225 (task #84 mis-sec P1): basis-point share of a slashed
+    /// settlement bond paid out to the watcher who proved the fraud.
+    /// `5000` = 50% — design memo §6 #9 starting point. Pallet clamps
+    /// at the call site to `[0, 10_000]` so a misconfigured runtime can
+    /// never pay out more than the bond. Governance-tunable post-launch.
+    pub const IntentSettlementSlashWatcherShareBps: u32 = 5000;
+    /// spec-225 (task #84): minimum number of Materios blocks that must
+    /// elapse between `attest_settle` landing and
+    /// `release_settlement_bond` succeeding. Set to `2 * MinFinalityDepth`
+    /// (= 2 × 15 = 30) so Cardano has had two finality windows to
+    /// surface any reorg before the bond is returned to the original
+    /// poster. Pallet doc-comment on `Config::BondReleaseDelayBlocks`
+    /// (§4.2 of the design memo) names this exact ratio as the
+    /// "production runtimes plumb" target.
+    pub const IntentSettlementBondReleaseDelayBlocks: u32 = 30;
+    /// spec-225 (task #84): minimum bond a requester must reserve via
+    /// `post_settlement_bond` for the call to succeed. Defaulting to
+    /// zero keeps the bond opt-in (matches design memo §5.2's
+    /// "opt-in by default" property). Production runtimes bump this via
+    /// governance once a credible MATRA-denominated value surface lands
+    /// (e.g. post pallet-mm-rebate v0, task #257).
+    pub const IntentSettlementMinSettlementBond: u128 = 0;
 }
 
 impl pallet_intent_settlement::Config for Runtime {
@@ -889,6 +969,19 @@ impl pallet_intent_settlement::Config for Runtime {
     type MinFinalityDepth = IntentSettlementMinFinalityDepth;
     type SettlementRequestTtl = IntentSettlementSettlementRequestTtl;
     type MainchainGenesisHash = IntentSettlementMainchainGenesisHash;
+    // spec-225 (task #84 mis-sec P1) Config items — settle_claim bond +
+    // slash. `Currency` reuses `Balances` (same `ReservableCurrency`
+    // surface the treasury already uses); `SettlementTreasuryPalletId`
+    // REUSES the runtime-level `TreasuryPalletId` so slashed-bond
+    // residue lands in the same `mat/trsy` account as every other
+    // treasury credit. Task #295 pre-funds that derived account with
+    // `ExistentialDeposit` at spec activation so `repatriate_reserved`
+    // can't stall on a non-existent destination.
+    type Currency = Balances;
+    type SlashWatcherShareBps = IntentSettlementSlashWatcherShareBps;
+    type BondReleaseDelayBlocks = IntentSettlementBondReleaseDelayBlocks;
+    type MinSettlementBond = IntentSettlementMinSettlementBond;
+    type SettlementTreasuryPalletId = TreasuryPalletId;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = IntentSettlementBenchmarkHelper;
     type WeightInfo = pallet_intent_settlement::weights::SubstrateWeight<Runtime>;
