@@ -75,6 +75,14 @@ pallet-billing = { workspace = true }
 # payload aggregate into `Prices[pair_id]`. Sudo-managed attestor registry
 # in v1; v2 swaps to bonded permissionless registration.
 pallet-oracle = { workspace = true }
+# Perp Engine v0 (PR-E, spec 226, task #259). Permissionless USD-quoted
+# linear perpetual-futures primitive. Reads pull-mark prices from
+# `pallet-oracle` via the runtime adapter `PerpEngineOracleAdapter`;
+# settles funding pull-based per position; bond-gated permissionless
+# liquidator pool with 100%-slash on false trigger. NO markets registered
+# at genesis — governance (sudo on preprod) calls `governance_set_market`
+# post-activation to register ADA-PERP as the first market.
+pallet-perp-engine = { workspace = true }
 sp-arithmetic = { workspace = true }
 frame-system-rpc-runtime-api = { workspace = true }
 getrandom = { workspace = true }
@@ -154,6 +162,7 @@ std = [
     "pallet-tee-attestation/std",
     "pallet-billing/std",
     "pallet-oracle/std",
+    "pallet-perp-engine/std",
     "sp-arithmetic/std",
     "frame-system-rpc-runtime-api/std",
     "substrate-wasm-builder",
@@ -209,6 +218,12 @@ runtime-benchmarks = [
     # placeholders bumped per /security-review F1 (PR #36) pending
     # bench-cli-generated WeightInfo in Phase 1D.
     "pallet-oracle/runtime-benchmarks",
+    # pallet-perp-engine (PR-E, spec 226) — declares the runtime-benchmarks
+    # feature flag and ships bench bodies for the v0 surface
+    # (open/close/deposit/withdraw/liquidate/settle_funding/adjust_leverage).
+    # WeightInfo wiring lands in PR-F (frame-benchmarking pass);
+    # `type WeightInfo = ()` on the runtime impl until then.
+    "pallet-perp-engine/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
 ]
 try-runtime = [
@@ -231,5 +246,6 @@ try-runtime = [
     "pallet-tee-attestation/try-runtime",
     "pallet-billing/try-runtime",
     "pallet-oracle/try-runtime",
+    "pallet-perp-engine/try-runtime",
     "sp-runtime/try-runtime",
 ]
