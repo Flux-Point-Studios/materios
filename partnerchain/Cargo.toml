@@ -149,9 +149,9 @@ chrono = { version = "0.4", default-features = false }
 #
 # Prior rev `6125ae4` was the post-PR-#36 merge tip pinning spec 220 +
 # spec 221 (settle_claim B+D + expire_policy_mirror B+D).
-pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2", default-features = false }
-pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2", default-features = false }
-pallet-perp-engine = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2", default-features = false }
+pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c60b98f6bcbb99b1745447fe7a74be321c72bd51", default-features = false }
+pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c60b98f6bcbb99b1745447fe7a74be321c72bd51", default-features = false }
+pallet-perp-engine = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c60b98f6bcbb99b1745447fe7a74be321c72bd51", default-features = false }
 
 # MOTRA
 sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
