@@ -610,7 +610,18 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //        on_initialize hook is a no-op until the first
     //        `governance_set_market` registers a market). Pure additive
     //        on the dispatch surface, `transaction_version` stays at 2.
-    spec_version: 226,
+    // 227 = perp-engine v0 polish + oracle SigVerifier wire-up
+    // (companion to materios-intent-settlement PR #42 + #43, task #314 +
+    // #316). Pallet-perp-engine: real `governance_set_market` body (14
+    // validation gates + `MarketAlreadyExists` error + `MarketRegistered`
+    // event, replaces under-specified `MarketSet`), sub-rate liquidation
+    // fee floor-to-1-MOTRA when `fee_e18 > 0` (PR-C sec-review LOW 2).
+    // Pallet-oracle: pluggable `SigVerifier` trait + `Sr25519Verifier`
+    // production impl + `BenchAllowAnyVerifier` (cfg-gated). Runtime
+    // adds `[pallet_oracle, Oracle]` + `[pallet_perp_engine, PerpEngine]`
+    // to `define_benchmarks!` so frame-omni-bencher can build them.
+    // Dispatch signatures unchanged → `transaction_version` stays at 2.
+    spec_version: 227,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -1506,6 +1517,11 @@ impl pallet_oracle::Config for Runtime {
     type MaxStaleSlots = OracleMaxStaleSlots;
     type MaxFutureSlots = OracleMaxFutureSlots;
     type AttestorRegistry = PalletOracleAttestorRegistry;
+    // spec-227: pluggable sig verifier (pallet-oracle PR #42). Production
+    // wires `Sr25519Verifier` — byte-exact equivalent of the previous
+    // inline `sp_io::crypto::sr25519_verify` call. `BenchAllowAnyVerifier`
+    // is cfg-gated behind `runtime-benchmarks` and cannot reach prod.
+    type SigVerifier = pallet_oracle::Sr25519Verifier;
 }
 
 // ---------------------------------------------------------------------------
@@ -2252,6 +2268,8 @@ frame_benchmarking::define_benchmarks!(
     [pallet_balances, Balances]
     [pallet_timestamp, Timestamp]
     [pallet_intent_settlement, IntentSettlement]
+    [pallet_oracle, Oracle]
+    [pallet_perp_engine, PerpEngine]
 );
 
 
