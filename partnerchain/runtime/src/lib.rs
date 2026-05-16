@@ -431,7 +431,186 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     //            cursor can't overflow `u32::MAX`.
     //        Pure additive — no existing extrinsic signature changed,
     //        `transaction_version` stays at 2.
-    spec_version: 225,
+    // 226 = #259 — pallet-perp-engine v0 runtime wire-up (PR-E). Sourced from
+    //        `materios-intent-settlement` rev `c95e5edb` (post-PR-#41 PR-D
+    //        merge tip; supersedes the spec-225 pin at rev `7334b61e`):
+    //          - 8 permissionless / sudo extrinsics on `pallet_perp_engine`:
+    //              * `governance_set_market(market_id, MarketConfig)` —
+    //                sudo-only registration of a new market (call_index 0).
+    //              * `open_position(market_id, direction, size_e8,
+    //                leverage_bps)` — permissionless.
+    //              * `close_position(market_id)` — permissionless;
+    //                works at the cached mark even when the oracle is stale
+    //                (per spec §5.5 "closes succeed on a stale feed").
+    //              * `deposit_margin(amount_motra)` — MOTRA → pMATRA-USD
+    //                conversion at the live MATRA/USD rate; pins
+    //                `MarginAccount.weighted_deposit_rate_e18` for
+    //                snapshot-rate withdraw accounting.
+    //              * `withdraw_margin(amount_e18)` — gated by 24h
+    //                `WithdrawDwellBlocks` AND post-withdraw margin-equity
+    //                check; clamps MOTRA payout to the asymmetric
+    //                snapshot-vs-live rate to bound volatile-collateral
+    //                drawdown risk (cf. `feedback_u256_weighted_avg_volatile_
+    //                collateral.md`).
+    //              * `adjust_leverage(market_id, new_leverage_bps)` —
+    //                permissionless re-leverage within the market's
+    //                governance-set band.
+    //              * `liquidate(market_id, who)` — permissionless,
+    //                bond-gated. Slashes the FULL `KeeperBondMinimum`
+    //                on a false trigger; on a valid liquidation pays
+    //                `LiquidationFee` split keeper/treasury (per
+    //                `MarketConfig.liquidation_fee_bps`). Returns
+    //                `Ok(())` on punish so `with_storage_layer` does NOT
+    //                roll back the slash writes — callers MUST scan
+    //                `triggered_events` (Ok-return + emit-on-fail
+    //                pattern per `feedback_substrate_ok_return_emit_on_
+    //                fail_pattern.md`).
+    //              * `settle_funding(market_id, epoch)` — permissionless,
+    //                idempotent. Computes the trimmed-median premium
+    //                index for the epoch, advances
+    //                `CumulativeFundingIndex[market]`, and prunes the
+    //                bounded `PremiumIndexSamples` ring.
+    //          - 2 keeper bond extrinsics (PR-D, call_index 8/9):
+    //              * `reserve_keeper_bond(market_id, amount)` — keeper
+    //                reserves ≥ `KeeperBondMinimum` MOTRA via
+    //                `Currency::reserve` before they can call
+    //                `liquidate`. `ReservedKeeperBonds` bookkeeping
+    //                map MUST stay ≤ actual `reserved_balance`.
+    //              * `release_keeper_bond(market_id)` — withdraws the
+    //                bond. Bond release is unconditional; the slash
+    //                branch fires inside `liquidate` and pre-empts
+    //                release.
+    //          - `IntentKind::PerpAction(PerpActionKind)` variant landing
+    //            on `pallet_intent_settlement::IntentKind` (PR-D,
+    //            byte-pinned). Routes the perp surface (Open/Close/
+    //            Liquidate) through the intent layer when an off-chain
+    //            UX wants the intent-flow semantics. Expire-branch is
+    //            `IntentNotEligibleForExpiry` — perp intents have no
+    //            Cardano-side policy mirror to expire against, so they
+    //            short-circuit the policy-expire path.
+    //          - Storage maps registered: `Markets`, `Positions`,
+    //            `MarginAccounts` (with snapshot-rate accounting),
+    //            `CumulativeFundingIndex`, `MarkPriceCacheMap`,
+    //            `PremiumIndexSamples`, `LastSettledFundingEpoch`,
+    //            `ReservedKeeperBonds`, `BadDebtAccumulated`,
+    //            `BadDebtWindowStart`.
+    //          - Hooks: `on_initialize` iterates active markets, samples
+    //            the premium index per market, and updates the cached
+    //            mark price via the clamped EMA-basis trade-off (§5.2).
+    //            Bounded by `MaxMarkets` so the hook's weight is
+    //            constant in market-set size.
+    //        16 new `Config` items wired (full set from the pallet
+    //        Config trait at `pallets/perp-engine/src/lib.rs` line 145):
+    //          * `Currency` = `Balances` — same `ReservableCurrency`
+    //            surface used by every other reserve-pot pallet on this
+    //            runtime.
+    //          * `PriceOracle` = `PerpEngineOracleAdapter` — runtime-side
+    //            adapter implementing `pallet_perp_engine::PriceOracle`
+    //            on top of `pallet_oracle::Pallet`. Hashes the
+    //            BoundedVec `OracleFeedId` into the 32-byte
+    //            `pallet_oracle::PairId` via sha2_256, scales the
+    //            `(price: u64, decimals: u8)` pair up to 1e18, and
+    //            cross-checks freshness via
+    //            `pallet_oracle::Pallet::is_price_fresh(pair_id,
+    //            current_block, OracleMaxStaleSlots)`. Per design memo
+    //            §6.1 "PRICE adapter" composition contract.
+    //          * `PalletId = PerpEnginePalletId = PalletId(*b"perp/v0w")`
+    //            — derives the sovereign account that holds MOTRA
+    //            margin custody. Distinct from `mat/trsy` (treasury)
+    //            and `mat/attr` (attestor reserve). The derived account
+    //            (`5EYCAe…` style SS58) MUST be pre-funded with
+    //            `ExistentialDeposit` at spec activation so the FIRST
+    //            `Currency::transfer` from a fresh chain (`deposit_margin`
+    //            or post-liquidate keeper payout via repatriate) cannot
+    //            stall on a non-existent destination — same rationale
+    //            as the spec-225 `mat/trsy` pre-fund (task #295). Done
+    //            via sudo `balances.forceSetBalance` at ceremony time.
+    //          * `MateriosChainId = [0e46e33f…]` — live preprod v6
+    //            genesis hash. Reuses the same 32-byte value pinned on
+    //            `pallet_oracle` (`OracleMateriosChainId`); the pallet
+    //            Config types it as `Get<[u8; 32]>`. Defends future PR-B+
+    //            committee-signed perp flows against cross-chain replay.
+    //          * `MaxLeverageBps = 5_000` — 50× hard cap across ALL
+    //            markets (per spec §10). Each market's
+    //            `MarketConfig.max_leverage_bps` MUST be ≤ this value;
+    //            governance enforces the bound in
+    //            `governance_set_market`.
+    //          * `MinLeverageBps = 100` — 1× minimum (per spec §10).
+    //            Enforces `open_position` / `adjust_leverage` lower
+    //            bound; rejects sub-1× over-collateralised opens which
+    //            would only serve to grief storage.
+    //          * `MaxMarkets = 32` — caps `Markets` cardinality so the
+    //            `on_initialize` hook's per-block work is bounded. Spec
+    //            §10 default; accommodates the v0 launch set of 3
+    //            (ADA/BTC/ETH-PERP per spec §9.2) with growth headroom.
+    //          * `MaxFundingSamplesPerEpoch = 600` — bounded ring buffer
+    //            per (market, epoch) for `PremiumIndexSamples`. Spec
+    //            §10 default (= `funding_epoch_blocks` = 1h @ 6s → 600).
+    //          * `KeeperBondMinimum = 100 MATRA = 100 × 10^8` MOTRA
+    //            base units (8 decimals). Spec §6.4 economic rationale:
+    //            a $100-ballpark stake big enough to deter casual
+    //            false-liquidate griefing, small enough to keep the
+    //            keeper economy permissionless. Hard-slashed 100% on
+    //            false trigger; half to `mat/trsy`, half burned via
+    //            `Currency::slash_reserved`.
+    //          * `FreshnessLimitBlocks = 3` — mark-cache freshness
+    //            threshold. `on_initialize` updates the cache every
+    //            block; 3 blocks (18s) of staleness suffices for the
+    //            "open / liquidate paths reject stale" gate while not
+    //            tripping on occasional block-author skips. Closes
+    //            still succeed at the cached mark even when stale (per
+    //            spec §5.5 collateral-trapped protection).
+    //          * `MaxMarkBasisBps = 200` — 2% cap on the
+    //            premium-index EMA basis added to the live oracle
+    //            price (per spec §5.2 mark-manipulation guard against
+    //            thin CLOB liquidity). The EMA basis is clamped at
+    //            ±MaxMarkBasisBps × oracle_e18 before being written
+    //            to `MarkPriceCache.mark_ema_basis_e18`.
+    //          * `BadDebtCircuitBreakerThresholdE18 = 10_000 × 10^18`
+    //            — $10_000 cumulative bad-debt over the rolling window
+    //            auto-pauses the market (per spec §6.5). Governance
+    //            tunes per market once mainnet volume materialises.
+    //          * `BadDebtWindowBlocks = 14_400` — 24h rolling window
+    //            (per spec §9.1; matches `WithdrawDwellBlocks`).
+    //          * `MatraUsdFeedId = b"MATRA/USD"` — canonical Aegis MON
+    //            Phase 1 publisher feed handle. The pallet hashes this
+    //            BoundedVec into the 32-byte PairId for cross-pallet
+    //            lookup via `PerpEngineOracleAdapter`. The 5-pair
+    //            Aegis fleet has MATRA/USD running as one of its
+    //            output rails (Phase 1D, task #293); confirm that
+    //            feed is publishing fresh prices BEFORE the first
+    //            `deposit_margin` / `withdraw_margin` exercise.
+    //          * `WithdrawDwellBlocks = 14_400` — 24h dwell between
+    //            `deposit_margin` and `withdraw_margin` on the same
+    //            account (per spec §3.4 bridge-deposit-replay defence).
+    //          * `WeightInfo = ()` — PR-E ships with default zero
+    //            WeightInfo. PR-F runs `frame-benchmarking-cli` over
+    //            the pallet's existing bench bodies and lands a real
+    //            `weights.rs`; until then dispatch weights default to
+    //            the pallet's tagged `#[pallet::call_index]` weights
+    //            plus the default unit weight, which is conservative
+    //            for the v0-pre-mainnet preprod environment.
+    //        Operational follow-ups queued before this WASM activates:
+    //          - Pre-fund the `perp/v0w` derived account (sovereign
+    //            margin custody pot) with ≥ ExistentialDeposit via
+    //            sudo `balances.forceSetBalance` at ceremony time.
+    //            Same shape as the spec-225 `mat/trsy` pre-fund (#295).
+    //          - Post-activation: governance calls `governance_set_market`
+    //            registering ADA-PERP as the first market. The
+    //            `MarketConfig.oracle_feed_id` MUST hash to a registered
+    //            `pallet_oracle::PairId` with live attestor sigs (Phase
+    //            1D's ADA/USD pair). Smoke-check: any signer can call
+    //            `system.queryStorage('PerpEngine', 'Markets', '<id>')`
+    //            and get the new MarketConfig.
+    //          - Demo trade: `deposit_margin` 1 MATRA → `open_position`
+    //            ADA-PERP 10× → `close_position`. Verifies the full
+    //            oracle-mark + funding + margin-equity flow end-to-end.
+    //        NO markets registered at genesis. NO pre_runtime_upgrade /
+    //        post_runtime_upgrade migration — pallet starts empty (its
+    //        on_initialize hook is a no-op until the first
+    //        `governance_set_market` registers a market). Pure additive
+    //        on the dispatch surface, `transaction_version` stays at 2.
+    spec_version: 226,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 2,
@@ -1330,6 +1509,267 @@ impl pallet_oracle::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Perp Engine (perp-engine v0 — PR-E, spec 226, task #259)
+// ---------------------------------------------------------------------------
+//
+// Permissionless USD-quoted linear perpetual-futures primitive. Pull-based
+// mark prices from `pallet-oracle`, pull-based funding, bond-gated
+// permissionless liquidator pool with 100% slash on false trigger.
+//
+// All Config defaults are sourced from
+// `/home/deci/work/perp-engine-v0-spec.md §10 parameter table` unless noted.
+// The pallet's `Config` trait is the source of truth — see
+// `pallets/perp-engine/src/lib.rs` line 145 (PR-D rev `c95e5edb`).
+
+parameter_types! {
+    /// PalletId for the perp-engine MOTRA margin-custody pot. All
+    /// `deposit_margin` / `withdraw_margin` traffic and the post-
+    /// liquidate keeper-payout splits route through this derived
+    /// account. Bytes `b"perp/v0w"` are intentionally distinct from
+    /// `mat/trsy` (treasury) and `mat/attr` (attestor reserve) so the
+    /// account-store partitions cleanly.
+    ///
+    /// At spec-226 activation the derived account MUST be pre-funded
+    /// with ≥ `ExistentialDeposit` via sudo `balances.forceSetBalance`
+    /// (mirrors the spec-225 `mat/trsy` pre-fund, task #295) so the
+    /// FIRST `Currency::transfer` from a chain that has never executed
+    /// `deposit_margin` cannot stall on a non-existent destination.
+    pub const PerpEnginePalletId: PalletId = PalletId(*b"perp/v0w");
+
+    /// 32-byte materios chain identity — preprod v6 genesis hash. The
+    /// pallet Config types this as `Get<[u8; 32]>`. Same bytes as
+    /// `OracleMateriosChainId` so a future committee-signed perp flow
+    /// can interlock with the oracle PRIC preimage scheme.
+    pub const PerpEngineMateriosChainId: [u8; 32] = [
+        0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc,
+        0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
+        0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07,
+        0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
+    ];
+
+    /// Hard cap on leverage across ALL markets, in basis points. 5_000 bps
+    /// = 50× per spec §10. Each market's `MarketConfig.max_leverage_bps`
+    /// MUST be ≤ this value; `governance_set_market` enforces the bound
+    /// at registration time. Provides a runtime-level kill-switch for
+    /// systemic over-leverage even if a misconfigured market slips
+    /// through governance review.
+    pub const PerpEngineMaxLeverageBps: u32 = 5_000;
+
+    /// Floor on leverage in basis points. 100 bps = 1× per spec §10.
+    /// `open_position` / `adjust_leverage` reject `leverage_bps <
+    /// MinLeverageBps`. Rejects sub-1× over-collateralised opens which
+    /// only serve to grief storage on the `Positions` map.
+    pub const PerpEngineMinLeverageBps: u32 = 100;
+
+    /// Cap on `Markets` cardinality. 32 markets accommodates the v0
+    /// launch set of 3 (ADA-PERP, BTC-PERP, ETH-PERP per spec §9.2)
+    /// with substantial headroom. Bounds the per-block work in
+    /// `on_initialize` (mark-cache sweep + premium-index sample per
+    /// active market) so the hook weight is constant in `Markets`
+    /// cardinality and never exceeds the normal-class budget.
+    pub const PerpEngineMaxMarkets: u32 = 32;
+
+    /// Bounded ring-buffer size for `PremiumIndexSamples[(market, epoch)]`.
+    /// 600 samples per epoch matches the canonical `funding_epoch_blocks
+    /// = 600` (1h at 6s blocks) per spec §10 — exactly one sample per
+    /// block. The pallet's `on_initialize` hook drops samples when the
+    /// ring saturates.
+    pub const PerpEngineMaxFundingSamplesPerEpoch: u32 = 600;
+
+    /// Keeper bond minimum, in MOTRA base units (8 decimals — MOTRA is
+    /// the on-chain token, MATRA is the human-readable unit). 100 MATRA
+    /// × 10^8 = 10^10 base units. Per spec §6.4: large enough to deter
+    /// casual false-liquidate griefing, small enough to keep the
+    /// keeper economy permissionless. Slashed 100% on false trigger;
+    /// half repatriated to `mat/trsy`, half burned via
+    /// `Currency::slash_reserved`.
+    pub const PerpEngineKeeperBondMinimum: Balance = 100u128 * 100_000_000u128;
+
+    /// Mark-price cache freshness threshold, in blocks. `on_initialize`
+    /// updates the cache every block; 3 blocks (≈18s) of staleness
+    /// suffices for the "opens + liquidations reject stale" gate while
+    /// not tripping on occasional block-author skips. Per spec §5.5
+    /// closes succeed at the cached mark even when the gate fires —
+    /// collateral-trapped protection takes precedence.
+    pub const PerpEngineFreshnessLimitBlocks: u32 = 3;
+
+    /// Cap on the premium-index EMA basis added to the live oracle
+    /// price, in basis points. 200 bps = 2% per spec §5.2 — defends
+    /// the mark price against manipulation via thin CLOB liquidity
+    /// dragging the EMA off the oracle. Clamped symmetrically in
+    /// `MarkPriceCache.mark_ema_basis_e18` so the cached mark stays
+    /// within ±2% of the oracle price.
+    pub const PerpEngineMaxMarkBasisBps: u32 = 200;
+
+    /// Bad-debt circuit-breaker threshold, in 1e18-scaled pMATRA-USD.
+    /// $10_000 = 10_000 × 10^18 per spec §6.5. When the rolling-window
+    /// bad-debt sum exceeds this value the affected market auto-pauses
+    /// — governance must explicitly clear the pause via runtime upgrade
+    /// or a new `governance_set_market` row. Conservative default for
+    /// v0 preprod; governance tunes per market once mainnet volume
+    /// materialises.
+    pub const PerpEngineBadDebtCircuitBreakerThresholdE18: u128 =
+        10_000u128 * 1_000_000_000_000_000_000u128;
+
+    /// Bad-debt rolling-window length, in blocks. 14_400 ≈ 24h at 6s
+    /// blocks per spec §9.1. Matches `WithdrawDwellBlocks` so the
+    /// time-domain semantics of "yesterday's bad debt" and "yesterday's
+    /// deposit" are coherent. The window slides forward in
+    /// `liquidate`'s bad-debt accumulator.
+    pub const PerpEngineBadDebtWindowBlocks: u32 = 14_400;
+
+    /// Withdraw-dwell window, in blocks. 14_400 ≈ 24h at 6s blocks per
+    /// spec §3.4. A fresh `deposit_margin` must dwell this many blocks
+    /// before the same account can `withdraw_margin` — defends against
+    /// bridge-deposit-replay shapes where a brittle off-chain bridge
+    /// re-credits a withdrawn deposit. Matches the spec-220
+    /// `MinFinalityDepth × 1000`-equivalent intent-side dwell on
+    /// intent-settlement.
+    pub const PerpEngineWithdrawDwellBlocks: u32 = 14_400;
+
+    /// MATRA/USD oracle feed handle. Hashed by the
+    /// `PerpEngineOracleAdapter` into the 32-byte
+    /// `pallet_oracle::PairId` for cross-pallet lookup. The Aegis
+    /// publisher fleet on Node-2 publishes MATRA/USD as one of its
+    /// five rails (Phase 1D, task #293); confirm that feed is
+    /// publishing fresh prices BEFORE the first `deposit_margin` or
+    /// `withdraw_margin` call on this runtime — both extrinsics fail
+    /// with `OracleUnavailable` if the feed is stale or missing.
+    ///
+    /// 9 ASCII bytes — well inside `MAX_MARKET_ID_LEN = 16`. Wrapped
+    /// in a `parameter_types!` accessor because `BoundedVec` does NOT
+    /// have a const constructor; the closure runs once at runtime
+    /// metadata bake time.
+    pub PerpEngineMatraUsdFeedId: pallet_perp_engine::OracleFeedId =
+        pallet_perp_engine::OracleFeedId::try_from(b"MATRA/USD".to_vec())
+            .expect("9 bytes < MAX_MARKET_ID_LEN = 16; static literal");
+}
+
+/// Adapter implementing `pallet_perp_engine::PriceOracle` on top of
+/// `pallet_oracle::Pallet<Runtime>`.
+///
+/// ## Type bridge
+///
+/// `pallet-perp-engine` types its feed handle as a bounded UTF-8 byte
+/// string (`OracleFeedId = BoundedVec<u8, ConstU32<MAX_MARKET_ID_LEN=16>>`)
+/// while `pallet-oracle` keys its storage by the canonical 32-byte
+/// `PairId = [u8; 32]` (= `sha256(pair_string_utf8)`). The adapter is
+/// the runtime-side bridge: hash the perp-engine handle to compute the
+/// oracle PairId, then forward through `pallet_oracle::Pallet`.
+///
+/// This composition is the canonical "pallet-oracle as `PriceOracle`
+/// adapter" shape per `materios-oracle-design.md §6.1`. Same pattern
+/// `pallet-intent-settlement::IsCommitteeMember` uses to consume
+/// `pallet-orinq-receipts` committee storage (`OrinqCommitteeAdapter`
+/// above) and `pallet-oracle::IsAttestorFor` uses to consume the
+/// AccountId32 → sr25519 pubkey identity map
+/// (`PalletOracleAttestorRegistry` above).
+///
+/// ## Price-scale normalisation
+///
+/// `pallet-oracle` stores aggregated prices as `(price: u64, decimals:
+/// u8)`. The perp-engine consumes prices at 1e18 scale. The adapter
+/// scales the raw `u64` up to `u128` and multiplies by
+/// `10^(18 - decimals)`. Decimals are bounded `[0, 18]` by the
+/// pallet-oracle's `submit_price` validation (§oracle pallet line 12),
+/// so the shift is always non-negative and the `u128` headroom is
+/// `~10^18 × 10^18 = 10^36` — well clear of overflow even at
+/// 18-decimal $1B-equivalent prices.
+///
+/// ## Freshness gate
+///
+/// `is_fresh` is fail-CLOSED on a missing or paused feed. We delegate to
+/// `pallet_oracle::Pallet::is_price_fresh(pair_id, current_block,
+/// OracleMaxStaleSlots)` so the same `MaxStaleSlots = 60` block tolerance
+/// the oracle pallet enforces on `submit_price` applies uniformly to
+/// downstream consumers (no separate per-consumer staleness config).
+/// `current_block` is sourced from `frame_system::Pallet::block_number()`
+/// at read time — the Aegis-publisher rail substitutes
+/// `int(time.time())` for `slot_observed` per
+/// `mon-phase1-aegis-extend-design.md §2 #4` so wall-clock-equivalent
+/// staleness is the correct gate.
+pub struct PerpEngineOracleAdapter;
+
+impl pallet_perp_engine::PriceOracle for PerpEngineOracleAdapter {
+    fn latest_price_e18(feed_id: &pallet_perp_engine::OracleFeedId) -> Option<u128> {
+        // Hash the perp-engine BoundedVec handle to the canonical
+        // 32-byte oracle PairId (`sha256(handle_bytes)`).
+        let pair_id: pallet_oracle::PairId =
+            sp_io::hashing::sha2_256(feed_id.as_slice());
+        // `pallet_oracle::Pallet::get_price` returns `(u64 price, u8
+        // decimals, SlotNumber)` or `None` when the feed has no
+        // aggregated row yet.
+        let (price_u64, decimals, _slot) =
+            pallet_oracle::Pallet::<Runtime>::get_price(pair_id)?;
+        // Scale `(price, decimals)` up to 1e18. Decimals are bounded
+        // `[0, 18]` by the oracle pallet's `submit_price` validation
+        // so the exponent is non-negative. Use `u128` throughout —
+        // `10^18 × 10^18 = 10^36` is well inside `u128::MAX ≈ 3.4 × 10^38`.
+        let shift = 18u32.saturating_sub(decimals as u32);
+        let scale: u128 = 10u128.checked_pow(shift)?;
+        (price_u64 as u128).checked_mul(scale)
+    }
+
+    fn price_age_blocks(feed_id: &pallet_perp_engine::OracleFeedId) -> u32 {
+        // Compute age = current_block - last_update_block. Falls back
+        // to `u32::MAX` (the no-feed sentinel per pallet-perp-engine
+        // §PriceOracle docstring) whenever the feed has never been
+        // published or the block-number conversion would underflow.
+        let pair_id: pallet_oracle::PairId =
+            sp_io::hashing::sha2_256(feed_id.as_slice());
+        let feed = match pallet_oracle::Prices::<Runtime>::get(pair_id) {
+            Some(f) => f,
+            None => return u32::MAX,
+        };
+        let now: u32 = frame_system::Pallet::<Runtime>::block_number();
+        let last: u32 = feed.last_update_block;
+        now.saturating_sub(last)
+    }
+
+    fn is_fresh(feed_id: &pallet_perp_engine::OracleFeedId) -> bool {
+        // Fail-CLOSED on missing / paused / overflow paths via
+        // `pallet_oracle::Pallet::is_price_fresh` semantics (returns
+        // `false` whenever `Prices[pair_id]` is `None`).
+        let pair_id: pallet_oracle::PairId =
+            sp_io::hashing::sha2_256(feed_id.as_slice());
+        // Materios block counter substitutes for `slot_observed` per
+        // `materios_rail.py` design memo §2 #4 — the publisher rail
+        // submits `int(time.time())` as `slot_observed`, and the
+        // pallet treats it as a monotonic counter. Bridging to
+        // block-number for the freshness gate is structurally
+        // equivalent because both rails advance at the same wall-clock
+        // tick.
+        let now_block: u32 = frame_system::Pallet::<Runtime>::block_number();
+        let max_age: u64 = <Runtime as pallet_oracle::Config>::MaxStaleSlots::get();
+        pallet_oracle::Pallet::<Runtime>::is_price_fresh(
+            pair_id,
+            now_block as u64,
+            max_age,
+        )
+    }
+}
+
+impl pallet_perp_engine::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Currency = Balances;
+    type PriceOracle = PerpEngineOracleAdapter;
+    type PalletId = PerpEnginePalletId;
+    type MateriosChainId = PerpEngineMateriosChainId;
+    type MaxLeverageBps = PerpEngineMaxLeverageBps;
+    type MinLeverageBps = PerpEngineMinLeverageBps;
+    type MaxMarkets = PerpEngineMaxMarkets;
+    type MaxFundingSamplesPerEpoch = PerpEngineMaxFundingSamplesPerEpoch;
+    type KeeperBondMinimum = PerpEngineKeeperBondMinimum;
+    type FreshnessLimitBlocks = PerpEngineFreshnessLimitBlocks;
+    type MaxMarkBasisBps = PerpEngineMaxMarkBasisBps;
+    type BadDebtCircuitBreakerThresholdE18 =
+        PerpEngineBadDebtCircuitBreakerThresholdE18;
+    type BadDebtWindowBlocks = PerpEngineBadDebtWindowBlocks;
+    type MatraUsdFeedId = PerpEngineMatraUsdFeedId;
+    type WithdrawDwellBlocks = PerpEngineWithdrawDwellBlocks;
+}
+
+// ---------------------------------------------------------------------------
 // Construct runtime
 // ---------------------------------------------------------------------------
 
@@ -1399,6 +1839,22 @@ construct_runtime! {
         // `aegis-publisher/publisher/materios_rail.py` is byte-pinned to
         // the PRIC preimage builder in `pallet_oracle::types`.
         Oracle: pallet_oracle = 22,
+        // Perp Engine v0 (spec 226, task #259, PR-E): permissionless
+        // USD-quoted linear perpetual-futures primitive. Appended at
+        // index 23. Closes the runtime side of #259. Surface: open /
+        // close / deposit_margin / withdraw_margin / adjust_leverage /
+        // liquidate / settle_funding (all permissionless) + the two
+        // bonded keeper extrinsics (reserve_keeper_bond /
+        // release_keeper_bond, PR-D call_index 8/9) + sudo-only
+        // governance_set_market. Reads pull-mark prices through the
+        // runtime-side `PerpEngineOracleAdapter` over
+        // `pallet_oracle::Pallet`. NO markets registered at genesis —
+        // governance (sudo on preprod) calls `governance_set_market`
+        // post-activation to register ADA-PERP as the first market. The
+        // sovereign margin-custody pot at derived `PalletId(*b"perp/v0w")`
+        // MUST be pre-funded with ≥ ExistentialDeposit at ceremony time
+        // (same shape as the spec-225 `mat/trsy` pre-fund, task #295).
+        PerpEngine: pallet_perp_engine = 23,
     }
 }
 

@@ -4710,6 +4710,7 @@ dependencies = [
  "pallet-oracle",
  "pallet-orinq-receipts",
  "pallet-partner-chains-session",
+ "pallet-perp-engine",
  "pallet-session",
  "pallet-session-runtime-stub",
  "pallet-session-validator-management",
@@ -5694,7 +5695,7 @@ dependencies = [
 [[package]]
 name = "pallet-intent-settlement"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=7334b61ea42a857fa8fe8818384f8a02b9470567#7334b61ea42a857fa8fe8818384f8a02b9470567"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2#c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5760,7 +5761,7 @@ dependencies = [
 [[package]]
 name = "pallet-oracle"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=7334b61ea42a857fa8fe8818384f8a02b9470567#7334b61ea42a857fa8fe8818384f8a02b9470567"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2#c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5813,6 +5814,23 @@ dependencies = [
  "sp-core",
  "sp-runtime",
  "sp-staking",
+ "sp-std",
+]
+
+[[package]]
+name = "pallet-perp-engine"
+version = "0.1.0"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2#c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "log",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
  "sp-std",
 ]
 

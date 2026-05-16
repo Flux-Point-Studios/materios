@@ -117,36 +117,41 @@ num-bigint = { version = "0.4", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 chrono = { version = "0.4", default-features = false }
 
-# Wave 2 W2.2 + MON Phase 1: external pallets pinned by git rev. Both live
-# in Flux-Point-Studios/materios-intent-settlement (monorepo of three
-# pallets — `pallet-intent-settlement`, `pallet-oracle`, and
-# `pallet-committee-governance`). The pallet Cargo pins the same
-# `polkadot-stable2409-4` SDK tag as this workspace so no version dance is
-# required. Pin by `rev` (not `branch = "main"`) for reproducibility.
+# Wave 2 W2.2 + MON Phase 1 + Perp Engine v0: external pallets pinned by
+# git rev. All three live in Flux-Point-Studios/materios-intent-settlement
+# (monorepo of four pallets — `pallet-intent-settlement`, `pallet-oracle`,
+# `pallet-committee-governance`, `pallet-perp-engine`). The pallet Cargo
+# pins the same `polkadot-stable2409-4` SDK tag as this workspace so no
+# version dance is required. Pin by `rev` (not `branch = "main"`) for
+# reproducibility.
 #
-# Rev `7334b61e` is the post-PR-#38 merge tip and includes:
+# Rev `c95e5edb` is the post-PR-#41 merge tip (PR-D) and includes:
 #   - #84 settle_claim bond + slash (PR #38, mis-sec P1): new extrinsics
 #     `post_settlement_bond`, `slash_bad_settlement_evidence`,
-#     `release_settlement_bond`. New Config items `SlashWatcherShareBps`,
-#     `BondReleaseDelayBlocks`, `MinSettlementBond`. v2→v3 migration
-#     adds `bond_amount: u128` to existing `SettlementRequestRecord`
-#     rows. Closes the audit P1 follow-up to spec-220 B+D.
-#   - pallet-perp-engine scaffold (PR #37, task #259) — types + storage +
-#     8 extrinsic stubs. Not wired in this runtime (Phase B impl bodies
-#     ship in a follow-up PR; the runtime wire lands in PR-D).
+#     `release_settlement_bond` on `pallet_intent_settlement`. New Config
+#     items `SlashWatcherShareBps`, `BondReleaseDelayBlocks`,
+#     `MinSettlementBond`. v2→v3 migration adds `bond_amount: u128` to
+#     existing `SettlementRequestRecord` rows. Already live on chain at
+#     spec_version 225.
+#   - #259 pallet-perp-engine v0 (PRs #37/#39/#40/#41, scaffold → PR-D):
+#     full 8-extrinsic surface (`governance_set_market`, `open_position`,
+#     `close_position`, `deposit_margin`, `withdraw_margin`,
+#     `adjust_leverage`, `liquidate`, `settle_funding`) plus the two
+#     bond extrinsics (`reserve_keeper_bond` / `release_keeper_bond`,
+#     PR-D call_index 8/9) and the false-trigger 100%-slash branch on
+#     `liquidate`. Pull-based funding, premium-index mark cache via
+#     `on_initialize`, isolated-margin per-account collateral with
+#     snapshot-rate accounting, bad-debt circuit breaker. NEW in this
+#     runtime wire (PerpEngine = index 23).
 #
-# Prior rev `6125ae4` was the post-PR-#36 merge tip and included:
-#   - spec-220 `request_settle` / `attest_settle` + B+D L1 verification
-#     (PRs #33, #266, mis-sec P0) — already live on-chain at spec_version
-#     221 via the spec-220 + spec-221 sudo ceremonies (runtime-overrides
-#     deploy path). This source pin catches main up to that runtime.
-#   - spec-221 `request_expire_policy` / `attest_expire_policy` symmetric
-#     B+D expire path (PR #34, task #267 mis-sec P0 followup).
-#   - pallet-oracle scaffold + impl (PRs #35, #36) — the canonical PRIC
-#     payload + sudo-managed attestor registry + M-of-N price aggregation.
-#     New in this PR's runtime wire (Oracle = index 22).
-pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "7334b61ea42a857fa8fe8818384f8a02b9470567", default-features = false }
-pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "7334b61ea42a857fa8fe8818384f8a02b9470567", default-features = false }
+# Prior rev `7334b61e` was the post-PR-#38 merge tip and pinned spec 225's
+# settle bond + slash surface; it predates the perp-engine impl PRs.
+#
+# Prior rev `6125ae4` was the post-PR-#36 merge tip pinning spec 220 +
+# spec 221 (settle_claim B+D + expire_policy_mirror B+D).
+pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2", default-features = false }
+pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2", default-features = false }
+pallet-perp-engine = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "c95e5edbe70dd7bd9a0ebb6d6467967d7077e8b2", default-features = false }
 
 # MOTRA
 sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
