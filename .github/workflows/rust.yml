@@ -1,0 +1,83 @@
+name: rust
+
+# Validates the partnerchain Substrate workspace on every push to main and
+# every PR. Pinned to the rust-toolchain.toml channel (1.85.0 at time of
+# writing — see the SECURITY NOTE in partnerchain/rust-toolchain.toml for
+# why this is pinned).
+#
+# Strategy:
+#   - cargo check --workspace --all-targets exercises every member (12 crates
+#     incl. node, runtime, 4 local pallets, 2 vendored IOG crates) without
+#     codegen, so ubuntu-latest can finish in ~10 min cold / ~2 min warm.
+#   - cargo test runs only on the 4 local pallets that actually carry tests
+#     (motra, tee-attestation, orinq-receipts, billing). Skipping the full
+#     workspace test keeps the runtime + node WASM builders out of the
+#     critical path.
+#
+# We do NOT run the runtime WASM build or `cargo build --release` here —
+# those are exercised by the spec-N ceremony scripts.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-test:
+    name: cargo check + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: partnerchain
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show pinned toolchain
+        run: |
+          cat rust-toolchain.toml
+          rustup show active-toolchain
+
+      - name: Add wasm32 target + rust-src component
+        run: |
+          rustup target add wasm32-unknown-unknown
+          rustup component add rust-src
+
+      - name: Install system build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libclang-dev libssl-dev pkg-config \
+            protobuf-compiler make cmake
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            partnerchain/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('partnerchain/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets --locked
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+        continue-on-error: true
+
+      - name: cargo test (local pallets only)
+        run: |
+          cargo test \
+            -p pallet-motra \
+            -p pallet-tee-attestation \
+            -p pallet-orinq-receipts \
+            -p pallet-billing \
+            --no-fail-fast
