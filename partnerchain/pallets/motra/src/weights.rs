@@ -6,7 +6,6 @@ pub trait WeightInfo {
     fn claim_motra() -> Weight;
 }
 
-/// Substrate reference weights -- replace with benchmarked values.
 pub struct SubstrateWeight;
 impl WeightInfo for SubstrateWeight {
     fn set_delegatee() -> Weight {

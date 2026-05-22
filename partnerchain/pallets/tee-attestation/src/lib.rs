@@ -1,56 +1,17 @@
-//! `pallet-tee-attestation` — Materios TEE attestation primitive (Wave 3 / Phase 2).
+//! Materios TEE attestation primitive.
 //!
-//! See `/home/deci/wave-3-polychain-attestation-pallet-design.md` for the
-//! design intent and `/home/deci/wave-3-phase-2-acurast-scoping.md` for why
-//! we vendor the Acurast Android Key Attestation verifier.
+//! Only `EvidenceType::ArmTrustZone` is fully implemented; other verifiers
+//! return `VerifyFailReason::NotImplemented`.
 //!
-//! ## Phase 2 scope
+//! Determinism: every committee member's verifier MUST produce identical
+//! bytes for the same input. The verifier uses `include_bytes!` for all
+//! trust roots, skips wall-clock validity checks, and never consults
+//! external services.
 //!
-//! - `EvidenceType::ArmTrustZone` is the only **fully implemented** verifier.
-//! - Other variants (`AmdSevSnp`, `IntelTdx`, `ReproducibleBuild`,
-//!   `ZkVmExecution`) are typed and dispatched, but their verifiers return
-//!   `VerifyFailReason::NotImplemented`. Phases 3.x and 4 will fill these in.
-//! - The pallet is NOT yet wired into `construct_runtime!`. Integration is a
-//!   separate PR; Phase 2 only ships the standalone verifier + storage +
-//!   extrinsic.
-//!
-//! ## Determinism rules
-//!
-//! Every committee member's verifier MUST produce identical bytes for the
-//! same input. See `feedback_mofn_hash_determinism.md`. The Phase 2 verifier
-//! achieves this by:
-//!   - Using `include_bytes!` for ALL trust roots (Google RSA, Google P-384,
-//!     Apple). No filesystem or network reads.
-//!   - Skipping wall-clock validity checks on certificates (would otherwise
-//!     diverge by node clock skew).
-//!   - Not consulting any external service (no Google CRL, no Acurast
-//!     marketplace).
-//!
-//! ## Storage layout
-//!
-//! - `Disabled: StorageValue<bool>` — kill-switch for `submit_evidence`.
-//!   Defaults `true` at genesis; sudo flips it via `set_disabled` once
-//!   Phase 2.5 ships challenge binding (see "Phase 2 status" below).
-//! - `CompositeTrustScores: StorageMap<ReceiptId, CompositeTrustScore>` —
-//!   the cumulative score after every successful verification.
-//! - `VerifiedEntries: StorageMap<ReceiptId, BoundedVec<VerifiedEvidence>>`
-//!   — extracted attest_key_hash + raw_level per receipt for audit. Sorted
-//!   by `EvidenceType` discriminant (canonical ordering). This is the
-//!   canonical per-receipt evidence store; the pallet does NOT keep a
-//!   parallel raw-bytes map (the v1 PR-#17 design did, which let any
-//!   submitter bloat state with arbitrary `receipt_id`s — see security
-//!   review H-2). The verifier runs in-pallet on the extrinsic input and
-//!   only the extracted `VerifiedEvidence` is persisted.
-//!
-//! ## Phase 2 status (kill-switch)
-//!
-//! Phase 2 ships the verifier with the extrinsic disabled at genesis.
-//! Phase 2.5 will bind `attestation_challenge` to the receipt's
-//! `content_hash`, at which point this flag is flipped permanently.
-//! Without challenge binding the verifier accepts replays of any
-//! well-formed Google-rooted chain — a single attestation captured from
-//! any compliant Android device can be re-submitted against arbitrary
-//! receipt_ids and pass. See the security review of PR #17, finding H-3.
+//! `Disabled` is `true` at genesis and stays so until `submit_evidence`
+//! binds `attestation_challenge` to the receipt's `content_hash`. Without
+//! that binding the verifier accepts replays of any well-formed
+//! Google-rooted chain against arbitrary `receipt_id`s.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -59,15 +20,8 @@ extern crate alloc;
 pub use pallet::*;
 pub mod types;
 pub mod verifier;
-// Bundle the vendored Acurast attestation logic as a sub-module of the
-// pallet. The `__root_key__` files, `asn.rs`, `error.rs` and
-// `attestation.rs` all live under
-// `pallets/tee-attestation/vendor/acurast-attestation/`. We use
-// `#[path = ...]` to point straight at that directory while avoiding a
-// separate sub-crate (which would force its own Cargo.toml + a
-// polkadot-stable2409-4 pinning duplicate). The `attestation.rs` entry
-// declares `pub mod asn` and `pub mod error` whose own paths resolve
-// inside the vendor dir via further #[path] indirection on each.
+// `#[path = ...]` points at the vendored Acurast attestation logic without
+// adding a sub-crate.
 #[path = "../vendor/acurast-attestation/attestation.rs"]
 pub mod acurast_attestation_root;
 
@@ -119,9 +73,8 @@ pub mod pallet {
         true
     }
 
-    /// Successful verifier outputs per receipt. Canonical per-receipt
-    /// evidence store; raw evidence bytes are NOT persisted (see lib-level
-    /// docstring on the H-2 hardening).
+    /// Successful verifier outputs per receipt. Raw evidence bytes are NOT
+    /// persisted.
     #[pallet::storage]
     pub type VerifiedEntries<T: Config> = StorageMap<
         _,
@@ -152,7 +105,7 @@ pub mod pallet {
             evidence_type: EvidenceType,
             reason: u8,
         },
-        /// Phase 2 kill-switch flipped via `set_disabled`. Sudo-only.
+        /// Kill-switch flipped via `set_disabled`. Sudo-only.
         DisabledChanged {
             disabled: bool,
         },
@@ -166,9 +119,8 @@ pub mod pallet {
         /// The submitted evidence failed verification. The verbose reason
         /// is in the emitted `EvidenceRejected` event.
         VerificationFailed,
-        /// The pallet is disabled at genesis (Phase 2 kill-switch). Sudo
-        /// flips `Disabled=false` via `set_disabled` once Phase 2.5 ships
-        /// challenge binding.
+        /// The pallet's kill-switch is engaged. Sudo flips `Disabled=false`
+        /// via `set_disabled` once challenge binding ships.
         PalletDisabled,
     }
 
@@ -176,20 +128,11 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         /// Submit one evidence entry for a receipt. Anyone can call.
         ///
-        /// On success: the verifier runs, the extracted `VerifiedEvidence`
-        /// record is appended to `VerifiedEntries`, and the new
-        /// `CompositeTrustScore` is recomputed and stored. Raw evidence
-        /// bytes are NOT persisted — only the verifier's extracted
-        /// `attest_key_hash` + `raw_level` survive the call.
-        // Interim weight (H-1). The original value (10M ref_time, 0 proof
-        // bytes) is wildly under-priced for what `submit_evidence` does —
-        // the verifier walks an X.509 chain (RSA + P-256 + P-384
-        // signature verifies, ASN.1 decode, SHA-256 hashing) plus
-        // re-encodes the SPKI for the attest-key hash. Realistic cost is
-        // ~500M-1B ref_time + ~32 KB proof_size. Hard-coding 1B / 32 KB
-        // here as an interim until the FRAME benchmarking wiring lands
-        // (tasks #32 / #33). TODO(#32, #33): replace with generated
-        // `WeightInfo::submit_evidence()` from `weights.rs`.
+        /// On success, the verifier runs, the extracted `VerifiedEvidence`
+        /// is appended to `VerifiedEntries`, and the new
+        /// `CompositeTrustScore` is recomputed and stored.
+        // Hand-tuned weight: 1B ref_time / 32 KB proof_size covers an X.509
+        // chain walk + ASN.1 decode + SPKI re-encode.
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
         pub fn submit_evidence(
@@ -200,9 +143,6 @@ pub mod pallet {
         ) -> DispatchResult {
             let _who = ensure_signed(origin)?;
 
-            // Phase 2 kill-switch (H-3 interim mitigation). Disabled at
-            // genesis; sudo flips via `set_disabled` once Phase 2.5 binds
-            // attestation_challenge to content_hash.
             ensure!(!Disabled::<T>::get(), Error::<T>::PalletDisabled);
 
             let outcome = verify_evidence(&content_hash, &entry);
@@ -213,8 +153,7 @@ pub mod pallet {
                     verified_entries
                         .try_push(verified.clone())
                         .map_err(|_| Error::<T>::TooManyEntries)?;
-                    // Canonical ordering: keep verified-entries sorted by
-                    // EvidenceType discriminant. Determinism + stable hashing.
+                    // Sort by EvidenceType discriminant for canonical ordering.
                     sort_verified_entries(&mut verified_entries);
 
                     let score = compose_score(verified_entries.as_slice());
@@ -242,10 +181,8 @@ pub mod pallet {
             }
         }
 
-        /// Sudo-only: flip the Phase 2 kill-switch. Set `disabled=false`
-        /// once Phase 2.5 ships challenge binding (the H-3 interim
-        /// mitigation can come off then). The pallet is disabled at
-        /// genesis — see lib-level "Phase 2 status" docstring.
+        /// Sudo-only: flip the kill-switch. Set `disabled=false` once
+        /// challenge binding ships.
         #[pallet::call_index(1)]
         #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
         pub fn set_disabled(origin: OriginFor<T>, disabled: bool) -> DispatchResult {
@@ -256,9 +193,8 @@ pub mod pallet {
         }
     }
 
-    /// Read-API helper for cert-daemon — query the composite trust score for
-    /// a receipt. Returns the baseline (tier 0) when no evidence has been
-    /// verified.
+    /// Read-API helpers. `trust_score` returns the baseline when no
+    /// evidence has been verified.
     impl<T: Config> Pallet<T> {
         pub fn trust_score(receipt_id: &ReceiptId) -> CompositeTrustScore {
             if !CompositeTrustScores::<T>::contains_key(receipt_id) {
@@ -276,9 +212,8 @@ pub mod pallet {
     }
 
     /// Compose verified evidence into a CompositeTrustScore.
-    /// Mirrors the table in design doc §5.
     pub fn compose_score(verified: &[VerifiedEvidence]) -> CompositeTrustScore {
-        // Group by vendor class — collapse 2 AMD chips down to 1 silicon vendor.
+        // Collapse multiple chips from the same vendor down to one.
         let mut has_silicon_amd = false;
         let mut has_silicon_intel = false;
         let mut has_silicon_arm = false;

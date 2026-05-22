@@ -1,25 +1,6 @@
-//! v5.1 tokenomics — Component 1: pallet_treasury integration tests.
-//!
-//! Verifies:
-//!   * pallet_treasury is wired into construct_runtime! and its Config is
-//!     implemented with a mainnet-safe SpendOrigin / RejectOrigin / Burn.
-//!   * The treasury PalletId derives a stable, canonical account that can be
-//!     credited via genesis and drained via `spend_local` after SpendPeriod.
-//!   * spend_local with a non-root origin is rejected (BadOrigin).
-//!   * spend_local with amount > MaxBalance cap (if any) is rejected.
-//!   * The `Burn` fraction is applied at every SpendPeriod rollover even when
-//!     no approvals are pending.
-//!
-//! ---------------------------------------------------------------------------
-//! TDD CONTRACT
-//! ---------------------------------------------------------------------------
-//!
-//! These tests are written BEFORE `pallet_treasury` is wired into the runtime.
-//! They will fail to compile until:
-//!   1. `pallet-treasury` is added to `runtime/Cargo.toml`.
-//!   2. `impl pallet_treasury::Config for Runtime` is added to `runtime/src/lib.rs`.
-//!   3. `Treasury: pallet_treasury` is added to `construct_runtime!`.
-//!   4. `TreasuryPalletId` + `TreasuryAccount` parameters are exposed.
+//! Integration tests for pallet_treasury: PalletId derivation, signed/root
+//! spend_local origin gating, SpendPeriod-driven Burn fraction, and
+//! end-to-end credit-then-drain.
 
 use crate::*;
 

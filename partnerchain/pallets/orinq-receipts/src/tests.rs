@@ -196,7 +196,7 @@ fn submit(
     )
 }
 
-/// spec-219: produce the canonical-cert hash for `rid` as it would be
+/// Produce the canonical-cert hash for `rid` as it would be
 /// computed by the runtime. Existing tests that used to pass an arbitrary
 /// `[0xCE; 32]` to `attest_availability_cert` must now supply this exact
 /// value or take a `BadAttestStrike` event (with `Ok(())` dispatch —
@@ -1118,7 +1118,7 @@ fn threshold_hit_splits_fee_80_20_three_signers() {
         let treasury_before = Balances::free_balance(&treasury_account());
 
         // Three signers attest — threshold hits on the third.
-        // spec-219: must propose the canonical hash; otherwise the runtime
+        // must propose the canonical hash; otherwise the runtime
         // records a `BadAttestStrike` (Ok dispatch + event) and the bad
         // attest is dropped before reaching the `Attestations` map.
         let cert_hash = canonical_for(rid);
@@ -1189,7 +1189,7 @@ fn threshold_hit_with_seven_signers_splits_cleanly() {
             committee_seeds.iter().map(|&s| Balances::free_balance(&acc(s))).collect();
         let treasury_before = Balances::free_balance(&treasury_account());
 
-        // spec-219: canonical-only acceptance — see `canonical_for`.
+        // canonical-only acceptance — see `canonical_for`.
         let cert_hash = canonical_for(rid);
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
@@ -1239,7 +1239,7 @@ fn threshold_hit_single_signer_gets_full_80_percent() {
         let signer_before = Balances::free_balance(&acc(1));
         let treasury_before = Balances::free_balance(&treasury_account());
 
-        let cert_hash = canonical_for(rid); // spec-219 canonical-only
+        let cert_hash = canonical_for(rid); // canonical-only
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
@@ -1272,7 +1272,7 @@ fn threshold_hit_emits_fee_distributed_event() {
         let rid = H256::from([0xD1; 32]);
         let ch = H256::from([0xD2; 32]);
         assert_ok!(submit_c4(submitter_seed, rid, ch));
-        let cert_hash = canonical_for(rid); // spec-219 canonical-only
+        let cert_hash = canonical_for(rid); // canonical-only
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
@@ -1325,7 +1325,7 @@ fn pre_component_4_receipt_skips_fee_payout() {
         let _ = Balances::unreserve(&submitter, DEFAULT_FEE);
 
         // Certify — must not error.
-        // spec-219: canonical-only acceptance.
+        // canonical-only acceptance.
         let cert_hash = canonical_for(rid);
         for &s in committee_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
@@ -1414,7 +1414,7 @@ fn expire_after_certification_fails() {
         let rid = H256::from([0x21; 32]);
         let ch = H256::from([0x22; 32]);
         assert_ok!(submit_c4(submitter_seed, rid, ch));
-        let cert_hash = canonical_for(rid); // spec-219 canonical-only
+        let cert_hash = canonical_for(rid); // canonical-only
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
@@ -1790,7 +1790,7 @@ fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
 
         // Three signers attest — threshold hits.
         let signer_seeds = [1u8, 2, 3];
-        let cert_hash = canonical_for(rid); // spec-219 canonical-only
+        let cert_hash = canonical_for(rid); // canonical-only
         for &s in signer_seeds.iter() {
             assert_ok!(OrinqReceipts::attest_availability_cert(
                 RuntimeOrigin::signed(acc(s)),
@@ -2007,19 +2007,9 @@ mod era_emission_drip {
                 "sum of validator + treasury emissions must equal full era reward (no leak)"
             );
 
-            // Treasury delta is at least the floor 15% share; with rounding
-            // residue it can be strictly greater. The exact distribution is:
+            // Exact distribution at REWARD_PER_ERA=102_739_726, 15% treasury:
             //   validator = floor(102_739_726 * 85 / 100) = 87_328_767
             //   treasury  = 102_739_726 - 87_328_767     = 15_410_959
-            // (HIGH #3 fix 2026-04-21: this comment previously said the
-            // validator got 87_328_766 / treasury got 15_410_960, which was
-            // off-by-one — the assertion in
-            // `era_emission_rounding_residue_goes_to_treasury_not_validator`
-            // is, correctly, 87_328_767 / 15_410_959.)
-            //
-            // The old expected pre-migration behaviour was:
-            //   validator = 102_739_726 (full reward to author)
-            //   treasury  = 0
             assert!(
                 treasury_delta >= expected_treasury_min,
                 "treasury must receive >= floor(reward * 15 / 100); got {} expected >= {}",
@@ -2182,21 +2172,16 @@ mod era_emission_drip {
 }
 
 // ---------------------------------------------------------------------------
-// spec-219 bug_005 / bug_003 / bug_011: regression suite
+// Canonical-cert auto-slash regression suite
 // ---------------------------------------------------------------------------
 //
-// These tests guard against the four bugs surfaced by the ultrareview of
-// PR #23. If any of them flips red, the headline spec-219 mechanism
-// (auto-slash on cert mismatch) is silently regressing — re-check the
-// `with_transaction` / threshold-clamp / migration logic in lib.rs.
+// If any of these flip red, the auto-slash-on-cert-mismatch mechanism is
+// silently regressing — re-check `with_storage_layer` interaction,
+// threshold-clamp, and migration logic in lib.rs.
 
-/// bug_005: a bad attest must (a) increment `BadAttestStrikes` and (b)
-/// emit a `BadAttestStrike` event. The original PR returned
-/// `Err(CertHashMismatch)`, but the `#[pallet::call]` auto-wrap in
-/// `with_storage_layer` then rolled BOTH back — making the headline
-/// spec-219 mechanism a no-op. The fix changes the dispatch to return
-/// `Ok(())` so the writes commit normally; SDK callers detect
-/// misattestation via the event, not the error.
+/// A bad attest must increment `BadAttestStrikes` and emit `BadAttestStrike`.
+/// The dispatch returns `Ok(())` so `with_storage_layer` doesn't roll back
+/// the strike write; SDK callers detect misattestation via the event.
 #[test]
 fn bad_attest_strike_persists_after_err_return() {
     new_test_ext().execute_with(|| {
@@ -2227,17 +2212,14 @@ fn bad_attest_strike_persists_after_err_return() {
             "test precondition: claimed hash must differ from canonical"
         );
 
-        // Dispatch returns Ok(()) — the failure is signalled via the
-        // BadAttestStrike event, not a DispatchError. This is the only
-        // way to preserve the strike write under the auto-wrap.
+        // Dispatch returns Ok(()); the failure is signalled via the
+        // BadAttestStrike event, not a DispatchError.
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
             wrong_claim,
         ));
 
-        // CRITICAL: the strike MUST have persisted. This is the entire
-        // point of the bug_005 fix.
         let strikes = pallet::BadAttestStrikes::<Test>::get(&acc(1));
         assert_eq!(
             strikes, 1,
@@ -2265,27 +2247,19 @@ fn bad_attest_strike_persists_after_err_return() {
     });
 }
 
-/// bug_005 (slash path): with threshold=1 the very first bad attest must
-/// (a) increment strikes, (b) zero the bond, (c) eject from committee,
-/// (d) reset strikes, (e) emit all three events. The dispatch returns
-/// `Ok(())`; callers detect misattestation by inspecting events.
+/// With threshold=1 the very first bad attest must increment strikes, zero
+/// the bond, eject from committee, reset strikes, and emit all three events.
+/// Dispatch returns `Ok(())`; callers detect misattestation via events.
 #[test]
 fn bad_attest_threshold_one_slashes_and_ejects() {
     new_test_ext().execute_with(|| {
         let submitter_seed = 10;
         seed_submitter_and_committee(submitter_seed, &[1]);
-        // spec-219 bug_006: `auto_slash_for_bad_attest` now propagates
-        // `repatriate_reserved` errors via `?`, so the reserve pot
-        // MUST be funded above ED for the slash to actually move the
-        // bond. Pre-fund here to exercise the happy path.
+        // Pre-fund the reserve pot above ED so `repatriate_reserved`
+        // succeeds (slash propagates `?` from `auto_slash_for_bad_attest`).
         let reserve_acct: MockAccountId =
             AttestorReservePotId::get().into_account_truncating();
         Balances::make_free_balance_be(&reserve_acct, 1);
-        // BadAttestSlashThreshold is seeded to 1 by `on_runtime_upgrade` on
-        // a live chain; in this mock the storage starts at the ValueQuery
-        // default (0) but the call site clamps via `.max(1)`, so the
-        // effective threshold is 1 either way. Set it explicitly here so
-        // the test stays self-documenting.
         assert_ok!(OrinqReceipts::set_bad_attest_slash_threshold(
             RuntimeOrigin::root(),
             1
@@ -2351,23 +2325,20 @@ fn bad_attest_threshold_one_slashes_and_ejects() {
     });
 }
 
-/// bug_006 (auto-slash failure path): if the `mat/attr` reserve pot is
-/// below ED, `repatriate_reserved` errors with `DeadAccount`. The
-/// dispatchable must STILL return `Ok(())` so the strike side effect
-/// commits (otherwise the `with_storage_layer` auto-wrap would unwind
-/// bug_005's strike-on-Ok-path mechanism), but the slash itself
-/// reports via a new `AutoSlashFailed` event. Critically: the bond is
-/// NOT zeroed, the attestor is NOT ejected from the committee, and
-/// `AutoSlashedForBadAttest` is NOT emitted — exactly the inverse of
-/// the happy path above. Operators must fund `mat/attr` and call
-/// `slash_attestor` manually to complete the slash.
+/// Auto-slash failure path: if `mat/attr` is below ED,
+/// `repatriate_reserved` errors. The dispatchable still returns `Ok(())` so
+/// the strike commits, but the slash reports via `AutoSlashFailed`. The
+/// bond is NOT zeroed, the attestor is NOT ejected from the committee, and
+/// When `mat/attr` is below ED, the slash fails: dispatch still returns Ok,
+/// strikes commit, AutoSlashFailed fires, and the bond + committee stay
+/// untouched so operators can fund and `slash_attestor` manually.
 #[test]
 fn bad_attest_threshold_one_with_unfunded_pot_emits_slash_failed() {
     new_test_ext().execute_with(|| {
         let submitter_seed = 10;
         seed_submitter_and_committee(submitter_seed, &[1]);
-        // DELIBERATELY DO NOT pre-fund the reserve pot — this is the
-        // bug_006 / task #233 condition we're exercising.
+        // Reserve pot intentionally left at zero to exercise the slash-fail
+        // path.
         let reserve_acct: MockAccountId =
             AttestorReservePotId::get().into_account_truncating();
         assert_eq!(
@@ -2396,7 +2367,6 @@ fn bad_attest_threshold_one_with_unfunded_pot_emits_slash_failed() {
         assert_ok!(submit_c4(submitter_seed, rid, ch));
 
         let wrong_claim = [0xDE; 32];
-        // Dispatch MUST succeed — bug_005 mechanism preserved.
         assert_ok!(OrinqReceipts::attest_availability_cert(
             RuntimeOrigin::signed(acc(1)),
             rid,
@@ -2421,7 +2391,6 @@ fn bad_attest_threshold_one_with_unfunded_pot_emits_slash_failed() {
         );
 
         let events = frame_system::Pallet::<Test>::events();
-        // Strike side-effect DID commit (bug_005 path).
         let saw_strike = events.iter().any(|r| matches!(
             &r.event,
             RuntimeEvent::OrinqReceipts(crate::Event::BadAttestStrike { attester, .. })
@@ -2451,19 +2420,14 @@ fn bad_attest_threshold_one_with_unfunded_pot_emits_slash_failed() {
     });
 }
 
-/// bug_003: shrinking the committee via auto-slash MUST clamp
-/// AttestationThreshold so the certification path stays satisfiable.
-/// Without the clamp a threshold-7-of-10 committee that loses two members
-/// would still need 7 attestations from the remaining 8 — but with the
-/// aggressive flush threshold=1 default it can quickly bottom out below
-/// the required count and wedge.
+/// Shrinking the committee via auto-slash MUST clamp AttestationThreshold
+/// so the certification path stays satisfiable.
 #[test]
 fn auto_slash_clamps_threshold_below_new_committee_size() {
     new_test_ext().execute_with(|| {
         let submitter_seed = 10;
         let committee_seeds: Vec<u8> = (1u8..=5).collect();
         seed_submitter_and_committee(submitter_seed, &committee_seeds);
-        // spec-219 bug_006: auto-slash fail-fast on unfunded reserve pot.
         let reserve_acct: MockAccountId =
             AttestorReservePotId::get().into_account_truncating();
         Balances::make_free_balance_be(&reserve_acct, 1);
@@ -2503,11 +2467,9 @@ fn auto_slash_clamps_threshold_below_new_committee_size() {
     });
 }
 
-/// bug_011: at spec-219 activation, `on_runtime_upgrade` must drain
-/// `Attestations` so honest attesters can re-attest under the canonical
-/// scheme. Pre-spec-219 mid-attestation entries would otherwise rot until
-/// expiry — their stored `existing_hash` is a legacy CBOR-style value that
-/// the canonical post-219 hash cannot match.
+/// `on_runtime_upgrade` must drain `Attestations` so honest attesters can
+/// re-attest under the canonical scheme; legacy entries would otherwise rot
+/// until expiry because their stored hash cannot match the canonical hash.
 #[test]
 fn on_runtime_upgrade_clears_stale_attestations() {
     new_test_ext().execute_with(|| {
@@ -2549,21 +2511,13 @@ fn on_runtime_upgrade_clears_stale_attestations() {
 }
 
 // ---------------------------------------------------------------------------
-// spec-219: SCALE-canonical Cert byte-parity tests
+// SCALE-canonical Cert byte-parity tests
 // ---------------------------------------------------------------------------
 //
-// Three fixture vectors lifted VERBATIM from `materios-c-deep-design.md` §6.
-// The symmetric Python encoder lives in
+// Fixture vectors mirror the symmetric Python encoder in
 // `operator-kit/tests/test_scale_cert_parity.py`; both repos hash the same
-// 202-byte pre-image and assert identical SHA-256 cert hashes. Any drift in
-// either implementation flips CI red before the daemon image lands on prod.
-//
-// Vector 3 differs from Vector 2 ONLY in `chain_id` (a stale v5 chain
-// genesis) — this is the exact pattern of MacBook's 15-day silent failure
-// and faucet-attestor's confirmed-stale config. The fourth test
-// (`v3_hash_differs_from_v2_hash`) asserts the bug class IS detectable: any
-// implementation that ignores `chain_id` would collapse V2.hash == V3.hash
-// and immediately fail.
+// 202-byte pre-image and assert identical SHA-256 cert hashes. Any drift
+// flips CI red.
 #[cfg(test)]
 mod scale_cert_parity {
     use crate::types::{
@@ -2573,7 +2527,7 @@ mod scale_cert_parity {
     use hex_literal::hex;
     use parity_scale_codec::Encode;
 
-    /// Build a `Cert` from raw inputs using the spec-219 pinned constants.
+    /// Build a `Cert` from raw inputs using the pinned cert constants.
     fn build_cert(
         chain_id: [u8; 32],
         receipt_id: [u8; 32],
@@ -2710,7 +2664,7 @@ mod scale_cert_parity {
         );
     }
 
-    /// spec-219 invariant: V3.hash != V2.hash. If this fails, the
+    /// Invariant: V3.hash != V2.hash. If this fails, the
     /// canonical-cert pre-image has dropped `chain_id` (or some other
     /// distinguishing field) and the stale-config bug class is no longer
     /// detectable — exactly the failure mode this entire spec aims to

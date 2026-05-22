@@ -1,33 +1,20 @@
 //! Verifier trait and concrete implementations.
 //!
-//! Wave 3 / Phase 2 ships only `ArmTrustZoneVerifier`, which wraps the
-//! vendored Acurast `validate_certificate_chain` + `extract_attestation`
-//! helpers. The other verifiers (AMD SEV-SNP, Intel TDX, reproducible
-//! build, ZK-VM execution proof) are stubs that return
+//! Only `ArmTrustZoneVerifier` is implemented; the others return
 //! `VerifyFailReason::NotImplemented`. The dispatch table in `lib.rs` calls
 //! the right verifier based on `EvidenceType`.
 //!
-//! ## Determinism rules
+//! Determinism rules:
+//!   - All trust roots are pinned via `include_bytes!`.
+//!   - No network calls in the verify path.
+//!   - No wall-clock checks: certificate `not_before`/`not_after` would
+//!     diverge by node clock skew.
+//!   - `attest_key_hash` is SHA-256 of the leaf cert's SPKI in canonical DER.
 //!
-//! Per `feedback_mofn_hash_determinism.md`:
-//!   - ALL trust roots are pinned via `include_bytes!` — see vendored
-//!     `__root_key__/google-public.key` etc.
-//!   - NO network calls in the verify path. The X.509 chain is parsed and
-//!     verified entirely in-memory.
-//!   - NO wall-clock dependence. We do NOT check certificate `not_before` /
-//!     `not_after` — committee members in different time zones / drifted
-//!     clocks would otherwise diverge. The chain's chain-of-trust validation
-//!     is the only signature check.
-//!   - The `attest_key_hash` extraction is deterministic — SHA-256 of the
-//!     leaf cert's SubjectPublicKeyInfo bytes (canonical DER).
-//!
-//! ## Wire format
-//!
-//! For `EvidenceType::ArmTrustZone`, the `EvidenceEntry::payload` is the
-//! SCALE-encoded `Vec<Vec<u8>>` cert chain — index 0 is the root cert,
-//! ascending toward the leaf. The chain is allowed to omit the root if the
-//! root's public key matches one of the pinned trust roots; this matches
-//! Acurast's behaviour and Android's standard chain emission.
+//! For `EvidenceType::ArmTrustZone`, `EvidenceEntry::payload` is a
+//! SCALE-encoded `Vec<Vec<u8>>` X.509 chain (root → intermediates → leaf,
+//! DER-encoded). The chain may omit the root if its public key matches one
+//! of the pinned trust roots.
 
 use alloc::vec::Vec;
 use parity_scale_codec::Decode;
@@ -43,23 +30,16 @@ use crate::vendor::acurast_attestation::{
 
 use sha2::{Digest, Sha256};
 
-/// Trait every evidence verifier implements.
-///
-/// ## Determinism
-///
-/// Implementations MUST produce bit-identical `VerifyOutcome::Verified`
-/// records for identical inputs across all committee members. See
-/// `feedback_mofn_hash_determinism.md` for the load-bearing rule.
+/// Trait every evidence verifier implements. Implementations MUST produce
+/// bit-identical `VerifyOutcome::Verified` records for identical inputs
+/// across all committee members.
 pub trait EvidenceVerifier {
     fn evidence_type(&self) -> EvidenceType;
 
-    /// Verify a single evidence entry. The `content_hash` is the receipt's
-    /// content_hash from the receipt record; verifiers MAY use it to bind
-    /// the evidence to the receipt (e.g. the attestation_challenge field in
-    /// ARM Key Attestation, REPORT_DATA in AMD SEV-SNP). Phase 2 of the
-    /// `ArmTrustZoneVerifier` does NOT check the challenge field — that is
-    /// queued for Phase 2.5 when the off-chain submitter contract for the
-    /// challenge derivation is finalised.
+    /// Verify a single evidence entry. `content_hash` is the receipt's
+    /// `content_hash`; verifiers MAY use it to bind the evidence to the
+    /// receipt. `ArmTrustZoneVerifier` currently does NOT check the
+    /// challenge field.
     fn verify(&self, content_hash: &[u8; 32], entry: &EvidenceEntry) -> VerifyOutcome;
 }
 
@@ -119,23 +99,13 @@ impl EvidenceVerifier for ArmTrustZoneVerifier {
             }
         };
 
-        // M-4: positive allowlist of the AOSP `SecurityLevel` values that
-        // mean "the key actually lives in attested hardware":
-        //   1 = TrustedEnvironment (TEE / TrustZone)
-        //   2 = StrongBox (hardware-isolated security chip)
-        // Reject everything else, including:
-        //   0 = Software (key in a userspace process — not attested HW)
-        //   3 = Keystore (key in the Android Keystore daemon's userspace —
-        //       not attested HW; the previous `!= 0` reject leaked it)
-        //   anything outside the AOSP-defined enum range
+        // Positive allowlist: only TrustedEnvironment (1) and StrongBox (2)
+        // represent attested hardware-rooted keys; reject everything else.
         if !is_security_level_allowed(raw_level) {
             return VerifyOutcome::Failed(VerifyFailReason::PolicyViolation);
         }
 
-        // 4. Derive attest_key_hash = sha256 of the leaf SubjectPublicKeyInfo.
-        // Re-encode the SPKI to canonical DER for hashing. NOT a stable
-        // per-device identifier — see VerifiedEvidence::attest_key_hash
-        // doc — but stable for the lifetime of one Android KeyStore key.
+        // attest_key_hash = sha256 of the SPKI re-encoded to canonical DER.
         let spki_der = match asn1::write_single(&leaf_tbs.subject_public_key_info) {
             Ok(b) => b,
             Err(_) => return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed),
@@ -150,39 +120,19 @@ impl EvidenceVerifier for ArmTrustZoneVerifier {
     }
 }
 
-/// Map a parsed `KeyDescription` to the `raw_level` integer the pallet
-/// stores. The mapping mirrors Android's `SecurityLevel` enum:
-///   0 = Software (rejected by the verifier)
-///   1 = TrustedEnvironment / TEE (TrustZone)
-///   2 = StrongBox (hardware-isolated security chip)
-///
-/// We read `key_mint_security_level` — the level where the **attested
-/// KEY actually lives** — NOT `attestation_security_level`, which is the
-/// level of the SIGNER that emitted the attestation cert. The two can
-/// differ: a TEE-attested chain that mints the key in software produces
-/// `attestation_security_level=1, key_mint_security_level=0` and must be
-/// rejected. The earlier code read the wrong field (M-1 of the PR-#17
-/// security review).
-///
-/// Reference: AOSP Keystore attestation spec —
-/// <https://source.android.com/docs/security/features/keystore/attestation>
-/// (`KeyDescription.keyMintSecurityLevel` vs
-///  `KeyDescription.attestationSecurityLevel`).
-///
-/// `SecurityLevel` is `asn1::Enumerated` whose `value()` is the raw
-/// ASN.1 ENUMERATED integer; we surface that integer directly.
-/// Positive allowlist of AOSP `SecurityLevel` raw integer values that
-/// represent attested hardware-rooted keys. Returns true ONLY for:
-///   1 = TrustedEnvironment (TEE / TrustZone)
-///   2 = StrongBox (hardware-isolated security chip)
-///
-/// Everything else — Software (0), Keystore (3), and any future or
-/// out-of-range values — is rejected. Ref AOSP Keystore attestation
-/// spec: <https://source.android.com/docs/security/features/keystore/attestation>
+/// Positive allowlist of AOSP `SecurityLevel` values representing attested
+/// hardware: 1 = TrustedEnvironment (TEE), 2 = StrongBox. Reject Software
+/// (0), Keystore (3), and anything outside the AOSP-defined enum range.
+/// Ref: <https://source.android.com/docs/security/features/keystore/attestation>
 pub(crate) fn is_security_level_allowed(raw_level: u32) -> bool {
     raw_level == 1 || raw_level == 2
 }
 
+/// Read `key_mint_security_level` (where the attested key lives), not
+/// `attestation_security_level` (where the signer lives). A TEE-attested
+/// chain that mints the key in software produces
+/// `attestation_security_level=1, key_mint_security_level=0` and must be
+/// rejected.
 pub(crate) fn key_description_security_level(kd: &KeyDescription<'_>) -> u32 {
     let sl_value = match kd {
         KeyDescription::V1(v) => v.key_mint_security_level.value(),
@@ -258,9 +208,7 @@ impl EvidenceVerifier for ZkVmExecutionVerifier {
     }
 }
 
-/// Static dispatch — returns the right verifier for an evidence type.
-/// Phase 2 hard-wires implementations; later phases switch on Config when
-/// per-pallet verifier configuration becomes useful.
+/// Static dispatch to the right verifier for an evidence type.
 pub fn verify_evidence(content_hash: &[u8; 32], entry: &EvidenceEntry) -> VerifyOutcome {
     match entry.evidence_type {
         EvidenceType::ArmTrustZone => ArmTrustZoneVerifier.verify(content_hash, entry),

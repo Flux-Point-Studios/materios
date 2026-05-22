@@ -1,50 +1,7 @@
-//! SPO cross-validation integration tests.
-//!
-//! This file exercises the integration of six IOG Partner Chains pallets into
-//! the Materios runtime:
-//!
-//!   1. pallet_sidechain           -- partner chain identity (genesis UTXO, epoch tracking)
-//!   2. pallet_session_validator_management -- SPO committee selection
-//!   3. pallet_session             -- Substrate session rotation (stub config)
-//!   4. pallet_partner_chains_session -- partner chain session extension
-//!   5. pallet_block_rewards       -- SPO block rewards accumulation
-//!   6. pallet_native_token_management -- cross-chain native token movement
-//!
-//! ---------------------------------------------------------------------------
-//! TDD CONTRACT
-//! ---------------------------------------------------------------------------
-//!
-//! These tests are written BEFORE the pallets are wired into the runtime.
-//! They will fail to compile until the following steps are completed:
-//!
-//! 1. Add the six IOG pallet crates (and their transitive dependencies:
-//!    `sidechain_domain`, `sidechain_slots`, `sp_sidechain`, `sp_block_rewards`,
-//!    `sp_native_token_management`, `sp_session_validator_management`,
-//!    `authority_selection_inherents`, `session_manager`,
-//!    `pallet_session_runtime_stub`) to `runtime/Cargo.toml`.
-//!
-//! 2. Implement `Config` for each pallet in `runtime/src/lib.rs`:
-//!    - `pallet_sidechain::Config`
-//!    - `pallet_session_validator_management::Config`
-//!    - `pallet_partner_chains_session::Config`
-//!    - `pallet_session::Config` (via `pallet_session_runtime_stub::impl_pallet_session_config!`)
-//!    - `pallet_block_rewards::Config`
-//!    - `pallet_native_token_management::Config`
-//!
-//! 3. Add the six pallets to `construct_runtime!`:
-//!    ```ignore
-//!    Sidechain: pallet_sidechain,
-//!    SessionCommitteeManagement: pallet_session_validator_management,
-//!    BlockRewards: pallet_block_rewards,
-//!    PalletSession: pallet_session,
-//!    Session: pallet_partner_chains_session,
-//!    NativeTokenManagement: pallet_native_token_management,
-//!    ```
-//!
-//! 4. Define the `BeneficiaryId` type alias and `TokenTransferHandler` impl.
-//!
-//! 5. Run `cargo test -p materios-runtime` -- all tests should pass.
-//! ---------------------------------------------------------------------------
+//! SPO cross-validation integration tests for the six IOG Partner Chains
+//! pallets wired into the Materios runtime (sidechain, session committee
+//! management, session, partner-chains-session, block-rewards,
+//! native-token-management).
 
 use crate::*;
 
@@ -55,14 +12,8 @@ use frame_support::{
 use sp_io::TestExternalities;
 use sp_runtime::BuildStorage;
 
-// ============================================================================
-// Section 1 -- Test externalities builder
-// ============================================================================
-
-/// Build a `TestExternalities` with a complete genesis for every pallet in the
-/// runtime.  If any of the six new IOG pallets are missing from
-/// `construct_runtime!`, the genesis config struct will be missing the
-/// corresponding field and compilation will fail.
+/// Build a `TestExternalities` with a complete genesis for every pallet in
+/// the runtime.
 fn new_test_ext() -> TestExternalities {
     let mut storage = frame_system::GenesisConfig::<Runtime>::default()
         .build_storage()
@@ -116,9 +67,6 @@ fn new_test_ext() -> TestExternalities {
     storage.into()
 }
 
-// ============================================================================
-// Section 2 -- Helper constants and utilities
-// ============================================================================
 
 /// Slots per sidechain epoch, matching the IOG mock pattern.
 const SLOTS_PER_EPOCH: u32 = 7;
@@ -178,9 +126,6 @@ fn run_to_block(n: BlockNumber) {
     }
 }
 
-// ============================================================================
-// Section 3 -- Pallet existence tests
-// ============================================================================
 //
 // Each test below accesses a type or storage item that only exists if the
 // pallet has been added to `construct_runtime!` AND has its `Config`
@@ -238,9 +183,6 @@ fn pallet_native_token_management_exists_in_runtime() {
     });
 }
 
-// ============================================================================
-// Section 4 -- Sidechain genesis configuration tests
-// ============================================================================
 
 #[test]
 fn sidechain_genesis_utxo_is_stored() {
@@ -267,9 +209,6 @@ fn sidechain_epoch_number_derivation_at_genesis() {
     });
 }
 
-// ============================================================================
-// Section 5 -- Session rotation and committee tests
-// ============================================================================
 
 #[test]
 fn validator_management_initial_committee_is_empty() {
@@ -329,9 +268,6 @@ fn get_next_unset_epoch_number_is_one_at_genesis() {
     });
 }
 
-// ============================================================================
-// Section 6 -- Block rewards tests
-// ============================================================================
 
 #[test]
 fn block_rewards_pending_is_empty_at_genesis() {
@@ -440,9 +376,6 @@ fn block_rewards_get_rewards_and_clear_drains_storage() {
     });
 }
 
-// ============================================================================
-// Section 7 -- Native token management tests
-// ============================================================================
 
 #[test]
 fn native_token_management_is_not_initialized_at_genesis() {
@@ -507,9 +440,6 @@ fn native_token_set_main_chain_scripts_requires_root() {
     });
 }
 
-// ============================================================================
-// Section 8 -- Existing Materios pallet compatibility tests
-// ============================================================================
 //
 // Adding the IOG pallets must not break Motra or OrinqReceipts.
 
@@ -546,9 +476,6 @@ fn system_pallet_still_functional_after_integration() {
     });
 }
 
-// ============================================================================
-// Section 9 -- RuntimeGenesisConfig completeness test
-// ============================================================================
 
 #[test]
 fn runtime_genesis_config_includes_all_iog_pallet_fields() {
@@ -586,9 +513,6 @@ fn runtime_genesis_config_includes_all_iog_pallet_fields() {
     };
 }
 
-// ============================================================================
-// Section 10 -- Type instantiation tests
-// ============================================================================
 //
 // Proves that the pallet generic parameters resolve with the Runtime type.
 
@@ -614,9 +538,6 @@ fn pallet_types_are_instantiable_with_runtime() {
     };
 }
 
-// ============================================================================
-// Section 11 -- PalletInfo name tests
-// ============================================================================
 
 #[test]
 fn pallet_info_has_correct_names() {
@@ -646,9 +567,6 @@ fn pallet_info_has_correct_names() {
     });
 }
 
-// ============================================================================
-// Section 12 -- Pallet ordering tests
-// ============================================================================
 //
 // IOG requires specific ordering in construct_runtime!:
 //   - Sidechain AFTER Aura (reads CurrentSlot)
@@ -687,9 +605,6 @@ fn pallet_ordering_partner_session_after_stub_session() {
     });
 }
 
-// ============================================================================
-// Section 13 -- SessionKeys compatibility test
-// ============================================================================
 
 #[test]
 fn session_keys_contain_aura_and_grandpa() {
@@ -706,9 +621,6 @@ fn session_keys_contain_aura_and_grandpa() {
     );
 }
 
-// ============================================================================
-// Section 14 -- Epoch transition smoke test
-// ============================================================================
 
 #[test]
 fn sidechain_on_initialize_sets_epoch_tracker() {
@@ -720,9 +632,6 @@ fn sidechain_on_initialize_sets_epoch_tracker() {
     });
 }
 
-// ============================================================================
-// Section 15 -- Cross-chain public key type test
-// ============================================================================
 //
 // The runtime defines `CrossChainPublic` from the opaque module.  Verify it
 // is usable as the AuthorityId for session_validator_management.
@@ -736,9 +645,6 @@ fn cross_chain_public_type_is_defined() {
     };
 }
 
-// ============================================================================
-// Section 16 -- ValidatorManagementSessionManager wiring test
-// ============================================================================
 
 #[test]
 fn validator_management_session_manager_is_usable() {
@@ -756,9 +662,6 @@ fn validator_management_session_manager_is_usable() {
     });
 }
 
-// ============================================================================
-// Section 17 -- Main-chain scripts configuration tests
-// ============================================================================
 
 #[test]
 fn session_validator_management_main_chain_scripts_stored() {
@@ -771,9 +674,6 @@ fn session_validator_management_main_chain_scripts_stored() {
     });
 }
 
-// ============================================================================
-// Section 18 -- Token transfer handler integration test
-// ============================================================================
 
 #[test]
 fn token_transfer_handler_is_wired() {
@@ -791,9 +691,6 @@ fn token_transfer_handler_is_wired() {
     });
 }
 
-// ============================================================================
-// Section 19 -- Block rewards inherent creation test
-// ============================================================================
 
 #[test]
 fn block_rewards_create_inherent_from_inherent_data() {
@@ -819,9 +716,6 @@ fn block_rewards_create_inherent_from_inherent_data() {
     });
 }
 
-// ============================================================================
-// Section 20 -- AllPalletsWithSystem includes new pallets
-// ============================================================================
 //
 // Running on_initialize / on_finalize with AllPalletsWithSystem should not
 // panic when the new pallets are included.

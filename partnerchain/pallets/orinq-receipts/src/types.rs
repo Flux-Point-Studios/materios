@@ -5,54 +5,35 @@ use sp_core::H256;
 pub type ReceiptId = H256;
 pub type ContentHash = H256;
 
-// ── spec-219: SCALE-canonical availability certificate ────────────────────
-//
-// See materios-c-deep-design.md §2 for the design rationale. Every field of
-// `Cert` has a fixed encoded width — total 202 bytes — so the byte layout is
-// representation-stable across Rust/Python and across any future SCALE
-// implementation. SHA-256 of `cert.encode()` is the canonical
-// `availability_cert_hash` the runtime computes itself in
-// `Pallet::canonical_cert_hash`; daemons must propose this exact hash to
-// `attest_availability_cert` or take a `BadAttestStrike`.
-//
-// Constants are plain `pub const` (NOT `#[pallet::constant]`) so they do not
-// appear in runtime metadata and there is no operator-config drift risk —
-// changing one of these is a runtime upgrade, full stop.
+// SCALE-canonical availability certificate. Every field has fixed encoded
+// width (no `Compact<u32>` length prefixes), so `cert.encode()` is exactly
+// 202 bytes and the byte layout is identical to the symmetric Python
+// encoder. Bumping any pinned constant below is a schema change.
 
 /// Domain separator: ASCII `"materios-availability-cert-v1"` (29 bytes)
-/// right-padded with three `\x00` bytes to a fixed 32-byte slot. Lifting the
-/// pre-image into a fixed-width slot eliminates SCALE length-prefix
-/// representational ambiguity (a `Vec<u8>` would prepend a `Compact<u32>`).
+/// right-padded to 32 bytes. The fixed-width slot avoids SCALE length-prefix
+/// representational ambiguity.
 pub const CERT_DOMAIN_BYTES: &[u8; 32] = b"materios-availability-cert-v1\x00\x00\x00";
 
-/// Compile-time assertion that the domain separator is exactly 32 bytes.
-/// If anyone shortens or lengthens the literal above, this fails to compile
-/// — preventing a silent encoding drift.
+/// Compile-time guarantee that `CERT_DOMAIN_BYTES` is 32 bytes.
 const _: () = assert!(CERT_DOMAIN_BYTES.len() == 32);
 
-/// Reserved for future epoch-aware cert format. Pinned to 0 at spec-219.
+/// Reserved for future epoch-aware cert format.
 pub const CERT_EPOCH_PLACEHOLDER: u32 = 0;
 
-/// Retention window, in days. Pinned to 365 at spec-219. `u32` so a future
-/// `u32::MAX` sentinel can mean "retain forever".
+/// Retention window in days. `u32::MAX` is reserved as a "retain forever"
+/// sentinel.
 pub const CERT_RETENTION_DAYS: u32 = 365;
 
-/// Attestation level. `2 = HASH_VERIFIED` in the daemon-side
-/// `AttestationLevel` enum. Pinned for spec-219; bumping is a schema change.
+/// Attestation level. `2 = HASH_VERIFIED` in the daemon-side enum.
 pub const CERT_ATTESTATION_LEVEL: u8 = 2;
 
-/// Cert schema version, encoded as `u8` (NOT the legacy text `"1.0"`). `0`
-/// is reserved as a migration sentinel; `1` is the spec-219 schema.
+/// Cert schema version. `0` is reserved as a migration sentinel.
 pub const CERT_SCHEMA_VERSION: u8 = 1;
 
-/// SCALE-canonical availability certificate (spec-219).
-///
-/// Every field has fixed encoded width — there is no `Compact<u32>` length
-/// prefix anywhere — so `cert.encode()` is always exactly 202 bytes and the
-/// byte layout is identical to the symmetric Python encoder in
-/// `operator-kit/daemon/cert_builder.py::scale_cert_encode`. Drift between
-/// the two encoders is caught at CI time via the byte-pinned fixture vectors
-/// in `pallets/orinq-receipts/src/tests.rs` (`scale_cert_parity` module).
+/// SCALE-canonical availability certificate. Encoded length is exactly
+/// 202 bytes and must match the symmetric Python encoder in
+/// `operator-kit/daemon/cert_builder.py`.
 #[derive(Clone, Encode, Decode, TypeInfo, MaxEncodedLen, Debug, PartialEq, Eq)]
 pub struct Cert {
     /// Domain separator — `CERT_DOMAIN_BYTES`. 32 raw bytes, no length prefix.
@@ -96,8 +77,7 @@ pub struct ReceiptRecord<AccountId> {
     pub submitter: AccountId,
 }
 
-/// Player anti-cheat signature data, stored separately from ReceiptRecord
-/// to maintain backward compatibility with v1 receipt storage encoding.
+/// Player anti-cheat signature data, stored separately from ReceiptRecord.
 #[derive(Clone, Encode, Decode, TypeInfo, MaxEncodedLen, Debug, PartialEq, Eq)]
 pub struct PlayerSigRecord {
     pub player_pubkey: [u8; 32],
@@ -105,8 +85,8 @@ pub struct PlayerSigRecord {
     pub sig_type: u8,
 }
 
-/// Lightweight anchor record for SDK-submitted content (PoI traces, checkpoints).
-/// Separate from ReceiptRecord — cert daemon does not process anchors.
+/// Lightweight anchor record for SDK-submitted content. Cert daemon does
+/// not process anchors.
 #[derive(Clone, Encode, Decode, TypeInfo, MaxEncodedLen, Debug, PartialEq, Eq)]
 pub struct AnchorRecord<AccountId> {
     pub content_hash: [u8; 32],
@@ -116,11 +96,8 @@ pub struct AnchorRecord<AccountId> {
     pub submitter: AccountId,
 }
 
-/// Reason for slashing an attestor's bond.
-///
-/// Enumerates the misbehaviours governance / the runtime can cite when
-/// invoking `slash_attestor`. The variant is recorded in the `Slashed`
-/// event so indexers / dashboards can classify each slash.
+/// Reason for slashing an attestor's bond. The variant is recorded in the
+/// `Slashed` event so indexers can classify each slash.
 #[derive(Clone, Copy, Encode, Decode, TypeInfo, MaxEncodedLen, Debug, PartialEq, Eq)]
 pub enum SlashReason {
     /// The attestor produced an invalid signature for an availability

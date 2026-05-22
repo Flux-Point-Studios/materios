@@ -122,23 +122,10 @@ fn run_to_block(n: u64) {
 
 #[test]
 fn motra_has_no_transfer_extrinsic() {
-    // There is no dispatchable in pallet_motra that transfers MOTRA between accounts.
-    // This is a design guarantee -- we verify it by checking that the only extrinsics
-    // are set_delegatee, set_params, and claim_motra.
-    // The type system enforces this -- there is no `transfer` function exposed.
-    // This test documents the invariant.
     new_test_ext().execute_with(|| {
-        // Manually set a balance.
         pallet_motra::MotraBalances::<Test>::insert(1u64, 1000u128);
         pallet_motra::MotraBalances::<Test>::insert(2u64, 0u128);
 
-        // There is no extrinsic to transfer from account 1 to account 2.
-        // The only way MOTRA moves is via:
-        // 1. Generation (based on MATRA holdings)
-        // 2. Delegation (generation target)
-        // 3. Fee burning
-
-        // Verify balances unchanged.
         assert_eq!(Motra::motra_balance(&1u64), 1000);
         assert_eq!(Motra::motra_balance(&2u64), 0);
     });

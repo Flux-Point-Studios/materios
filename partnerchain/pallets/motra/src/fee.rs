@@ -1,6 +1,7 @@
-//! MOTRA fee payment -- custom SignedExtension.
+//! MOTRA fee payment as a custom SignedExtension.
 //!
-//! Computes fee = min_fee + congestion_rate * weight, then burns from payer's MOTRA balance.
+//! Computes fee = min_fee + congestion_rate * weight, then burns it from the
+//! payer's MOTRA balance.
 
 use parity_scale_codec::{Decode, Encode};
 use scale_info::TypeInfo;
@@ -32,7 +33,7 @@ impl<T: Config + Send + Sync> core::fmt::Debug for ChargeMotra<T> {
     }
 }
 
-#[allow(deprecated)] // SignedExtension is deprecated in favour of TransactionExtension
+#[allow(deprecated)]
 impl<T> SignedExtension for ChargeMotra<T>
 where
     T: Config + Send + Sync,
@@ -43,7 +44,7 @@ where
     type AccountId = T::AccountId;
     type Call = <T as frame_system::Config>::RuntimeCall;
     type AdditionalSigned = ();
-    type Pre = (T::AccountId, u128); // (who, fee_amount)
+    type Pre = (T::AccountId, u128);
 
     fn additional_signed(&self) -> Result<(), TransactionValidityError> {
         Ok(())
@@ -56,7 +57,6 @@ where
         info: &DispatchInfoOf<Self::Call>,
         len: usize,
     ) -> TransactionValidity {
-        // Reconcile balance (apply decay + generation).
         let _ =
             crate::Pallet::<T>::reconcile(who).map_err(|_| InvalidTransaction::Payment)?;
 
@@ -84,7 +84,6 @@ where
     ) -> Result<Self::Pre, TransactionValidityError> {
         let fee = crate::Pallet::<T>::compute_fee(info.weight, len);
 
-        // Burn MOTRA.
         crate::Pallet::<T>::burn_fee(who, fee)
             .map_err(|_| TransactionValidityError::Invalid(InvalidTransaction::Payment))?;
 
@@ -98,8 +97,6 @@ where
         _len: usize,
         _result: &sp_runtime::DispatchResult,
     ) -> Result<(), TransactionValidityError> {
-        // No refund for MVP -- fee is fully burned regardless of actual weight used.
-        // Future: could refund unused portion.
         Ok(())
     }
 }
