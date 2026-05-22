@@ -34,10 +34,6 @@ pub mod pallet {
         type WeightInfo: WeightInfo;
     }
 
-    // -----------------------------------------------------------------------
-    // Storage
-    // -----------------------------------------------------------------------
-
     /// MOTRA balance per account.
     #[pallet::storage]
     #[pallet::getter(fn motra_balance)]
@@ -76,10 +72,6 @@ pub mod pallet {
     #[pallet::getter(fn insufficient_motra_failures)]
     pub type InsufficientMotraFailures<T: Config> = StorageValue<_, u64, ValueQuery>;
 
-    // -----------------------------------------------------------------------
-    // Events
-    // -----------------------------------------------------------------------
-
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -107,10 +99,6 @@ pub mod pallet {
         },
     }
 
-    // -----------------------------------------------------------------------
-    // Errors
-    // -----------------------------------------------------------------------
-
     #[pallet::error]
     pub enum Error<T> {
         /// Insufficient MOTRA to pay fee.
@@ -123,10 +111,6 @@ pub mod pallet {
         ArithmeticOverflow,
     }
 
-    // -----------------------------------------------------------------------
-    // Hooks
-    // -----------------------------------------------------------------------
-
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         /// At end of each block, adjust congestion_rate based on block fullness.
@@ -134,10 +118,6 @@ pub mod pallet {
             Self::adjust_congestion_rate();
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Genesis
-    // -----------------------------------------------------------------------
 
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
@@ -173,10 +153,6 @@ pub mod pallet {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Extrinsics
-    // -----------------------------------------------------------------------
-
     #[pallet::call]
     impl<T: Config> Pallet<T>
     where
@@ -196,7 +172,6 @@ pub mod pallet {
         ) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
-            // Reconcile caller's balance first.
             Self::reconcile(&who)?;
 
             if let Some(ref d) = delegatee {
@@ -236,10 +211,6 @@ pub mod pallet {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Internal logic
-    // -----------------------------------------------------------------------
-
     impl<T: Config> Pallet<T> {
         /// Read-only projection of what the MOTRA balance would be if reconciled now.
         ///
@@ -260,17 +231,15 @@ pub mod pallet {
                 return stored;
             }
 
-            // Apply decay
             let decayed = Self::apply_decay_iterative(stored, params.decay_rate_per_block, elapsed);
 
-            // Generate from MATRA holdings
             let matra_balance: u128 = Self::get_matra_balance(who);
+            // MATRA has 6 decimals; normalize to compute generated MOTRA.
             let generated = matra_balance
                 .saturating_mul(params.generation_per_matra_per_block)
                 .saturating_mul(elapsed as u128)
-                / 1_000_000u128; // Normalize: MATRA is 6 decimals
+                / 1_000_000u128;
 
-            // Check delegation
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
             if &generation_target == who {
                 decayed.saturating_add(generated).min(params.max_balance)
@@ -288,7 +257,6 @@ pub mod pallet {
             let last = LastTouched::<T>::get(who);
             let params = Params::<T>::get();
 
-            // How many blocks since last reconciliation.
             let elapsed: u64 = current_block
                 .saturating_sub(last)
                 .try_into()
@@ -300,50 +268,41 @@ pub mod pallet {
 
             let old_balance = MotraBalances::<T>::get(who);
 
-            // 1) Apply decay: balance * (decay_rate ^ elapsed)
             let decayed_balance =
                 Self::apply_decay_iterative(old_balance, params.decay_rate_per_block, elapsed);
 
             let decay_amount = old_balance.saturating_sub(decayed_balance);
 
-            // 2) Generate MOTRA based on MATRA (free balance) holdings.
-            //    Using pallet_balances free balance as "stake proxy".
+            // MATRA has 6 decimals; normalize to compute generated MOTRA.
             let matra_balance: u128 = Self::get_matra_balance(who);
             let generated = matra_balance
                 .saturating_mul(params.generation_per_matra_per_block)
                 .saturating_mul(elapsed as u128)
-                / 1_000_000u128; // Normalize: MATRA is 6 decimals
+                / 1_000_000u128;
 
-            // 3) Route generated MOTRA.
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
 
-            // 4) Apply to balances.
             let new_self_balance = if &generation_target == who {
-                // No delegation: apply to self.
                 decayed_balance
                     .saturating_add(generated)
                     .min(params.max_balance)
             } else {
-                // Delegated: generation goes to delegatee, self only gets decay.
                 decayed_balance
             };
 
             MotraBalances::<T>::insert(who, new_self_balance);
             LastTouched::<T>::insert(who, current_block);
 
-            // If delegated, add generated amount to delegatee.
             if &generation_target != who && generated > 0 {
                 let delegatee_balance = MotraBalances::<T>::get(&generation_target);
                 let new_delegatee_balance = delegatee_balance
                     .saturating_add(generated)
                     .min(params.max_balance);
                 MotraBalances::<T>::insert(&generation_target, new_delegatee_balance);
-                // Note: we don't recursively reconcile the delegatee to avoid complexity.
             }
 
             TotalIssued::<T>::mutate(|total| {
                 *total = total.saturating_add(generated);
-                // Subtract decayed amount from total.
                 *total = total.saturating_sub(decay_amount);
             });
 
@@ -371,10 +330,9 @@ pub mod pallet {
             let mut remaining = iterations;
 
             while remaining > 0 {
-                // Apply in chunks of up to 64 blocks at a time.
                 let chunk = remaining.min(64);
                 for _ in 0..chunk {
-                    result = rate * result; // Perbill * u128 -> u128
+                    result = rate * result;
                 }
                 remaining -= chunk;
                 if result == 0 {
@@ -389,8 +347,6 @@ pub mod pallet {
         fn get_matra_balance(who: &T::AccountId) -> u128 {
             use frame_support::traits::fungible::Inspect;
             let bal = pallet_balances::Pallet::<T>::balance(who);
-            // Convert Balance to u128. Balance in our runtime IS u128.
-            // Use TryInto in case it's a different type.
             bal.try_into().unwrap_or(0u128)
         }
 
@@ -446,9 +402,9 @@ pub mod pallet {
                 let step = params.max_congestion_step;
                 let smoothing = params.congestion_smoothing;
 
-                // Compute target congestion rate based on how far above/below target fullness
+                // Target rate scales linearly with the gap between block fullness and
+                // params.target_fullness, clamped by params.max_congestion_step.
                 let target_rate = if fullness > target {
-                    // Above target: rate should increase. Proportional to overshoot.
                     let overshoot = fullness.saturating_sub(target);
                     let increase = Perbill::from_rational(
                         overshoot.deconstruct() as u64,
@@ -456,7 +412,6 @@ pub mod pallet {
                     ) * step;
                     old_rate.saturating_add(increase)
                 } else {
-                    // Below target: rate should decrease. Proportional to undershoot.
                     let undershoot = target.saturating_sub(fullness);
                     let decrease = Perbill::from_rational(
                         undershoot.deconstruct() as u64,
@@ -465,7 +420,7 @@ pub mod pallet {
                     old_rate.saturating_sub(decrease)
                 };
 
-                // EMA smoothing: new_rate = (1 - alpha) * old_rate + alpha * target_rate
+                // EMA: new = (1 - smoothing) * old + smoothing * target.
                 let complement = Perbill::one().saturating_sub(smoothing);
                 let smoothed = (complement * old_rate).saturating_add(smoothing * target_rate);
                 params.congestion_rate = smoothed;

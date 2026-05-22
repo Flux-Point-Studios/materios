@@ -1,12 +1,4 @@
-//! A collection of node-specific RPC methods.
-//!
-//! Merges Substrate system RPC with orinq-receipts + MOTRA RPCs.
-//!
-//! NOTE: `pallet_transaction_payment_rpc` was removed at spec 202 (HIGH #1
-//! follow-up to PR #9, 2026-04-21). The pallet it depended on was deleted
-//! from the runtime because it was never wired into `SignedExtra` —
-//! `ChargeMotra` is the sole tx-fee path. Wallets / explorers should
-//! query `MotraApi::estimate_fee` for MOTRA-denominated fee quotes.
+//! Node-specific RPC methods: Substrate system + orinq-receipts + MOTRA.
 
 use std::sync::Arc;
 
@@ -49,13 +41,8 @@ where
     let mut module = RpcModule::new(());
     let FullDeps { client, pool } = deps;
 
-    // Substrate built-ins
     module.merge(System::new(client.clone(), pool).into_rpc())?;
-
-    // Orinq receipts
     module.merge(OrinqReceipts::new(client.clone()).into_rpc())?;
-
-    // MOTRA capacity token
     module.merge(motra_rpc::MotraRpc::new(client).into_rpc())?;
 
     Ok(module)

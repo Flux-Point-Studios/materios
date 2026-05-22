@@ -1,68 +1,30 @@
 //! Runtime-level sanity checks over `AuthoritySelectionInputs`.
 //!
-//! IOG's vendored `authority-selection-inherents` already validates
-//! *per-entry* correctness (signatures, key length, tx inputs, stake > 0).
-//! It does not enforce *whole-input* invariants such as:
-//!
-//! - A hard cap on the number of registrations per epoch (DoS guard).
-//! - Deduplication by `sidechain_pub_key`, `mainchain_pub_key`,
-//!   `aura_pub_key`, or `grandpa_pub_key`.
-//! - Bounded `epoch_nonce` length.
-//! - Sanity bounds on `d_parameter` vs `MaxValidators`.
-//!
-//! This module is a wrapper layer consumed by `select_authorities` in
-//! `lib.rs` *before* the input is handed to IOG's selection logic. Bad
-//! individual entries are dropped (fail-open for liveness). Top-level
-//! invariant violations cause the whole input to be rejected so the
-//! session pallet reuses the previous committee.
-//!
-//! See `docs/d-param-sanity-checks-design.md` for the threat model and
-//! the per-field rationale.
+//! Wraps IOG's vendored `authority-selection-inherents` (which validates
+//! per-entry correctness but does NOT enforce whole-input invariants like
+//! per-epoch caps, cross-entry key dedup, or `d_parameter` vs
+//! `MaxValidators` bounds). Bad individual entries are dropped (fail-open
+//! for liveness); top-level invariant violations reject the whole input
+//! so the session pallet reuses the previous committee.
 
 use alloc::vec::Vec;
 use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
 use sidechain_domain::{PermissionedCandidateData, RegistrationData, StakeDelegation};
 
-/// Hard caps. Chosen for preprod.
 pub const MAX_PERMISSIONED_CANDIDATES: usize = 64;
-/// TODO(mainnet): make governance-settable before the mainnet launch.
-/// Mainnet Cardano has ~3000 SPOs; 256 would silently drop 91% of the
-/// registration pool. For preprod with ~60 SPOs it's 4x headroom.
 pub const MAX_REGISTRATIONS_PER_EPOCH: usize = 256;
 pub const MAX_EPOCH_NONCE_BYTES: usize = 64;
-/// 45 bn ADA * 1e6 lovelace. Total supply of ADA on mainnet. A
-/// registration claiming more stake than this is definitionally
-/// corrupt db-sync output.
+/// 45 bn ADA × 1e6 lovelace. Total ADA supply; anything above is
+/// definitionally corrupt db-sync output.
 pub const MAX_PLAUSIBLE_STAKE_LOVELACE: u64 = 45_000_000_000u64 * 1_000_000u64;
 /// Upper bound on seats-per-epoch accepted from a Cardano-sourced
-/// `AuthoritySelectionInputs.d_parameter`.
-///
-/// Spec 203 decoupled this from `crate::MAX_VALIDATORS`. Before 203 it
-/// was `crate::MAX_VALIDATORS as u16` (= 32), which conflated two
-/// distinct concepts:
-///   1. The Aura/GRANDPA/session block-producer cap
-///      (`pallet_session_validator_management::MaxValidators`).
-///   2. The `pallet_orinq_receipts` attestor committee cap
-///      (`MaxCommitteeSize`).
-///
-/// Raising `MaxCommitteeSize` 16 → 64 in spec 203 required this constant
-/// to track the pallet cap, not the session cap, otherwise Ariadne
-/// d-parameter inputs summing to > 32 would be silently rejected at the
-/// sanitation layer while the pallet would accept them — creating
-/// debug-hostile asymmetry. It's therefore pinned to 64 directly.
-///
-/// The compile-time assertion still holds that `MAX_VALIDATORS` fits in
-/// u16 (required because `DParameter` uses u16 count fields) but no
-/// longer derives the cap.
+/// `AuthoritySelectionInputs.d_parameter`. MUST stay in lockstep with
+/// `OrinqReceipts::MaxCommitteeSize` — otherwise Ariadne sanitation
+/// silently rejects values the pallet would accept.
 pub const MAX_COMMITTEE_SIZE: u16 = {
-    // Sanity: the session-pallet cap must still fit in u16 because the
-    // `select_authorities` return BoundedVec is bounded by MaxValidators
+    // `select_authorities`' return BoundedVec is bounded by MaxValidators
     // and downstream consumers treat counts as u16.
     assert!(crate::MAX_VALIDATORS <= u16::MAX as u32);
-    // 96 mirrors `OrinqReceipts::MaxCommitteeSize` after the spec-218
-    // hot-restore (see runtime/src/lib.rs spec_version log). The pair MUST
-    // stay in lockstep, otherwise Ariadne d-parameter sanitation will
-    // silently reject a value the pallet would otherwise accept.
     96
 };
 
@@ -104,14 +66,11 @@ impl SanityReport {
     }
 }
 
-/// Apply all checks. Returns a cleaned `AuthoritySelectionInputs` plus a
-/// drop report, or `Err` if a top-level invariant was violated.
 pub fn sanitize_authority_selection_inputs(
     mut inputs: AuthoritySelectionInputs,
 ) -> Result<(AuthoritySelectionInputs, SanityReport), SanityError> {
     let mut report = SanityReport::default();
 
-    // ---- top-level invariants (fail-closed) ---------------------------
     let dp = &inputs.d_parameter;
     let sum = dp.num_permissioned_candidates.saturating_add(dp.num_registered_candidates);
     if dp.num_permissioned_candidates > MAX_COMMITTEE_SIZE
@@ -131,11 +90,9 @@ pub fn sanitize_authority_selection_inputs(
         });
     }
 
-    // ---- permissioned: dedup + cap (drop-entry) -----------------------
     inputs.permissioned_candidates =
         sanitize_permissioned(inputs.permissioned_candidates, &mut report);
 
-    // ---- registered: cap, outer dedup by mainchain_pub_key ------------
     let mut registered = inputs.registered_candidates;
     if registered.len() > MAX_REGISTRATIONS_PER_EPOCH {
         let excess = registered.len() - MAX_REGISTRATIONS_PER_EPOCH;
@@ -156,8 +113,6 @@ pub fn sanitize_authority_selection_inputs(
         }
     });
 
-    // Implausible stake: clamp out any CandidateRegistrations whose
-    // reported stake exceeds the total ADA supply.
     registered.retain(|c| match c.stake_delegation {
         Some(StakeDelegation(s)) if s > MAX_PLAUSIBLE_STAKE_LOVELACE => {
             report.record(DropReason::ImplausibleStake);
@@ -166,11 +121,9 @@ pub fn sanitize_authority_selection_inputs(
         _ => true,
     });
 
-    // Cross-registration key dedup. We consider ALL submitted
-    // registrations under every remaining outer entry. Permissioned
-    // keys participate too — a permissioned candidate who is *also*
-    // submitting an SPO registration with the same keys should only
-    // count once, and the permissioned slot wins (first seen).
+    // Permissioned keys participate in cross-registration dedup: a
+    // permissioned candidate who also submits an SPO registration with
+    // the same keys only counts once — permissioned wins (first seen).
     let mut seen_sc: Vec<Vec<u8>> = inputs
         .permissioned_candidates
         .iter()
@@ -212,9 +165,9 @@ pub fn sanitize_authority_selection_inputs(
             .collect();
         outer.registrations = filtered;
     }
-    // An outer entry whose last valid registration was stripped is
-    // useless; drop it so Ariadne doesn't see a stakeholder with zero
-    // surviving registrations.
+    // Outer entries whose last valid registration was stripped get
+    // dropped so Ariadne doesn't see a stakeholder with zero surviving
+    // registrations.
     registered.retain(|c| !c.registrations.is_empty());
 
     inputs.registered_candidates = registered;
@@ -259,13 +212,9 @@ fn sanitize_permissioned(
         .collect()
 }
 
-/// Thin logging wrapper. Kept separate from the pure function so
-/// `sanitize_authority_selection_inputs` stays testable without needing
-/// a mock logger. The runtime calls this one.
-///
-/// Logs a single summary line per sanitisation pass (counts-per-reason)
-/// rather than one line per drop — otherwise a 256-entry flood of bad
-/// registrations would generate 256 log lines.
+/// Logging wrapper around `sanitize_authority_selection_inputs`. Logs a
+/// single summary line per pass (counts-per-reason) so a 256-entry flood
+/// of bad registrations doesn't generate 256 log lines.
 pub fn sanitize_and_log(
     inputs: AuthoritySelectionInputs,
 ) -> Result<AuthoritySelectionInputs, SanityError> {
@@ -416,11 +365,10 @@ mod tests {
         matches!(err, SanityError::DParamTooLarge { .. });
     }
 
-    /// Boundary test: a d_parameter whose permissioned+registered seats sum
-    /// exactly to 96 must PASS sanitation. Guards against regressions where
-    /// `MAX_COMMITTEE_SIZE` gets silently decoupled from the orinq-receipts
-    /// pallet cap. Spec 218 (C-deep hot-restore) raised both to 96; this
-    /// test pins the cap at exactly 96.
+    /// Boundary test: a d_parameter summing exactly to MAX_COMMITTEE_SIZE
+    /// (96) must PASS. Pins the cap; complements the `_to_97` test below
+    /// against regressions where `MAX_COMMITTEE_SIZE` gets decoupled from
+    /// the orinq-receipts pallet cap.
     #[test]
     fn input_sanity_accepts_d_param_summing_to_96() {
         let mut i = inputs_ok();
@@ -436,9 +384,8 @@ mod tests {
         assert_eq!(cleaned.d_parameter.num_registered_candidates, 36);
     }
 
-    /// Boundary test: a d_parameter summing to 97 (one over the cap) must
-    /// fail. Complements `input_sanity_accepts_d_param_summing_to_96`; the
-    /// pair pins the cap at exactly 96.
+    /// Boundary test: one over the cap must fail. Complements
+    /// `input_sanity_accepts_d_param_summing_to_96`.
     #[test]
     fn input_sanity_rejects_d_param_summing_to_97() {
         let mut i = inputs_ok();
@@ -473,8 +420,6 @@ mod tests {
         let mut i = inputs_ok();
         i.registered_candidates = (0..(MAX_REGISTRATIONS_PER_EPOCH as u16 + 5))
             .map(|n| {
-                // mainchain key = low byte; to keep duplicates out we
-                // also vary registration content.
                 let b = (n & 0xff) as u8;
                 let hi = ((n >> 8) & 0xff) as u8;
                 let mc = CandidateRegistrations {
@@ -506,7 +451,7 @@ mod tests {
         let mut i = inputs_ok();
         i.registered_candidates = vec![
             cr(42, vec![reg_data(4, 14, 24)], 1_000),
-            cr(42, vec![reg_data(5, 15, 25)], 99_999), // duplicate mc key, second dropped
+            cr(42, vec![reg_data(5, 15, 25)], 99_999),
         ];
         let (cleaned, report) = sanitize_authority_selection_inputs(i).unwrap();
         assert_eq!(cleaned.registered_candidates.len(), 1);
@@ -519,10 +464,10 @@ mod tests {
         let mut i = inputs_ok();
         i.registered_candidates = vec![
             cr(40, vec![reg_data(4, 14, 24)], 1_000),
-            cr(41, vec![reg_data(4, 15, 25)], 2_000), // same sc key, different mc
+            cr(41, vec![reg_data(4, 15, 25)], 2_000),
         ];
         let (cleaned, report) = sanitize_authority_selection_inputs(i).unwrap();
-        // Second outer entry has had its only registration stripped -> outer dropped too.
+        // Second outer entry has its only registration stripped → outer dropped.
         assert_eq!(cleaned.registered_candidates.len(), 1);
         assert!(
             report
@@ -568,7 +513,6 @@ mod tests {
     #[test]
     fn permissioned_wins_over_registered_on_key_collision() {
         let mut i = inputs_ok();
-        // Registration reuses permissioned sidechain key from pc(1,...).
         i.registered_candidates = vec![cr(60, vec![reg_data(1, 99, 99)], 1_000)];
         let (cleaned, report) = sanitize_authority_selection_inputs(i).unwrap();
         assert_eq!(cleaned.permissioned_candidates.len(), 3);

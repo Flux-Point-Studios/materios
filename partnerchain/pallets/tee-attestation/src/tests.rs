@@ -370,9 +370,6 @@ mod pallet {
     fn submit_evidence_pixel_chain_writes_storage_and_score() {
         new_test_ext().execute_with(|| {
             System::set_block_number(1);
-            // Phase 2 kill-switch: enable the verifier via root before any
-            // submit_evidence call. See `submit_evidence_when_disabled_fails`
-            // for the genesis-default behaviour.
             assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
             let id = receipt_id(1);
             let entry = arm_entry(&[
@@ -459,17 +456,13 @@ mod pallet {
         });
     }
 
-    /// H-2 hardening: the pallet MUST NOT keep a parallel `EvidenceEntries`
-    /// storage map of raw evidence — `VerifiedEntries` is canonical. Submit
-    /// 8 valid Pixel chains for the same receipt and assert that the only
-    /// surviving per-receipt vector is `VerifiedEntries` (length 8). The
-    /// raw-evidence storage map has been dropped.
+    /// `VerifiedEntries` is the only per-receipt evidence store; raw evidence
+    /// is not persisted. Submit 8 valid Pixel chains and assert the vector
+    /// has length 8.
     #[test]
     fn verified_entries_is_the_only_per_receipt_evidence_store() {
         new_test_ext().execute_with(|| {
             System::set_block_number(1);
-            // Phase 2 ships the verifier disabled at genesis; tests of the
-            // verify path must explicitly flip the kill switch first.
             assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
             let id = receipt_id(8);
             for _ in 0..8 {
@@ -491,13 +484,10 @@ mod pallet {
         });
     }
 
-    // ---- H-3 interim mitigation: genesis-disabled kill-switch ----
+    // ---- Genesis-disabled kill-switch ----
 
-    /// Genesis: the pallet is disabled. submit_evidence with a valid Pixel
-    /// chain must fail with PalletDisabled — the H-3 challenge-binding
-    /// followup ships in Phase 2.5; until then the verifier accepts replays
-    /// of any well-formed Google-rooted chain, so the kill-switch keeps the
-    /// extrinsic dormant.
+    /// At genesis the pallet is disabled; submit_evidence with a valid Pixel
+    /// chain must fail with PalletDisabled.
     #[test]
     fn submit_evidence_when_disabled_fails() {
         new_test_ext().execute_with(|| {
@@ -567,12 +557,8 @@ mod pallet {
 
 // ---- Verifier-internal unit tests ---------------------------------------
 //
-// These tests bypass the full X.509 chain validation and exercise the
-// security-level extraction logic directly via a synthetic
-// `KeyDescription` value. They cover M-1 (read key_mint, not attestation)
-// and M-4 (allowlist {TEE, StrongBox}) directly — the reference Pixel +
-// Samsung chains both have key_mint == attestation == TEE/StrongBox so
-// they don't distinguish the two.
+// These bypass the full X.509 chain validation to exercise the
+// security-level extraction directly via a synthetic `KeyDescription`.
 
 mod verifier_internal {
     use crate::vendor::acurast_attestation::asn::{
@@ -652,7 +638,7 @@ mod verifier_internal {
         assert_eq!(level, 2);
     }
 
-    // ---- M-4: positive allowlist {TEE=1, StrongBox=2} ----
+    // ---- Positive allowlist: TEE=1, StrongBox=2 ----
 
     use crate::verifier::is_security_level_allowed;
 
@@ -671,11 +657,8 @@ mod verifier_internal {
         assert!(!is_security_level_allowed(0));
     }
 
-    /// M-4: the 4th SecurityLevel in the AOSP KeyMint enum is KEYSTORE (3),
-    /// which means the key lives in the Android Keystore daemon's
-    /// userspace process and isn't TEE-rooted. Old code was a negative
-    /// list (`!= 0` reject) so it would accept KEYSTORE; the positive
-    /// allowlist must reject anything not in {1, 2}.
+    /// AOSP KeyMint SecurityLevel 3 = KEYSTORE: key lives in the Android
+    /// Keystore daemon's userspace, not TEE-rooted, must be rejected.
     #[test]
     fn allowlist_rejects_keystore_level_3() {
         assert!(!is_security_level_allowed(3));
@@ -691,10 +674,9 @@ mod verifier_internal {
     }
 }
 
-/// M-2 rename: VerifiedEvidence's identity field is now `attest_key_hash`
-/// (32-byte SHA-256 of the leaf attestation key's SPKI DER) — NOT a
-/// stable per-device "chip id". This test exists purely to fail at
-/// compile-time if the field is reverted to `chip_id_hash` or removed.
+/// Compile-time guard: `VerifiedEvidence`'s identity field is `attest_key_hash`
+/// (SHA-256 of leaf SPKI DER). Failing this test means a field rename or
+/// removal that would break downstream consumers.
 #[test]
 fn verified_evidence_field_is_named_attest_key_hash() {
     use crate::types::VerifiedEvidence;

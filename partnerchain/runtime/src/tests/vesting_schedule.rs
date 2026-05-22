@@ -1,18 +1,5 @@
-//! v5.1 tokenomics — Component 3: pallet_vesting integration tests.
-//!
-//! Enables cliff+linear vesting for the Strategic/Investor bucket. Investors
-//! receive their tokens via `force_vested_transfer` (Root origin) with a
-//! schedule that combines a cliff (starting_block) and a linear unlock
-//! (per_block * blocks).
-//!
-//! ---------------------------------------------------------------------------
-//! TDD CONTRACT
-//! ---------------------------------------------------------------------------
-//!
-//! These tests FAIL until:
-//!   1. `pallet-vesting` is added to `runtime/Cargo.toml`.
-//!   2. `impl pallet_vesting::Config for Runtime` is added to `runtime/src/lib.rs`.
-//!   3. `Vesting: pallet_vesting` is added to `construct_runtime!`.
+//! Integration tests for pallet_vesting: cliff + linear unlock schedules,
+//! force_vested_transfer from Root, signed-origin gating.
 
 use crate::*;
 
@@ -44,10 +31,8 @@ fn new_test_ext() -> TestExternalities {
         .build_storage()
         .expect("frame_system genesis builds");
 
-    // Granter holds 10 MATRA * 1e6 = 10_000_000, the Strategic bucket for
-    // these tests. Needs to be > MinVestedTransfer.
-    // Grantee starts at ExistentialDeposit so later transfers can add locks;
-    // pallet_balances panics if a positive-balance account drops below ED.
+    // Granter holds 10M MATRA (> MinVestedTransfer). Grantee starts at ED so
+    // later transfers can add locks without dropping the account below ED.
     pallet_balances::GenesisConfig::<Runtime> {
         balances: vec![
             (granter(), 10_000_000 * MATRA),
@@ -57,7 +42,6 @@ fn new_test_ext() -> TestExternalities {
     .assimilate_storage(&mut storage)
     .expect("balances genesis");
 
-    // Minimal IOG genesis for AllPalletsWithSystem initialization.
     pallet_sidechain::GenesisConfig::<Runtime> {
         genesis_utxo: sidechain_domain::UtxoId::new(
             hex_literal::hex!(

@@ -1,30 +1,6 @@
-//! Wave 3 / Phase 2 — `pallet-tee-attestation` runtime-integration tests.
-//!
-//! Verifies the wiring of `pallet-tee-attestation` (PR #17) into the
-//! Materios runtime's `construct_runtime!` macro, its `Config` impl, and
-//! confirms that the genesis kill-switch (`Disabled = true`) is honored.
-//!
-//! ---------------------------------------------------------------------------
-//! TDD CONTRACT
-//! ---------------------------------------------------------------------------
-//!
-//! These tests are written BEFORE `pallet-tee-attestation` is wired into the
-//! runtime. They will fail to compile until:
-//!   1. `pallet-tee-attestation` is added to `runtime/Cargo.toml`.
-//!   2. `impl pallet_tee_attestation::Config for Runtime` is added in lib.rs.
-//!   3. `TeeAttestation: pallet_tee_attestation = N,` is appended to the END
-//!      of `construct_runtime!` (per `feedback_pallet_index_shift.md`).
-//!
-//! ---------------------------------------------------------------------------
-//! Pallet-index regression protection
-//! ---------------------------------------------------------------------------
-//!
-//! `feedback_pallet_index_shift.md` is explicit: pallet indices are
-//! load-bearing. Inserting OR removing a pallet in the middle of the macro
-//! shifts every subsequent index by ±1, silently invalidating every
-//! consumer of the runtime metadata (explorers, wallets, SDK type
-//! generators). This file pins the index of every PRE-PR pallet so a
-//! future drift produces a hard test failure rather than a silent bug.
+//! `pallet-tee-attestation` runtime-integration tests. Pin pallet indices
+//! so a future drift produces a hard test failure rather than a silent
+//! consumer-side bug.
 
 use crate::*;
 
@@ -33,20 +9,11 @@ use parity_scale_codec::Encode;
 use sp_io::TestExternalities;
 use sp_runtime::BuildStorage;
 
-// ---------------------------------------------------------------------------
-// Externalities builder — minimal genesis sufficient for storage reads /
-// dispatchable smoke tests on the new pallet. Mirrors the shape used in
-// `treasury_integration.rs` so the two stay in sync if more pallets are
-// added.
-// ---------------------------------------------------------------------------
-
 fn new_test_ext() -> TestExternalities {
     let mut storage = frame_system::GenesisConfig::<Runtime>::default()
         .build_storage()
         .expect("frame_system genesis builds");
 
-    // IOG pallets: minimum genesis so AllPalletsWithSystem hooks don't
-    // panic on default-zero data.
     pallet_sidechain::GenesisConfig::<Runtime> {
         genesis_utxo: sidechain_domain::UtxoId::new(
             hex_literal::hex!(
@@ -83,15 +50,6 @@ fn new_test_ext() -> TestExternalities {
     storage.into()
 }
 
-// ---------------------------------------------------------------------------
-// Test 1 — runtime constructs cleanly with `TeeAttestation` listed
-// ---------------------------------------------------------------------------
-//
-// Compiles only if `TeeAttestation: pallet_tee_attestation` is in
-// construct_runtime! AND the `pallet_tee_attestation::Config for Runtime`
-// impl exists. The runtime metadata MUST enumerate "TeeAttestation" as a
-// pallet — `PalletInfoAccess::name()` is the canonical way to assert that.
-
 #[test]
 fn runtime_includes_tee_attestation_pallet() {
     new_test_ext().execute_with(|| {
@@ -103,30 +61,18 @@ fn runtime_includes_tee_attestation_pallet() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Test 2 — pallet-index regression protection
-// ---------------------------------------------------------------------------
-//
-// Per `feedback_pallet_index_shift.md`: pallet indices are load-bearing.
-// This test pins the index of every PRE-PR pallet to the value it was
-// assigned before this PR landed, so an accidental insertion in the
-// middle of construct_runtime! produces a hard failure here rather than
+// Pin every pallet index so accidental insertion or removal in the middle
+// of `construct_runtime!` produces a hard failure here rather than
 // silently breaking every metadata consumer.
 //
-// Pre-existing pallet indices (from main pre-PR):
-//   System=0, Timestamp=1, Aura=2, Grandpa=3, Balances=4,
-//   [5 reserved — was pallet_transaction_payment, removed at spec 202],
-//   Sudo=6, Multisig=7, Utility=8, Treasury=9, Vesting=10,
-//   OrinqReceipts=11, Motra=12, Sidechain=13,
-//   SessionCommitteeManagement=14, BlockRewards=15, PalletSession=16,
-//   Session=17, NativeTokenManagement=18, IntentSettlement=19.
-// New pallet:
-//   TeeAttestation=20  (next available index, appended at the END).
+// Layout: System=0..Balances=4, [5 vacant], Sudo=6..Utility=8,
+//   Treasury=9..Motra=12, Sidechain=13..NativeTokenManagement=18,
+//   IntentSettlement=19, TeeAttestation=20.
 
 #[test]
 fn existing_pallet_indices_unchanged() {
     new_test_ext().execute_with(|| {
-        // Frame-system + tx-flow pallets
+        // Frame-system + tx-flow
         assert_eq!(
             <frame_system::Pallet<Runtime> as PalletInfoAccess>::index(),
             0,
@@ -152,7 +98,7 @@ fn existing_pallet_indices_unchanged() {
             4,
             "Balances index drift",
         );
-        // Index 5 deliberately vacant (was pallet_transaction_payment).
+        // index 5 vacant
         assert_eq!(
             <pallet_sudo::Pallet<Runtime> as PalletInfoAccess>::index(),
             6,
@@ -229,8 +175,6 @@ fn existing_pallet_indices_unchanged() {
             19,
             "IntentSettlement index drift",
         );
-
-        // The new pallet — appended at the END of construct_runtime!.
         assert_eq!(
             <pallet_tee_attestation::Pallet<Runtime> as PalletInfoAccess>::index(),
             20,
@@ -238,15 +182,6 @@ fn existing_pallet_indices_unchanged() {
         );
     });
 }
-
-// ---------------------------------------------------------------------------
-// Test 3 — `Disabled` is `true` at genesis
-// ---------------------------------------------------------------------------
-//
-// Phase 2 ships with the kill-switch ON. Per the pallet's lib.rs docstring
-// and `DefaultDisabled<T>` type-value, the `Disabled` storage value MUST
-// read `true` from a fresh genesis. Phase 2.5 governance flips this via
-// `set_disabled` once challenge-binding ships (security review H-3).
 
 #[test]
 fn tee_attestation_disabled_at_genesis() {
@@ -259,23 +194,14 @@ fn tee_attestation_disabled_at_genesis() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Test 4 — `submit_evidence` and `set_disabled` route through the runtime
-// ---------------------------------------------------------------------------
-//
-// Confirms the dispatchables are correctly aggregated into `RuntimeCall`.
-// At genesis (Disabled=true), `submit_evidence` MUST fail with the pallet's
-// `PalletDisabled` error — proves the call is correctly routed AND that
-// the kill-switch actually short-circuits execution.
-
 #[test]
 fn runtime_dispatches_submit_evidence_returns_pallet_disabled() {
     use sp_runtime::traits::Dispatchable;
 
     new_test_ext().execute_with(|| {
         let alice = sp_keyring::Sr25519Keyring::Alice.to_account_id();
-        // Empty payload — the kill-switch fires BEFORE the verifier reads
-        // the bytes, so payload contents are irrelevant for this test.
+        // Kill-switch fires before the verifier reads bytes; payload is
+        // irrelevant.
         let entry = pallet_tee_attestation::types::EvidenceEntry {
             evidence_type: pallet_tee_attestation::types::EvidenceType::ArmTrustZone,
             payload: frame_support::BoundedVec::default(),
@@ -303,7 +229,6 @@ fn runtime_dispatches_set_disabled_requires_root() {
     use sp_runtime::traits::Dispatchable;
 
     new_test_ext().execute_with(|| {
-        // Non-root signer must be rejected with BadOrigin.
         let alice = sp_keyring::Sr25519Keyring::Alice.to_account_id();
         let signed_call = RuntimeCall::TeeAttestation(
             pallet_tee_attestation::Call::<Runtime>::set_disabled { disabled: false }
@@ -316,7 +241,6 @@ fn runtime_dispatches_set_disabled_requires_root() {
             "set_disabled MUST be ensure_root — got {:?}", err.error,
         );
 
-        // Root succeeds + actually flips the storage value.
         let root_call = RuntimeCall::TeeAttestation(
             pallet_tee_attestation::Call::<Runtime>::set_disabled { disabled: false }
         );
@@ -330,26 +254,13 @@ fn runtime_dispatches_set_disabled_requires_root() {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Test 5 — runtime metadata exposes the pallet's events
-// ---------------------------------------------------------------------------
-//
-// `PR #17` ships three event variants: `EvidenceVerified`, `EvidenceRejected`,
-// `DisabledChanged`. They MUST be reachable via the runtime's `RuntimeEvent`
-// aggregator. We verify by SCALE-encoding each variant through the
-// aggregator — the aggregator's `Encode` impl only succeeds if the variant
-// is wired in, so this is a compile-time guarantee with a dynamic check on
-// top.
-//
-// This is the cheapest reliable surface; a full `frame_metadata::v15`
-// walk would couple the test to the metadata schema version (which varies
-// across polkadot-sdk releases) for no additional safety beyond what the
-// `RuntimeEvent::from(Event::*)` call already gives us.
+// SCALE-encoding each event variant through `RuntimeEvent` is a
+// compile-time check that every variant is wired into the aggregator,
+// without coupling to the metadata schema version.
 
 #[test]
 fn runtime_metadata_exposes_tee_attestation_events_and_storage() {
     new_test_ext().execute_with(|| {
-        // -- Events: each variant must round-trip through the aggregator. --
         let ev_verified = pallet_tee_attestation::Event::<Runtime>::EvidenceVerified {
             receipt_id: sp_core::H256::repeat_byte(0x01),
             evidence_type: pallet_tee_attestation::types::EvidenceType::ArmTrustZone,
@@ -374,9 +285,6 @@ fn runtime_metadata_exposes_tee_attestation_events_and_storage() {
         let agg_disabled: RuntimeEvent = ev_disabled.into();
         let _ = agg_disabled.encode();
 
-        // -- Storage: every documented map must be reachable on the runtime. --
-        // ValueQuery defaults exercise the storage prefix without needing to
-        // mutate state.
         let _ = pallet_tee_attestation::Disabled::<Runtime>::get();
         let receipt_id = sp_core::H256::repeat_byte(0x03);
         let entries = pallet_tee_attestation::VerifiedEntries::<Runtime>::get(receipt_id);
