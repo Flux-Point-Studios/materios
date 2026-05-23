@@ -76,7 +76,7 @@ If your hash matches canonical, the snapshot is fine and the issue is sync-proto
 
 **Diagnostic 2 — isolate sync to a single trusted peer.** Stop the node, edit `/etc/systemd/system/materios-node-spo.service` (the `ExecStart` line), and add:
 ```
---reserved-nodes /ip4/166.70.250.197/tcp/30333/p2p/12D3KooWNjyk4sAGCVeKk2qNABVzznJSLUKaKpTETzE8kfEzVKmd \
+--reserved-nodes /ip4/166.70.250.197/tcp/30333/p2p/12D3KooWPueKoxRAirTTKH4Y2qQAsJDegWMjS4k89Z7izCbZKgkM \
 --reserved-only \
 --in-peers 50 --out-peers 25
 ```
