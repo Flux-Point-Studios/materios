@@ -97,3 +97,29 @@ This forces your node to peer ONLY with the FPS Gemtek validator (bypasses libp2
 - **Binary version skew.** Your `materios-node` binary may be older than the network's current version. Re-run `bootstrap-validator.sh` to pull the latest binary from `/releases/`.
 
 If none of these help, capture the verbose log around 5 ban events and share with FPS.
+
+### Postgres prerequisites for cardano-db-sync
+
+Partner-chains queries hit cardano-db-sync's postgres on every block import. Two things matter beyond a stock db-sync install.
+
+**1. The `idx_ma_tx_out_ident` index.** Partner-chains lazy-creates this on first start, but the build takes 2-5 min on a freshly-restored db-sync. If your node restarts inside that window, the index never finishes and every subsequent block import takes 2.5s+ → sync-layer timeout → peer drop. `bootstrap-validator.sh` now creates the index ahead of time. If you're upgrading an older install or hit this on a fresh restore:
+```bash
+sudo systemctl stop materios-node-spo.service
+psql "$DB_SYNC_CONNECTION_STRING" -c \
+  "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_ma_tx_out_ident ON ma_tx_out(ident);"
+sudo systemctl start materios-node-spo.service
+```
+Confirm with `\di+ idx_ma_tx_out_ident` in psql — size should be >100 MB on preprod-current data.
+
+**2. Postgres tuning for a 4 vCPU / 8 GB / NVMe baseline.** Defaults assume a much smaller workload than db-sync runs. Append to `/etc/postgresql/15/main/postgresql.conf` (adjust path for your version):
+```
+shared_buffers = 2GB
+effective_cache_size = 6GB
+work_mem = 64MB
+maintenance_work_mem = 1GB
+random_page_cost = 1.1
+effective_io_concurrency = 200
+```
+Then `sudo systemctl restart postgresql && psql "$DB_SYNC_CONNECTION_STRING" -c "ANALYZE;"`. Scale up proportionally for larger hosts.
+
+If you see `sqlx::query: slow statement ... elapsed=2.5s` warnings in your node log AND repeated peer disconnects, this section is the fix.
