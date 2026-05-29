@@ -544,7 +544,7 @@ fn era_cap_auto_scales_with_attestor_count() {
                 RuntimeOrigin::signed(acc(i)),
                 1_000_000_000
             ));
-            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(i))));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(i)));
         }
         let cap_at_4 = OrinqReceipts::effective_era_cap();
         assert_eq!(
@@ -560,7 +560,7 @@ fn era_cap_auto_scales_with_attestor_count() {
                 RuntimeOrigin::signed(acc(i)),
                 1_000_000_000
             ));
-            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(i))));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(i)));
         }
         let cap_at_8 = OrinqReceipts::effective_era_cap();
         assert_eq!(
@@ -781,7 +781,7 @@ fn unbond_while_in_committee_fails() {
             RuntimeOrigin::signed(attestor.clone()),
             1_000_000_000
         ));
-        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor.clone())));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), attestor.clone()));
         assert_noop!(
             OrinqReceipts::unbond(RuntimeOrigin::signed(attestor)),
             pallet::Error::<Test>::StillInCommittee
@@ -827,7 +827,7 @@ fn join_committee_requires_bond() {
         let attestor = acc(1);
         Balances::make_free_balance_be(&attestor, 10_000_000_000);
         assert_noop!(
-            OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor.clone())),
+            OrinqReceipts::join_committee(RuntimeOrigin::root(), attestor.clone()),
             pallet::Error::<Test>::InsufficientBond
         );
 
@@ -837,7 +837,7 @@ fn join_committee_requires_bond() {
             500_000_000
         ));
         assert_noop!(
-            OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor.clone())),
+            OrinqReceipts::join_committee(RuntimeOrigin::root(), attestor.clone()),
             pallet::Error::<Test>::InsufficientBond
         );
 
@@ -846,7 +846,68 @@ fn join_committee_requires_bond() {
             RuntimeOrigin::signed(attestor.clone()),
             500_000_000
         ));
-        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor)));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), attestor));
+    });
+}
+
+#[test]
+fn join_committee_is_root_only() {
+    // spec-228: committee membership is governance-approved only. A signed
+    // origin — even a fully bonded account adding itself — must be rejected.
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            1_000_000_000
+        ));
+
+        // Signed self-join is no longer permitted.
+        assert_noop!(
+            OrinqReceipts::join_committee(RuntimeOrigin::signed(attestor.clone()), attestor.clone()),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert!(!OrinqReceipts::committee_members().contains(&attestor));
+
+        // Governance (root) can add the bonded member.
+        assert_ok!(OrinqReceipts::join_committee(
+            RuntimeOrigin::root(),
+            attestor.clone()
+        ));
+        assert!(OrinqReceipts::committee_members().contains(&attestor));
+    });
+}
+
+#[test]
+fn leave_committee_is_root_only() {
+    // spec-228: a member cannot self-leave to dodge eviction/slash. Only
+    // governance (root) can remove a member.
+    new_test_ext().execute_with(|| {
+        let attestor = acc(1);
+        Balances::make_free_balance_be(&attestor, 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(attestor.clone()),
+            1_000_000_000
+        ));
+        assert_ok!(OrinqReceipts::join_committee(
+            RuntimeOrigin::root(),
+            attestor.clone()
+        ));
+        assert!(OrinqReceipts::committee_members().contains(&attestor));
+
+        // Signed self-leave is no longer permitted.
+        assert_noop!(
+            OrinqReceipts::leave_committee(RuntimeOrigin::signed(attestor.clone()), attestor.clone()),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert!(OrinqReceipts::committee_members().contains(&attestor));
+
+        // Governance (root) can remove the member.
+        assert_ok!(OrinqReceipts::leave_committee(
+            RuntimeOrigin::root(),
+            attestor.clone()
+        ));
+        assert!(!OrinqReceipts::committee_members().contains(&attestor));
     });
 }
 
@@ -897,9 +958,10 @@ fn slash_auto_ejects_if_bond_drops_below_requirement() {
             RuntimeOrigin::signed(attestor.clone()),
             1_000_000_000
         ));
-        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(
+        assert_ok!(OrinqReceipts::join_committee(
+            RuntimeOrigin::root(),
             attestor.clone()
-        )));
+        ));
         assert!(OrinqReceipts::committee_members().contains(&attestor));
 
         // Slash half the bond — new bond = 500M, below the 1B requirement.
@@ -1035,7 +1097,7 @@ fn seed_submitter_and_committee(submitter_seed: u8, committee_seeds: &[u8]) {
     for &s in committee_seeds.iter() {
         Balances::make_free_balance_be(&acc(s), 10_000_000_000);
         assert_ok!(OrinqReceipts::bond(RuntimeOrigin::signed(acc(s)), 1_000_000_000));
-        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(s))));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(s)));
     }
     // Treasury pot pre-funded above ED so it can receive deposits.
     Balances::make_free_balance_be(&treasury_account(), 1);
@@ -1306,7 +1368,7 @@ fn pre_component_4_receipt_skips_fee_payout() {
         for &s in committee_seeds.iter() {
             Balances::make_free_balance_be(&acc(s), 10_000_000_000);
             assert_ok!(OrinqReceipts::bond(RuntimeOrigin::signed(acc(s)), 1_000_000_000));
-            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(s))));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(s)));
         }
         assert_ok!(OrinqReceipts::set_committee(
             RuntimeOrigin::root(),
@@ -1766,7 +1828,7 @@ fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
                 RuntimeOrigin::signed(acc(s)),
                 1_000_000_000
             ));
-            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(acc(s))));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(s)));
         }
         // Treasury pot explicitly drained below ED.
         Balances::make_free_balance_be(&treasury_account(), 0);
@@ -1863,7 +1925,7 @@ fn committee_can_hold_up_to_64_distinct_members() {
                 1_000_000_000
             ));
             assert!(
-                OrinqReceipts::join_committee(RuntimeOrigin::signed(a.clone())).is_ok(),
+                OrinqReceipts::join_committee(RuntimeOrigin::root(), a.clone()).is_ok(),
                 "member #{i} must be able to join"
             );
         }
@@ -1892,7 +1954,7 @@ fn sixty_fifth_member_join_fails_with_committee_full() {
                 RuntimeOrigin::signed(a.clone()),
                 1_000_000_000
             ));
-            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::signed(a)));
+            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), a));
         }
         // 65th join must fail with `CommitteeFull`.
         let overflow = AccountId32::new({
@@ -1907,7 +1969,7 @@ fn sixty_fifth_member_join_fails_with_committee_full() {
             1_000_000_000
         ));
         assert_noop!(
-            OrinqReceipts::join_committee(RuntimeOrigin::signed(overflow)),
+            OrinqReceipts::join_committee(RuntimeOrigin::root(), overflow),
             pallet::Error::<Test>::CommitteeFull
         );
         // Storage bound still at 64.

@@ -1667,55 +1667,62 @@ pub mod pallet {
             Ok(())
         }
 
-        /// Permissionless: any signed account can join the attestation
-        /// committee. Once joined, the account can call
-        /// `attest_availability_cert` and earn attestation rewards.
+        /// Root-only: governance adds `member` to the attestation committee.
+        /// Once added, the member can call `attest_availability_cert` and earn
+        /// attestation rewards. Permissionless self-join was removed in
+        /// spec-228 — committee membership is governance-approved only, so an
+        /// unbonded/untrusted account can no longer insert itself. Bulk membership
+        /// is still managed via `set_committee`; this is the single-member add.
         ///
-        /// Fails if the committee is already at `MaxCommitteeSize` or the
-        /// caller is already a member.
+        /// Fails if the committee is at `MaxCommitteeSize`, `member` is already
+        /// in it, or `member`'s posted bond is below `BondRequirement`.
         #[pallet::call_index(7)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
-            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1)))]
-        pub fn join_committee(origin: OriginFor<T>) -> DispatchResult {
-            let who = ensure_signed(origin)?;
+        pub fn join_committee(origin: OriginFor<T>, member: T::AccountId) -> DispatchResult {
+            ensure_root(origin)?;
 
             // Component 8: require a bond at or above BondRequirement.
-            // BondRequirement == 0 intentionally permits joins without a
+            // BondRequirement == 0 intentionally permits adds without a
             // bond (preprod bootstrap / upgrade grace window).
             let required = BondRequirement::<T>::get();
             if required > 0 {
-                let posted = AttestorBonds::<T>::get(&who);
+                let posted = AttestorBonds::<T>::get(&member);
                 ensure!(posted >= required, Error::<T>::InsufficientBond);
             }
 
             CommitteeMembers::<T>::try_mutate(|set| {
-                ensure!(!set.contains(&who), Error::<T>::AlreadyCommitteeMember);
-                set.try_insert(who.clone()).map_err(|_| Error::<T>::CommitteeFull)?;
+                ensure!(!set.contains(&member), Error::<T>::AlreadyCommitteeMember);
+                set.try_insert(member.clone()).map_err(|_| Error::<T>::CommitteeFull)?;
                 let size = set.len() as u32;
                 Self::deposit_event(Event::CommitteeMemberJoined {
-                    who,
+                    who: member,
                     committee_size: size,
                 });
                 Ok(())
             })
         }
 
-        /// Voluntarily leave the attestation committee. The caller stops
-        /// receiving attestation rewards and can no longer attest.
+        /// Root-only: governance removes `member` from the attestation
+        /// committee. The member stops receiving attestation rewards and can no
+        /// longer attest. Permissionless self-leave was removed in spec-228 so a
+        /// misbehaving member cannot dodge eviction/slash by leaving voluntarily;
+        /// removal (and slashing) is governance-driven (see `slash_attestor`,
+        /// which also auto-ejects when bond drops below requirement).
         #[pallet::call_index(8)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
             .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1)))]
-        pub fn leave_committee(origin: OriginFor<T>) -> DispatchResult {
-            let who = ensure_signed(origin)?;
+        pub fn leave_committee(origin: OriginFor<T>, member: T::AccountId) -> DispatchResult {
+            ensure_root(origin)?;
 
             CommitteeMembers::<T>::try_mutate(|set| {
-                ensure!(set.contains(&who), Error::<T>::NotCommitteeMemberCantLeave);
-                set.remove(&who);
+                ensure!(set.contains(&member), Error::<T>::NotCommitteeMemberCantLeave);
+                set.remove(&member);
                 let size = set.len() as u32;
                 Self::deposit_event(Event::CommitteeMemberLeft {
-                    who,
+                    who: member,
                     committee_size: size,
                 });
                 Ok(())
