@@ -2040,6 +2040,39 @@ mod era_emission_drip {
     }
 
     #[test]
+    fn last_authored_block_survives_era_clear() {
+        // Invariant the committee-liveness filter depends on: BlocksAuthored
+        // is wiped at the era boundary, but LastAuthoredBlock is NOT —
+        // otherwise every validator would read as "never authored" right
+        // after each era and the filter would evict the whole committee.
+        new_test_ext().execute_with(|| {
+            pallet::BlocksAuthored::<Test>::insert(&validator_a(), ERA_LENGTH);
+            pallet::LastAuthoredBlock::<Test>::insert(&validator_a(), 7u32);
+            pallet::EraStartBlock::<Test>::put(1u32);
+
+            System::set_block_number(ERA_LENGTH + 2);
+            let _ = <OrinqReceipts as Hooks<_>>::on_initialize(ERA_LENGTH + 2);
+
+            // BlocksAuthored cleared by the era distribution...
+            assert_eq!(pallet::BlocksAuthored::<Test>::get(&validator_a()), 0);
+            // ...but the last-authored marker persists across the boundary.
+            assert_eq!(OrinqReceipts::last_authored_block(&validator_a()), Some(7u32));
+        });
+    }
+
+    #[test]
+    fn stamp_first_selected_is_idempotent() {
+        new_test_ext().execute_with(|| {
+            assert_eq!(OrinqReceipts::candidate_first_selected(&validator_a()), None);
+            OrinqReceipts::stamp_first_selected(&validator_a(), 100u32);
+            // A later stamp must NOT overwrite the first — the grace window is
+            // measured from a candidate's first-ever selection.
+            OrinqReceipts::stamp_first_selected(&validator_a(), 250u32);
+            assert_eq!(OrinqReceipts::candidate_first_selected(&validator_a()), Some(100u32));
+        });
+    }
+
+    #[test]
     fn era_emission_splits_85_validator_15_treasury() {
         new_test_ext().execute_with(|| {
             // Pre-fund treasury pot at ED so sub-ED deposits don't fail the

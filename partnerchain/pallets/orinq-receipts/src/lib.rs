@@ -148,6 +148,23 @@ pub mod pallet {
     #[pallet::storage]
     pub type EraStartBlock<T: Config> = StorageValue<_, BlockNumberFor<T>, ValueQuery>;
 
+    /// Last block each validator authored. Updated alongside `BlocksAuthored`
+    /// in `on_initialize`, but — unlike it — NEVER cleared at the era
+    /// boundary. Drives committee liveness filtering so a registered SPO that
+    /// never produces blocks cannot inflate the GRANDPA quorum. Keyed by the
+    /// Aura-key account (see `find_block_author`).
+    #[pallet::storage]
+    pub type LastAuthoredBlock<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, BlockNumberFor<T>, OptionQuery>;
+
+    /// Block at which an account was first seen in a selected committee.
+    /// Stamped once by the runtime's authority selection; gives a new
+    /// candidate a grace window to author its first block before liveness
+    /// filtering may drop it.
+    #[pallet::storage]
+    pub type CandidateFirstSelected<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, BlockNumberFor<T>, OptionQuery>;
+
     /// Total tMATRA distributed from the validator reserve so far.
     #[pallet::storage]
     #[pallet::getter(fn total_rewards_distributed)]
@@ -650,6 +667,7 @@ pub mod pallet {
             // We use the Aura author digest to identify who produced this block.
             if let Some(author) = Self::find_block_author() {
                 BlocksAuthored::<T>::mutate(&author, |count| *count = count.saturating_add(1));
+                LastAuthoredBlock::<T>::insert(&author, n);
             }
 
             // ── Validator rewards: era distribution ──────────────────────
@@ -995,6 +1013,26 @@ pub mod pallet {
         /// here rather than being burned.
         pub fn treasury_account() -> T::AccountId {
             T::TreasuryPotId::get().into_account_truncating()
+        }
+
+        /// Most recent block `who` authored, if any. Liveness signal for
+        /// committee selection; survives the per-era `BlocksAuthored` reset.
+        pub fn last_authored_block(who: &T::AccountId) -> Option<BlockNumberFor<T>> {
+            LastAuthoredBlock::<T>::get(who)
+        }
+
+        /// Block at which `who` was first selected into a committee, if ever.
+        pub fn candidate_first_selected(who: &T::AccountId) -> Option<BlockNumberFor<T>> {
+            CandidateFirstSelected::<T>::get(who)
+        }
+
+        /// Record that `who` was selected into a committee at `block`.
+        /// Idempotent — only the first call records a value, so the grace
+        /// window is measured from a candidate's first-ever selection.
+        pub fn stamp_first_selected(who: &T::AccountId, block: BlockNumberFor<T>) {
+            if !CandidateFirstSelected::<T>::contains_key(who) {
+                CandidateFirstSelected::<T>::insert(who, block);
+            }
         }
 
         /// Component 4 helper: reserve the current `ReceiptSubmissionFee`
