@@ -670,6 +670,22 @@ pub mod pallet {
                 LastAuthoredBlock::<T>::insert(&author, n);
             }
 
+            // Stamp first-selected for the enacted Aura authorities here, in a
+            // committing context. The runtime's `select_authorities` runs only
+            // in the inherent build/verify path, whose writes are discarded, so
+            // stamping there never persists. Keyed by the Aura account exactly
+            // as `find_block_author` (first 32 bytes of the encoded key). The
+            // stamp is idempotent, so a validator's grace window starts when it
+            // first becomes an active authority.
+            for authority in pallet_aura::Authorities::<T>::get().iter() {
+                let encoded = parity_scale_codec::Encode::encode(authority);
+                if encoded.len() >= 32 {
+                    let mut bytes = [0u8; 32];
+                    bytes.copy_from_slice(&encoded[..32]);
+                    Self::stamp_first_selected(&T::AccountId::from(bytes), n);
+                }
+            }
+
             // ── Validator rewards: era distribution ──────────────────────
             // Era length: 14400 blocks (~24h at 6s block time)
             // Reward pool: 150,000,000 MATRA (6 decimals = 150_000_000_000_000 base units)

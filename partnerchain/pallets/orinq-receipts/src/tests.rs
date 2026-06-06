@@ -358,6 +358,36 @@ fn make_grandpa_ids(count: u8) -> sp_consensus_grandpa::AuthorityList {
 }
 
 #[test]
+fn on_initialize_stamps_first_selected_for_active_aura_authorities() {
+    // Regression guard for the inherent-flow trap: the runtime's
+    // `select_authorities` runs only in the (discarded) inherent build/verify
+    // path, so first-selected MUST be stamped on-chain in on_initialize from
+    // the enacted Aura authorities. AuraId unchecked_from([k;32]) maps to
+    // AccountId32([k;32]) == acc(k), matching find_block_author.
+    use frame_support::traits::Hooks;
+    new_test_ext().execute_with(|| {
+        OrinqReceipts::rotate_authorities(
+            RuntimeOrigin::root(),
+            make_aura_ids(2), // -> acc(1), acc(2)
+            make_grandpa_ids(2),
+            5,
+        )
+        .unwrap();
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(1)), None);
+
+        System::set_block_number(5);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(5);
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(1)), Some(5u32));
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(2)), Some(5u32));
+
+        // Idempotent: a later block does not move the first-selected mark.
+        System::set_block_number(9);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(9);
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(1)), Some(5u32));
+    });
+}
+
+#[test]
 fn rotate_authorities_works() {
     new_test_ext().execute_with(|| {
         let aura_ids = make_aura_ids(3);

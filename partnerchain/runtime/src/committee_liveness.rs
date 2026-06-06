@@ -75,9 +75,12 @@ pub fn aura_account_bytes(aura: &AuraPublicKey) -> Option<[u8; 32]> {
     account_bytes_from_encoded(&aura.0)
 }
 
-/// Drop dead registered candidates. An outer `CandidateRegistrations` entry
-/// is kept if *any* of its registrations maps to a live (or unmappable)
-/// Aura account. Returns the filtered inputs and the number of outer
+/// Drop dead registered candidates. For each outer `CandidateRegistrations`
+/// entry only the registration the selector will actually install is judged:
+/// the vendor's `select_latest_valid_candidate` picks the registration with
+/// the greatest `utxo_info.ordering_key()`, so an older live registration must
+/// not rescue a newer dead one (and vice-versa). An unmappable or missing key
+/// fails open (kept). Returns the filtered inputs and the number of outer
 /// entries dropped. Permissioned candidates are left untouched.
 pub fn filter_dead_registered<F>(
     mut inputs: AuthoritySelectionInputs,
@@ -91,21 +94,21 @@ where
 {
     let mut dropped: u32 = 0;
     inputs.registered_candidates.retain(|outer| {
-        let mut any_alive = false;
-        for r in outer.registrations.iter() {
-            let alive = match aura_account_bytes(&r.aura_pub_key) {
+        let latest = outer
+            .registrations
+            .iter()
+            .max_by_key(|r| r.utxo_info.ordering_key());
+        let alive = match latest {
+            Some(r) => match aura_account_bytes(&r.aura_pub_key) {
                 Some(acct) => !is_dead(&lookup(acct), now, grace_blocks, window_blocks),
                 None => true,
-            };
-            if alive {
-                any_alive = true;
-                break;
-            }
-        }
-        if !any_alive {
+            },
+            None => true,
+        };
+        if !alive {
             dropped = dropped.saturating_add(1);
         }
-        any_alive
+        alive
     });
     (inputs, dropped)
 }
@@ -322,5 +325,30 @@ mod tests {
             filter_dead_registered(inputs, now, GRACE, WINDOW, |_acct| live(Some(1), None));
         assert_eq!(dropped, 0);
         assert_eq!(out.registered_candidates.len(), 1);
+    }
+
+    #[test]
+    fn drops_when_latest_registration_dead_even_if_older_live() {
+        // The selector installs the registration with the greatest utxo
+        // ordering key; an older live key must not rescue a newer dead one.
+        let now = 2_000_000;
+        let mut c = cand(0x70, 0x71); // reg #1: aura 0x71, the OLDER registration
+        let mut newer = reg(0x72); // reg #2: aura 0x72, dominates utxo ordering
+        newer.utxo_info.utxo_id = UtxoId { tx_hash: McTxHash([0xFFu8; 32]), index: UtxoIndex(9) };
+        newer.utxo_info.epoch_number = McEpochNumber(9);
+        newer.utxo_info.block_number = McBlockNumber(999);
+        newer.utxo_info.slot_number = McSlotNumber(999);
+        newer.utxo_info.tx_index_within_block = McTxIndexInBlock(9);
+        c.registrations.push(newer);
+        let inputs = inputs_with(alloc::vec![c]);
+        let (out, dropped) = filter_dead_registered(inputs, now, GRACE, WINDOW, |acct| {
+            if acct == [0x72u8; 32] {
+                live(Some(1_000_000), None) // newest registration = dead
+            } else {
+                live(Some(1_000_000), Some(now - 10)) // older = live
+            }
+        });
+        assert_eq!(dropped, 1);
+        assert!(out.registered_candidates.is_empty());
     }
 }

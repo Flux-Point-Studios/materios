@@ -737,25 +737,13 @@ impl pallet_session_validator_management::Config for Runtime {
             );
         }
 
-        let committee: BoundedVec<(Self::AuthorityId, Self::AuthorityKeys), Self::MaxValidators> =
-            select_authorities(Sidechain::genesis_utxo(), sanitized, sidechain_epoch)?;
-
-        // Stamp the block at which each member was first selected so a
-        // genuinely new candidate gets its grace window before the filter
-        // above can judge it dead. Idempotent per account; keyed by the Aura
-        // account exactly as `find_block_author` records authorship.
-        for (_authority_id, keys) in committee.iter() {
-            if let Some(acct) = committee_liveness::account_bytes_from_encoded(
-                &parity_scale_codec::Encode::encode(&keys.aura),
-            ) {
-                pallet_orinq_receipts::Pallet::<Runtime>::stamp_first_selected(
-                    &AccountId::from(acct),
-                    now,
-                );
-            }
-        }
-
-        Some(committee)
+        // NOTE: `select_authorities` runs only in the inherent build/verify
+        // path (`create_inherent` / `check_inherent`), whose storage writes are
+        // discarded — so first-selected is stamped on-chain in
+        // `pallet_orinq_receipts::on_initialize` (a committing context) from the
+        // enacted Aura authorities, NOT here. Stamping here would never persist,
+        // leaving `CandidateFirstSelected` empty and the filter inert.
+        select_authorities(Sidechain::genesis_utxo(), sanitized, sidechain_epoch)
     }
 
     fn current_epoch_number() -> ScEpochNumber {
