@@ -358,6 +358,36 @@ fn make_grandpa_ids(count: u8) -> sp_consensus_grandpa::AuthorityList {
 }
 
 #[test]
+fn on_initialize_stamps_first_selected_for_active_aura_authorities() {
+    // Regression guard for the inherent-flow trap: the runtime's
+    // `select_authorities` runs only in the (discarded) inherent build/verify
+    // path, so first-selected MUST be stamped on-chain in on_initialize from
+    // the enacted Aura authorities. AuraId unchecked_from([k;32]) maps to
+    // AccountId32([k;32]) == acc(k), matching find_block_author.
+    use frame_support::traits::Hooks;
+    new_test_ext().execute_with(|| {
+        OrinqReceipts::rotate_authorities(
+            RuntimeOrigin::root(),
+            make_aura_ids(2), // -> acc(1), acc(2)
+            make_grandpa_ids(2),
+            5,
+        )
+        .unwrap();
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(1)), None);
+
+        System::set_block_number(5);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(5);
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(1)), Some(5u32));
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(2)), Some(5u32));
+
+        // Idempotent: a later block does not move the first-selected mark.
+        System::set_block_number(9);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(9);
+        assert_eq!(OrinqReceipts::candidate_first_selected(&acc(1)), Some(5u32));
+    });
+}
+
+#[test]
 fn rotate_authorities_works() {
     new_test_ext().execute_with(|| {
         let aura_ids = make_aura_ids(3);
@@ -2037,6 +2067,39 @@ mod era_emission_drip {
             post_validator.saturating_sub(pre_validator),
             post_trsy.saturating_sub(pre_trsy),
         )
+    }
+
+    #[test]
+    fn last_authored_block_survives_era_clear() {
+        // Invariant the committee-liveness filter depends on: BlocksAuthored
+        // is wiped at the era boundary, but LastAuthoredBlock is NOT —
+        // otherwise every validator would read as "never authored" right
+        // after each era and the filter would evict the whole committee.
+        new_test_ext().execute_with(|| {
+            pallet::BlocksAuthored::<Test>::insert(&validator_a(), ERA_LENGTH);
+            pallet::LastAuthoredBlock::<Test>::insert(&validator_a(), 7u32);
+            pallet::EraStartBlock::<Test>::put(1u32);
+
+            System::set_block_number(ERA_LENGTH + 2);
+            let _ = <OrinqReceipts as Hooks<_>>::on_initialize(ERA_LENGTH + 2);
+
+            // BlocksAuthored cleared by the era distribution...
+            assert_eq!(pallet::BlocksAuthored::<Test>::get(&validator_a()), 0);
+            // ...but the last-authored marker persists across the boundary.
+            assert_eq!(OrinqReceipts::last_authored_block(&validator_a()), Some(7u32));
+        });
+    }
+
+    #[test]
+    fn stamp_first_selected_is_idempotent() {
+        new_test_ext().execute_with(|| {
+            assert_eq!(OrinqReceipts::candidate_first_selected(&validator_a()), None);
+            OrinqReceipts::stamp_first_selected(&validator_a(), 100u32);
+            // A later stamp must NOT overwrite the first — the grace window is
+            // measured from a candidate's first-ever selection.
+            OrinqReceipts::stamp_first_selected(&validator_a(), 250u32);
+            assert_eq!(OrinqReceipts::candidate_first_selected(&validator_a()), Some(100u32));
+        });
     }
 
     #[test]

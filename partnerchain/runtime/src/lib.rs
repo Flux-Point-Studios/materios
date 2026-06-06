@@ -7,6 +7,7 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
+pub mod committee_liveness;
 pub mod input_sanity;
 pub mod migrations;
 
@@ -178,7 +179,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 228,
+    spec_version: 229,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 3,
@@ -675,6 +676,16 @@ parameter_types! {
     pub const MaxValidators: u32 = MAX_VALIDATORS;
 }
 
+/// Committee liveness filter (task #410). A registered (trustless) SPO
+/// candidate selectable for longer than the grace window yet producing no
+/// block within the liveness window is dropped from selection, so a dead
+/// registration cannot inflate the GRANDPA quorum and wedge finality. Eras
+/// are ~14_400 blocks (~24h @ 6s); permissioned (FPS) candidates are never
+/// filtered. MAINNET: retune to mainnet block time and ensure the preprod
+/// vendor relaxations (ariadne `<=`, db-sync offset 0) are reverted first.
+const LIVENESS_GRACE_BLOCKS: u32 = 14_400; // 1 era
+const LIVENESS_WINDOW_BLOCKS: u32 = 28_800; // 2 eras (~48h)
+
 impl pallet_session_validator_management::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type MaxValidators = MaxValidators;
@@ -695,6 +706,43 @@ impl pallet_session_validator_management::Config for Runtime {
             Ok(cleaned) => cleaned,
             Err(_) => return None,
         };
+
+        // Drop registered (trustless) candidates that have been selectable
+        // past the grace window yet never produced a block within the
+        // liveness window. A permanently-dead SPO registration otherwise
+        // inflates the GRANDPA authority set N — raising the finality quorum
+        // above the live-voter count and wedging finality (the 2026-06 six-day
+        // stall). Permissioned (FPS) candidates are never filtered.
+        let now: u32 = frame_system::Pallet::<Runtime>::block_number();
+        let (sanitized, dropped) = committee_liveness::filter_dead_registered(
+            sanitized,
+            now,
+            LIVENESS_GRACE_BLOCKS,
+            LIVENESS_WINDOW_BLOCKS,
+            |acct| {
+                let who = AccountId::from(acct);
+                committee_liveness::CandidateLiveness {
+                    first_selected:
+                        pallet_orinq_receipts::Pallet::<Runtime>::candidate_first_selected(&who),
+                    last_authored:
+                        pallet_orinq_receipts::Pallet::<Runtime>::last_authored_block(&who),
+                }
+            },
+        );
+        if dropped > 0 {
+            log::warn!(
+                target: "committee_liveness",
+                "dropped {} dead registered candidate(s) from selection at block {}",
+                dropped, now,
+            );
+        }
+
+        // NOTE: `select_authorities` runs only in the inherent build/verify
+        // path (`create_inherent` / `check_inherent`), whose storage writes are
+        // discarded — so first-selected is stamped on-chain in
+        // `pallet_orinq_receipts::on_initialize` (a committing context) from the
+        // enacted Aura authorities, NOT here. Stamping here would never persist,
+        // leaving `CandidateFirstSelected` empty and the filter inert.
         select_authorities(Sidechain::genesis_utxo(), sanitized, sidechain_epoch)
     }
 
