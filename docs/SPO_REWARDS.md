@@ -43,7 +43,7 @@ You are not choosing between Cardano and Materios. One pool, one set of keys, on
 
 ## How selection works (so you actually produce blocks)
 
-Materios uses Partner Chains' **Ariadne** committee selection, governed by the **D‑parameter** `D = (permissioned, registered)`:
+Materios is a Cardano **Partner Chain** built on IOG's **Minotaur** multi‑resource consensus — the model that lets a partner chain be secured by Cardano SPO stake rather than its own token alone. That's *why* the same stake behind your pool can also secure Materios. **Ariadne** is the selection rule within that model: each epoch it composes the block‑producing committee, governed by the **D‑parameter** `D = (permissioned, registered)`:
 
 - The chain opens gradually: `D = (N, 0)` → `(2, 1)` → `(1, 2)` → `(0, N)`.
 - **Registered SPO candidates** (you, via Cardano mainchain registration) fill the `registered` slots.

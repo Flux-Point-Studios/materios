@@ -359,7 +359,7 @@ See [docs/GOVERNANCE.md](docs/GOVERNANCE.md) for initialization procedures and t
 
 - **RPC lockdown:** `--rpc-methods safe` blocks admin/author methods on public-facing nodes
 - **No slashing:** Offline validators miss rewards but are not penalized
-- **Permissionless attestation:** Anyone can join via `join_committee`, with per-era reward caps to prevent drain
+- **Bonded attestation:** `join_committee` is root-gated — operators post a bond and governance admits them (no open self-join); per-era reward caps limit drain
 - **Content validation:** Schema-driven, AST-based expression evaluation (no `eval()`)
 - **Path traversal protection:** All file:// and local manifest paths are normalized and prefix-checked
 
