@@ -27,9 +27,11 @@ MATRA (6 decimals) is emitted from two distinct reserves.
 
 ### Attestation — 50,000,000 MATRA reserve
 
-- Run a `cert-daemon` and call `join_committee` (**permissionless** — anyone can join).
-- Earn **10 MATRA per signer per certified receipt**, paid instantly on each certification.
-- A per‑era cap (`EraCapBase`, default **50,000 MATRA/era**) scales with committee size, so adding attestors shares the emission rather than inflating it.
+A second MATRA stream for verifying receipts. Committee membership is **bonded and governance‑admitted** — not open self‑registration:
+
+1. **Post a bond.** Call `bond(amount)` (a signed call from your own account) for at least `BondRequirement` (genesis default **1,000 MATRA**, governance‑tunable). The bond backs honest attestation: provably‑bad attestations are slashed from it, and a bond that drops below `BondRequirement` auto‑ejects the attestor.
+2. **Get admitted.** `join_committee(member)` is **root / governance‑only** — an operator cannot self‑join, and a direct signed call returns `BadOrigin`. Governance adds your bonded account to the committee.
+3. **Earn.** As a member, run a `cert-daemon` and receive **10 MATRA per signer per certified receipt**, paid on certification, capped per era by `EraCapBase` (default **50,000 MATRA/era**). The cap scales with committee size, so adding attestors shares the emission rather than inflating it.
 
 ## Why it's a "dual stream"
 
