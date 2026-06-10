@@ -64,6 +64,8 @@ Operators earn tMATRA from two separate reserve pools:
 - **Permissionless attestation** — anyone can call `join_committee` and earn attestation rewards
 - **Per-era cap** — attestation rewards capped at 50,000 MATRA/era to prevent reserve drain
 
+> **Running a Cardano SPO?** See [docs/SPO_REWARDS.md](docs/SPO_REWARDS.md) for the full **dual‑stream** picture — keep earning ADA on your pool *and* earn MATRA on Materios.
+
 ---
 
 ## Project Structure
