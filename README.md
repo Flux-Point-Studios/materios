@@ -60,9 +60,11 @@ Operators earn tMATRA from two separate reserve pools:
 | **Block production** | 150M MATRA (15% of supply) | Pro-rata per era (~24h), proportional to blocks authored |
 | **Attestation** | 50M MATRA (5% of supply) | 10 tMATRA per signer per certified receipt, instant payout |
 
-- **No slashing** — missed blocks = missed rewards
-- **Permissionless attestation** — anyone can call `join_committee` and earn attestation rewards
+- **No slashing on block production** — a missed block is a missed reward, not a penalty
+- **Bonded attestation** — post a bond, then governance admits you to the committee (`join_committee` is root-gated); attestors earn per certified receipt
 - **Per-era cap** — attestation rewards capped at 50,000 MATRA/era to prevent reserve drain
+
+> **Running a Cardano SPO?** See [docs/SPO_REWARDS.md](docs/SPO_REWARDS.md) for the full **dual‑stream** picture — keep earning ADA on your pool *and* earn MATRA on Materios.
 
 ---
 
