@@ -308,8 +308,8 @@ The cert daemon and its test suite live in [materios-operator-kit](https://githu
 | `submit_anchor` | 4 | Submit a Cardano L1 anchor |
 | `rotate_authorities` | 5 | Root-only: rotate Aura + Grandpa authority sets |
 | `submit_receipt_v2` | 6 | Submit receipt with player anti-cheat signature |
-| `join_committee` | 7 | Permissionless: join the attestation committee |
-| `leave_committee` | 8 | Voluntary: leave the attestation committee |
+| `join_committee` | 7 | Root-only: governance admits a bonded account to the committee |
+| `leave_committee` | 8 | Root-only: governance removes a member from the committee |
 
 ---
 
@@ -317,9 +317,9 @@ The cert daemon and its test suite live in [materios-operator-kit](https://githu
 
 There are two ways to participate:
 
-### Attestor (No Approval Needed)
+### Attestor (Bonded + Governance-Admitted)
 
-Run a cert daemon and earn tMATRA for verifying receipts:
+Run a cert daemon to verify receipts and earn tMATRA. Committee membership is bonded and governance-admitted (not open self-registration):
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/Flux-Point-Studios/materios-operator-kit/main/install.sh \
@@ -327,6 +327,8 @@ curl -sSL https://raw.githubusercontent.com/Flux-Point-Studios/materios-operator
 ```
 
 Requirements: 1 vCPU, 512 MB RAM, 1 GB disk, outbound HTTPS only.
+
+**Joining the committee:** post a bond via `bond(amount)` (≥ 1,000 MATRA, the genesis `BondRequirement`), then governance admits your account with `join_committee` (a signed self-join returns `BadOrigin`).
 
 ### Full Validator (Invite Required)
 
@@ -374,7 +376,7 @@ Materios is newly open-source and we're actively looking for feedback from devel
 - **Found a bug or vulnerability?** [Open an issue](https://github.com/Flux-Point-Studios/materios/issues) — security reports are especially appreciated
 - **Have a game you want to integrate?** Check the [Game Integration Guide](https://docs.fluxpointstudios.com/materios-partner-chain/game-integration) and open a PR to add your schema to [`schemas/registry.json` in materios-operator-kit](https://github.com/Flux-Point-Studios/materios-operator-kit/blob/main/schemas/registry.json)
 - **Want to improve the pallets?** The pallet weights are hand-estimated (not benchmarked), player signatures aren't verified on-chain yet, and there's room for gas optimization — PRs welcome
-- **Run an attestor node** and help secure the network — takes 1 minute, no approval needed (see [Becoming an Operator](#becoming-an-operator))
+- **Run an attestor node** and help secure the network — post a bond, then governance admits you (see [Becoming an Operator](#becoming-an-operator))
 - **Questions or ideas?** Join us in the [Flux Point Studios Discord](https://discord.gg/MfYUMnfrJM) (#materios channel)
 
 For significant changes, please open an issue first to discuss the approach.
