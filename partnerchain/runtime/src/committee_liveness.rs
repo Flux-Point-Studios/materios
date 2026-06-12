@@ -13,6 +13,12 @@
 //! `LastAuthoredBlock`) and tests back with a map. Only the *registered*
 //! candidates are filtered — the permissioned (FPS) backbone is never
 //! touched, so a briefly-down trusted node is never evicted.
+//!
+//! The candidate filter alone cannot stop Ariadne from *seating* a set whose
+//! live members fall short of the GRANDPA quorum (permissioned seats are
+//! drawn with replacement; twice on 2026-06-12 such draws wedged finality).
+//! `passes_live_quorum_floor` judges the *selected* set after the draw so the
+//! runtime can refuse it and keep the current committee for one more epoch.
 
 use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
 use sidechain_domain::AuraPublicKey;
@@ -111,6 +117,58 @@ where
         alive
     });
     (inputs, dropped)
+}
+
+/// GRANDPA finality quorum for an authority set of size `n`:
+/// `n − ⌊(n−1)/3⌋`, the smallest vote count a Byzantine-safe supermajority
+/// accepts (1→1, 4→3, 6→5, 7→5). `n = 0` → 0.
+pub fn grandpa_quorum_threshold(n: usize) -> usize {
+    n.saturating_sub(n.saturating_sub(1) / 3)
+}
+
+/// Count selected members whose `last_authored` lies within `window_blocks`
+/// of `now`. Keys are SCALE-encoded Aura keys, mapped to liveness accounts
+/// via `account_bytes_from_encoded`. Never-authored and unmappable keys count
+/// NOT live — the opposite polarity of `filter_dead_registered`'s fail-open:
+/// the floor is a safety check, so unknowns must not satisfy it.
+pub fn live_member_count<K, F>(
+    selected_aura_keys: &[K],
+    now: u32,
+    window_blocks: u32,
+    mut lookup: F,
+) -> usize
+where
+    K: AsRef<[u8]>,
+    F: FnMut([u8; 32]) -> CandidateLiveness,
+{
+    selected_aura_keys
+        .iter()
+        .filter(|key| {
+            account_bytes_from_encoded(key.as_ref())
+                .and_then(|acct| lookup(acct).last_authored)
+                .is_some_and(|last_authored| now.saturating_sub(last_authored) <= window_blocks)
+        })
+        .count()
+}
+
+/// Can the known-live members of a selected committee carry the GRANDPA
+/// quorum? `false` means the caller must refuse the rotation (returning
+/// `None` from `select_authorities` keeps the current committee for one more
+/// epoch via the session pallet's create_inherent fallback). An empty
+/// selection never passes.
+pub fn passes_live_quorum_floor<K, F>(
+    selected_aura_keys: &[K],
+    now: u32,
+    window_blocks: u32,
+    lookup: F,
+) -> bool
+where
+    K: AsRef<[u8]>,
+    F: FnMut([u8; 32]) -> CandidateLiveness,
+{
+    !selected_aura_keys.is_empty()
+        && live_member_count(selected_aura_keys, now, window_blocks, lookup)
+            >= grandpa_quorum_threshold(selected_aura_keys.len())
 }
 
 // ---------------------------------------------------------------------
@@ -350,5 +408,120 @@ mod tests {
         });
         assert_eq!(dropped, 1);
         assert!(out.registered_candidates.is_empty());
+    }
+
+    // ── grandpa_quorum_threshold ─────────────────────────────────────
+
+    #[test]
+    fn quorum_threshold_matches_grandpa_supermajority() {
+        assert_eq!(grandpa_quorum_threshold(0), 0);
+        assert_eq!(grandpa_quorum_threshold(1), 1);
+        assert_eq!(grandpa_quorum_threshold(2), 2);
+        assert_eq!(grandpa_quorum_threshold(3), 3);
+        assert_eq!(grandpa_quorum_threshold(4), 3);
+        assert_eq!(grandpa_quorum_threshold(5), 4);
+        assert_eq!(grandpa_quorum_threshold(6), 5);
+        assert_eq!(grandpa_quorum_threshold(7), 5);
+    }
+
+    // ── passes_live_quorum_floor ─────────────────────────────────────
+
+    const NOW: u32 = 2_000_000;
+
+    /// Encoded 32-byte aura key whose every byte is `b`.
+    fn key(b: u8) -> Vec<u8> {
+        alloc::vec![b; 32]
+    }
+
+    /// Floor lookup keyed on the account's high nibble: `0x1_` authored 10
+    /// blocks ago (live), `0xD_` authored one block beyond the window (dead),
+    /// anything else has no record (unknown / never authored).
+    fn floor_lookup(acct: [u8; 32]) -> CandidateLiveness {
+        match acct[0] >> 4 {
+            0x1 => live(Some(1_000), Some(NOW - 10)),
+            0xD => live(Some(1_000), Some(NOW - (WINDOW + 1))),
+            _ => live(None, None),
+        }
+    }
+
+    #[test]
+    fn floor_rejects_wedge_shape_four_live_of_six() {
+        // The 2026-06-12 incident shape: a 6-seat draw with only 4 live
+        // members (one dead, one never authored). Quorum 5 > 4 live → refuse.
+        let keys = alloc::vec![
+            key(0x10),
+            key(0x11),
+            key(0x12),
+            key(0x13),
+            key(0xD0),
+            key(0x00)
+        ];
+        assert!(!passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+    }
+
+    #[test]
+    fn floor_seats_never_authored_newcomer_with_live_quorum() {
+        // 4 live cores + 1 never-authored newcomer: quorum(5) = 4 ≤ 4 live,
+        // so a fresh joiner can still be seated.
+        let keys = alloc::vec![key(0x10), key(0x11), key(0x12), key(0x13), key(0x00)];
+        assert!(passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+    }
+
+    #[test]
+    fn floor_rejects_three_live_of_five() {
+        let keys = alloc::vec![key(0x10), key(0x11), key(0x12), key(0x00), key(0x01)];
+        assert!(!passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+    }
+
+    #[test]
+    fn floor_passes_all_live_four() {
+        let keys = alloc::vec![key(0x10), key(0x11), key(0x12), key(0x13)];
+        assert!(passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+    }
+
+    #[test]
+    fn floor_passes_three_live_one_dead_of_four() {
+        // quorum(4) = 3 ≤ 3 live: one dead seat is tolerable at n=4.
+        let keys = alloc::vec![key(0x10), key(0x11), key(0x12), key(0xD0)];
+        assert!(passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+    }
+
+    #[test]
+    fn floor_counts_exact_window_boundary_as_live() {
+        // last_authored == now - window is LIVE, matching is_dead's
+        // exact-equal-kept boundary.
+        let keys = alloc::vec![key(0x10)];
+        assert!(passes_live_quorum_floor(&keys, NOW, WINDOW, |_| live(
+            Some(1_000),
+            Some(NOW - WINDOW)
+        )));
+        assert!(!passes_live_quorum_floor(&keys, NOW, WINDOW, |_| live(
+            Some(1_000),
+            Some(NOW - WINDOW - 1)
+        )));
+    }
+
+    #[test]
+    fn floor_rejects_all_unknown_cold_start() {
+        // A draw with zero authoring history (cold start) is refused; the
+        // keep-current fallback is the bootstrapping path.
+        let keys = alloc::vec![key(0x00), key(0x01), key(0x02), key(0x03)];
+        assert!(!passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+    }
+
+    #[test]
+    fn floor_counts_unmappable_key_not_live() {
+        // A short (unmappable) key still occupies a seat (n = 2, quorum 2)
+        // but must not count live, even though its lookup would say live:
+        // 1 live < 2 → refuse. If the short key were skipped from n or
+        // counted live, this draw would pass.
+        let keys = alloc::vec![alloc::vec![0x10u8; 16], key(0x10)];
+        assert!(!passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+    }
+
+    #[test]
+    fn floor_rejects_empty_selection() {
+        let keys: Vec<Vec<u8>> = Vec::new();
+        assert!(!passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
     }
 }

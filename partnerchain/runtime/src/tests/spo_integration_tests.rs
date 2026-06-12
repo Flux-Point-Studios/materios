@@ -739,3 +739,86 @@ fn all_pallets_hooks_run_without_panic() {
         AllPalletsWithSystem::on_finalize(1u32);
     });
 }
+
+//
+// GRANDPA live-quorum floor (spec 230): the runtime's `select_authorities`
+// must refuse an Ariadne draw whose known-live members cannot carry the
+// GRANDPA quorum, returning None so the vendored create_inherent fallback
+// re-seats the current committee — and a refused draw must not start any
+// grace clocks (CandidateFirstSelected stays empty for its members).
+
+/// `n` distinct, structurally-valid permissioned candidates. Key bytes are
+/// the candidate index, so candidate `i`'s liveness account is `[i; 32]`.
+fn permissioned_candidates(n: u8) -> Vec<sidechain_domain::PermissionedCandidateData> {
+    (1..=n)
+        .map(|i| sidechain_domain::PermissionedCandidateData {
+            sidechain_public_key: sidechain_domain::SidechainPublicKey(vec![i; 33]),
+            aura_public_key: sidechain_domain::AuraPublicKey(vec![i; 32]),
+            grandpa_public_key: sidechain_domain::GrandpaPublicKey(vec![i; 32]),
+        })
+        .collect()
+}
+
+/// Selection inputs drawing a full committee from the given permissioned
+/// candidates (D = (n, 0), no registered candidates).
+fn selection_inputs(
+    candidates: Vec<sidechain_domain::PermissionedCandidateData>,
+) -> AuthoritySelectionInputs {
+    AuthoritySelectionInputs {
+        d_parameter: sidechain_domain::DParameter {
+            num_permissioned_candidates: candidates.len() as u16,
+            num_registered_candidates: 0,
+        },
+        permissioned_candidates: candidates,
+        registered_candidates: Vec::new(),
+        epoch_nonce: sidechain_domain::EpochNonce(vec![7; 32]),
+    }
+}
+
+#[test]
+fn live_quorum_floor_refuses_draw_with_no_live_members() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        // No candidate has ever authored → zero known-live members.
+        let chosen = <Runtime as pallet_session_validator_management::Config>::select_authorities(
+            selection_inputs(permissioned_candidates(6)),
+            ScEpochNumber(1),
+        );
+        assert!(
+            chosen.is_none(),
+            "draw with zero known-live members must be refused"
+        );
+        // A refused draw must not start anyone's grace clock.
+        for i in 1..=6u8 {
+            assert_eq!(
+                pallet_orinq_receipts::Pallet::<Runtime>::candidate_first_selected(
+                    &AccountId::from([i; 32])
+                ),
+                None,
+                "refused draw stamped first-selected for candidate {i}",
+            );
+        }
+    });
+}
+
+#[test]
+fn live_quorum_floor_seats_draw_with_live_quorum() {
+    // Twin of the refusal test: identical inputs, but every candidate
+    // authored recently. Proves the None above comes from the floor, not
+    // from input sanity or the vendored MIN_DISTINCT_COMMITTEE check.
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        for i in 1..=6u8 {
+            pallet_orinq_receipts::LastAuthoredBlock::<Runtime>::insert(
+                AccountId::from([i; 32]),
+                90u32,
+            );
+        }
+        let chosen = <Runtime as pallet_session_validator_management::Config>::select_authorities(
+            selection_inputs(permissioned_candidates(6)),
+            ScEpochNumber(1),
+        )
+        .expect("all-live draw must be seated");
+        assert!(!chosen.is_empty());
+    });
+}
