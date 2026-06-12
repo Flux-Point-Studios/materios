@@ -49,7 +49,6 @@ use sp_runtime::{
 };
 use sp_sidechain::SidechainStatus;
 use sp_version::RuntimeVersion;
-use sp_weights;
 
 #[cfg(feature = "std")]
 use sp_version::NativeVersion;
@@ -179,7 +178,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 229,
+    spec_version: 230,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 3,
@@ -707,6 +706,18 @@ impl pallet_session_validator_management::Config for Runtime {
             Err(_) => return None,
         };
 
+        // Liveness facts for the filter and the quorum floor below, keyed by
+        // the Aura-key account `pallet_orinq_receipts` writes for authors.
+        fn liveness_of(acct: [u8; 32]) -> committee_liveness::CandidateLiveness {
+            let who = AccountId::from(acct);
+            committee_liveness::CandidateLiveness {
+                first_selected: pallet_orinq_receipts::Pallet::<Runtime>::candidate_first_selected(
+                    &who,
+                ),
+                last_authored: pallet_orinq_receipts::Pallet::<Runtime>::last_authored_block(&who),
+            }
+        }
+
         // Drop registered (trustless) candidates that have been selectable
         // past the grace window yet never produced a block within the
         // liveness window. A permanently-dead SPO registration otherwise
@@ -719,15 +730,7 @@ impl pallet_session_validator_management::Config for Runtime {
             now,
             LIVENESS_GRACE_BLOCKS,
             LIVENESS_WINDOW_BLOCKS,
-            |acct| {
-                let who = AccountId::from(acct);
-                committee_liveness::CandidateLiveness {
-                    first_selected:
-                        pallet_orinq_receipts::Pallet::<Runtime>::candidate_first_selected(&who),
-                    last_authored:
-                        pallet_orinq_receipts::Pallet::<Runtime>::last_authored_block(&who),
-                }
-            },
+            liveness_of,
         );
         if dropped > 0 {
             log::warn!(
@@ -743,7 +746,46 @@ impl pallet_session_validator_management::Config for Runtime {
         // `pallet_orinq_receipts::on_initialize` (a committing context) from the
         // enacted Aura authorities, NOT here. Stamping here would never persist,
         // leaving `CandidateFirstSelected` empty and the filter inert.
-        select_authorities(Sidechain::genesis_utxo(), sanitized, sidechain_epoch)
+        let chosen: BoundedVec<(Self::AuthorityId, Self::AuthorityKeys), Self::MaxValidators> =
+            select_authorities(Sidechain::genesis_utxo(), sanitized, sidechain_epoch)?;
+
+        // GRANDPA live-quorum floor (spec 230). Permissioned seats are drawn
+        // with replacement, so even an all-live candidate list can yield a set
+        // whose live members fall short of quorum once dead or never-authored
+        // members are seated — twice on 2026-06-12 such draws wedged finality,
+        // and a draw with zero live authors would perma-halt rotation (the
+        // next rotation needs an authored block). Refuse any set whose
+        // known-live members cannot carry quorum: returning None re-seats the
+        // current committee for one more epoch via the session pallet's
+        // create_inherent fallback, and since first-selected is stamped only
+        // from ENACTED authorities (see NOTE above), a refused draw starts no
+        // grace clocks for its members.
+        let aura_keys: Vec<Vec<u8>> = chosen
+            .iter()
+            .map(|(_, keys)| parity_scale_codec::Encode::encode(&keys.aura))
+            .collect();
+        if !committee_liveness::passes_live_quorum_floor(
+            &aura_keys,
+            now,
+            LIVENESS_WINDOW_BLOCKS,
+            liveness_of,
+        ) {
+            log::warn!(
+                target: "runtime::committee-liveness",
+                "refusing committee for epoch {}: {} live of {} selected < GRANDPA quorum {}; keeping current committee",
+                sidechain_epoch,
+                committee_liveness::live_member_count(
+                    &aura_keys,
+                    now,
+                    LIVENESS_WINDOW_BLOCKS,
+                    liveness_of,
+                ),
+                aura_keys.len(),
+                committee_liveness::grandpa_quorum_threshold(aura_keys.len()),
+            );
+            return None;
+        }
+        Some(chosen)
     }
 
     fn current_epoch_number() -> ScEpochNumber {
