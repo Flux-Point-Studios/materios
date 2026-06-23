@@ -64,7 +64,14 @@ Report 12D3KooW...: -2147483648 to -2147483648. Reason: Same block request multi
 ```
 and `Idle (0 peers)` between bans.
 
-This means your node is rejecting every peer that tries to send it new blocks. Your **state is fine** (snapshot integrity is independent of this); the issue is in the sync-protocol handshake.
+This is almost always the **FPS-side justification-pruning ban-loop**: when your node asks an FPS node for a block range whose per-block GRANDPA justification has been pruned, the FPS node returns nothing, and substrate's sync layer scores the retry as a duplicate request and bans the peer for ~69s — so you cycle between `Idle (0 peers)` and brief `1 peer` windows and never finalize past a floor. Your **state is fine** (snapshot integrity is independent of this).
+
+**Fastest fix — restore the current snapshot to jump to tip.** Re-run `bootstrap-validator.sh`: it restores the current-room snapshot (sha256-verified) and sets the correct bootnode, landing you at the chain tip *past* the pruned heights. After that you only track fresh blocks, whose justifications are not yet pruned, so the loop never recurs:
+```bash
+curl -fsSL https://materios.fluxpointstudios.com/releases/bootstrap-validator.sh | sudo bash -s -- \
+  --db-sync 'postgres://…' --aura-pubkey 0x… --grandpa-pubkey 0x… --operator-label <you>
+```
+(FPS are also deploying a justification-retaining public sync node so a from-behind sync works without this step.) The diagnostics below help if you want to confirm the cause rather than skip past it.
 
 **Diagnostic 1 — confirm canonical state match.** From a healthy reference (e.g. ask FPS for the canonical hash at your `best` block), then on your node:
 ```bash
@@ -76,7 +83,7 @@ If your hash matches canonical, the snapshot is fine and the issue is sync-proto
 
 **Diagnostic 2 — isolate sync to a single trusted peer.** Stop the node, edit `/etc/systemd/system/materios-node-spo.service` (the `ExecStart` line), and add:
 ```
---reserved-nodes /ip4/166.70.250.197/tcp/30333/p2p/12D3KooWPueKoxRAirTTKH4Y2qQAsJDegWMjS4k89Z7izCbZKgkM \
+--reserved-nodes /dns4/bootnode.materios.fluxpointstudios.com/tcp/30333/p2p/12D3KooWPueKoxRAirTTKH4Y2qQAsJDegWMjS4k89Z7izCbZKgkM \
 --reserved-only \
 --in-peers 50 --out-peers 25
 ```
@@ -97,6 +104,23 @@ This forces your node to peer ONLY with the FPS Gemtek validator (bypasses libp2
 - **Binary version skew.** Your `materios-node` binary may be older than the network's current version. Re-run `bootstrap-validator.sh` to pull the latest binary from `/releases/`.
 
 If none of these help, capture the verbose log around 5 ban events and share with FPS.
+
+### Fast-sync your cardano-node with Mithril (days → minutes)
+
+cardano-db-sync indexes a **cardano-node**, and a from-genesis cardano-node sync takes days. Mithril (Cardano's stake-certified snapshot system) restores a verified node DB at tip in ~10–20 min. cardano-node 11.0.1 loads the restored ledger snapshot natively — no `snapshot-converter` step. Do this BEFORE starting db-sync:
+
+```bash
+# Preprod Mithril config
+export AGGREGATOR_ENDPOINT="https://aggregator.release-preprod.api.mithril.network/aggregator"
+export GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-preprod/genesis.vkey)
+export ANCILLARY_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-preprod/ancillary.vkey)
+
+# Download + verify the latest certified Cardano DB (v2 backend is the default since 2025-11).
+# --include-ancillary pulls the IOG-signed last ledger snapshot + last immutable chunk,
+# so node 11.0.1 starts at tip in minutes instead of recomputing ledger state from genesis.
+mithril-client cardano-db download latest --include-ancillary --download-dir "$CARDANO_DB_DIR"
+```
+Then start cardano-node 11.0.1 against `$CARDANO_DB_DIR` and let db-sync index forward. Notes: pin `mithril-client` to a current stable tag (0.13.x); the v1 backend was removed in distribution 2617.0 (don't pass `--backend v1`). **This restores the cardano-node ledger only — it does NOT populate the db-sync Postgres**, which still indexes forward from the restored tip (so the index/tuning steps below still apply).
 
 ### Postgres prerequisites for cardano-db-sync
 
