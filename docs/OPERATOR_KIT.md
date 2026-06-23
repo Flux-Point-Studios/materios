@@ -105,6 +105,23 @@ This forces your node to peer ONLY with the FPS Gemtek validator (bypasses libp2
 
 If none of these help, capture the verbose log around 5 ban events and share with FPS.
 
+### Fast-sync your cardano-node with Mithril (days → minutes)
+
+cardano-db-sync indexes a **cardano-node**, and a from-genesis cardano-node sync takes days. Mithril (Cardano's stake-certified snapshot system) restores a verified node DB at tip in ~10–20 min. cardano-node 11.0.1 loads the restored ledger snapshot natively — no `snapshot-converter` step. Do this BEFORE starting db-sync:
+
+```bash
+# Preprod Mithril config
+export AGGREGATOR_ENDPOINT="https://aggregator.release-preprod.api.mithril.network/aggregator"
+export GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-preprod/genesis.vkey)
+export ANCILLARY_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-preprod/ancillary.vkey)
+
+# Download + verify the latest certified Cardano DB (v2 backend is the default since 2025-11).
+# --include-ancillary pulls the IOG-signed last ledger snapshot + last immutable chunk,
+# so node 11.0.1 starts at tip in minutes instead of recomputing ledger state from genesis.
+mithril-client cardano-db download latest --include-ancillary --download-dir "$CARDANO_DB_DIR"
+```
+Then start cardano-node 11.0.1 against `$CARDANO_DB_DIR` and let db-sync index forward. Notes: pin `mithril-client` to a current stable tag (0.13.x); the v1 backend was removed in distribution 2617.0 (don't pass `--backend v1`). **This restores the cardano-node ledger only — it does NOT populate the db-sync Postgres**, which still indexes forward from the restored tip (so the index/tuning steps below still apply).
+
 ### Postgres prerequisites for cardano-db-sync
 
 Partner-chains queries hit cardano-db-sync's postgres on every block import. Two things matter beyond a stock db-sync install.
