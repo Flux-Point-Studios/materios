@@ -16,6 +16,8 @@ pub mod block;
 pub mod candidates;
 #[cfg(feature = "mc-hash")]
 pub mod mc_hash;
+#[cfg(feature = "mithril-stake")]
+pub(crate) mod mithril_stake;
 #[cfg(feature = "native-token")]
 pub mod native_token;
 #[cfg(feature = "sidechain-rpc")]

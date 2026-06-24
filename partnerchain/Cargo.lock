@@ -12334,6 +12334,7 @@ dependencies = [
  "pallet-sidechain-rpc",
  "partner-chains-plutus-data",
  "serde",
+ "serde_json",
  "sidechain-domain",
  "sidechain-mc-hash",
  "sp-native-token-management",

@@ -14,6 +14,7 @@ use crate::db_datum::DbDatum;
 use crate::SqlxError;
 use cardano_serialization_lib::PlutusData;
 use chrono::{DateTime, NaiveDateTime};
+#[cfg(any(all(feature = "candidate-source", not(feature = "mithril-stake")), feature = "native-token"))]
 use num_traits::ToPrimitive;
 use sidechain_domain::*;
 use sqlx::{Pool, Postgres};
@@ -28,6 +29,9 @@ pub(crate) fn parse_hash32(hex_hash: &str) -> Result<[u8; 32], String> {
 }
 
 /// Parses a lowercase-hex pool-id / key-hash string into a fixed 28-byte array.
+/// Used by the yaci `epoch_stake` stake path; the `mithril-stake` path decodes
+/// the pool hash from bech32 instead (see [`crate::mithril_stake`]).
+#[cfg(any(all(feature = "candidate-source", not(feature = "mithril-stake")), test))]
 pub(crate) fn parse_hash28(hex_hash: &str) -> Result<[u8; 28], String> {
 	let bytes = hex::decode(hex_hash).map_err(|e| format!("invalid hex hash: {e}"))?;
 	bytes
@@ -97,12 +101,14 @@ pub(crate) struct StakePoolEntry {
 	pub stake: u64,
 }
 
+#[cfg(all(feature = "candidate-source", not(feature = "mithril-stake")))]
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct StakePoolRow {
 	pool_id: String,
 	stake: sqlx::types::BigDecimal,
 }
 
+#[cfg(all(feature = "candidate-source", not(feature = "mithril-stake")))]
 impl TryFrom<StakePoolRow> for StakePoolEntry {
 	type Error = sqlx::Error;
 	fn try_from(r: StakePoolRow) -> Result<Self, Self::Error> {
@@ -306,13 +312,15 @@ pub(crate) async fn get_latest_stable_epoch(
 /// equals db-sync's `epoch_no` (active_epoch = epoch + 2). The pool id is the
 /// raw 28-byte pool hash as lowercase hex.
 ///
-/// TRUSTLESS UPGRADE SEAM: a Mithril-certified per-pool stake distribution can
-/// replace this query without touching the callers — Mithril certifies exactly
-/// this `(pool_hash, stake)` snapshot (the Ariadne input), which is the one
-/// follower input that is otherwise only as trustworthy as the local yaci-store.
-/// yaci stake is byte-identical to db-sync today; Mithril is the later
-/// composition that removes the trust-in-the-local-DB assumption.
-#[cfg(feature = "candidate-source")]
+/// TRUSTLESS UPGRADE SEAM (#370): with `mithril-stake` enabled, the body reads a
+/// Mithril-certified per-pool stake distribution instead of this yaci query —
+/// Mithril certifies exactly this `(pool_hash, stake)` Ariadne snapshot, the one
+/// follower input otherwise only as trustworthy as the local yaci-store. yaci
+/// stake is byte-identical to db-sync (and to Mithril, proven per-pool); Mithril
+/// removes the trust-in-the-local-DB assumption and lets the deployment drop the
+/// heaviest yaci module (`adapot`/`epoch_stake`). The default path keeps the
+/// yaci query so the seam is opt-in.
+#[cfg(all(feature = "candidate-source", not(feature = "mithril-stake")))]
 pub(crate) async fn get_stake_distribution(
 	pool: &Pool<Postgres>,
 	active_epoch: u32,
@@ -327,6 +335,37 @@ pub(crate) async fn get_stake_distribution(
 	.fetch_all(pool)
 	.await?;
 	Ok(rows.into_iter().map(StakePoolEntry::try_from).collect::<Result<_, _>>()?)
+}
+
+/// Mithril-stake variant of the seam. The yaci Postgres `pool` is intentionally
+/// unused — the whole point is to stop trusting the local DB for stake. The
+/// per-epoch fetch + certificate verification + cache lives in
+/// [`crate::mithril_stake`]; the blocking `mithril-client` invocation runs on a
+/// blocking thread so the async runtime is not stalled.
+#[cfg(all(feature = "candidate-source", feature = "mithril-stake"))]
+pub(crate) async fn get_stake_distribution(
+	_pool: &Pool<Postgres>,
+	active_epoch: u32,
+) -> Result<Vec<StakePoolEntry>, SqlxError> {
+	use std::sync::OnceLock;
+	static CACHE: OnceLock<crate::mithril_stake::MithrilStakeCache> = OnceLock::new();
+	let cache = CACHE.get_or_init(crate::mithril_stake::MithrilStakeCache::default);
+
+	if let Some(cached) = cache.get(active_epoch) {
+		return Ok(cached);
+	}
+
+	let result = tokio::task::spawn_blocking(move || {
+		let config = crate::mithril_stake::MithrilConfig::from_env()?;
+		let scratch = crate::mithril_stake::MithrilStakeCache::default();
+		crate::mithril_stake::get_stake_distribution_mithril(&config, &scratch, active_epoch)
+	})
+	.await
+	.map_err(|e| sqlx::Error::Decode(format!("mithril stake task join: {e}").into()))?
+	.map_err(|e| sqlx::Error::Decode(format!("mithril stake: {e}").into()))?;
+
+	cache.put(active_epoch, result.clone());
+	Ok(result)
 }
 
 /// Epoch nonce, read from yaci `epoch_nonce.nonce` (hex `varchar`). Proven

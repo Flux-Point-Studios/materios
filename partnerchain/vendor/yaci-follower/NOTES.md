@@ -24,7 +24,11 @@ Done and exercised against the live `.230` preprod pilot DB:
 Tests: 10 pure-logic/unit tests run in CI; 5 `#[ignore]`d DB-integration tests
 run against `YACI_DATABASE_URL` and all pass against the live `.230` pilot
 (epoch-nonce golden, stake active_epoch-92 golden, raw-epoch off-by-two guard,
-unknown-epoch-None, UTxO+datum decode).
+unknown-epoch-None, UTxO+datum decode). With `mithril-stake`: +7 offline unit
+tests (bech32 decode, epoch-alignment lock, parse/cache) and +1 `#[ignore]`d
+live golden (`mithril_stake_distribution_matches_db_sync_golden_active_epoch_297`)
+that fetches a **cert-verified** Mithril SD and asserts per-pool + total parity
+with db-sync `epoch_no` 297.
 
 ## The `active_epoch` convention (the #1 footgun)
 
@@ -46,16 +50,94 @@ that fails if anyone "fixes" the query back onto `epoch`.
 | token at policy  | `ma_tx_out`/`multi_asset`        | `address_utxo.amounts` JSONB `policy_id`    |
 | pool id          | `pool_hash.hash_raw` (`[u8;28]`) | `epoch_stake.pool_id` hex (= same 28 bytes) |
 
-## Mithril-stake seam (trustless upgrade path)
+## Mithril-stake seam (#370, trustless — IMPLEMENTED behind `mithril-stake`)
 
-`db_model::get_stake_distribution` carries a comment marking the seam: a
-Mithril-certified per-pool stake distribution can replace this one query
-without touching any caller. Mithril GA certifies exactly the `(pool_hash,
-stake)` Ariadne snapshot — the one follower input that is otherwise only as
-trustworthy as the local yaci-store DB. yaci stake is byte-identical to db-sync
-today; Mithril is the later composition that removes the trust-in-the-local-DB
-assumption. The nonce and the datum/address inputs are NOT Mithril-certifiable,
-so Mithril complements (does not replace) the yaci/db-sync follower.
+`db_model::get_stake_distribution` is the seam: with the `mithril-stake` cargo
+feature it reads a **Mithril-certified** per-pool stake distribution instead of
+the yaci `epoch_stake` query, with **no caller change** (same
+`Vec<StakePoolEntry>`). Mithril GA certifies exactly the `(pool_hash, stake)`
+Ariadne snapshot — the one follower input otherwise only as trustworthy as the
+local yaci-store DB. The nonce and the datum/address inputs are NOT
+Mithril-certifiable, so Mithril complements (does not replace) the yaci/db-sync
+follower. Enabling Tier-2 lets the deployment drop the heaviest yaci module
+(`adapot`/`epoch_stake`, the reward replay) entirely.
+
+### Client path: CLI, not the crate (decision)
+
+We shell the pinned `mithril-client` binary (`cardano-stake-distribution
+download <epoch> --json`), not the `mithril-client` Rust crate. yaci-follower is
+a **member of the pinned partner-chains workspace** (`polkadot-stable2409-4`,
+`sidechain-domain` v1.5.1). The crate pulls a heavy, independent crypto stack
+(mithril-stm, blst, reqwest/rustls) whose resolver-2 unification would force the
+node build to compile blst + mithril crypto on the live validator box — exactly
+the heavy compile the SAFETY rules forbid. The CLI keeps the dep footprint to
+`serde_json`, and the binary is already used by OPERATOR_KIT (#368/#369). The
+certificate chain is still verified **in-process by the binary** against the
+genesis vkey before any stake value is read (steps 2-3 of its output: "verifying
+the certificate chain" / "Verify that the Cardano stake distribution is signed
+in the associated certificate"). Verification is the whole point and is not
+skipped.
+
+### Epoch alignment — the #445-style footgun, EMPIRICALLY LOCKED
+
+Mithril labels its stake distribution by the epoch in which the snapshot is
+*taken*; that stake becomes *active* two epochs later. db-sync `epoch_no`
+(== yaci `active_epoch`) is the *active* epoch. So:
+
+```text
+mithril_epoch = active_epoch - 2
+```
+
+Proven byte-identical against the .230 db-sync on two independent preprod pairs
+(per-pool AND total):
+
+| Mithril epoch | db-sync `epoch_no` | pools (non-zero) | total lovelace      |
+|---------------|--------------------|------------------|---------------------|
+| 294           | 296                | 412              | 1 606 572 572 988 498 |
+| 295           | 297                | 415              | 1 608 793 594 792 982 |
+
+0 per-pool mismatches, 0 pools only-in-Mithril. db-sync additionally carries
+zero-stake pools (74 at epoch_no 297) that Mithril omits; they carry **zero
+Ariadne weight**, so the certified set is the active set. The offset is locked by
+`mithril_stake::tests::epoch_alignment_offset_is_two` (offline) and the live
+golden `mithril_stake_distribution_matches_db_sync_golden_active_epoch_297`
+(cert-verified) — both fail if anyone changes the offset.
+
+### Retention-window caveat
+
+The preprod aggregator retains ~20 epochs of `cardano-stake-distribution`
+(observed window 276–295, ≈100 days at 5-day preprod epochs). A follower asking
+for `active_epoch` whose `active_epoch - 2` has aged out of the window gets a
+download error and must fall back to the yaci `epoch_stake` path (build without
+`mithril-stake`) for that historical epoch. In steady-state operation the
+follower only needs the current/just-past epoch, which is always in-window.
+
+### Enabling Tier-2
+
+1. Build the follower with `mithril-stake` (implies `candidate-source`):
+   `cargo build -p yaci-follower --features "block-source,candidate-source,native-token,mc-hash,sidechain-rpc,mithril-stake"`.
+2. Drop the yaci `ledger-state` profile (no `adapot`, no `account`) — see
+   LEAN-DEPLOYMENT.md Tier-2.
+3. Set the runtime env for the node process:
+   - `MITHRIL_AGGREGATOR_ENDPOINT`
+   - `MITHRIL_GENESIS_VERIFICATION_KEY` (the network's genesis vkey)
+   - `MITHRIL_CLIENT_BIN` (path to the pinned `mithril-client`; defaults to
+     `mithril-client` on `PATH`)
+
+   Preprod:
+   ```bash
+   export MITHRIL_AGGREGATOR_ENDPOINT="https://aggregator.release-preprod.api.mithril.network/aggregator"
+   export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-preprod/genesis.vkey)
+   ```
+   Mainnet (magic 764824073):
+   ```bash
+   export MITHRIL_AGGREGATOR_ENDPOINT="https://aggregator.release-mainnet.api.mithril.network/aggregator"
+   export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-mainnet/genesis.vkey)
+   ```
+
+The per-epoch result is cached in-process (a Mithril SD is fixed once its
+certificate is signed), so the `mithril-client` is invoked at most once per
+`active_epoch`.
 
 ## Remaining / not in this session
 
