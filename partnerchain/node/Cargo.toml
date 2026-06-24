@@ -73,6 +73,7 @@ sc-partner-chains-consensus-aura = { workspace = true }
 sp-partner-chains-consensus-aura = { workspace = true }
 time-source = { workspace = true }
 db-sync-follower = { workspace = true, features = ["block-source", "candidate-source", "native-token", "mc-hash", "sidechain-rpc"] }
+yaci-follower = { workspace = true, features = ["block-source", "candidate-source", "native-token", "mc-hash", "sidechain-rpc"] }
 main-chain-follower-mock = { workspace = true, features = ["block-source", "candidate-source", "native-token", "mc-hash", "sidechain-rpc"] }
 authority-selection-inherents = { workspace = true }
 sp-native-token-management = { workspace = true, features = ["std"] }

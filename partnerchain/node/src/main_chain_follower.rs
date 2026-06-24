@@ -41,6 +41,13 @@ pub(crate) async fn create_cached_main_chain_follower_data_sources(
 					.into(),
 			)
 		})
+	} else if use_yaci_follower() {
+		log::info!("Using yaci-store main chain follower data sources");
+		create_cached_yaci_data_sources(metrics_opt).await.map_err(|err| {
+			ServiceError::Application(
+				format!("Failed to create yaci-store main chain follower: {err}").into(),
+			)
+		})
 	} else {
 		log::info!("Using db-sync main chain follower data sources");
 		create_cached_data_sources(metrics_opt).await.map_err(|err| {
@@ -49,6 +56,15 @@ pub(crate) async fn create_cached_main_chain_follower_data_sources(
 			)
 		})
 	}
+}
+
+/// Selects the yaci-store backend when `MAIN_CHAIN_FOLLOWER=yaci`. The backend
+/// reads from a yaci-store 3.0.0-beta3 Postgres (same connection env var as
+/// db-sync; point it at the yaci DB).
+fn use_yaci_follower() -> bool {
+	std::env::var("MAIN_CHAIN_FOLLOWER")
+		.map(|v| v.eq_ignore_ascii_case("yaci"))
+		.unwrap_or(false)
 }
 
 fn use_mock_follower() -> bool {
@@ -92,5 +108,32 @@ pub async fn create_cached_data_sources(
 			pool,
 			metrics_opt,
 		)?),
+	})
+}
+
+pub async fn create_cached_yaci_data_sources(
+	metrics_opt: Option<McFollowerMetrics>,
+) -> Result<DataSources, Box<dyn Error + Send + Sync + 'static>> {
+	use yaci_follower::{
+		block::BlockDataSourceImpl as YaciBlockDataSourceImpl,
+		candidates::CandidatesDataSourceImpl as YaciCandidatesDataSourceImpl,
+		mc_hash::McHashDataSourceImpl as YaciMcHashDataSourceImpl,
+		native_token::NativeTokenManagementDataSourceImpl as YaciNativeTokenDataSourceImpl,
+		sidechain_rpc::SidechainRpcDataSourceImpl as YaciSidechainRpcDataSourceImpl,
+	};
+	let pool = yaci_follower::data_sources::get_connection_from_env().await?;
+	let block = Arc::new(YaciBlockDataSourceImpl::new_from_env(pool.clone()).await?);
+	Ok(DataSources {
+		sidechain_rpc: Arc::new(YaciSidechainRpcDataSourceImpl::new(
+			block.clone(),
+			metrics_opt.clone(),
+		)),
+		mc_hash: Arc::new(YaciMcHashDataSourceImpl::new(block, metrics_opt.clone())),
+		authority_selection: Arc::new(
+			YaciCandidatesDataSourceImpl::new(pool.clone(), metrics_opt.clone())
+				.await?
+				.cached(CANDIDATES_FOR_EPOCH_CACHE_SIZE)?,
+		),
+		native_token: Arc::new(YaciNativeTokenDataSourceImpl::new_from_env(pool, metrics_opt)?),
 	})
 }
