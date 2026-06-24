@@ -112,7 +112,7 @@ pub async fn create_cached_data_sources(
 }
 
 pub async fn create_cached_yaci_data_sources(
-	metrics_opt: Option<McFollowerMetrics>,
+	_metrics_opt: Option<McFollowerMetrics>,
 ) -> Result<DataSources, Box<dyn Error + Send + Sync + 'static>> {
 	use yaci_follower::{
 		block::BlockDataSourceImpl as YaciBlockDataSourceImpl,
@@ -121,19 +121,27 @@ pub async fn create_cached_yaci_data_sources(
 		native_token::NativeTokenManagementDataSourceImpl as YaciNativeTokenDataSourceImpl,
 		sidechain_rpc::SidechainRpcDataSourceImpl as YaciSidechainRpcDataSourceImpl,
 	};
+	// The yaci sources take `yaci_follower::McFollowerMetrics`, a distinct type
+	// from the `db_sync_follower::McFollowerMetrics` the node registers. Both
+	// register the same prometheus metric names against the same registry, so
+	// the already-registered db-sync handle cannot be re-registered as the yaci
+	// type without a name collision. The backends are runtime-exclusive
+	// (`MAIN_CHAIN_FOLLOWER=yaci`), so the yaci path runs without follower
+	// metrics; the `observed_async_trait` timing simply no-ops when None.
+	let yaci_metrics: Option<yaci_follower::metrics::McFollowerMetrics> = None;
 	let pool = yaci_follower::data_sources::get_connection_from_env().await?;
 	let block = Arc::new(YaciBlockDataSourceImpl::new_from_env(pool.clone()).await?);
 	Ok(DataSources {
 		sidechain_rpc: Arc::new(YaciSidechainRpcDataSourceImpl::new(
 			block.clone(),
-			metrics_opt.clone(),
+			yaci_metrics.clone(),
 		)),
-		mc_hash: Arc::new(YaciMcHashDataSourceImpl::new(block, metrics_opt.clone())),
+		mc_hash: Arc::new(YaciMcHashDataSourceImpl::new(block, yaci_metrics.clone())),
 		authority_selection: Arc::new(
-			YaciCandidatesDataSourceImpl::new(pool.clone(), metrics_opt.clone())
+			YaciCandidatesDataSourceImpl::new(pool.clone(), yaci_metrics.clone())
 				.await?
 				.cached(CANDIDATES_FOR_EPOCH_CACHE_SIZE)?,
 		),
-		native_token: Arc::new(YaciNativeTokenDataSourceImpl::new_from_env(pool, metrics_opt)?),
+		native_token: Arc::new(YaciNativeTokenDataSourceImpl::new_from_env(pool, yaci_metrics)?),
 	})
 }
