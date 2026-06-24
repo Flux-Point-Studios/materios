@@ -1,16 +1,24 @@
 # Lean yaci-store deployment for the Materios Ariadne follower
 
 The validation pilot runs the `applications/all` build (every store, pruning off,
-`-Xmx9g`) for byte-diff parity — that's **53 GB**, *heavier* than db-sync's 27 GB.
-This is the **deployment** config: only the stores the follower actually reads,
-with safe pruning. Target footprint **~8–15 GB** (preprod), well under db-sync.
+`-Xmx9g`) for byte-diff parity — that's **53 GB**. This is the **deployment**
+config: only the stores the follower reads, with safe pruning.
+
+**Honest footprint (measured on the preprod pilot): ~23–25 GB** — roughly db-sync
+parity (27 GB), NOT a dramatic disk win. The irreducible floor is `transaction`
+(8.7 G) + `block` (6.3 G) + inline datums (4.3 G) + pruned `address_utxo`
+(18 G → ~3.6 G). The genuine wins are **operational** (5 fewer stores), **RAM**
+(Tier-2 drops the `adapot` reward-replay — the heap hog — for a far smaller `-Xmx`
+than db-sync needs), and **trustless stake** (Tier-2). The big *disk* win is a
+mainnet story (db-sync ~1 TB), not preprod.
 
 ## What the follower actually reads (validated against the crate's SQL)
 
-`address_utxo`, `tx_input`, `datum`, `block`, `epoch_nonce`, `transaction`
-(metadata columns only), `epoch_stake`. Everything else (`assets`,
-`transaction_scripts`, `transaction_metadata`, `script`, governance) is dead weight.
-`epoch_stake` is the one input Mithril replaces (Tier 2 below).
+`address_utxo` (with `inline_datum` / `amounts` / `owner_addr` denormalized onto the
+row — there is no standalone `datum` table query), `tx_input`, `block`, `epoch_nonce`,
+`transaction`, `epoch_stake`. Everything else (`assets`, `transaction_scripts`,
+`transaction_metadata`, `script`, governance) is dead weight. `epoch_stake` is the one
+input Mithril replaces (Tier 2 below).
 
 ## `application.properties` (lean core)
 
@@ -27,8 +35,8 @@ store.blocks.enabled=true
 store.epoch.enabled=true
 store.epoch-nonce.enabled=true
 store.transaction.enabled=true
-store.transaction.save-cbor=false      # default false; keeps tx metadata, drops the CBOR body (the bulk)
-store.transaction.save-witness=false   # default false
+store.transaction.save-cbor=false      # already default false on beta3 (no tx-CBOR column to drop)
+store.transaction.save-witness=false   # already default false on beta3
 
 # --- drop everything the follower never queries ---
 store.assets.enabled=false
@@ -37,16 +45,17 @@ store.metadata.enabled=false
 store.governance.enabled=false
 store.epoch-aggr.enabled=false
 
-# --- PRUNING: the disk win ---
+# --- PRUNING (utxo — the only real disk lever) ---
 # Keep all UNSPENT utxos + everything spent within k=2160 blocks (the follower's
-# as-of-stable-block depth). Spent-deeper-than-k is never queried → pruned.
+# as-of-stable-block depth). Spent-deeper-than-k is never queried → pruned from
+# BOTH address_utxo and tx_input. Measured on preprod: ~80% of address_utxo rows
+# prune (18 G → ~3.6 G). transaction/block/inline-datums stay (irreducible ~19 G).
 store.utxo.pruning-enabled=true
 store.utxo.pruning-safe-blocks=2160
 store.utxo.pruning.interval=600
 store.utxo.pruning-batch-size=3000
-# Block CBOR: retain ~recent, prune old bodies (headers stay).
-store.blocks.cbor-pruning-enabled=true
-store.blocks.cbor-retention-slots=43200
+# NB: block/tx CBOR pruning is a NO-OP on beta3 (saveCbor/saveWitness default false
+# → no CBOR columns exist to prune). Deliberately omitted.
 
 store.auto-index-management=true
 ```
@@ -114,12 +123,16 @@ to compile — see #442.)
 
 ## Honest caveats
 
-- **RAM floor is cardano-node (~4–8 GB on preprod), not the follower.** yaci-lean
-  cuts the *follower's* footprint (disk a lot, RAM some) vs db-sync's 16 GB+, so a
-  **trustless** SPO is viable on ~8 GB instead of 16 GB+ — but not on 4 GB. A 4 GB box
-  only works with a *remote/shared* follower (trading some trustlessness).
-- The ~8–15 GB target is computed from the pilot's per-table breakdown + the pruning
-  math; **the first real lean sync confirms the exact number** (and validates that the
-  disabled stores don't break any follower query — run the 16-test suite against it).
+- **RAM floor is cardano-node (~4–8 GB on preprod), not the follower.** On preprod the
+  follower DISK is ~parity with db-sync; the follower-side win is RAM (Tier-2 drops the
+  adapot reward-replay → a much smaller heap than db-sync's appetite) + trustless stake.
+  A 4 GB box still won't self-host (cardano-node floor) — it needs a *remote/shared*
+  follower (trading some trustlessness).
+- The **~23–25 GB** figure is from the pilot's per-table breakdown + the measured pruning
+  ratio (~80% of `address_utxo` prunes). The store-disable safety is **validated** (no
+  cross-store dependency starves a follower table — every store is independently
+  `@ConditionalOnProperty`-gated; `address_utxo` denormalizes amounts/inline_datum/owner_addr
+  onto the row). A first real lean sync confirms the exact GB end-to-end (run the
+  16-test suite against it).
 - MAINNET: revert `get_epoch_of_data_storage` to `epoch − 2` (see NOTES.md); the disk
   win is far larger there (db-sync ~1 TB → lean yaci ~150–300 GB).
