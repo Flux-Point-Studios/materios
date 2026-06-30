@@ -306,6 +306,17 @@ pub mod pallet {
     #[pallet::storage]
     pub type BadAttestSlashThreshold<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+    /// Governance kill-switch for dead-permissioned-CORE eviction (Residual #2 /
+    /// spec-233). `false` (the genesis-empty `ValueQuery` default) reproduces
+    /// spec-231/232 behavior exactly: the runtime's `filter_dead_permissioned`
+    /// pass is skipped and cores are never evicted from selection. Flipped to
+    /// `true` via `set_core_eviction_enabled` (Root / 2-of-3 multisig-sudo) only
+    /// after the Group-J harness proof and the multi-node devnet cascade are
+    /// green, so a misbehaving predicate can be disabled by one tx without a
+    /// runtime upgrade.
+    #[pallet::storage]
+    pub type CoreEvictionEnabled<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     // ── Events ───────────────────────────────────────────────────────────
 
     #[pallet::event]
@@ -468,6 +479,10 @@ pub mod pallet {
         /// never-selected newcomer state so a future Ariadne draw can re-seat it
         /// with a fresh grace window. Keyed by the candidate's Aura account.
         CandidateLivenessReset { who: T::AccountId },
+        /// Governance flipped the dead-permissioned-CORE eviction kill-switch
+        /// (`CoreEvictionEnabled`). When `false`, the runtime never evicts a
+        /// permissioned core from committee selection (spec-231/232 behavior).
+        CoreEvictionEnabledUpdated { enabled: bool },
     }
 
     // Error doc comments ship in on-chain metadata. Keep them actionable.
@@ -1045,6 +1060,14 @@ pub mod pallet {
         /// Block at which `who` was first selected into a committee, if ever.
         pub fn candidate_first_selected(who: &T::AccountId) -> Option<BlockNumberFor<T>> {
             CandidateFirstSelected::<T>::get(who)
+        }
+
+        /// Whether dead-permissioned-CORE eviction is enabled (Residual #2 /
+        /// spec-233 kill-switch). The runtime's `select_authorities` reads this
+        /// to gate its `filter_dead_permissioned` pass; `false` (default) keeps
+        /// the spec-231/232 behavior of never evicting a core.
+        pub fn core_eviction_enabled() -> bool {
+            CoreEvictionEnabled::<T>::get()
         }
 
         /// Record that `who` was selected into a committee at `block`.
@@ -2178,6 +2201,32 @@ pub mod pallet {
             CandidateFirstSelected::<T>::remove(&who);
             LastAuthoredBlock::<T>::remove(&who);
             Self::deposit_event(Event::CandidateLivenessReset { who });
+            Ok(())
+        }
+
+        /// Root-only: flip the dead-permissioned-CORE eviction kill-switch
+        /// (Residual #2 / spec-233). With `enabled == false` (the default) the
+        /// runtime's `select_authorities` never runs its `filter_dead_permissioned`
+        /// pass, so a permissioned core is never evicted — identical to
+        /// spec-231/232. Setting `true` arms eviction: a core silent past the
+        /// (much longer than registered) core liveness window is dropped from the
+        /// next Ariadne draw, at most one per selection, shrinking the GRANDPA
+        /// quorum WITHOUT touching the L1 D-param. The post-draw live-quorum floor
+        /// still guards every shrink, so this can never install a sub-quorum
+        /// committee. Ship `false`; flip `true` via the 2-of-3 multisig-sudo
+        /// ceremony only after the harness proof + devnet cascade are green, and
+        /// flip back `false` to instantly disable a misbehaving predicate without
+        /// a runtime upgrade.
+        #[pallet::call_index(22)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_core_eviction_enabled(
+            origin: OriginFor<T>,
+            enabled: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            CoreEvictionEnabled::<T>::put(enabled);
+            Self::deposit_event(Event::CoreEvictionEnabledUpdated { enabled });
             Ok(())
         }
     }

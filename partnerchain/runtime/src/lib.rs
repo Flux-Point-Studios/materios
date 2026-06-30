@@ -689,6 +689,29 @@ parameter_types! {
 const LIVENESS_GRACE_BLOCKS: u32 = 1_800; // ~3h @ 6s
 const LIVENESS_WINDOW_BLOCKS: u32 = 28_800; // 2 eras (~48h)
 
+/// Dead-CORE eviction (Residual #2, activated by spec-233 — the ceremony owns
+/// the single 232→233 spec_version bump, this source does not bump it). Cores
+/// are exempt from the registered filter by design, so a genuinely-dead core
+/// otherwise inflates the GRANDPA quorum forever and the only remedy would be
+/// the forbidden L1 D-param re-shrink. `filter_dead_permissioned` instead drops
+/// the dead core from the permissioned pool before the draw; the vendor's dedup
+/// then collapses the distinct committee, so the quorum shrinks WITHOUT touching
+/// the L1 D-parameter. Because cores are trusted and few, the thresholds are
+/// MUCH longer than the registered ones — no reboot, deploy, snapshot restore,
+/// or brief partition flaps a healthy core out; only a multi-day silence reads
+/// as dead. Gated OFF by the `CoreEvictionEnabled` governance flag and capped at
+/// one eviction per selection. MAINNET: retune to mainnet block time alongside
+/// the registered constants.
+const CORE_LIVENESS_GRACE_BLOCKS: u32 = 14_400; // ~24h @ 6s (vs registered 1_800)
+const CORE_LIVENESS_WINDOW_BLOCKS: u32 = 100_800; // ~7d @ 6s (vs registered 28_800)
+/// At most this many dead cores leave per selection — the rate cap that makes a
+/// buggy or hostile predicate unable to collapse the FPS backbone in one epoch.
+const CORE_MAX_EVICTIONS_PER_SELECTION: usize = 1;
+
+// Cores must be strictly harder to evict than registered candidates.
+const _: () = assert!(CORE_LIVENESS_GRACE_BLOCKS > LIVENESS_GRACE_BLOCKS);
+const _: () = assert!(CORE_LIVENESS_WINDOW_BLOCKS > LIVENESS_WINDOW_BLOCKS);
+
 impl pallet_session_validator_management::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type MaxValidators = MaxValidators;
@@ -741,6 +764,44 @@ impl pallet_session_validator_management::Config for Runtime {
                 target: "committee_liveness",
                 "dropped {} dead registered candidate(s) from selection at block {}",
                 dropped, now,
+            );
+        }
+
+        // Dead-CORE eviction (Residual #2 / spec-233), gated OFF by the Root-set
+        // `CoreEvictionEnabled` flag — shipped false, flipped ON via the 2-of-3
+        // multisig-sudo ceremony only after the Group-J harness proof and the
+        // multi-node devnet cascade are green. Removing a genuinely-dead FPS core
+        // from the permissioned pool lets the remaining permissioned draws
+        // redistribute over the live cores; the vendor dedup then collapses the
+        // distinct committee, so the GRANDPA quorum shrinks WITHOUT touching the
+        // L1 D-parameter (the count stays put; only the runtime candidate pool
+        // shrinks). Core constants are far longer than the registered ones and at
+        // most CORE_MAX_EVICTIONS_PER_SELECTION leave per epoch, so a buggy or
+        // hostile predicate cannot collapse the FPS backbone in one rotation. The
+        // post-draw live-quorum floor below still judges the shrunk set, so a
+        // shrink that would strand quorum is refused (keep-current) — eviction can
+        // never install a sub-quorum committee. It is preventive: a standard
+        // scheduled set-change that enacts only while the old set still finalizes
+        // it; a finality-frozen chain still needs R1's `Grandpa::note_stalled`
+        // break-glass (the existing 2-of-3 ceremony — no new extrinsic).
+        let (sanitized, cores_dropped) =
+            if pallet_orinq_receipts::Pallet::<Runtime>::core_eviction_enabled() {
+                committee_liveness::filter_dead_permissioned(
+                    sanitized,
+                    now,
+                    CORE_LIVENESS_GRACE_BLOCKS,
+                    CORE_LIVENESS_WINDOW_BLOCKS,
+                    CORE_MAX_EVICTIONS_PER_SELECTION,
+                    liveness_of,
+                )
+            } else {
+                (sanitized, 0)
+            };
+        if cores_dropped > 0 {
+            log::warn!(
+                target: "committee_liveness",
+                "evicted {} dead permissioned core(s) from selection at block {}",
+                cores_dropped, now,
             );
         }
 

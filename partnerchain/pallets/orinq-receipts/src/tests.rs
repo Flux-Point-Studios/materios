@@ -468,6 +468,56 @@ fn reset_candidate_liveness_is_idempotent() {
 }
 
 #[test]
+fn core_eviction_disabled_by_default() {
+    // The Residual #2 kill-switch ships OFF: a fresh chain never evicts a core
+    // (spec-231/232 behavior) until governance flips it on.
+    new_test_ext().execute_with(|| {
+        assert!(!OrinqReceipts::core_eviction_enabled());
+    });
+}
+
+#[test]
+fn set_core_eviction_enabled_works_for_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_core_eviction_enabled(
+            RuntimeOrigin::root(),
+            true
+        ));
+        assert!(OrinqReceipts::core_eviction_enabled());
+
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                r.event,
+                RuntimeEvent::OrinqReceipts(crate::Event::CoreEvictionEnabledUpdated {
+                    enabled: true
+                })
+            )
+        });
+        assert!(matched, "CoreEvictionEnabledUpdated event must fire");
+
+        // Flipping back OFF instantly disables eviction without a runtime upgrade.
+        assert_ok!(OrinqReceipts::set_core_eviction_enabled(
+            RuntimeOrigin::root(),
+            false
+        ));
+        assert!(!OrinqReceipts::core_eviction_enabled());
+    });
+}
+
+#[test]
+fn set_core_eviction_enabled_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_core_eviction_enabled(RuntimeOrigin::signed(acc(9)), true),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        // A rejected call leaves the kill-switch OFF.
+        assert!(!OrinqReceipts::core_eviction_enabled());
+    });
+}
+
+#[test]
 fn rotate_authorities_works() {
     new_test_ext().execute_with(|| {
         let aura_ids = make_aura_ids(3);
