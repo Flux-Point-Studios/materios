@@ -178,7 +178,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 230,
+    spec_version: 231,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 3,
@@ -678,11 +678,15 @@ parameter_types! {
 /// Committee liveness filter (task #410). A registered (trustless) SPO
 /// candidate selectable for longer than the grace window yet producing no
 /// block within the liveness window is dropped from selection, so a dead
-/// registration cannot inflate the GRANDPA quorum and wedge finality. Eras
-/// are ~14_400 blocks (~24h @ 6s); permissioned (FPS) candidates are never
-/// filtered. MAINNET: retune to mainnet block time and ensure the preprod
-/// vendor relaxations (ariadne `<=`, db-sync offset 0) are reverted first.
-const LIVENESS_GRACE_BLOCKS: u32 = 14_400; // 1 era
+/// registration cannot inflate the GRANDPA quorum and wedge finality. Grace is
+/// 1_800 blocks (~3h @ 6s) — long enough for a snapshot-bootstrapped node to be
+/// selected and author its first block, short enough that a never-authoring
+/// dead registration vacates its committee seat (and the finality slack it
+/// holds) in ~3h instead of a full era. Eras are ~14_400 blocks (~24h @ 6s);
+/// permissioned (FPS) candidates are never filtered. MAINNET: retune to mainnet
+/// block time and ensure the preprod vendor relaxations (ariadne `<=`, db-sync
+/// offset 0) are reverted first.
+const LIVENESS_GRACE_BLOCKS: u32 = 1_800; // ~3h @ 6s
 const LIVENESS_WINDOW_BLOCKS: u32 = 28_800; // 2 eras (~48h)
 
 impl pallet_session_validator_management::Config for Runtime {

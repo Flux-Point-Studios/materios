@@ -186,7 +186,7 @@ mod tests {
         StakeDelegation, UtxoId, UtxoIndex, UtxoInfo,
     };
 
-    const GRACE: u32 = 14_400; // 1 era
+    const GRACE: u32 = 1_800; // ~3h @ 6s
     const WINDOW: u32 = 28_800; // 2 eras
 
     fn live(first_selected: Option<u32>, last_authored: Option<u32>) -> CandidateLiveness {
@@ -250,6 +250,18 @@ mod tests {
     fn exactly_at_grace_boundary_is_kept() {
         let now = 1_000_000 + GRACE; // now - first_selected == GRACE, not > grace.
         assert!(!is_dead(&live(Some(1_000_000), None), now, GRACE, WINDOW));
+    }
+
+    #[test]
+    fn grace_is_three_hours_not_an_era() {
+        // spec-231: grace is 1_800 blocks (~3h @ 6s), not the spec-229 era.
+        // Pins the value so a future edit cannot silently widen it back toward
+        // a day and let a dead reg hold a committee seat for ~24h again.
+        assert_eq!(GRACE, 1_800);
+        // A never-authoring dead reg first selected at block N is still kept at
+        // ~3h but evicted one block later.
+        assert!(!is_dead(&live(Some(0), None), 1_800, GRACE, WINDOW));
+        assert!(is_dead(&live(Some(0), None), 1_801, GRACE, WINDOW));
     }
 
     // ── account_bytes_from_encoded / aura_account_bytes ──────────────
