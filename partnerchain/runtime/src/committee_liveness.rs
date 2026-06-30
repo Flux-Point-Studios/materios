@@ -440,6 +440,38 @@ mod tests {
     }
 
     #[test]
+    fn contribution_window_sheds_silent_external_that_full_window_keeps() {
+        // R1 Lever 1 (Residual #1 / spec-233): the registered filter is already
+        // parameterized by `window_blocks`. An external that authored inside the
+        // full ~48h window but is silent past the short ~3h CONTRIBUTION window is
+        // KEPT under the full window and DROPPED under the short one — exactly the
+        // behavior `select_authorities` arms when `ContributionWindowEnabled` is
+        // on, so NextCommittee sheds a >f silently-failed external within ~1 epoch
+        // (giving R1's note_stalled break-glass a cores-only fire target fast).
+        const CONTRIBUTION_WINDOW: u32 = 1_800; // == runtime LIVENESS_CONTRIBUTION_WINDOW
+        let now = 2_000_000;
+        // authored ~2h ago: inside the 48h window, outside the 3h contribution one.
+        let last = Some(now - (CONTRIBUTION_WINDOW + 600));
+
+        let inputs = inputs_with(alloc::vec![cand(0x40, 0x44)]);
+        let (out, dropped) =
+            filter_dead_registered(inputs, now, GRACE, WINDOW, |_| live(Some(1_000_000), last));
+        assert_eq!(dropped, 0);
+        assert_eq!(out.registered_candidates.len(), 1);
+
+        let inputs = inputs_with(alloc::vec![cand(0x40, 0x44)]);
+        let (out, dropped) = filter_dead_registered(
+            inputs,
+            now,
+            GRACE,
+            CONTRIBUTION_WINDOW,
+            |_| live(Some(1_000_000), last),
+        );
+        assert_eq!(dropped, 1);
+        assert!(out.registered_candidates.is_empty());
+    }
+
+    #[test]
     fn keeps_all_when_all_live() {
         let now = 2_000_000;
         let inputs = inputs_with(alloc::vec![cand(0x40, 0x44), cand(0x50, 0x55)]);

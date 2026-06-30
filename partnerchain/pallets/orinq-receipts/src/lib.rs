@@ -317,6 +317,20 @@ pub mod pallet {
     #[pallet::storage]
     pub type CoreEvictionEnabled<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+    /// Governance arming flag for R1 Lever 1 — the short registered-liveness
+    /// "contribution window" (Residual #1 / spec-233). `false` (the genesis-empty
+    /// `ValueQuery` default) reproduces spec-231/232 behavior exactly: the
+    /// registered filter judges externals against the full ~48h
+    /// `LIVENESS_WINDOW_BLOCKS`. Flipped to `true` via
+    /// `set_contribution_window_enabled` (Root / 2-of-3 multisig-sudo) the
+    /// registered filter switches to the short `LIVENESS_CONTRIBUTION_WINDOW`
+    /// (~3h), so `NextCommittee` sheds a silently-failed external within ~1 epoch
+    /// — giving R1's `note_stalled` break-glass a cores-only fire target during a
+    /// `>f` mid-epoch external failure. Bundled in the same spec-233 ceremony as
+    /// `CoreEvictionEnabled`; one tx disables it without a runtime upgrade.
+    #[pallet::storage]
+    pub type ContributionWindowEnabled<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     // ── Events ───────────────────────────────────────────────────────────
 
     #[pallet::event]
@@ -483,6 +497,10 @@ pub mod pallet {
         /// (`CoreEvictionEnabled`). When `false`, the runtime never evicts a
         /// permissioned core from committee selection (spec-231/232 behavior).
         CoreEvictionEnabledUpdated { enabled: bool },
+        /// Governance flipped the R1 short-contribution-window arming flag
+        /// (`ContributionWindowEnabled`). When `false`, the registered liveness
+        /// filter uses the full ~48h window (spec-231/232 behavior).
+        ContributionWindowEnabledUpdated { enabled: bool },
     }
 
     // Error doc comments ship in on-chain metadata. Keep them actionable.
@@ -1068,6 +1086,15 @@ pub mod pallet {
         /// the spec-231/232 behavior of never evicting a core.
         pub fn core_eviction_enabled() -> bool {
             CoreEvictionEnabled::<T>::get()
+        }
+
+        /// Whether the R1 short registered-contribution window is armed
+        /// (Residual #1 / spec-233). The runtime's `select_authorities` reads this
+        /// to pick the registered liveness filter window: `true` →
+        /// `LIVENESS_CONTRIBUTION_WINDOW` (~3h), `false` (default) →
+        /// `LIVENESS_WINDOW_BLOCKS` (~48h, spec-231/232 behavior).
+        pub fn contribution_window_enabled() -> bool {
+            ContributionWindowEnabled::<T>::get()
         }
 
         /// Record that `who` was selected into a committee at `block`.
@@ -2227,6 +2254,34 @@ pub mod pallet {
             ensure_root(origin)?;
             CoreEvictionEnabled::<T>::put(enabled);
             Self::deposit_event(Event::CoreEvictionEnabledUpdated { enabled });
+            Ok(())
+        }
+
+        /// Root-only: flip the R1 short-contribution-window arming flag
+        /// (`ContributionWindowEnabled`, Residual #1 / spec-233). With
+        /// `enabled == false` (the default) the registered liveness filter uses
+        /// the full ~48h `LIVENESS_WINDOW_BLOCKS` — identical to spec-231/232.
+        /// Setting `true` switches the registered filter to the short ~3h
+        /// `LIVENESS_CONTRIBUTION_WINDOW`, so a seated external that goes silent
+        /// mid-epoch is shed from the next Ariadne draw within ~1 epoch, giving
+        /// R1's `Grandpa::note_stalled` break-glass a cores-only fire target
+        /// during a `>f` external-failure wedge — with no Cardano D-param
+        /// round-trip. Cores are never registered-filtered and the post-draw
+        /// live-quorum floor still uses the full window, so arming this can only
+        /// SHED a draw, never strand quorum. Ship `false`; flip `true` via the
+        /// 2-of-3 multisig-sudo ceremony alongside `set_core_eviction_enabled`
+        /// once the harness proof + devnet cascade are green; flip back `false`
+        /// to instantly revert without a runtime upgrade.
+        #[pallet::call_index(23)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_contribution_window_enabled(
+            origin: OriginFor<T>,
+            enabled: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ContributionWindowEnabled::<T>::put(enabled);
+            Self::deposit_event(Event::ContributionWindowEnabledUpdated { enabled });
             Ok(())
         }
     }

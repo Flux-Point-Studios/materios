@@ -712,6 +712,26 @@ const CORE_MAX_EVICTIONS_PER_SELECTION: usize = 1;
 const _: () = assert!(CORE_LIVENESS_GRACE_BLOCKS > LIVENESS_GRACE_BLOCKS);
 const _: () = assert!(CORE_LIVENESS_WINDOW_BLOCKS > LIVENESS_WINDOW_BLOCKS);
 
+/// R1 Lever 1 (Residual #1, activated by spec-233 — the ceremony owns the single
+/// 232→233 spec_version bump, this source does not bump it). When the
+/// `ContributionWindowEnabled` governance flag is ON, `select_authorities` judges
+/// the registered (external) liveness filter against this short "currently
+/// contributing" horizon instead of `LIVENESS_WINDOW_BLOCKS`, so a seated
+/// external that goes silent mid-epoch is shed from the NEXT Ariadne draw within
+/// ~1 epoch rather than after ~48h. That makes `NextCommittee` a cores-only fire
+/// target fast enough for R1's `Grandpa::note_stalled` break-glass G2 fire-gate
+/// during a `>f` external-failure wedge, with no Cardano D-param round-trip. ~3h
+/// ≈ the grace magnitude and > the ~200–450-block snapshot-to-tip restore with
+/// ~4× margin, so routine restarts do not flap a healthy external out. Cores are
+/// never registered-filtered, so the backbone is untouched; the post-draw floor
+/// keeps the full window, so the change can only SHED a draw, never strand
+/// quorum. Gated OFF by default (identical to spec-231/232). MAINNET: retune to
+/// mainnet block time alongside the registered constants.
+const LIVENESS_CONTRIBUTION_WINDOW: u32 = 1_800; // ~3h @ 6s
+
+// The contribution window only ever SHORTENS the registered eviction horizon.
+const _: () = assert!(LIVENESS_CONTRIBUTION_WINDOW <= LIVENESS_WINDOW_BLOCKS);
+
 impl pallet_session_validator_management::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type MaxValidators = MaxValidators;
@@ -752,11 +772,27 @@ impl pallet_session_validator_management::Config for Runtime {
         // above the live-voter count and wedging finality (the 2026-06 six-day
         // stall). Permissioned (FPS) candidates are never filtered.
         let now: u32 = frame_system::Pallet::<Runtime>::block_number();
+        // R1 Lever 1 (Residual #1 / spec-233), gated OFF by the Root-set
+        // `ContributionWindowEnabled` flag. When armed, the registered filter
+        // judges a seated external silent past the short LIVENESS_CONTRIBUTION_WINDOW
+        // (~3h) as dead instead of waiting the full ~48h LIVENESS_WINDOW_BLOCKS, so
+        // NextCommittee sheds a silently-failed external within ~1 epoch — fast
+        // enough that R1's note_stalled break-glass has a cores-only fire target
+        // during a >f mid-epoch external failure, with no Cardano D-param
+        // round-trip. Cores are never registered-filtered, and the post-draw floor
+        // below still uses the full window, so this can only SHED a draw, never
+        // strand quorum. OFF → identical to spec-231/232 (~48h horizon).
+        let registered_window =
+            if pallet_orinq_receipts::Pallet::<Runtime>::contribution_window_enabled() {
+                LIVENESS_CONTRIBUTION_WINDOW
+            } else {
+                LIVENESS_WINDOW_BLOCKS
+            };
         let (sanitized, dropped) = committee_liveness::filter_dead_registered(
             sanitized,
             now,
             LIVENESS_GRACE_BLOCKS,
-            LIVENESS_WINDOW_BLOCKS,
+            registered_window,
             liveness_of,
         );
         if dropped > 0 {

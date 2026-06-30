@@ -518,6 +518,57 @@ fn set_core_eviction_enabled_rejects_non_root() {
 }
 
 #[test]
+fn contribution_window_disabled_by_default() {
+    // The R1 Lever-1 arming flag ships OFF: a fresh chain uses the full ~48h
+    // registered window (spec-231/232 behavior) until governance flips it on.
+    new_test_ext().execute_with(|| {
+        assert!(!OrinqReceipts::contribution_window_enabled());
+    });
+}
+
+#[test]
+fn set_contribution_window_enabled_works_for_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_contribution_window_enabled(
+            RuntimeOrigin::root(),
+            true
+        ));
+        assert!(OrinqReceipts::contribution_window_enabled());
+
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                r.event,
+                RuntimeEvent::OrinqReceipts(crate::Event::ContributionWindowEnabledUpdated {
+                    enabled: true
+                })
+            )
+        });
+        assert!(matched, "ContributionWindowEnabledUpdated event must fire");
+
+        // Flipping back OFF instantly reverts to the full window without a
+        // runtime upgrade.
+        assert_ok!(OrinqReceipts::set_contribution_window_enabled(
+            RuntimeOrigin::root(),
+            false
+        ));
+        assert!(!OrinqReceipts::contribution_window_enabled());
+    });
+}
+
+#[test]
+fn set_contribution_window_enabled_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_contribution_window_enabled(RuntimeOrigin::signed(acc(9)), true),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        // A rejected call leaves the flag OFF.
+        assert!(!OrinqReceipts::contribution_window_enabled());
+    });
+}
+
+#[test]
 fn rotate_authorities_works() {
     new_test_ext().execute_with(|| {
         let aura_ids = make_aura_ids(3);
