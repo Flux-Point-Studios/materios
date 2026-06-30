@@ -178,7 +178,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 231,
+    spec_version: 232,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 3,
@@ -1417,6 +1417,29 @@ impl_runtime_apis! {
         }
         fn get_main_chain_scripts() -> sp_session_validator_management::MainChainScripts {
             SessionCommitteeManagement::get_main_chain_scripts()
+        }
+    }
+
+    impl authority_selection_inherents::filter_invalid_candidates::CandidateValidationApi<Block> for Runtime {
+        fn validate_registered_candidate_data(
+            mainchain_pub_key: &sidechain_domain::MainchainPublicKey,
+            registration_data: &sidechain_domain::RegistrationData,
+        ) -> Option<authority_selection_inherents::filter_invalid_candidates::RegistrationDataError> {
+            authority_selection_inherents::filter_invalid_candidates::validate_registration_data(
+                mainchain_pub_key,
+                registration_data,
+                Sidechain::genesis_utxo(),
+            ).err()
+        }
+        fn validate_stake(
+            stake: Option<sidechain_domain::StakeDelegation>,
+        ) -> Option<authority_selection_inherents::filter_invalid_candidates::StakeError> {
+            authority_selection_inherents::filter_invalid_candidates::validate_stake(stake).err()
+        }
+        fn validate_permissioned_candidate_data(
+            candidate: sidechain_domain::PermissionedCandidateData,
+        ) -> Option<authority_selection_inherents::filter_invalid_candidates::PermissionedCandidateDataError> {
+            authority_selection_inherents::filter_invalid_candidates::validate_permissioned_candidate_data::<CrossChainPublic>(candidate).err()
         }
     }
 

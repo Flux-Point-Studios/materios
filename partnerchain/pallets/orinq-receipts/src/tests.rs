@@ -388,6 +388,86 @@ fn on_initialize_stamps_first_selected_for_active_aura_authorities() {
 }
 
 #[test]
+fn reset_candidate_liveness_clears_stamps() {
+    // The onboarding-stick revive: `CandidateFirstSelected` is write-once
+    // (stamped on first enacted selection, never cleared on its own), so an
+    // honest SPO selected once that never authored before grace elapsed is
+    // dead-stamped forever — dead-filtered from every future draw, so it can
+    // never be seated, so it can never author, so the stamp can never clear.
+    // `reset_candidate_liveness` (Root) clears both stamps, returning it to the
+    // never-selected newcomer state so a later draw can re-seat it fresh.
+    new_test_ext().execute_with(|| {
+        let who = acc(7);
+        // Seed the OnlyBlocks shape: selected long ago, both stamps present.
+        OrinqReceipts::stamp_first_selected(&who, 100u32);
+        pallet::LastAuthoredBlock::<Test>::insert(&who, 100u32);
+        assert_eq!(OrinqReceipts::candidate_first_selected(&who), Some(100u32));
+        assert_eq!(OrinqReceipts::last_authored_block(&who), Some(100u32));
+
+        assert_ok!(OrinqReceipts::reset_candidate_liveness(
+            RuntimeOrigin::root(),
+            who.clone()
+        ));
+
+        // Back to first_selected == None — committee_liveness::is_dead's
+        // newcomer-kept branch — so filter_dead_registered re-admits it.
+        assert_eq!(OrinqReceipts::candidate_first_selected(&who), None);
+        assert_eq!(OrinqReceipts::last_authored_block(&who), None);
+
+        let events = frame_system::Pallet::<Test>::events();
+        let matched = events.iter().any(|r| {
+            matches!(
+                r.event,
+                RuntimeEvent::OrinqReceipts(crate::Event::CandidateLivenessReset { .. })
+            )
+        });
+        assert!(matched, "CandidateLivenessReset event must fire");
+    });
+}
+
+#[test]
+fn reset_candidate_liveness_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        let who = acc(7);
+        OrinqReceipts::stamp_first_selected(&who, 100u32);
+        assert_noop!(
+            OrinqReceipts::reset_candidate_liveness(
+                RuntimeOrigin::signed(acc(9)),
+                who.clone()
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        // A rejected call leaves the stamp untouched.
+        assert_eq!(OrinqReceipts::candidate_first_selected(&who), Some(100u32));
+    });
+}
+
+#[test]
+fn reset_candidate_liveness_is_idempotent() {
+    new_test_ext().execute_with(|| {
+        let who = acc(7);
+        // No stamp present — reset is a clean no-op that still succeeds.
+        assert_ok!(OrinqReceipts::reset_candidate_liveness(
+            RuntimeOrigin::root(),
+            who.clone()
+        ));
+        assert_eq!(OrinqReceipts::candidate_first_selected(&who), None);
+
+        // Stamp, then reset twice — the second reset is also a no-op success.
+        OrinqReceipts::stamp_first_selected(&who, 50u32);
+        assert_ok!(OrinqReceipts::reset_candidate_liveness(
+            RuntimeOrigin::root(),
+            who.clone()
+        ));
+        assert_ok!(OrinqReceipts::reset_candidate_liveness(
+            RuntimeOrigin::root(),
+            who.clone()
+        ));
+        assert_eq!(OrinqReceipts::candidate_first_selected(&who), None);
+    });
+}
+
+#[test]
 fn rotate_authorities_works() {
     new_test_ext().execute_with(|| {
         let aura_ids = make_aura_ids(3);

@@ -463,6 +463,11 @@ pub mod pallet {
             attester: T::AccountId,
             reason: DispatchError,
         },
+        /// A candidate's liveness stamps (`CandidateFirstSelected` +
+        /// `LastAuthoredBlock`) were cleared by governance, returning it to the
+        /// never-selected newcomer state so a future Ariadne draw can re-seat it
+        /// with a fresh grace window. Keyed by the candidate's Aura account.
+        CandidateLivenessReset { who: T::AccountId },
     }
 
     // Error doc comments ship in on-chain metadata. Keep them actionable.
@@ -2145,6 +2150,34 @@ pub mod pallet {
             ensure_root(origin)?;
             BadAttestSlashThreshold::<T>::put(value);
             Self::deposit_event(Event::BadAttestSlashThresholdUpdated { new_value: value });
+            Ok(())
+        }
+
+        /// Root-only: clear a candidate's liveness stamps so it returns to the
+        /// never-selected newcomer state. `CandidateFirstSelected` is otherwise
+        /// write-once — stamped on first enacted selection, never cleared — so a
+        /// candidate selected once that never authored a block before its grace
+        /// window elapsed is dead-filtered from every committee draw, and because
+        /// it can never be seated it can never author, so the stamp can never
+        /// clear on its own. Clearing `first_selected` to `None` puts it back in
+        /// `committee_liveness::is_dead`'s newcomer-kept branch; the next draw can
+        /// seat it and `on_initialize` re-stamps a fresh grace clock. Identity,
+        /// stake, and the Cardano registration are untouched — this only changes
+        /// whether the candidate competes for a registered seat, so the live
+        /// quorum floor still refuses any quorum-stranding rotation and the filter
+        /// re-evicts a revived seat that still never authors. Idempotent: clearing
+        /// an account with no stamp is a no-op that still succeeds.
+        #[pallet::call_index(21)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(2)))]
+        pub fn reset_candidate_liveness(
+            origin: OriginFor<T>,
+            who: T::AccountId,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            CandidateFirstSelected::<T>::remove(&who);
+            LastAuthoredBlock::<T>::remove(&who);
+            Self::deposit_event(Event::CandidateLivenessReset { who });
             Ok(())
         }
     }
