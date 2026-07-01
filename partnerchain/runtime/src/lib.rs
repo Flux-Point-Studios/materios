@@ -178,7 +178,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 232,
+    spec_version: 233,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 3,
