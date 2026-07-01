@@ -93,9 +93,31 @@ pub fn select_authorities<
 		selection::impls::seed_from_nonce_and_sc_epoch(&input.epoch_nonce, &sidechain_epoch);
 	let committee_size =
 		input.d_parameter.num_registered_candidates + input.d_parameter.num_permissioned_candidates;
-	if let Some(validators) =
+	// [materios-patch: force-include-when-fits]
+	// The IOG weighted_selection sampler draws `committee_size` seats WITH
+	// REPLACEMENT, so when the eligible (positive-weight) candidates number
+	// fewer than the seats it can miss one entirely — e.g. 4 permissioned cores
+	// for 15+1 seats → ~1% chance per epoch a core is never drawn, deduping to a
+	// smaller committee (observed live as n=3 zero-slack ~2.4% of epochs;
+	// MIN_DISTINCT_COMMITTEE=2 only blocks the pathological n<2, not this). When
+	// every eligible candidate fits, the weighted lottery is meaningless — seat
+	// them all deterministically, in the account_id-sorted order established
+	// above (identical across nodes). Zero-weight candidates (ineligible, e.g.
+	// registered candidates when num_registered==0) are excluded, matching the
+	// sampler. When candidates outnumber the seats the weighted draw is unchanged.
+	let eligible_count = candidates_with_weight.iter().filter(|pair| pair.1 > 0).count();
+	let selected = if eligible_count > 0 && eligible_count <= committee_size as usize {
+		Some(
+			candidates_with_weight
+				.into_iter()
+				.filter(|pair| pair.1 > 0)
+				.map(|(candidate, _weight)| (candidate.account_id, candidate.account_keys))
+				.collect::<Vec<_>>(),
+		)
+	} else {
 		weighted_selection(candidates_with_weight, committee_size, random_seed)
-	{
+	};
+	if let Some(validators) = selected {
 		let raw_len = validators.len();
 		// [materios-patch: ariadne-output-dedup] Collapse duplicate validators
 		// produced by the with-replacement weighted-random sampler. GRANDPA
