@@ -169,6 +169,24 @@ pub mod opaque {
 pub type CrossChainPublic = opaque::cross_chain_app::Public;
 use opaque::SessionKeys;
 
+/// Rebuild a committee tuple `(CrossChainPublic, SessionKeys)` from an emergency
+/// pinned member's raw keys (mainnet-resilience #491). Mirrors the vendor's
+/// committee construction exactly — `account_id: ecdsa::Public.into()`,
+/// `account_keys: (sr25519::Public, ed25519::Public).into()` — so a pinned member
+/// installs the identical authority tuple the Ariadne path would for the same
+/// keys, and the session pallet maps validators to the keys their nodes hold.
+fn reconstruct_pinned_member(
+    m: &pallet_orinq_receipts::types::PinnedMember,
+) -> (CrossChainPublic, SessionKeys) {
+    let account: CrossChainPublic = sp_core::ecdsa::Public::from(m.cross_chain).into();
+    let keys: SessionKeys = (
+        sp_core::sr25519::Public::from(m.aura),
+        sp_core::ed25519::Public::from(m.grandpa),
+    )
+        .into();
+    (account, keys)
+}
+
 // ---------------------------------------------------------------------------
 // Runtime version
 // ---------------------------------------------------------------------------
@@ -745,6 +763,40 @@ impl pallet_session_validator_management::Config for Runtime {
         input: AuthoritySelectionInputs,
         sidechain_epoch: ScEpochNumber,
     ) -> Option<BoundedVec<(Self::AuthorityId, Self::AuthorityKeys), Self::MaxValidators>> {
+        // Emergency pinned committee (mainnet-resilience #491): the L1-independent
+        // override. Read FIRST — a committed-storage read so author and verifier
+        // agree — and while it is set and unexpired, return the reconstructed
+        // committee VERBATIM, bypassing the entire Ariadne draw, liveness filter,
+        // and quorum/break-glass floors. Reconstruction mirrors the vendor's
+        // committee-tuple construction exactly (ecdsa -> CrossChainPublic;
+        // (sr25519, ed25519) -> SessionKeys). Any malformed/oversized/empty pin
+        // fails safe: fall through to the normal L1-driven selection.
+        if let Some((members, until_epoch)) =
+            pallet_orinq_receipts::Pallet::<Runtime>::pinned_committee()
+        {
+            if sidechain_epoch.0 <= until_epoch && !members.is_empty() {
+                let chosen: Vec<(CrossChainPublic, SessionKeys)> =
+                    members.iter().map(reconstruct_pinned_member).collect();
+                match BoundedVec::try_from(chosen) {
+                    Ok(bounded) => {
+                        log::warn!(
+                            target: "runtime::committee-liveness",
+                            "PINNED COMMITTEE active for epoch {} (until {}): installing {} members verbatim, bypassing Ariadne selection",
+                            sidechain_epoch.0,
+                            until_epoch,
+                            bounded.len(),
+                        );
+                        return Some(bounded);
+                    }
+                    Err(_) => log::error!(
+                        target: "runtime::committee-liveness",
+                        "pinned committee ({} members) exceeds MaxValidators; ignoring pin, using Ariadne selection",
+                        members.len(),
+                    ),
+                }
+            }
+        }
+
         // Filter out duplicate keys, cap list sizes, and reject whole-input
         // invariant violations: the registered-candidates list is untrusted
         // db-sync output until D<1.0.
@@ -885,6 +937,36 @@ impl pallet_session_validator_management::Config for Runtime {
                 committee_liveness::grandpa_quorum_threshold(aura_keys.len()),
             );
             return None;
+        }
+
+        // Break-glass floor (mainnet-resilience #490), gated OFF by the Root-set
+        // `BreakGlassFloorEnabled` flag. When armed, refuse any drawn committee
+        // that seats none of the FPS-held `BreakGlassAuraKeys` — returning None
+        // keeps the current committee (which, while the floor stays armed, always
+        // holds an FPS key) for one more epoch via the session pallet's
+        // create_inherent fallback. This guarantees the enacted committee can
+        // never drop to zero FPS-controlled seats, so a break-glass recovery
+        // (`Grandpa::note_stalled`, an emergency runtime upgrade) always has an
+        // FPS author left to include the recovering block — closing the
+        // trustless-majority reset corner where a Cardano D-parameter that zeroes
+        // the permissioned count would strand FPS with no enacted key. It only
+        // ever refuses a draw (keep-current), so it can never itself install an
+        // unsafe committee; the inductive base case (current committee holds an
+        // FPS key) must hold when armed, which is why arming precedes the seat
+        // ramp. OFF (default) → identical to spec-233.
+        if pallet_orinq_receipts::Pallet::<Runtime>::break_glass_floor_enabled() {
+            let break_glass_keys =
+                pallet_orinq_receipts::Pallet::<Runtime>::break_glass_aura_keys();
+            if !committee_liveness::committee_covers_break_glass(&aura_keys, &break_glass_keys) {
+                log::warn!(
+                    target: "runtime::committee-liveness",
+                    "refusing committee for epoch {}: none of {} break-glass FPS key(s) seated among {} selected; keeping current committee",
+                    sidechain_epoch,
+                    break_glass_keys.len(),
+                    aura_keys.len(),
+                );
+                return None;
+            }
         }
         Some(chosen)
     }

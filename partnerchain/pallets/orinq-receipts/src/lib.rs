@@ -27,7 +27,7 @@ pub mod pallet {
     use sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
 
     use crate::types::{
-        AnchorRecord, Cert, PlayerSigRecord, ReceiptRecord, SlashReason,
+        AnchorRecord, Cert, PinnedMember, PlayerSigRecord, ReceiptRecord, SlashReason,
         CERT_ATTESTATION_LEVEL, CERT_DOMAIN_BYTES, CERT_EPOCH_PLACEHOLDER,
         CERT_RETENTION_DAYS, CERT_SCHEMA_VERSION,
     };
@@ -331,6 +331,52 @@ pub mod pallet {
     #[pallet::storage]
     pub type ContributionWindowEnabled<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+    /// Governance arming flag for the break-glass floor (mainnet-resilience #490).
+    /// `false` (the genesis-empty `ValueQuery` default) reproduces spec-233
+    /// behavior exactly: `select_authorities` never applies the FPS-presence
+    /// check. Flipped `true` via `set_break_glass_floor_enabled` (Root / 2-of-3
+    /// multisig-sudo) once `BreakGlassAuraKeys` is seeded and the ≥16-key devnet
+    /// enact proof is green, the runtime refuses (keep-current) any committee that
+    /// would seat zero FPS keys — so a break-glass recovery (`note_stalled`, an
+    /// emergency upgrade) always has an FPS author to include the recovering
+    /// block. One tx disables it without a runtime upgrade. MUST be armed while
+    /// the current committee still holds an FPS key (i.e. before the seat ramp).
+    #[pallet::storage]
+    pub type BreakGlassFloorEnabled<T: Config> = StorageValue<_, bool, ValueQuery>;
+
+    /// The FPS-held Aura public keys (raw 32-byte) that satisfy the break-glass
+    /// floor (mainnet-resilience #490). Set by Root via `set_break_glass_aura_keys`.
+    /// Empty (genesis default) means the floor is unconfigured and every committee
+    /// passes even when `BreakGlassFloorEnabled` is true — so arming without
+    /// seeding is a no-op, and Root must seed before arming. Bounded by
+    /// `MaxCommitteeSize` (a break-glass set larger than a committee is nonsense).
+    #[pallet::storage]
+    pub type BreakGlassAuraKeys<T: Config> =
+        StorageValue<_, BoundedVec<[u8; 32], T::MaxCommitteeSize>, ValueQuery>;
+
+    /// Emergency pinned committee (mainnet-resilience #491) — the L1-independent
+    /// ultimate override. `None` (genesis default) = no pin, byte-identical
+    /// spec-233. When `Some((members, until_epoch))`, the runtime's
+    /// `select_authorities` returns the reconstructed committee VERBATIM for every
+    /// sidechain epoch `<= until_epoch`, bypassing the entire Ariadne/Cardano draw
+    /// and all liveness filters/floors, then auto-expires back to L1-driven
+    /// selection once the epoch passes. Set via `set_pinned_committee` (Root /
+    /// 2-of-3 multisig-sudo); it is a committed-storage READ inside
+    /// select_authorities so author and verifier compute the identical `set`
+    /// inherent (writes there are discarded — the spec-229 lesson). Bounded by
+    /// `MaxAuthorities` (the block-production authority-set size, NOT the larger
+    /// attestation `MaxCommitteeSize`). Paired operationally with one
+    /// `Grandpa::note_stalled` to cross the SetId handoff. THE break-glass tool
+    /// that closes the reset corner when Cardano hands the chain an unrecoverable
+    /// committee (all-dead, bad D-param stuck behind k-stability, follower
+    /// diverged) — collapses the ~10-day mainnet D-param settle tail to one block.
+    #[pallet::storage]
+    pub type PinnedCommittee<T: Config> = StorageValue<
+        _,
+        (BoundedVec<PinnedMember, <T as pallet_aura::Config>::MaxAuthorities>, u64),
+        OptionQuery,
+    >;
+
     // ── Events ───────────────────────────────────────────────────────────
 
     #[pallet::event]
@@ -381,14 +427,6 @@ pub mod pallet {
             era_blocks: u32,
             total_distributed: u128,
             validators_rewarded: u32,
-        },
-        /// Consensus authorities rotated. Aura takes effect immediately;
-        /// Grandpa takes effect at `apply_at_block`.
-        AuthoritiesRotated {
-            aura_count: u32,
-            grandpa_count: u32,
-            grandpa_set_id: u64,
-            apply_at_block: BlockNumberFor<T>,
         },
         /// `AttestationRewardPerSigner` was updated by governance.
         AttestationRewardPerSignerUpdated { new_value: u128 },
@@ -501,6 +539,19 @@ pub mod pallet {
         /// (`ContributionWindowEnabled`). When `false`, the registered liveness
         /// filter uses the full ~48h window (spec-231/232 behavior).
         ContributionWindowEnabledUpdated { enabled: bool },
+        /// Governance flipped the break-glass floor arming flag
+        /// (`BreakGlassFloorEnabled`, mainnet-resilience #490). When `false`
+        /// (default), `select_authorities` never applies the FPS-presence check.
+        BreakGlassFloorEnabledUpdated { enabled: bool },
+        /// Governance updated the break-glass FPS Aura key set
+        /// (`BreakGlassAuraKeys`); `count` is the number of keys after the update.
+        BreakGlassAuraKeysUpdated { count: u32 },
+        /// An emergency committee was pinned (mainnet-resilience #491) — the
+        /// runtime installs it verbatim through `until_epoch`. `count` members.
+        PinnedCommitteeSet { count: u32, until_epoch: u64 },
+        /// The emergency pinned committee was cleared; selection returns to the
+        /// L1-driven Ariadne draw immediately.
+        PinnedCommitteeCleared,
     }
 
     // Error doc comments ship in on-chain metadata. Keep them actionable.
@@ -544,28 +595,20 @@ pub mod pallet {
         /// An anchor with this ID already exists on-chain. Anchor IDs must
         /// be globally unique, similar to receipt IDs.
         AnchorAlreadyExists,
-        /// The new authority set cannot be empty. At least one Aura and one
-        /// Grandpa authority must be provided for block production and
-        /// finality to continue.
-        EmptyAuthoritySet,
         /// The caller is already a member of the attestation committee.
         AlreadyCommitteeMember,
         /// The caller is not a member of the attestation committee and
         /// cannot leave it.
         NotCommitteeMemberCantLeave,
-        /// The number of Aura authorities must equal the number of Grandpa
-        /// authorities. Each validator node needs exactly one key in each
-        /// set.
-        AuthorityCountMismatch,
-        /// The provided authority list exceeds `MaxAuthorities`. Reduce the
-        /// number of validators or increase the `MaxAuthorities` constant
-        /// via a runtime upgrade.
-        TooManyAuthorities,
-        /// A Grandpa authority change is already scheduled and has not yet
-        /// been applied. Wait for the pending change to take effect (check
-        /// `grandpa.PendingChange` storage) before scheduling another
-        /// rotation.
-        AuthorityChangeAlreadyPending,
+        /// `set_break_glass_aura_keys` was given more keys than `MaxCommitteeSize`.
+        /// A break-glass set larger than a committee is nonsensical — reduce it.
+        TooManyBreakGlassKeys,
+        /// `set_pinned_committee` was given an empty member list. A pinned
+        /// committee with no authors would halt production — provide ≥1 member.
+        EmptyPinnedCommittee,
+        /// `set_pinned_committee` was given more members than `MaxAuthorities`
+        /// (the block-production authority-set bound). Reduce the member count.
+        TooManyPinnedMembers,
         /// `EraCapBaselineAttestorCount` cannot be zero — it is the divisor
         /// in `effective_era_cap()` and zero would panic/saturate.
         InvalidBaseline,
@@ -1095,6 +1138,29 @@ pub mod pallet {
         /// `LIVENESS_WINDOW_BLOCKS` (~48h, spec-231/232 behavior).
         pub fn contribution_window_enabled() -> bool {
             ContributionWindowEnabled::<T>::get()
+        }
+
+        /// Whether the break-glass floor is armed (mainnet-resilience #490). The
+        /// runtime's `select_authorities` reads this to gate its FPS-presence
+        /// check: `true` → refuse any committee holding none of
+        /// `break_glass_aura_keys()`; `false` (default) → spec-233 behavior.
+        pub fn break_glass_floor_enabled() -> bool {
+            BreakGlassFloorEnabled::<T>::get()
+        }
+
+        /// The FPS-held break-glass Aura keys (mainnet-resilience #490). The
+        /// runtime's `select_authorities` reads these to enforce the break-glass
+        /// floor when armed.
+        pub fn break_glass_aura_keys() -> Vec<[u8; 32]> {
+            BreakGlassAuraKeys::<T>::get().into_inner()
+        }
+
+        /// The emergency pinned committee (mainnet-resilience #491), if any:
+        /// `(members, until_epoch)`. The runtime's `select_authorities` reads this
+        /// FIRST and, while `sidechain_epoch <= until_epoch`, reconstructs and
+        /// returns the committee verbatim, bypassing Ariadne selection.
+        pub fn pinned_committee() -> Option<(Vec<PinnedMember>, u64)> {
+            PinnedCommittee::<T>::get().map(|(members, until)| (members.into_inner(), until))
         }
 
         /// Record that `who` was selected into a committee at `block`.
@@ -1632,77 +1698,6 @@ pub mod pallet {
                 anchor_id,
                 content_hash,
                 submitter,
-            });
-
-            Ok(())
-        }
-
-        /// Root-only: rotate Aura and Grandpa authorities.
-        ///
-        /// Replaces `Sudo(System.set_storage)` for authority changes.
-        /// Aura authorities take effect immediately. Grandpa authorities
-        /// are scheduled via PendingChange and take effect after
-        /// `delay_blocks` blocks.
-        ///
-        /// `new_aura` — sr25519 public keys for block production.
-        /// `new_grandpa` — (ed25519 public key, weight) pairs for finality.
-        /// `delay_blocks` — blocks before Grandpa change takes effect (min 1).
-        #[pallet::call_index(5)]
-        #[pallet::weight(Weight::from_parts(50_000, 0)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(4)))]
-        pub fn rotate_authorities(
-            origin: OriginFor<T>,
-            new_aura: Vec<<T as pallet_aura::Config>::AuthorityId>,
-            new_grandpa: sp_consensus_grandpa::AuthorityList,
-            delay_blocks: u32,
-        ) -> DispatchResult {
-            ensure_root(origin)?;
-
-            // Validate inputs
-            ensure!(!new_aura.is_empty(), Error::<T>::EmptyAuthoritySet);
-            ensure!(!new_grandpa.is_empty(), Error::<T>::EmptyAuthoritySet);
-            ensure!(
-                new_aura.len() == new_grandpa.len(),
-                Error::<T>::AuthorityCountMismatch
-            );
-
-            // --- Update Aura authorities (immediate) ---
-            let bounded_aura: BoundedVec<
-                <T as pallet_aura::Config>::AuthorityId,
-                <T as pallet_aura::Config>::MaxAuthorities,
-            > = new_aura
-                .try_into()
-                .map_err(|_| Error::<T>::TooManyAuthorities)?;
-            pallet_aura::Authorities::<T>::put(bounded_aura);
-
-            // --- Schedule Grandpa authority change via the pallet's public API ---
-            // Using pallet_grandpa::Pallet::schedule_change() ensures correct
-            // SCALE encoding of StoredPendingChange (including WeakBoundedVec
-            // for authorities). Raw storage writes caused "Invalid authority set"
-            // errors due to encoding mismatches.
-            let delay: BlockNumberFor<T> = delay_blocks.max(2).into();
-            pallet_grandpa::Pallet::<T>::schedule_change(
-                new_grandpa.clone(),
-                delay,
-                Some(delay), // FORCED — applies at block height regardless of finality
-            )?;
-
-            // Increment CurrentSetId so GRANDPA voters track the new authority set.
-            // schedule_change() does not do this (it's normally done by pallet_session).
-            let set_id_key = frame_support::storage::storage_prefix(b"Grandpa", b"CurrentSetId");
-            let new_set_id: u64 = frame_support::storage::unhashed::get(&set_id_key)
-                .unwrap_or(0u64)
-                .saturating_add(1);
-            frame_support::storage::unhashed::put(&set_id_key, &new_set_id);
-
-            let current_block = frame_system::Pallet::<T>::block_number();
-            let apply_at = current_block + delay;
-            Self::deposit_event(Event::AuthoritiesRotated {
-                aura_count: new_grandpa.len() as u32,
-                grandpa_count: new_grandpa.len() as u32,
-                grandpa_set_id: new_set_id,
-                apply_at_block: apply_at,
             });
 
             Ok(())
@@ -2282,6 +2277,99 @@ pub mod pallet {
             ensure_root(origin)?;
             ContributionWindowEnabled::<T>::put(enabled);
             Self::deposit_event(Event::ContributionWindowEnabledUpdated { enabled });
+            Ok(())
+        }
+
+        /// Root-only: flip the break-glass floor arming flag
+        /// (`BreakGlassFloorEnabled`, mainnet-resilience #490). With `false` (the
+        /// default) `select_authorities` never applies the FPS-presence check —
+        /// identical to spec-233. Setting `true` refuses (keep-current) any draw
+        /// that would seat zero of the `BreakGlassAuraKeys`, so the enacted
+        /// committee can never drop to zero FPS-controlled seats and a break-glass
+        /// recovery always has an FPS author. Because it only refuses (never
+        /// installs) a committee, it cannot itself strand the chain — but it MUST
+        /// be armed while the current committee still holds an FPS key (before the
+        /// trustless-majority seat ramp), and `BreakGlassAuraKeys` MUST be seeded
+        /// first (arming with an empty set is a no-op). Flip back `false` to
+        /// disable instantly without a runtime upgrade.
+        #[pallet::call_index(24)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_break_glass_floor_enabled(
+            origin: OriginFor<T>,
+            enabled: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            BreakGlassFloorEnabled::<T>::put(enabled);
+            Self::deposit_event(Event::BreakGlassFloorEnabledUpdated { enabled });
+            Ok(())
+        }
+
+        /// Root-only: set the FPS-held break-glass Aura key set
+        /// (`BreakGlassAuraKeys`, mainnet-resilience #490) — the raw 32-byte Aura
+        /// public keys FPS controls, any one of which satisfies the break-glass
+        /// floor. Passing an empty vec clears the set (which, with the floor
+        /// armed, makes it a no-op — so seed before arming). Bounded by
+        /// `MaxCommitteeSize`; an over-long list is rejected with
+        /// `TooManyBreakGlassKeys`.
+        #[pallet::call_index(25)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_break_glass_aura_keys(
+            origin: OriginFor<T>,
+            keys: Vec<[u8; 32]>,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            let bounded: BoundedVec<[u8; 32], T::MaxCommitteeSize> =
+                keys.try_into().map_err(|_| Error::<T>::TooManyBreakGlassKeys)?;
+            let count = bounded.len() as u32;
+            BreakGlassAuraKeys::<T>::put(bounded);
+            Self::deposit_event(Event::BreakGlassAuraKeysUpdated { count });
+            Ok(())
+        }
+
+        /// Root-only: install an emergency pinned committee (mainnet-resilience
+        /// #491) that `select_authorities` returns verbatim for every sidechain
+        /// epoch through `until_epoch`, bypassing the Ariadne/Cardano draw and all
+        /// liveness filters/floors, then auto-expiring. This is THE L1-independent
+        /// override for when Cardano hands the chain an unrecoverable committee
+        /// (all-dead, a bad D-parameter stuck behind k-stability, a diverged
+        /// follower): it collapses the ~10-day mainnet D-param settle tail to one
+        /// block. `members` are the FPS core consensus keys (cross-chain/aura/
+        /// grandpa) the live nodes actually hold — pinning keys no node holds
+        /// would halt production, so this is a Root ceremony input, paired
+        /// operationally with one `Grandpa::note_stalled` to cross the GRANDPA
+        /// SetId handoff. Rejected if empty or larger than `MaxAuthorities`.
+        /// Clear early with `clear_pinned_committee`; otherwise it goes inert after
+        /// `until_epoch` and selection returns to the L1-driven draw.
+        #[pallet::call_index(26)]
+        #[pallet::weight(Weight::from_parts(20_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_pinned_committee(
+            origin: OriginFor<T>,
+            members: Vec<PinnedMember>,
+            until_epoch: u64,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            ensure!(!members.is_empty(), Error::<T>::EmptyPinnedCommittee);
+            let bounded: BoundedVec<PinnedMember, <T as pallet_aura::Config>::MaxAuthorities> =
+                members.try_into().map_err(|_| Error::<T>::TooManyPinnedMembers)?;
+            let count = bounded.len() as u32;
+            PinnedCommittee::<T>::put((bounded, until_epoch));
+            Self::deposit_event(Event::PinnedCommitteeSet { count, until_epoch });
+            Ok(())
+        }
+
+        /// Root-only: clear the emergency pinned committee (mainnet-resilience
+        /// #491) — `select_authorities` returns to the L1-driven Ariadne draw at
+        /// the next selection. A no-op if no pin is set.
+        #[pallet::call_index(27)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn clear_pinned_committee(origin: OriginFor<T>) -> DispatchResult {
+            ensure_root(origin)?;
+            PinnedCommittee::<T>::kill();
+            Self::deposit_event(Event::PinnedCommitteeCleared);
             Ok(())
         }
     }

@@ -259,6 +259,46 @@ where
             >= grandpa_quorum_threshold(selected_aura_keys.len())
 }
 
+/// Break-glass floor (mainnet-resilience #490). Does the drawn committee
+/// contain at least one FPS-held break-glass Aura key? When the floor is armed
+/// and this returns `false`, the caller refuses the rotation exactly as it does
+/// for `passes_live_quorum_floor` — returning `None` from `select_authorities`
+/// keeps the current committee for one more epoch via the session pallet's
+/// create_inherent fallback. The two floors compose: a rotation must clear both.
+///
+/// The invariant this enforces, inductively while armed: the ENACTED committee
+/// can never drop to zero FPS-controlled seats, so a break-glass recovery
+/// (`Grandpa::note_stalled`, an emergency runtime upgrade) always has an FPS
+/// author left to include the recovering block. It closes the trustless-majority
+/// reset corner where a Cardano D-parameter that zeroes the permissioned count
+/// would otherwise strand FPS with no enacted key and no way to author the fix.
+/// Because it only ever refuses a draw (keep-current), it can never itself
+/// install an unsafe committee — the base case (current committee already holds
+/// an FPS key) must hold when the floor is armed, which is why arming precedes
+/// the seat ramp.
+///
+/// `selected_aura_keys` are the SCALE-encoded Aura keys of the drawn committee
+/// (the same slice fed to `passes_live_quorum_floor`), normalized to the 32-byte
+/// account via `account_bytes_from_encoded`; `break_glass_keys` are the raw
+/// 32-byte FPS Aura public keys set by Root. Empty `break_glass_keys` means the
+/// floor is unconfigured and every committee passes — so the caller MUST also
+/// gate on the on-chain enabled flag, and Root MUST seed the keys before arming.
+pub fn committee_covers_break_glass<K>(
+    selected_aura_keys: &[K],
+    break_glass_keys: &[[u8; 32]],
+) -> bool
+where
+    K: AsRef<[u8]>,
+{
+    if break_glass_keys.is_empty() {
+        return true;
+    }
+    selected_aura_keys.iter().any(|key| {
+        account_bytes_from_encoded(key.as_ref())
+            .is_some_and(|acct| break_glass_keys.iter().any(|bg| &acct == bg))
+    })
+}
+
 // ---------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------
@@ -885,5 +925,57 @@ mod tests {
         // after the full 13→9 cascade: n=9, q=7, slack 2 — but only reached by
         // surviving the 0-slack window first.
         assert_eq!(grandpa_quorum_threshold(9), 7);
+    }
+
+    // ── committee_covers_break_glass (mainnet-resilience #490) ───────
+
+    fn bg_key(b: u8) -> Vec<u8> {
+        alloc::vec![b; 32]
+    }
+
+    #[test]
+    fn break_glass_unconfigured_passes_any_committee() {
+        // Empty key set = floor not seeded: every committee passes, byte-identical
+        // to pre-#490 behaviour. The caller additionally gates on the enabled flag.
+        assert!(committee_covers_break_glass(&[bg_key(1), bg_key(2)], &[]));
+        let empty: Vec<Vec<u8>> = Vec::new();
+        assert!(committee_covers_break_glass(&empty, &[]));
+    }
+
+    #[test]
+    fn break_glass_present_in_committee_passes() {
+        let bg = [[7u8; 32]];
+        assert!(committee_covers_break_glass(&[bg_key(3), bg_key(7), bg_key(9)], &bg));
+    }
+
+    #[test]
+    fn break_glass_absent_from_committee_refuses() {
+        // The reset-corner case: an all-external draw with no FPS key present.
+        let bg = [[7u8; 32]];
+        assert!(!committee_covers_break_glass(&[bg_key(3), bg_key(4), bg_key(5)], &bg));
+    }
+
+    #[test]
+    fn break_glass_any_of_several_keys_satisfies() {
+        // Multiple FPS cores registered as break-glass; the committee holding any
+        // one of them clears the floor.
+        let bg = [[1u8; 32], [2u8; 32], [3u8; 32]];
+        assert!(committee_covers_break_glass(&[bg_key(9), bg_key(2)], &bg));
+        assert!(!committee_covers_break_glass(&[bg_key(9), bg_key(8)], &bg));
+    }
+
+    #[test]
+    fn break_glass_empty_committee_refuses_when_configured() {
+        // An empty draw cannot cover a configured break-glass key.
+        let empty: Vec<Vec<u8>> = Vec::new();
+        assert!(!committee_covers_break_glass(&empty, &[[7u8; 32]]));
+    }
+
+    #[test]
+    fn break_glass_short_key_does_not_match() {
+        // An unmappable (<32-byte) committee key can never satisfy the floor.
+        let bg = [[7u8; 32]];
+        let short = alloc::vec![alloc::vec![7u8; 8]];
+        assert!(!committee_covers_break_glass(&short, &bg));
     }
 }

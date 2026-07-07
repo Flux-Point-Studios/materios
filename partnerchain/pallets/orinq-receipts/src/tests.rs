@@ -1,5 +1,5 @@
 use crate as pallet_orinq_receipts;
-use crate::{pallet, pallet::GrandpaPendingChange, types::{ReceiptRecord, SlashReason}};
+use crate::{pallet, pallet::GrandpaPendingChange, types::{PinnedMember, SlashReason}};
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
     traits::{ConstBool, ConstU32, ConstU64, Currency, ReservableCurrency},
@@ -340,20 +340,13 @@ fn timestamp_comes_from_pallet_timestamp() {
 }
 
 // ---------------------------------------------------------------------------
-// rotate_authorities tests
+// on_initialize first-selected stamping
 // ---------------------------------------------------------------------------
 
 fn make_aura_ids(count: u8) -> Vec<sp_consensus_aura::sr25519::AuthorityId> {
     use sp_core::crypto::UncheckedFrom;
     (1..=count)
         .map(|i| sp_consensus_aura::sr25519::AuthorityId::unchecked_from([i; 32]))
-        .collect()
-}
-
-fn make_grandpa_ids(count: u8) -> sp_consensus_grandpa::AuthorityList {
-    use sp_core::crypto::UncheckedFrom;
-    (1..=count)
-        .map(|i| (sp_consensus_grandpa::AuthorityId::unchecked_from([i; 32]), 1))
         .collect()
 }
 
@@ -366,13 +359,13 @@ fn on_initialize_stamps_first_selected_for_active_aura_authorities() {
     // AccountId32([k;32]) == acc(k), matching find_block_author.
     use frame_support::traits::Hooks;
     new_test_ext().execute_with(|| {
-        OrinqReceipts::rotate_authorities(
-            RuntimeOrigin::root(),
-            make_aura_ids(2), // -> acc(1), acc(2)
-            make_grandpa_ids(2),
-            5,
+        // Seed enacted Aura authorities directly (acc(1), acc(2)); the runtime
+        // rotates authorities through the Cardano-driven session, not a pallet call.
+        let aura = frame_support::BoundedVec::<_, <Test as pallet_aura::Config>::MaxAuthorities>::try_from(
+            make_aura_ids(2),
         )
-        .unwrap();
+        .expect("2 <= MaxAuthorities");
+        pallet_aura::Authorities::<Test>::put(aura);
         assert_eq!(OrinqReceipts::candidate_first_selected(&acc(1)), None);
 
         System::set_block_number(5);
@@ -568,108 +561,188 @@ fn set_contribution_window_enabled_rejects_non_root() {
     });
 }
 
-#[test]
-fn rotate_authorities_works() {
-    new_test_ext().execute_with(|| {
-        let aura_ids = make_aura_ids(3);
-        let grandpa_ids = make_grandpa_ids(3);
+// ── break-glass floor (mainnet-resilience #490) ─────────────────────────────
 
-        assert_ok!(OrinqReceipts::rotate_authorities(
+#[test]
+fn break_glass_floor_disabled_and_empty_by_default() {
+    // A fresh chain ships the floor OFF with no keys — byte-identical spec-233
+    // behavior until Root seeds keys and arms it.
+    new_test_ext().execute_with(|| {
+        assert!(!OrinqReceipts::break_glass_floor_enabled());
+        assert!(OrinqReceipts::break_glass_aura_keys().is_empty());
+    });
+}
+
+#[test]
+fn set_break_glass_floor_enabled_works_for_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_break_glass_floor_enabled(
             RuntimeOrigin::root(),
-            aura_ids.clone(),
-            grandpa_ids.clone(),
-            5,
+            true
         ));
+        assert!(OrinqReceipts::break_glass_floor_enabled());
 
-        // Aura authorities updated immediately
-        let stored_aura = pallet_aura::Authorities::<Test>::get();
-        assert_eq!(stored_aura.len(), 3);
-
-        // Grandpa PendingChange was written (raw storage — type alias is pub(crate))
-        let pending_key = frame_support::storage::storage_prefix(b"Grandpa", b"PendingChange");
-        assert!(frame_support::storage::unhashed::exists(&pending_key));
-
-        // Stalled marker cleared (raw storage — type alias is pub(crate))
-        let stalled_key = frame_support::storage::storage_prefix(b"Grandpa", b"Stalled");
-        assert!(!frame_support::storage::unhashed::exists(&stalled_key));
+        let events = frame_system::Pallet::<Test>::events();
+        assert!(events.iter().any(|r| matches!(
+            r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::BreakGlassFloorEnabledUpdated {
+                enabled: true
+            })
+        )));
     });
 }
 
 #[test]
-fn rotate_authorities_rejects_non_root() {
+fn set_break_glass_floor_enabled_rejects_non_root() {
     new_test_ext().execute_with(|| {
         assert_noop!(
-            OrinqReceipts::rotate_authorities(
-                RuntimeOrigin::signed(acc(1)),
-                make_aura_ids(2),
-                make_grandpa_ids(2),
-                5,
-            ),
-            frame_support::error::BadOrigin
+            OrinqReceipts::set_break_glass_floor_enabled(RuntimeOrigin::signed(acc(9)), true),
+            sp_runtime::DispatchError::BadOrigin
         );
+        assert!(!OrinqReceipts::break_glass_floor_enabled());
     });
 }
 
 #[test]
-fn rotate_authorities_rejects_empty_set() {
+fn set_break_glass_aura_keys_works_for_root() {
     new_test_ext().execute_with(|| {
-        assert_noop!(
-            OrinqReceipts::rotate_authorities(
-                RuntimeOrigin::root(),
-                vec![],
-                vec![],
-                5,
-            ),
-            pallet::Error::<Test>::EmptyAuthoritySet
-        );
-    });
-}
-
-#[test]
-fn rotate_authorities_rejects_mismatched_counts() {
-    new_test_ext().execute_with(|| {
-        assert_noop!(
-            OrinqReceipts::rotate_authorities(
-                RuntimeOrigin::root(),
-                make_aura_ids(3),
-                make_grandpa_ids(2),
-                5,
-            ),
-            pallet::Error::<Test>::AuthorityCountMismatch
-        );
-    });
-}
-
-#[test]
-fn rotate_authorities_rejects_double_pending() {
-    new_test_ext().execute_with(|| {
-        // First rotation succeeds
-        assert_ok!(OrinqReceipts::rotate_authorities(
+        let keys = alloc::vec![[1u8; 32], [2u8; 32]];
+        assert_ok!(OrinqReceipts::set_break_glass_aura_keys(
             RuntimeOrigin::root(),
-            make_aura_ids(2),
-            make_grandpa_ids(2),
-            5,
+            keys.clone()
         ));
+        assert_eq!(OrinqReceipts::break_glass_aura_keys(), keys);
 
-        // Second rotation must fail — PendingChange already exists.
-        //
-        // Which error fires depends on the SDK version: our pallet's own
-        // `AuthorityChangeAlreadyPending` wins only if we can inspect the
-        // Grandpa state before calling `schedule_change`. Newer
-        // pallet-grandpa returns its own `ChangePending` from
-        // `schedule_change` first. Either way the invariant holds — the
-        // second rotation is rejected — so assert on the rejection, not on
-        // the specific discriminant.
-        let result = OrinqReceipts::rotate_authorities(
+        let events = frame_system::Pallet::<Test>::events();
+        assert!(events.iter().any(|r| matches!(
+            r.event,
+            RuntimeEvent::OrinqReceipts(crate::Event::BreakGlassAuraKeysUpdated { count: 2 })
+        )));
+
+        // A later empty set clears it (the caller must re-seed before arming).
+        assert_ok!(OrinqReceipts::set_break_glass_aura_keys(
             RuntimeOrigin::root(),
-            make_aura_ids(3),
-            make_grandpa_ids(3),
-            5,
+            alloc::vec![]
+        ));
+        assert!(OrinqReceipts::break_glass_aura_keys().is_empty());
+    });
+}
+
+#[test]
+fn set_break_glass_aura_keys_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_break_glass_aura_keys(
+                RuntimeOrigin::signed(acc(9)),
+                alloc::vec![[1u8; 32]]
+            ),
+            sp_runtime::DispatchError::BadOrigin
         );
-        assert!(
-            result.is_err(),
-            "Second rotation must fail while a change is pending; got {:?}",
-            result
+        assert!(OrinqReceipts::break_glass_aura_keys().is_empty());
+    });
+}
+
+#[test]
+fn set_break_glass_aura_keys_rejects_over_max_committee_size() {
+    // The mock's MaxCommitteeSize is 64; 65 keys must be rejected, not truncated.
+    new_test_ext().execute_with(|| {
+        let too_many: alloc::vec::Vec<[u8; 32]> = (0..65u16).map(|i| [i as u8; 32]).collect();
+        assert_noop!(
+            OrinqReceipts::set_break_glass_aura_keys(RuntimeOrigin::root(), too_many),
+            pallet::Error::<Test>::TooManyBreakGlassKeys
+        );
+        assert!(OrinqReceipts::break_glass_aura_keys().is_empty());
+    });
+}
+
+// ── PinnedCommittee (mainnet-resilience #491) ─────────────────────────────
+
+fn pinned_member(b: u8) -> PinnedMember {
+    PinnedMember { cross_chain: [b; 33], aura: [b; 32], grandpa: [b; 32] }
+}
+
+#[test]
+fn pinned_committee_none_by_default() {
+    new_test_ext().execute_with(|| {
+        assert!(OrinqReceipts::pinned_committee().is_none());
+    });
+}
+
+#[test]
+fn set_pinned_committee_works_for_root() {
+    new_test_ext().execute_with(|| {
+        let members = alloc::vec![pinned_member(1), pinned_member(2)];
+        assert_ok!(OrinqReceipts::set_pinned_committee(
+            RuntimeOrigin::root(),
+            members.clone(),
+            500u64
+        ));
+        let (stored, until) = OrinqReceipts::pinned_committee().expect("pin set");
+        assert_eq!(stored, members);
+        assert_eq!(until, 500u64);
+    });
+}
+
+#[test]
+fn set_pinned_committee_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_pinned_committee(
+                RuntimeOrigin::signed(acc(9)),
+                alloc::vec![pinned_member(1)],
+                500u64
+            ),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert!(OrinqReceipts::pinned_committee().is_none());
+    });
+}
+
+#[test]
+fn set_pinned_committee_rejects_empty() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::set_pinned_committee(RuntimeOrigin::root(), alloc::vec![], 500u64),
+            pallet::Error::<Test>::EmptyPinnedCommittee
+        );
+        assert!(OrinqReceipts::pinned_committee().is_none());
+    });
+}
+
+#[test]
+fn set_pinned_committee_rejects_over_max_authorities() {
+    // The mock's MaxAuthorities is 32; 33 members must be rejected, not truncated.
+    new_test_ext().execute_with(|| {
+        let too_many: alloc::vec::Vec<PinnedMember> =
+            (0..33u16).map(|i| pinned_member(i as u8)).collect();
+        assert_noop!(
+            OrinqReceipts::set_pinned_committee(RuntimeOrigin::root(), too_many, 500u64),
+            pallet::Error::<Test>::TooManyPinnedMembers
+        );
+        assert!(OrinqReceipts::pinned_committee().is_none());
+    });
+}
+
+#[test]
+fn clear_pinned_committee_works_for_root() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_pinned_committee(
+            RuntimeOrigin::root(),
+            alloc::vec![pinned_member(1)],
+            500u64
+        ));
+        assert!(OrinqReceipts::pinned_committee().is_some());
+        assert_ok!(OrinqReceipts::clear_pinned_committee(RuntimeOrigin::root()));
+        assert!(OrinqReceipts::pinned_committee().is_none());
+    });
+}
+
+#[test]
+fn clear_pinned_committee_rejects_non_root() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            OrinqReceipts::clear_pinned_committee(RuntimeOrigin::signed(acc(9))),
+            sp_runtime::DispatchError::BadOrigin
         );
     });
 }
