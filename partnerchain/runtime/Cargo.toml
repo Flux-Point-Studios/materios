@@ -44,6 +44,7 @@ pallet-aura = { workspace = true }
 pallet-balances = { workspace = true }
 pallet-grandpa = { workspace = true }
 pallet-multisig = { workspace = true }
+pallet-recovery = { workspace = true }
 pallet-utility = { workspace = true }
 pallet-sudo = { workspace = true }
 pallet-timestamp = { workspace = true }
@@ -148,6 +149,7 @@ std = [
     "pallet-balances/std",
     "pallet-grandpa/std",
     "pallet-multisig/std",
+    "pallet-recovery/std",
     "pallet-utility/std",
     "pallet-sudo/std",
     "pallet-timestamp/std",
@@ -195,6 +197,7 @@ runtime-benchmarks = [
     "pallet-balances/runtime-benchmarks",
     "pallet-grandpa/runtime-benchmarks",
     "pallet-multisig/runtime-benchmarks",
+    "pallet-recovery/runtime-benchmarks",
     "pallet-utility/runtime-benchmarks",
     "pallet-sudo/runtime-benchmarks",
     "pallet-timestamp/runtime-benchmarks",
@@ -234,6 +237,7 @@ try-runtime = [
     "pallet-balances/try-runtime",
     "pallet-grandpa/try-runtime",
     "pallet-multisig/try-runtime",
+    "pallet-recovery/try-runtime",
     "pallet-utility/try-runtime",
     "pallet-sudo/try-runtime",
     "pallet-timestamp/try-runtime",

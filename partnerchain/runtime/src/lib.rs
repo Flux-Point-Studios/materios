@@ -460,6 +460,41 @@ impl pallet_utility::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Recovery (mainnet-resilience #492)
+// ---------------------------------------------------------------------------
+//
+// The SECOND, independent path to Root. `pallet_sudo` alone is the bootstrap
+// paradox: lose the sudo key and every governance lever (authorize_upgrade,
+// the break-glass/PinnedCommittee setters, note_stalled-via-sudo) is closed
+// forever — a reset-class outcome no forkless upgrade can reach. Social recovery
+// gives a separate, geo-distributed friend set (independent custody domain, not
+// the sudo multisig signatories) a delayed path to recover the sudo ACCOUNT and
+// re-key sudo, surviving a custody-correlated loss of the primary multisig.
+//
+// DEFAULT-INERT: with no `create_recovery` configured on the sudo account this
+// pallet does nothing — byte-identical governance to today. Arming is a ceremony
+// (the sudo account calls `create_recovery(friends, threshold, delay_period)`
+// with the real recovery keys). The delay_period + `cancel_recovered`/
+// `remove_recovery` give the legitimate holders a veto window against a malicious
+// recovery, so the second path never weakens the first.
+parameter_types! {
+    pub const RecoveryConfigDepositBase: Balance = 1_000;
+    pub const RecoveryFriendDepositFactor: Balance = 500;
+    pub const RecoveryDeposit: Balance = 1_000;
+}
+
+impl pallet_recovery::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type Currency = Balances;
+    type ConfigDepositBase = RecoveryConfigDepositBase;
+    type FriendDepositFactor = RecoveryFriendDepositFactor;
+    type MaxFriends = ConstU32<9>;
+    type RecoveryDeposit = RecoveryDeposit;
+    type WeightInfo = pallet_recovery::weights::SubstrateWeight<Runtime>;
+}
+
+// ---------------------------------------------------------------------------
 // Orinq Receipts
 // ---------------------------------------------------------------------------
 
@@ -1308,6 +1343,8 @@ construct_runtime! {
         Billing: pallet_billing = 21,
         Oracle: pallet_oracle = 22,
         PerpEngine: pallet_perp_engine = 23,
+        // Second, independent path to Root (mainnet-resilience #492).
+        Recovery: pallet_recovery = 24,
     }
 }
 

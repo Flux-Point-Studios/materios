@@ -7,3 +7,4 @@ mod motra_only_fees;
 mod treasury_drip_migration;
 mod tee_attestation_integration;
 mod pinned_committee;
+mod recovery_second_root;

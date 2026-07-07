@@ -78,6 +78,7 @@ pallet-aura = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "p
 pallet-grandpa = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 pallet-multisig = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 pallet-utility = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
+pallet-recovery = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 substrate-frame-rpc-system = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
 frame-system-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
 # pallet-transaction-payment-rpc removed at spec 202 — see note above.
