@@ -413,8 +413,8 @@ pub(crate) async fn get_epoch_nonce(
 /// the transaction's position within the block (`tx.block_index`); yaci's
 /// equivalent is `transaction.tx_index`, so we JOIN `transaction` and order on
 /// `t.tx_index`, NOT `au.output_index` (the index within a single tx). The
-/// empty-asset-name match mirrors db-sync's `multi_asset.name = ''` so the
-/// candidate set can't be widened by another asset under the same policy.
+/// containment predicate matches the config policy id only (see
+/// `config_token_amounts_predicate`).
 #[cfg(feature = "candidate-source")]
 pub(crate) const GET_TOKEN_UTXO_FOR_EPOCH_SQL: &str = "SELECT au.inline_datum
 	 FROM address_utxo au
@@ -425,13 +425,17 @@ pub(crate) const GET_TOKEN_UTXO_FOR_EPOCH_SQL: &str = "SELECT au.inline_datum
 	 LIMIT 1";
 
 /// The `address_utxo.amounts` JSONB containment predicate that selects the
-/// config token: the policy id AND an empty asset name (mirrors db-sync's
-/// `multi_asset.name = ''`), so another asset under the same policy can't widen
-/// the candidate set.
+/// config token by policy id. We match policy only, NOT asset name: the
+/// D-parameter and permissioned-candidate policies are FPS-controlled, so no
+/// other asset is ever minted under them, and policy-only is the form proven
+/// byte-identical to db-sync in production. A `"asset_name":""` predicate would
+/// be strictly narrower and — if yaci-store's empty-name serialization differs
+/// from a literal `""` — could drop the config UTxO and wedge committee
+/// selection, so it is deliberately not constrained here.
 #[cfg(feature = "candidate-source")]
 pub(crate) fn config_token_amounts_predicate(policy_id: &[u8]) -> String {
 	let policy_hex = hex::encode(policy_id);
-	format!("[{{\"policy_id\":\"{policy_hex}\",\"asset_name\":\"\"}}]")
+	format!("[{{\"policy_id\":\"{policy_hex}\"}}]")
 }
 
 #[cfg(feature = "candidate-source")]
@@ -638,15 +642,14 @@ mod tests {
 		assert!(Block::try_from(row).is_err(), "negative block_time must decode to an error");
 	}
 
-	/// DEFECT 1+2 regression (FINALITY-CRITICAL): the committee-UTxO query must
+	/// DEFECT 1 regression (FINALITY-CRITICAL): the committee-UTxO query must
 	/// tie-break on the transaction's position within the block
 	/// (`transaction.tx_index`, db-sync `tx.block_index`), NOT `output_index`
-	/// (the index within a single tx), and must constrain the asset name to
-	/// empty so another asset under the same policy can't widen the candidate
-	/// set. Asserting against the built SQL keeps this offline (no live DB).
+	/// (the index within a single tx). Asserting against the built SQL keeps
+	/// this offline (no live DB).
 	#[cfg(feature = "candidate-source")]
 	#[test]
-	fn token_utxo_query_tie_breaks_on_tx_index_and_constrains_empty_asset_name() {
+	fn token_utxo_query_tie_breaks_on_tx_index() {
 		let sql = GET_TOKEN_UTXO_FOR_EPOCH_SQL;
 
 		// tie-break must be on the transaction block-position column, latest wins.
@@ -666,20 +669,21 @@ mod tests {
 		);
 	}
 
-	/// DEFECT 2 regression: the JSONB containment predicate the query binds must
-	/// pin the asset name to empty (mirrors db-sync `multi_asset.name = ''`), not
-	/// match on policy id alone.
+	/// The JSONB containment predicate must match the config token by policy id
+	/// only. Constraining the (empty) asset name would be strictly narrower and,
+	/// under an unverified empty-name serialization, could drop the config UTxO
+	/// and wedge selection — so it must NOT appear.
 	#[cfg(feature = "candidate-source")]
 	#[test]
-	fn token_utxo_amounts_predicate_pins_empty_asset_name() {
+	fn token_utxo_amounts_predicate_matches_policy_only() {
 		let predicate = config_token_amounts_predicate(&[0xab, 0xcd]);
 		assert!(
 			predicate.contains("\"policy_id\":\"abcd\""),
 			"predicate must carry the policy id; got: {predicate}"
 		);
 		assert!(
-			predicate.contains("\"asset_name\":\"\""),
-			"config-token filter must constrain empty asset_name; got: {predicate}"
+			!predicate.contains("asset_name"),
+			"predicate must match policy only, not asset_name; got: {predicate}"
 		);
 	}
 }
