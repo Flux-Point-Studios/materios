@@ -4680,6 +4680,7 @@ dependencies = [
  "substrate-frame-rpc-system",
  "time-source",
  "tokio",
+ "yaci-follower",
 ]
 
 [[package]]
@@ -12310,6 +12311,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7d8a75eaf6557bb84a65ace8609883db44a29951042ada9b393151532e41fcb"
 dependencies = [
  "xml-rs",
+]
+
+[[package]]
+name = "yaci-follower"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "authority-selection-inherents",
+ "bigdecimal 0.4.10",
+ "cardano-serialization-lib",
+ "chrono",
+ "derive-new",
+ "figment",
+ "futures",
+ "hex",
+ "hex-literal",
+ "itertools 0.13.0",
+ "log",
+ "lru",
+ "num-traits",
+ "pallet-sidechain-rpc",
+ "partner-chains-plutus-data",
+ "serde",
+ "serde_json",
+ "sidechain-domain",
+ "sidechain-mc-hash",
+ "sp-native-token-management",
+ "sp-timestamp",
+ "sqlx",
+ "substrate-prometheus-endpoint",
+ "thiserror 1.0.69",
+ "tokio",
 ]
 
 [[package]]

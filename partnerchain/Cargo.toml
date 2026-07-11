@@ -16,6 +16,7 @@ members = [
     # dependencies (hex-literal, tokio, etc.) are resolved correctly.
     "vendor/authority-selection-inherents",
     "vendor/pallet-session-validator-management",
+    "vendor/yaci-follower",
 ]
 
 [workspace.package]
@@ -194,6 +195,7 @@ sc-partner-chains-consensus-aura = { git = "https://github.com/input-output-hk/p
 sp-partner-chains-consensus-aura = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
 time-source = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
 db-sync-follower = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
+yaci-follower = { path = "vendor/yaci-follower" }
 main-chain-follower-mock = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }
 pallet-sidechain-rpc = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1", default-features = false }
 sp-session-validator-management-query = { git = "https://github.com/input-output-hk/partner-chains.git", tag = "v1.5.1" }

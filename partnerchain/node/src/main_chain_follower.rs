@@ -41,6 +41,13 @@ pub(crate) async fn create_cached_main_chain_follower_data_sources(
 					.into(),
 			)
 		})
+	} else if use_yaci_follower() {
+		log::info!("Using yaci-store main chain follower data sources");
+		create_cached_yaci_data_sources(metrics_opt).await.map_err(|err| {
+			ServiceError::Application(
+				format!("Failed to create yaci-store main chain follower: {err}").into(),
+			)
+		})
 	} else {
 		log::info!("Using db-sync main chain follower data sources");
 		create_cached_data_sources(metrics_opt).await.map_err(|err| {
@@ -49,6 +56,15 @@ pub(crate) async fn create_cached_main_chain_follower_data_sources(
 			)
 		})
 	}
+}
+
+/// Selects the yaci-store backend when `MAIN_CHAIN_FOLLOWER=yaci`. The backend
+/// reads from a yaci-store 3.0.0-beta3 Postgres (same connection env var as
+/// db-sync; point it at the yaci DB).
+fn use_yaci_follower() -> bool {
+	std::env::var("MAIN_CHAIN_FOLLOWER")
+		.map(|v| v.eq_ignore_ascii_case("yaci"))
+		.unwrap_or(false)
 }
 
 fn use_mock_follower() -> bool {
@@ -92,5 +108,40 @@ pub async fn create_cached_data_sources(
 			pool,
 			metrics_opt,
 		)?),
+	})
+}
+
+pub async fn create_cached_yaci_data_sources(
+	_metrics_opt: Option<McFollowerMetrics>,
+) -> Result<DataSources, Box<dyn Error + Send + Sync + 'static>> {
+	use yaci_follower::{
+		block::BlockDataSourceImpl as YaciBlockDataSourceImpl,
+		candidates::CandidatesDataSourceImpl as YaciCandidatesDataSourceImpl,
+		mc_hash::McHashDataSourceImpl as YaciMcHashDataSourceImpl,
+		native_token::NativeTokenManagementDataSourceImpl as YaciNativeTokenDataSourceImpl,
+		sidechain_rpc::SidechainRpcDataSourceImpl as YaciSidechainRpcDataSourceImpl,
+	};
+	// The yaci sources take `yaci_follower::McFollowerMetrics`, a distinct type
+	// from the `db_sync_follower::McFollowerMetrics` the node registers. Both
+	// register the same prometheus metric names against the same registry, so
+	// the already-registered db-sync handle cannot be re-registered as the yaci
+	// type without a name collision. The backends are runtime-exclusive
+	// (`MAIN_CHAIN_FOLLOWER=yaci`), so the yaci path runs without follower
+	// metrics; the `observed_async_trait` timing simply no-ops when None.
+	let yaci_metrics: Option<yaci_follower::metrics::McFollowerMetrics> = None;
+	let pool = yaci_follower::data_sources::get_connection_from_env().await?;
+	let block = Arc::new(YaciBlockDataSourceImpl::new_from_env(pool.clone()).await?);
+	Ok(DataSources {
+		sidechain_rpc: Arc::new(YaciSidechainRpcDataSourceImpl::new(
+			block.clone(),
+			yaci_metrics.clone(),
+		)),
+		mc_hash: Arc::new(YaciMcHashDataSourceImpl::new(block, yaci_metrics.clone())),
+		authority_selection: Arc::new(
+			YaciCandidatesDataSourceImpl::new(pool.clone(), yaci_metrics.clone())
+				.await?
+				.cached(CANDIDATES_FOR_EPOCH_CACHE_SIZE)?,
+		),
+		native_token: Arc::new(YaciNativeTokenDataSourceImpl::new_from_env(pool, yaci_metrics)?),
 	})
 }
