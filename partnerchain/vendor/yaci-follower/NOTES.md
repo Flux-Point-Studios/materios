@@ -124,15 +124,20 @@ follower only needs the current/just-past epoch, which is always in-window.
    - `MITHRIL_CLIENT_BIN` (path to the pinned `mithril-client`; defaults to
      `mithril-client` on `PATH`)
 
+   The genesis vkey is the trust anchor for the whole certificate chain, so it
+   is fetched from an immutable Mithril release tag (`2617.0`), never the
+   mutable `main` branch. Bump the tag deliberately when upgrading the pinned
+   `mithril-client`.
+
    Preprod:
    ```bash
    export MITHRIL_AGGREGATOR_ENDPOINT="https://aggregator.release-preprod.api.mithril.network/aggregator"
-   export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-preprod/genesis.vkey)
+   export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/2617.0/mithril-infra/configuration/release-preprod/genesis.vkey)
    ```
    Mainnet (magic 764824073):
    ```bash
    export MITHRIL_AGGREGATOR_ENDPOINT="https://aggregator.release-mainnet.api.mithril.network/aggregator"
-   export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-mainnet/genesis.vkey)
+   export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/2617.0/mithril-infra/configuration/release-mainnet/genesis.vkey)
    ```
 
 The per-epoch result is cached in-process (a Mithril SD is fixed once its

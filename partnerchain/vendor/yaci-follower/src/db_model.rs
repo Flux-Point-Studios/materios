@@ -40,7 +40,13 @@ pub(crate) fn parse_hash28(hex_hash: &str) -> Result<[u8; 28], String> {
 }
 
 /// Converts a yaci `block_time` (unix seconds, `bigint`) into a `NaiveDateTime`.
+/// A negative `block_time` (pre-1970) is rejected here at the decode boundary so
+/// the downstream `Block -> MainchainBlock` timestamp (a `u64` since the epoch)
+/// can never receive a negative value and panic the follower.
 pub(crate) fn block_time_to_naive(unix_seconds: i64) -> Result<NaiveDateTime, String> {
+	if unix_seconds < 0 {
+		return Err(format!("block_time is negative (pre-1970): {unix_seconds}"));
+	}
 	DateTime::from_timestamp(unix_seconds, 0)
 		.map(|dt| dt.naive_utc())
 		.ok_or_else(|| format!("block_time out of range: {unix_seconds}"))
@@ -58,12 +64,17 @@ pub(crate) struct Block {
 #[cfg(feature = "block-source")]
 impl From<Block> for MainchainBlock {
 	fn from(b: Block) -> Self {
+		// `block_time_to_naive` rejects negative unix seconds at the decode
+		// boundary, so `timestamp()` is always >= 0 here; clamp instead of
+		// `.expect(..)` so a stray pre-1970 `Block` degrades to 0 rather than
+		// panicking (crashing) the follower.
+		let timestamp = u64::try_from(b.time.and_utc().timestamp()).unwrap_or(0);
 		MainchainBlock {
 			number: McBlockNumber(b.block_no),
 			hash: McBlockHash(b.hash),
 			epoch: McEpochNumber(b.epoch_no),
 			slot: McSlotNumber(b.slot_no),
-			timestamp: b.time.and_utc().timestamp().try_into().expect("i64 timestamp is valid u64"),
+			timestamp,
 		}
 	}
 }
@@ -305,7 +316,9 @@ pub(crate) async fn get_latest_stable_epoch(
 	.bind(security_parameter as i64)
 	.fetch_optional(pool)
 	.await?;
-	Ok(row.map(|(e,)| e as u32))
+	// db-sync funnels this through `EpochNumber::from` (a checked `i32 -> u32`
+	// `try_into`); mirror that instead of an unchecked `as u32` cast.
+	row.map(|(e,)| u32::try_from(e).map_err(decode_err)).transpose().map_err(Into::into)
 }
 
 /// Stake distribution for an epoch. CRITICAL: filters on `active_epoch`, which
@@ -392,25 +405,46 @@ pub(crate) async fn get_epoch_nonce(
 /// Latest UTxO at the given asset's policy, produced in an epoch `<= epoch`.
 /// Mirrors db-sync's `get_token_utxo_for_epoch`; yaci carries the policy id in
 /// the `address_utxo.amounts` JSONB array.
+///
+/// The tie-break is FINALITY-CRITICAL: when two config-policy UTxOs share a
+/// Cardano block the follower must pick the same one db-sync picks, or a
+/// yaci-backed node seats a different Ariadne committee (D-parameter +
+/// permissioned-candidate list) and GRANDPA finality wedges. db-sync orders on
+/// the transaction's position within the block (`tx.block_index`); yaci's
+/// equivalent is `transaction.tx_index`, so we JOIN `transaction` and order on
+/// `t.tx_index`, NOT `au.output_index` (the index within a single tx). The
+/// empty-asset-name match mirrors db-sync's `multi_asset.name = ''` so the
+/// candidate set can't be widened by another asset under the same policy.
+#[cfg(feature = "candidate-source")]
+pub(crate) const GET_TOKEN_UTXO_FOR_EPOCH_SQL: &str = "SELECT au.inline_datum
+	 FROM address_utxo au
+	 INNER JOIN transaction t ON t.tx_hash = au.tx_hash
+	 WHERE au.amounts @> $1::jsonb
+	   AND au.epoch <= $2
+	 ORDER BY au.block DESC, t.tx_index DESC
+	 LIMIT 1";
+
+/// The `address_utxo.amounts` JSONB containment predicate that selects the
+/// config token: the policy id AND an empty asset name (mirrors db-sync's
+/// `multi_asset.name = ''`), so another asset under the same policy can't widen
+/// the candidate set.
+#[cfg(feature = "candidate-source")]
+pub(crate) fn config_token_amounts_predicate(policy_id: &[u8]) -> String {
+	let policy_hex = hex::encode(policy_id);
+	format!("[{{\"policy_id\":\"{policy_hex}\",\"asset_name\":\"\"}}]")
+}
+
 #[cfg(feature = "candidate-source")]
 pub(crate) async fn get_token_utxo_for_epoch(
 	pool: &Pool<Postgres>,
 	policy_id: &[u8],
 	epoch: u32,
 ) -> Result<Option<TokenTxOutput>, SqlxError> {
-	let policy_hex = hex::encode(policy_id);
-	let row = sqlx::query_as::<_, TokenTxOutputRow>(
-		"SELECT au.inline_datum
-		 FROM address_utxo au
-		 WHERE au.amounts @> $1::jsonb
-		   AND au.epoch <= $2
-		 ORDER BY au.block DESC, au.output_index DESC
-		 LIMIT 1",
-	)
-	.bind(format!("[{{\"policy_id\":\"{policy_hex}\"}}]"))
-	.bind(epoch as i32)
-	.fetch_optional(pool)
-	.await?;
+	let row = sqlx::query_as::<_, TokenTxOutputRow>(GET_TOKEN_UTXO_FOR_EPOCH_SQL)
+		.bind(config_token_amounts_predicate(policy_id))
+		.bind(epoch as i32)
+		.fetch_optional(pool)
+		.await?;
 	Ok(row.map(TokenTxOutput::try_from).transpose()?)
 }
 
@@ -579,5 +613,73 @@ mod tests {
 		// 1_596_491_091 = 2020-08-03T20:24:51Z (Cardano Shelley-era timestamp).
 		let dt = block_time_to_naive(1_596_491_091).expect("in range");
 		assert_eq!(dt.and_utc().timestamp(), 1_596_491_091);
+	}
+
+	/// DEFECT 3 regression: a negative (pre-1970) `block_time` must yield a
+	/// decode error, never panic the follower.
+	#[test]
+	fn negative_block_time_is_a_decode_error_not_a_panic() {
+		let err = block_time_to_naive(-1).expect_err("negative block_time must error");
+		assert!(err.contains("negative"), "unexpected error message: {err}");
+	}
+
+	/// DEFECT 3 regression: the full `BlockRow -> Block` decode path rejects a
+	/// negative `block_time` as a `sqlx::Error::Decode` (the surrounding-code
+	/// convention) rather than panicking.
+	#[test]
+	fn block_row_with_negative_block_time_decodes_to_error() {
+		let row = BlockRow {
+			number: 1,
+			hash: "67d682b519036ae9e5d9b0e624ba3cddc4426bebebc56ba96f1287897c7f051c".to_string(),
+			epoch: 0,
+			slot: 0,
+			block_time: -100,
+		};
+		assert!(Block::try_from(row).is_err(), "negative block_time must decode to an error");
+	}
+
+	/// DEFECT 1+2 regression (FINALITY-CRITICAL): the committee-UTxO query must
+	/// tie-break on the transaction's position within the block
+	/// (`transaction.tx_index`, db-sync `tx.block_index`), NOT `output_index`
+	/// (the index within a single tx), and must constrain the asset name to
+	/// empty so another asset under the same policy can't widen the candidate
+	/// set. Asserting against the built SQL keeps this offline (no live DB).
+	#[cfg(feature = "candidate-source")]
+	#[test]
+	fn token_utxo_query_tie_breaks_on_tx_index_and_constrains_empty_asset_name() {
+		let sql = GET_TOKEN_UTXO_FOR_EPOCH_SQL;
+
+		// tie-break must be on the transaction block-position column, latest wins.
+		assert!(
+			sql.contains("ORDER BY au.block DESC, t.tx_index DESC"),
+			"tie-break must match db-sync's `tx.block_index DESC`; got:\n{sql}"
+		);
+		// must JOIN the transaction table on the shared tx hash.
+		assert!(
+			sql.contains("INNER JOIN transaction t ON t.tx_hash = au.tx_hash"),
+			"query must JOIN transaction to reach tx_index; got:\n{sql}"
+		);
+		// the wrong tie-break column must be gone entirely.
+		assert!(
+			!sql.contains("output_index"),
+			"tie-break must not order by output_index (index within a tx); got:\n{sql}"
+		);
+	}
+
+	/// DEFECT 2 regression: the JSONB containment predicate the query binds must
+	/// pin the asset name to empty (mirrors db-sync `multi_asset.name = ''`), not
+	/// match on policy id alone.
+	#[cfg(feature = "candidate-source")]
+	#[test]
+	fn token_utxo_amounts_predicate_pins_empty_asset_name() {
+		let predicate = config_token_amounts_predicate(&[0xab, 0xcd]);
+		assert!(
+			predicate.contains("\"policy_id\":\"abcd\""),
+			"predicate must carry the policy id; got: {predicate}"
+		);
+		assert!(
+			predicate.contains("\"asset_name\":\"\""),
+			"config-token filter must constrain empty asset_name; got: {predicate}"
+		);
 	}
 }

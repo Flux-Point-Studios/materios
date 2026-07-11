@@ -92,7 +92,7 @@ Enable + configure (see NOTES.md "Mithril-stake seam" for full detail):
 cargo build -p yaci-follower --features "block-source,candidate-source,native-token,mc-hash,sidechain-rpc,mithril-stake"
 # node runtime env (preprod)
 export MITHRIL_AGGREGATOR_ENDPOINT="https://aggregator.release-preprod.api.mithril.network/aggregator"
-export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/release-preprod/genesis.vkey)
+export MITHRIL_GENESIS_VERIFICATION_KEY=$(curl -fsSL https://raw.githubusercontent.com/input-output-hk/mithril/2617.0/mithril-infra/configuration/release-preprod/genesis.vkey)
 export MITHRIL_CLIENT_BIN=/path/to/mithril-client   # pinned binary (distribution 2617.0+)
 ```
 Mainnet: swap to `release-mainnet` aggregator + vkey (magic 764824073).

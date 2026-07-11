@@ -177,6 +177,15 @@ fn download_verified_stake_distribution(
 ) -> Result<String, String> {
 	let dir = std::env::temp_dir().join(format!("mithril-sd-{mithril_epoch}"));
 	std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {dir:?}: {e}"))?;
+	// The cert-verified stake distribution lands here; keep it owner-only so a
+	// world-readable, predictable temp path can't leak or be pre-created by
+	// another local user under the same shared temp dir.
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+			.map_err(|e| format!("chmod 0700 {dir:?}: {e}"))?;
+	}
 
 	let output = std::process::Command::new(&config.client_bin)
 		.args([
