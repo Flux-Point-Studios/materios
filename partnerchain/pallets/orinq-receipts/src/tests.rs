@@ -3079,3 +3079,90 @@ mod scale_cert_parity {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Post-certification attests (spec-235 phantom guard)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn attest_after_certification_is_a_benign_noop() {
+    new_test_ext().execute_with(|| {
+        let committee_seeds: Vec<u8> = (1u8..=5).collect();
+        seed_submitter_and_committee(10, &committee_seeds);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            3
+        ));
+
+        let rid = H256::from([0xB1; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xB2; 32])));
+        let cert_hash = canonical_for(rid);
+        for s in [1u8, 2, 3] {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                cert_hash
+            ));
+        }
+        assert!(pallet::Attestations::<Test>::get(rid).is_none());
+        let late_before: Vec<u128> =
+            [4u8, 5].iter().map(|&s| Balances::free_balance(&acc(s))).collect();
+
+        // Late attests after certification must not re-create the
+        // Attestations entry (the pre-spec-235 phantom), must not pay
+        // rewards, and must not strike the attestor.
+        for s in [4u8, 5] {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                cert_hash
+            ));
+        }
+        assert!(pallet::Attestations::<Test>::get(rid).is_none());
+        for (i, &s) in [4u8, 5].iter().enumerate() {
+            assert_eq!(Balances::free_balance(&acc(s)), late_before[i]);
+            assert_eq!(pallet::BadAttestStrikes::<Test>::get(acc(s)), 0);
+        }
+    });
+}
+
+#[test]
+fn six_attests_pay_the_certification_exactly_once() {
+    new_test_ext().execute_with(|| {
+        let committee_seeds: Vec<u8> = (1u8..=6).collect();
+        seed_submitter_and_committee(10, &committee_seeds);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            3
+        ));
+
+        let rid = H256::from([0xC1; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xC2; 32])));
+        let cert_hash = canonical_for(rid);
+        let before: Vec<u128> =
+            committee_seeds.iter().map(|&s| Balances::free_balance(&acc(s))).collect();
+
+        for &s in committee_seeds.iter() {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                cert_hash
+            ));
+        }
+
+        // Threshold fired once at the third attest: only signers 1-3 earn
+        // the attestation reward; 4-6 arrived post-certification and earn
+        // nothing (pre-spec-235 they re-triggered a second full payout).
+        for (i, &s) in committee_seeds.iter().enumerate() {
+            let delta = Balances::free_balance(&acc(s)) - before[i];
+            if s <= 3 {
+                assert!(delta > 0, "signer {} should earn the reward", s);
+            } else {
+                assert_eq!(delta, 0, "late signer {} must earn nothing", s);
+            }
+        }
+        assert!(pallet::Attestations::<Test>::get(rid).is_none());
+    });
+}

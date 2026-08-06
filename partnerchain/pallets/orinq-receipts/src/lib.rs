@@ -1508,6 +1508,16 @@ pub mod pallet {
             let committee = CommitteeMembers::<T>::get();
             ensure!(committee.contains(&attester), Error::<T>::NotCommitteeMember);
 
+            // Attests landing after certification must be benign no-ops.
+            // Threshold removes the `Attestations` entry, so a late attest
+            // would otherwise re-create it (stranding a phantom entry in the
+            // map forever) and, with enough stragglers, re-fire the whole
+            // threshold payout a second time.
+            let record = Receipts::<T>::get(receipt_id).ok_or(Error::<T>::ReceiptNotFound)?;
+            if record.availability_cert_hash != [0u8; 32] {
+                return Ok(());
+            }
+
             // The receipt must exist and `claimed_hash` must equal the
             // runtime-computed canonical hash. Stale daemons take a strike
             // rather than poisoning the receipt's `availability_cert_hash`.
