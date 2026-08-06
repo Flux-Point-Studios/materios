@@ -268,11 +268,11 @@ fn ariadne_3_to_2_test() {
 	let committee = calculated_committee.unwrap();
 	let committee_names =
 		committee.iter().map(|(id, _)| account_id_to_name(id)).collect::<Vec<_>>();
-	// [materios-patch: ariadne-output-dedup] Expected vector updated post-dedup.
-	// Pre-dedup (upstream with-replacement output):
-	//   vec!["bob", "charlie", "charlie", "alice", "bob"]
-	// First-seen order preserved: bob (seat 0), charlie (seat 1), alice (seat 3).
-	let expected_committee_names = vec!["bob", "charlie", "alice"];
+	// [materios-patch: force-include-when-fits] 5 candidates (3 permissioned +
+	// 2 registered) all fit in the 5-seat committee, so ALL are seated in
+	// account_id-sorted order. The with-replacement draw used to drop dave+eve
+	// (~["bob","charlie","charlie","alice","bob"] → 3 distinct) — the n=3 bug.
+	let expected_committee_names = vec!["bob", "charlie", "alice", "dave", "eve"];
 
 	assert_eq!(committee_names, expected_committee_names);
 }
@@ -332,13 +332,13 @@ fn ariadne_4_to_7_test() {
 	let committee = calculated_committee.unwrap();
 	let committee_names =
 		committee.iter().map(|(id, _)| account_id_to_name(id)).collect::<Vec<_>>();
-	// [materios-patch: ariadne-output-dedup] Expected vector updated post-dedup.
-	// Pre-dedup (upstream with-replacement output):
-	//   vec!["bob", "charlie", "henry", "ida", "kim", "bob", "alice", "greg",
-	//        "ida", "ferdie", "henry"]
-	// First-seen ordering preserved; duplicates of bob, ida, henry collapse.
-	let expected_committee_names =
-		vec!["bob", "charlie", "henry", "ida", "kim", "alice", "greg", "ferdie"];
+	// [materios-patch: force-include-when-fits] 11 candidates (4 permissioned +
+	// 7 registered) all fit in the 11-seat committee, so ALL are seated in
+	// account_id-sorted order. The with-replacement draw used to drop dave,
+	// james, eve (8 distinct) — the same class of miss as the live n=3 dip.
+	let expected_committee_names = vec![
+		"bob", "greg", "charlie", "henry", "ferdie", "alice", "ida", "dave", "james", "kim", "eve",
+	];
 
 	assert_eq!(committee_names, expected_committee_names);
 }
@@ -462,6 +462,44 @@ fn ariadne_pathological_integration_no_duplicates_in_output() {
 		"deduped committee should satisfy the safety floor, got {}",
 		committee.len()
 	);
+}
+
+#[test]
+fn force_includes_all_candidates_that_fit_in_committee() {
+	// [materios-patch: force-include-when-fits] The IOG weighted_selection
+	// sampler draws committee_size seats WITH REPLACEMENT, so when there are
+	// fewer distinct candidates than seats it can miss one entirely, yielding a
+	// smaller committee than the candidate set allows. On the live 4-core chain
+	// this produced n=3 zero-slack committees in ~2.4% of epochs. When the
+	// eligible candidates all fit (count <= committee_size) every one must be
+	// seated -- for EVERY epoch seed, not "usually".
+	let permissioned = vec![ALICE, BOB, CHARLIE, DAVE];
+	let registered = vec![];
+	for epoch in 0..12u64 {
+		// 4 equal-weight candidates, 6 seats: the with-replacement sampler
+		// drops one in ~half the seeds; the fix must return all 4 for every one.
+		let d_parameter =
+			DParameter { num_permissioned_candidates: 6, num_registered_candidates: 0 };
+		let inputs =
+			create_authority_selection_inputs(&permissioned, &registered, d_parameter);
+		let committee = select_authorities::<AccountId, AccountKeys, ConstU32<32>>(
+			UtxoId::default(),
+			inputs,
+			ScEpochNumber(epoch),
+		)
+		.expect("committee should be produced");
+		let mut distinct: HashMap<&'static str, u32> = HashMap::new();
+		for (id, _) in &committee {
+			*distinct.entry(account_id_to_name(id)).or_insert(0) += 1;
+		}
+		assert_eq!(
+			distinct.len(),
+			4,
+			"epoch {}: all 4 fitting candidates must seat (with-replacement dropped one); got {:?}",
+			epoch,
+			distinct.keys().collect::<Vec<_>>()
+		);
+	}
 }
 
 // helpers

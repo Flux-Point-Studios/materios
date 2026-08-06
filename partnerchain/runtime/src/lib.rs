@@ -169,6 +169,24 @@ pub mod opaque {
 pub type CrossChainPublic = opaque::cross_chain_app::Public;
 use opaque::SessionKeys;
 
+/// Rebuild a committee tuple `(CrossChainPublic, SessionKeys)` from an emergency
+/// pinned member's raw keys (mainnet-resilience #491). Mirrors the vendor's
+/// committee construction exactly — `account_id: ecdsa::Public.into()`,
+/// `account_keys: (sr25519::Public, ed25519::Public).into()` — so a pinned member
+/// installs the identical authority tuple the Ariadne path would for the same
+/// keys, and the session pallet maps validators to the keys their nodes hold.
+fn reconstruct_pinned_member(
+    m: &pallet_orinq_receipts::types::PinnedMember,
+) -> (CrossChainPublic, SessionKeys) {
+    let account: CrossChainPublic = sp_core::ecdsa::Public::from(m.cross_chain).into();
+    let keys: SessionKeys = (
+        sp_core::sr25519::Public::from(m.aura),
+        sp_core::ed25519::Public::from(m.grandpa),
+    )
+        .into();
+    (account, keys)
+}
+
 // ---------------------------------------------------------------------------
 // Runtime version
 // ---------------------------------------------------------------------------
@@ -178,10 +196,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 230,
+    spec_version: 235,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
-    transaction_version: 3,
+    transaction_version: 4,
     state_version: 1,
 };
 
@@ -442,6 +460,41 @@ impl pallet_utility::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
+// Recovery (mainnet-resilience #492)
+// ---------------------------------------------------------------------------
+//
+// The SECOND, independent path to Root. `pallet_sudo` alone is the bootstrap
+// paradox: lose the sudo key and every governance lever (authorize_upgrade,
+// the break-glass/PinnedCommittee setters, note_stalled-via-sudo) is closed
+// forever — a reset-class outcome no forkless upgrade can reach. Social recovery
+// gives a separate, geo-distributed friend set (independent custody domain, not
+// the sudo multisig signatories) a delayed path to recover the sudo ACCOUNT and
+// re-key sudo, surviving a custody-correlated loss of the primary multisig.
+//
+// DEFAULT-INERT: with no `create_recovery` configured on the sudo account this
+// pallet does nothing — byte-identical governance to today. Arming is a ceremony
+// (the sudo account calls `create_recovery(friends, threshold, delay_period)`
+// with the real recovery keys). The delay_period + `cancel_recovered`/
+// `remove_recovery` give the legitimate holders a veto window against a malicious
+// recovery, so the second path never weakens the first.
+parameter_types! {
+    pub const RecoveryConfigDepositBase: Balance = 1_000;
+    pub const RecoveryFriendDepositFactor: Balance = 500;
+    pub const RecoveryDeposit: Balance = 1_000;
+}
+
+impl pallet_recovery::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type Currency = Balances;
+    type ConfigDepositBase = RecoveryConfigDepositBase;
+    type FriendDepositFactor = RecoveryFriendDepositFactor;
+    type MaxFriends = ConstU32<9>;
+    type RecoveryDeposit = RecoveryDeposit;
+    type WeightInfo = pallet_recovery::weights::SubstrateWeight<Runtime>;
+}
+
+// ---------------------------------------------------------------------------
 // Orinq Receipts
 // ---------------------------------------------------------------------------
 
@@ -678,12 +731,59 @@ parameter_types! {
 /// Committee liveness filter (task #410). A registered (trustless) SPO
 /// candidate selectable for longer than the grace window yet producing no
 /// block within the liveness window is dropped from selection, so a dead
-/// registration cannot inflate the GRANDPA quorum and wedge finality. Eras
-/// are ~14_400 blocks (~24h @ 6s); permissioned (FPS) candidates are never
-/// filtered. MAINNET: retune to mainnet block time and ensure the preprod
-/// vendor relaxations (ariadne `<=`, db-sync offset 0) are reverted first.
-const LIVENESS_GRACE_BLOCKS: u32 = 14_400; // 1 era
+/// registration cannot inflate the GRANDPA quorum and wedge finality. Grace is
+/// 1_800 blocks (~3h @ 6s) — long enough for a snapshot-bootstrapped node to be
+/// selected and author its first block, short enough that a never-authoring
+/// dead registration vacates its committee seat (and the finality slack it
+/// holds) in ~3h instead of a full era. Eras are ~14_400 blocks (~24h @ 6s);
+/// permissioned (FPS) candidates are never filtered. MAINNET: retune to mainnet
+/// block time and ensure the preprod vendor relaxations (ariadne `<=`, db-sync
+/// offset 0) are reverted first.
+const LIVENESS_GRACE_BLOCKS: u32 = 1_800; // ~3h @ 6s
 const LIVENESS_WINDOW_BLOCKS: u32 = 28_800; // 2 eras (~48h)
+
+/// Dead-CORE eviction (Residual #2, activated by spec-233 — the ceremony owns
+/// the single 232→233 spec_version bump, this source does not bump it). Cores
+/// are exempt from the registered filter by design, so a genuinely-dead core
+/// otherwise inflates the GRANDPA quorum forever and the only remedy would be
+/// the forbidden L1 D-param re-shrink. `filter_dead_permissioned` instead drops
+/// the dead core from the permissioned pool before the draw; the vendor's dedup
+/// then collapses the distinct committee, so the quorum shrinks WITHOUT touching
+/// the L1 D-parameter. Because cores are trusted and few, the thresholds are
+/// MUCH longer than the registered ones — no reboot, deploy, snapshot restore,
+/// or brief partition flaps a healthy core out; only a multi-day silence reads
+/// as dead. Gated OFF by the `CoreEvictionEnabled` governance flag and capped at
+/// one eviction per selection. MAINNET: retune to mainnet block time alongside
+/// the registered constants.
+const CORE_LIVENESS_GRACE_BLOCKS: u32 = 14_400; // ~24h @ 6s (vs registered 1_800)
+const CORE_LIVENESS_WINDOW_BLOCKS: u32 = 100_800; // ~7d @ 6s (vs registered 28_800)
+/// At most this many dead cores leave per selection — the rate cap that makes a
+/// buggy or hostile predicate unable to collapse the FPS backbone in one epoch.
+const CORE_MAX_EVICTIONS_PER_SELECTION: usize = 1;
+
+// Cores must be strictly harder to evict than registered candidates.
+const _: () = assert!(CORE_LIVENESS_GRACE_BLOCKS > LIVENESS_GRACE_BLOCKS);
+const _: () = assert!(CORE_LIVENESS_WINDOW_BLOCKS > LIVENESS_WINDOW_BLOCKS);
+
+/// R1 Lever 1 (Residual #1, activated by spec-233 — the ceremony owns the single
+/// 232→233 spec_version bump, this source does not bump it). When the
+/// `ContributionWindowEnabled` governance flag is ON, `select_authorities` judges
+/// the registered (external) liveness filter against this short "currently
+/// contributing" horizon instead of `LIVENESS_WINDOW_BLOCKS`, so a seated
+/// external that goes silent mid-epoch is shed from the NEXT Ariadne draw within
+/// ~1 epoch rather than after ~48h. That makes `NextCommittee` a cores-only fire
+/// target fast enough for R1's `Grandpa::note_stalled` break-glass G2 fire-gate
+/// during a `>f` external-failure wedge, with no Cardano D-param round-trip. ~3h
+/// ≈ the grace magnitude and > the ~200–450-block snapshot-to-tip restore with
+/// ~4× margin, so routine restarts do not flap a healthy external out. Cores are
+/// never registered-filtered, so the backbone is untouched; the post-draw floor
+/// keeps the full window, so the change can only SHED a draw, never strand
+/// quorum. Gated OFF by default (identical to spec-231/232). MAINNET: retune to
+/// mainnet block time alongside the registered constants.
+const LIVENESS_CONTRIBUTION_WINDOW: u32 = 1_800; // ~3h @ 6s
+
+// The contribution window only ever SHORTENS the registered eviction horizon.
+const _: () = assert!(LIVENESS_CONTRIBUTION_WINDOW <= LIVENESS_WINDOW_BLOCKS);
 
 impl pallet_session_validator_management::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
@@ -698,6 +798,40 @@ impl pallet_session_validator_management::Config for Runtime {
         input: AuthoritySelectionInputs,
         sidechain_epoch: ScEpochNumber,
     ) -> Option<BoundedVec<(Self::AuthorityId, Self::AuthorityKeys), Self::MaxValidators>> {
+        // Emergency pinned committee (mainnet-resilience #491): the L1-independent
+        // override. Read FIRST — a committed-storage read so author and verifier
+        // agree — and while it is set and unexpired, return the reconstructed
+        // committee VERBATIM, bypassing the entire Ariadne draw, liveness filter,
+        // and quorum/break-glass floors. Reconstruction mirrors the vendor's
+        // committee-tuple construction exactly (ecdsa -> CrossChainPublic;
+        // (sr25519, ed25519) -> SessionKeys). Any malformed/oversized/empty pin
+        // fails safe: fall through to the normal L1-driven selection.
+        if let Some((members, until_epoch)) =
+            pallet_orinq_receipts::Pallet::<Runtime>::pinned_committee()
+        {
+            if sidechain_epoch.0 <= until_epoch && !members.is_empty() {
+                let chosen: Vec<(CrossChainPublic, SessionKeys)> =
+                    members.iter().map(reconstruct_pinned_member).collect();
+                match BoundedVec::try_from(chosen) {
+                    Ok(bounded) => {
+                        log::warn!(
+                            target: "runtime::committee-liveness",
+                            "PINNED COMMITTEE active for epoch {} (until {}): installing {} members verbatim, bypassing Ariadne selection",
+                            sidechain_epoch.0,
+                            until_epoch,
+                            bounded.len(),
+                        );
+                        return Some(bounded);
+                    }
+                    Err(_) => log::error!(
+                        target: "runtime::committee-liveness",
+                        "pinned committee ({} members) exceeds MaxValidators; ignoring pin, using Ariadne selection",
+                        members.len(),
+                    ),
+                }
+            }
+        }
+
         // Filter out duplicate keys, cap list sizes, and reject whole-input
         // invariant violations: the registered-candidates list is untrusted
         // db-sync output until D<1.0.
@@ -725,11 +859,27 @@ impl pallet_session_validator_management::Config for Runtime {
         // above the live-voter count and wedging finality (the 2026-06 six-day
         // stall). Permissioned (FPS) candidates are never filtered.
         let now: u32 = frame_system::Pallet::<Runtime>::block_number();
+        // R1 Lever 1 (Residual #1 / spec-233), gated OFF by the Root-set
+        // `ContributionWindowEnabled` flag. When armed, the registered filter
+        // judges a seated external silent past the short LIVENESS_CONTRIBUTION_WINDOW
+        // (~3h) as dead instead of waiting the full ~48h LIVENESS_WINDOW_BLOCKS, so
+        // NextCommittee sheds a silently-failed external within ~1 epoch — fast
+        // enough that R1's note_stalled break-glass has a cores-only fire target
+        // during a >f mid-epoch external failure, with no Cardano D-param
+        // round-trip. Cores are never registered-filtered, and the post-draw floor
+        // below still uses the full window, so this can only SHED a draw, never
+        // strand quorum. OFF → identical to spec-231/232 (~48h horizon).
+        let registered_window =
+            if pallet_orinq_receipts::Pallet::<Runtime>::contribution_window_enabled() {
+                LIVENESS_CONTRIBUTION_WINDOW
+            } else {
+                LIVENESS_WINDOW_BLOCKS
+            };
         let (sanitized, dropped) = committee_liveness::filter_dead_registered(
             sanitized,
             now,
             LIVENESS_GRACE_BLOCKS,
-            LIVENESS_WINDOW_BLOCKS,
+            registered_window,
             liveness_of,
         );
         if dropped > 0 {
@@ -737,6 +887,44 @@ impl pallet_session_validator_management::Config for Runtime {
                 target: "committee_liveness",
                 "dropped {} dead registered candidate(s) from selection at block {}",
                 dropped, now,
+            );
+        }
+
+        // Dead-CORE eviction (Residual #2 / spec-233), gated OFF by the Root-set
+        // `CoreEvictionEnabled` flag — shipped false, flipped ON via the 2-of-3
+        // multisig-sudo ceremony only after the Group-J harness proof and the
+        // multi-node devnet cascade are green. Removing a genuinely-dead FPS core
+        // from the permissioned pool lets the remaining permissioned draws
+        // redistribute over the live cores; the vendor dedup then collapses the
+        // distinct committee, so the GRANDPA quorum shrinks WITHOUT touching the
+        // L1 D-parameter (the count stays put; only the runtime candidate pool
+        // shrinks). Core constants are far longer than the registered ones and at
+        // most CORE_MAX_EVICTIONS_PER_SELECTION leave per epoch, so a buggy or
+        // hostile predicate cannot collapse the FPS backbone in one rotation. The
+        // post-draw live-quorum floor below still judges the shrunk set, so a
+        // shrink that would strand quorum is refused (keep-current) — eviction can
+        // never install a sub-quorum committee. It is preventive: a standard
+        // scheduled set-change that enacts only while the old set still finalizes
+        // it; a finality-frozen chain still needs R1's `Grandpa::note_stalled`
+        // break-glass (the existing 2-of-3 ceremony — no new extrinsic).
+        let (sanitized, cores_dropped) =
+            if pallet_orinq_receipts::Pallet::<Runtime>::core_eviction_enabled() {
+                committee_liveness::filter_dead_permissioned(
+                    sanitized,
+                    now,
+                    CORE_LIVENESS_GRACE_BLOCKS,
+                    CORE_LIVENESS_WINDOW_BLOCKS,
+                    CORE_MAX_EVICTIONS_PER_SELECTION,
+                    liveness_of,
+                )
+            } else {
+                (sanitized, 0)
+            };
+        if cores_dropped > 0 {
+            log::warn!(
+                target: "committee_liveness",
+                "evicted {} dead permissioned core(s) from selection at block {}",
+                cores_dropped, now,
             );
         }
 
@@ -784,6 +972,36 @@ impl pallet_session_validator_management::Config for Runtime {
                 committee_liveness::grandpa_quorum_threshold(aura_keys.len()),
             );
             return None;
+        }
+
+        // Break-glass floor (mainnet-resilience #490), gated OFF by the Root-set
+        // `BreakGlassFloorEnabled` flag. When armed, refuse any drawn committee
+        // that seats none of the FPS-held `BreakGlassAuraKeys` — returning None
+        // keeps the current committee (which, while the floor stays armed, always
+        // holds an FPS key) for one more epoch via the session pallet's
+        // create_inherent fallback. This guarantees the enacted committee can
+        // never drop to zero FPS-controlled seats, so a break-glass recovery
+        // (`Grandpa::note_stalled`, an emergency runtime upgrade) always has an
+        // FPS author left to include the recovering block — closing the
+        // trustless-majority reset corner where a Cardano D-parameter that zeroes
+        // the permissioned count would strand FPS with no enacted key. It only
+        // ever refuses a draw (keep-current), so it can never itself install an
+        // unsafe committee; the inductive base case (current committee holds an
+        // FPS key) must hold when armed, which is why arming precedes the seat
+        // ramp. OFF (default) → identical to spec-233.
+        if pallet_orinq_receipts::Pallet::<Runtime>::break_glass_floor_enabled() {
+            let break_glass_keys =
+                pallet_orinq_receipts::Pallet::<Runtime>::break_glass_aura_keys();
+            if !committee_liveness::committee_covers_break_glass(&aura_keys, &break_glass_keys) {
+                log::warn!(
+                    target: "runtime::committee-liveness",
+                    "refusing committee for epoch {}: none of {} break-glass FPS key(s) seated among {} selected; keeping current committee",
+                    sidechain_epoch,
+                    break_glass_keys.len(),
+                    aura_keys.len(),
+                );
+                return None;
+            }
         }
         Some(chosen)
     }
@@ -1125,6 +1343,8 @@ construct_runtime! {
         Billing: pallet_billing = 21,
         Oracle: pallet_oracle = 22,
         PerpEngine: pallet_perp_engine = 23,
+        // Second, independent path to Root (mainnet-resilience #492).
+        Recovery: pallet_recovery = 24,
     }
 }
 
@@ -1413,6 +1633,29 @@ impl_runtime_apis! {
         }
         fn get_main_chain_scripts() -> sp_session_validator_management::MainChainScripts {
             SessionCommitteeManagement::get_main_chain_scripts()
+        }
+    }
+
+    impl authority_selection_inherents::filter_invalid_candidates::CandidateValidationApi<Block> for Runtime {
+        fn validate_registered_candidate_data(
+            mainchain_pub_key: &sidechain_domain::MainchainPublicKey,
+            registration_data: &sidechain_domain::RegistrationData,
+        ) -> Option<authority_selection_inherents::filter_invalid_candidates::RegistrationDataError> {
+            authority_selection_inherents::filter_invalid_candidates::validate_registration_data(
+                mainchain_pub_key,
+                registration_data,
+                Sidechain::genesis_utxo(),
+            ).err()
+        }
+        fn validate_stake(
+            stake: Option<sidechain_domain::StakeDelegation>,
+        ) -> Option<authority_selection_inherents::filter_invalid_candidates::StakeError> {
+            authority_selection_inherents::filter_invalid_candidates::validate_stake(stake).err()
+        }
+        fn validate_permissioned_candidate_data(
+            candidate: sidechain_domain::PermissionedCandidateData,
+        ) -> Option<authority_selection_inherents::filter_invalid_candidates::PermissionedCandidateDataError> {
+            authority_selection_inherents::filter_invalid_candidates::validate_permissioned_candidate_data::<CrossChainPublic>(candidate).err()
         }
     }
 

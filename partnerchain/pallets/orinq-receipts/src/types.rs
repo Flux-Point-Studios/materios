@@ -5,6 +5,23 @@ use sp_core::H256;
 pub type ReceiptId = H256;
 pub type ContentHash = H256;
 
+/// One member of an emergency pinned committee (mainnet-resilience #491), stored
+/// as raw consensus keys so the pallet stays generic while the runtime
+/// reconstructs the `(CrossChainPublic, SessionKeys)` tuple verbatim — mirroring
+/// the vendor's `account_id: ecdsa::Public.into()` / `account_keys:
+/// (sr25519::Public, ed25519::Public).into()` construction. The operator sources
+/// these from the FPS core keys the nodes actually hold; pinning a key no live
+/// node holds would halt production, so this is a Root-only break-glass input.
+#[derive(Clone, Encode, Decode, TypeInfo, MaxEncodedLen, Debug, PartialEq, Eq)]
+pub struct PinnedMember {
+    /// The cross-chain (ecdsa) public key — the committee member's `AccountId`.
+    pub cross_chain: [u8; 33],
+    /// The Aura (sr25519) block-production public key.
+    pub aura: [u8; 32],
+    /// The Grandpa (ed25519) finality public key.
+    pub grandpa: [u8; 32],
+}
+
 // SCALE-canonical availability certificate. Every field has fixed encoded
 // width (no `Compact<u32>` length prefixes), so `cert.encode()` is exactly
 // 202 bytes and the byte layout is identical to the symmetric Python
