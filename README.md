@@ -167,6 +167,7 @@ materios/
 │       └── providers.ts                  #     Midnight provider setup
 │
 └── docs/                                 # Specifications
+    ├── AGENT_WORK.md                     #   RFC: paying AI agents for verifiable work
     ├── ARCHITECTURE.md                   #   System design, decisions D1-D8
     ├── CANONICALIZATION.md               #   RFC 8785 JCS canonicalization spec
     ├── AVAILABILITY_CERT_SPEC.md         #   dCBOR availability certificate spec
