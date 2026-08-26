@@ -344,6 +344,23 @@ pub mod pallet {
     #[pallet::storage]
     pub type BreakGlassFloorEnabled<T: Config> = StorageValue<_, bool, ValueQuery>;
 
+    /// Governance arming flag for the effective-slack invariant and D-parameter
+    /// ramp guard (mainnet-resilience #505). `false` (the genesis-empty
+    /// `ValueQuery` default) reproduces spec-235 behavior exactly: growth draws
+    /// are judged by `passes_live_quorum_floor` alone and the registered pool is
+    /// never capped. Flipped `true` via `set_slack_invariant_enabled` (Root /
+    /// 2-of-3 multisig-sudo), the runtime additionally refuses a draw that GROWS
+    /// the authority set without a proven-live voter to pay for the quorum it
+    /// adds, and clamps the registered pool to what the currently-live members
+    /// can carry. One tx disables it without a runtime upgrade.
+    ///
+    /// Unlike the break-glass floor this has no seeding prerequisite and no
+    /// arm-before-the-ramp ordering constraint: it derives everything from
+    /// `LastAuthoredBlock` and the current committee, and both halves are
+    /// no-ops on a chain that is not growing.
+    #[pallet::storage]
+    pub type SlackInvariantEnabled<T: Config> = StorageValue<_, bool, ValueQuery>;
+
     /// The FPS-held Aura public keys (raw 32-byte) that satisfy the break-glass
     /// floor (mainnet-resilience #490). Set by Root via `set_break_glass_aura_keys`.
     /// Empty (genesis default) means the floor is unconfigured and every committee
@@ -543,6 +560,9 @@ pub mod pallet {
         /// (`BreakGlassFloorEnabled`, mainnet-resilience #490). When `false`
         /// (default), `select_authorities` never applies the FPS-presence check.
         BreakGlassFloorEnabledUpdated { enabled: bool },
+        /// The effective-slack invariant / ramp-guard arming flag changed
+        /// (`SlackInvariantEnabled`, mainnet-resilience #505).
+        SlackInvariantEnabledUpdated { enabled: bool },
         /// Governance updated the break-glass FPS Aura key set
         /// (`BreakGlassAuraKeys`); `count` is the number of keys after the update.
         BreakGlassAuraKeysUpdated { count: u32 },
@@ -1146,6 +1166,16 @@ pub mod pallet {
         /// `break_glass_aura_keys()`; `false` (default) → spec-233 behavior.
         pub fn break_glass_floor_enabled() -> bool {
             BreakGlassFloorEnabled::<T>::get()
+        }
+
+        /// Whether the effective-slack invariant and D-parameter ramp guard are
+        /// armed (mainnet-resilience #505). The runtime's `select_authorities`
+        /// reads this to gate both halves: `true` → refuse a draw that grows the
+        /// authority set without a proven-live voter paying for the added quorum,
+        /// and clamp the registered pool to what the live members can carry;
+        /// `false` (default) → spec-235 behavior.
+        pub fn slack_invariant_enabled() -> bool {
+            SlackInvariantEnabled::<T>::get()
         }
 
         /// The FPS-held break-glass Aura keys (mainnet-resilience #490). The
@@ -2312,6 +2342,40 @@ pub mod pallet {
             ensure_root(origin)?;
             BreakGlassFloorEnabled::<T>::put(enabled);
             Self::deposit_event(Event::BreakGlassFloorEnabledUpdated { enabled });
+            Ok(())
+        }
+
+        /// Root-only: flip the effective-slack invariant and D-parameter ramp
+        /// guard (`SlackInvariantEnabled`, mainnet-resilience #505). With `false`
+        /// (the default) growth draws are judged by the live-quorum floor alone
+        /// and the registered pool is never capped — identical to spec-235.
+        ///
+        /// Setting `true` adds two things. A draw that GROWS the authority set
+        /// must carry at most `UNPROVEN_SEAT_CREDIT` never-authored seats and
+        /// leave live members above quorum by `min(MARGIN, current slack)`;
+        /// growth is what raises `q(n)`, so it is what spends finality slack, and
+        /// a seat we have never seen author cannot pay for the quorum it adds.
+        /// Separately the registered-candidate pool is clamped to the size the
+        /// currently-live members can carry, never below the externals already
+        /// seated.
+        ///
+        /// Neither half can freeze rotation: shrinks and same-size draws are
+        /// exempt from the floor (so a restorative eviction is never refused),
+        /// the margin clamps to zero on a chain that has no slack left, and the
+        /// ramp guard returns a seat count rather than a refusal. Unlike the
+        /// break-glass floor there is no seeding step and no arm-before-the-ramp
+        /// ordering constraint. Flip back `false` to disable instantly without a
+        /// runtime upgrade.
+        #[pallet::call_index(28)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().writes(1)))]
+        pub fn set_slack_invariant_enabled(
+            origin: OriginFor<T>,
+            enabled: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            SlackInvariantEnabled::<T>::put(enabled);
+            Self::deposit_event(Event::SlackInvariantEnabledUpdated { enabled });
             Ok(())
         }
 

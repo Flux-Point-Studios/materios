@@ -196,7 +196,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 235,
+    spec_version: 236,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 4,
@@ -782,6 +782,16 @@ const _: () = assert!(CORE_LIVENESS_WINDOW_BLOCKS > LIVENESS_WINDOW_BLOCKS);
 /// mainnet block time alongside the registered constants.
 const LIVENESS_CONTRIBUTION_WINDOW: u32 = 1_800; // ~3h @ 6s
 
+/// One drawn seat may be an unproven newcomer without paying for the quorum it
+/// adds; a second may not (mainnet-resilience #505). The growth-direction mirror
+/// of `CORE_MAX_EVICTIONS_PER_SELECTION`: bounded change per rotation.
+const UNPROVEN_SEAT_CREDIT: usize = 1;
+
+/// Finality slack a GROWN committee must retain: live members must exceed
+/// quorum by this much. Clamped by the current committee's own slack, so a
+/// chain that already has none is never asked for more than it has.
+const SLACK_MARGIN: usize = 1;
+
 // The contribution window only ever SHORTENS the registered eviction horizon.
 const _: () = assert!(LIVENESS_CONTRIBUTION_WINDOW <= LIVENESS_WINDOW_BLOCKS);
 
@@ -928,6 +938,78 @@ impl pallet_session_validator_management::Config for Runtime {
             );
         }
 
+        // Current-committee facts, read once and shared by both #505 halves.
+        // `ext_current` is COUNTED (seated members absent from the permissioned
+        // pool), not inferred as n_current − p_eff: those agree only while the
+        // pool is unchanged, and an L1 core upsert makes the subtraction shrink
+        // one-for-one — silently turning "never de-seat a live external" into
+        // its opposite.
+        let current_committee = SessionCommitteeManagement::current_committee_storage().committee;
+        let n_current = current_committee.len();
+        let current_aura: Vec<Vec<u8>> = current_committee
+            .iter()
+            .map(|(_, keys)| parity_scale_codec::Encode::encode(&keys.aura))
+            .collect();
+        let live_current = committee_liveness::live_member_count(
+            &current_aura,
+            now,
+            LIVENESS_WINDOW_BLOCKS,
+            liveness_of,
+        );
+        let permissioned_aura: alloc::collections::BTreeSet<Vec<u8>> = sanitized
+            .permissioned_candidates
+            .iter()
+            .map(|c| c.aura_public_key.0.clone())
+            .collect();
+        let ext_current = current_aura
+            .iter()
+            .filter(|k| !permissioned_aura.contains(*k))
+            .count();
+
+        // D-parameter ramp guard (mainnet-resilience #505), gated OFF by the
+        // Root-set `SlackInvariantEnabled` flag. A clamp, never a refusal: it
+        // offers at most the external seats the currently-live members can carry
+        // and never fewer than the chain already seats, so it cannot itself
+        // freeze rotation. OFF (default) → identical to spec-235.
+        let sanitized = if pallet_orinq_receipts::Pallet::<Runtime>::slack_invariant_enabled() {
+            let mut s = sanitized;
+            let requested = s.d_parameter.num_registered_candidates as usize;
+            let cap = committee_liveness::registered_pool_cap(
+                requested,
+                s.permissioned_candidates.len(),
+                ext_current,
+                n_current,
+                live_current,
+                SLACK_MARGIN,
+                MAX_VALIDATORS as usize,
+            );
+            if cap < requested {
+                // Deterministic across nodes: richest stake first, mainchain key
+                // as the tie-break. A node-local ordering would risk divergent
+                // committees on otherwise-identical inputs.
+                // Sort on the INNER primitives: neither StakeDelegation(u64) nor
+                // MainchainPublicKey([u8; N]) derives Ord, but both wrap a type
+                // that does.
+                s.registered_candidates.sort_by(|a, b| {
+                    b.stake_delegation
+                        .map(|s| s.0)
+                        .cmp(&a.stake_delegation.map(|s| s.0))
+                        .then_with(|| a.mainchain_pub_key().0.cmp(&b.mainchain_pub_key().0))
+                });
+                s.registered_candidates.truncate(cap);
+                s.d_parameter.num_registered_candidates = cap as u16;
+                log::warn!(
+                    target: "runtime::committee-liveness",
+                    "ramp guard for epoch {}: capping registered seats {} -> {} \
+                     ({} live of {} seated, {} external); D-parameter rewritten for this draw",
+                    sidechain_epoch, requested, cap, live_current, n_current, ext_current,
+                );
+            }
+            s
+        } else {
+            sanitized
+        };
+
         // NOTE: `select_authorities` runs only in the inherent build/verify
         // path (`create_inherent` / `check_inherent`), whose storage writes are
         // discarded — so first-selected is stamped on-chain in
@@ -970,6 +1052,44 @@ impl pallet_session_validator_management::Config for Runtime {
                 ),
                 aura_keys.len(),
                 committee_liveness::grandpa_quorum_threshold(aura_keys.len()),
+            );
+            return None;
+        }
+
+        // Effective-slack invariant (mainnet-resilience #505), gated OFF by the
+        // Root-set `SlackInvariantEnabled` flag. The floor above accepts
+        // live == q(n) exactly — zero slack, one fault from a wedge. This adds a
+        // condition on GROWTH only: a bigger n raises q(n), so growth spends
+        // slack, and a seat we have never seen author cannot pay for the quorum
+        // it adds. Shrinks and same-size draws are exempt, so the restorative
+        // eviction is never refused, and the margin clamps to the current
+        // committee's own slack, so a degraded chain is asked for nothing extra —
+        // between them this cannot be why rotation stops. OFF → spec-235.
+        if pallet_orinq_receipts::Pallet::<Runtime>::slack_invariant_enabled()
+            && !committee_liveness::passes_growth_slack_invariant(
+                &aura_keys,
+                n_current,
+                live_current,
+                now,
+                LIVENESS_WINDOW_BLOCKS,
+                UNPROVEN_SEAT_CREDIT,
+                SLACK_MARGIN,
+                liveness_of,
+            )
+        {
+            log::warn!(
+                target: "runtime::committee-liveness",
+                "refusing committee for epoch {}: growth {} -> {} would not retain slack \
+                 ({} live, {} unproven, quorum {}, current slack {}); keeping current committee",
+                sidechain_epoch,
+                n_current,
+                aura_keys.len(),
+                committee_liveness::live_member_count(
+                    &aura_keys, now, LIVENESS_WINDOW_BLOCKS, liveness_of),
+                committee_liveness::unproven_member_count(&aura_keys, liveness_of),
+                committee_liveness::grandpa_quorum_threshold(aura_keys.len()),
+                live_current.saturating_sub(
+                    committee_liveness::grandpa_quorum_threshold(n_current)),
             );
             return None;
         }
