@@ -960,6 +960,50 @@ mod tests {
     }
 
     #[test]
+    fn ramp_cap_growth_is_reachable_from_every_rung() {
+        // THE TEST THAT WAS MISSING. Every other ramp test asks "is this growth
+        // SAFE"; none asked "is any growth REACHABLE". They pass identically
+        // whether the guard is prudent or catatonic.
+        //
+        // `live_current <= n_current` always — a committee has no more live
+        // members than seats. So growth n -> n+1 needs `n >= q(n+1) + margin`,
+        // and at n=4 that is `4 >= 4 + margin`: ANY margin above zero makes
+        // growth off a small committee unsatisfiable forever, which is a
+        // permanent freeze wearing the costume of a safety check. Shipped as
+        // margin=1 in spec-236 and deadlocked the live chain at n=5.
+        //
+        // Asserted at the DEPLOYED margin (0), from a fully-live committee.
+        const DEPLOYED_MARGIN: usize = 0;
+        for n_cur in 4..=12usize {
+            let cap = registered_pool_cap(
+                /* requested_r  */ n_cur + 1 - 4,
+                /* p_eff        */ 4,
+                /* ext_current  */ n_cur - 4,
+                n_cur,
+                /* live_current */ n_cur,
+                DEPLOYED_MARGIN,
+                MAXV,
+            );
+            assert!(
+                4 + cap > n_cur,
+                "n_cur={n_cur}: guard offers r_cap={cap} (n={}) — no growth is \
+                 reachable from a FULLY LIVE committee, so the ramp is frozen",
+                4 + cap
+            );
+        }
+    }
+
+    #[test]
+    fn ramp_cap_still_refuses_growth_a_degraded_committee_cannot_carry() {
+        // Margin=0 must not become a rubber stamp. A committee that has ALREADY
+        // lost a member cannot buy a bigger quorum: n_cur=6 with only 5 live is
+        // at sigma 0, so growth to 7 (q=5) is allowed only because q is flat
+        // there, while growth to 8 (q=6 > 5 live) is refused.
+        let cap = registered_pool_cap(4, 4, 2, 6, 5, 0, MAXV);
+        assert!(4 + cap <= 7, "degraded committee grew to n={} on 5 live", 4 + cap);
+    }
+
+    #[test]
     fn ramp_cap_honours_max_validators() {
         let cap = registered_pool_cap(usize::MAX, 4, 0, 4, 4, MARGIN, MAXV);
         assert!(4 + cap <= MAXV);

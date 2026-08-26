@@ -196,7 +196,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 236,
+    spec_version: 237,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 4,
@@ -787,10 +787,26 @@ const LIVENESS_CONTRIBUTION_WINDOW: u32 = 1_800; // ~3h @ 6s
 /// of `CORE_MAX_EVICTIONS_PER_SELECTION`: bounded change per rotation.
 const UNPROVEN_SEAT_CREDIT: usize = 1;
 
-/// Finality slack a GROWN committee must retain: live members must exceed
-/// quorum by this much. Clamped by the current committee's own slack, so a
-/// chain that already has none is never asked for more than it has.
-const SLACK_MARGIN: usize = 1;
+/// Finality slack a GROWN committee must retain beyond quorum.
+///
+/// ZERO, and it cannot be raised. `live_current` can never exceed `n_current` —
+/// a committee has no more live members than seats — so growth from n to n+1
+/// needs `n >= q(n+1) + SLACK_MARGIN`. At n=4 that is `4 >= 4 + margin`, so any
+/// margin above zero makes growth from a small committee *unsatisfiable*, not
+/// merely conservative: the chain can never add a seat again. Shipped as 1 in
+/// spec-236, deadlocked the ramp at n=5, corrected here.
+///
+/// Zero still leaves three real constraints on growth: the unchanged live-quorum
+/// floor, at most `UNPROVEN_SEAT_CREDIT` never-authored seats per rotation, and
+/// at most one quorum step per rotation. What it gives up is the demand for a
+/// SPARE at the moment of growth — which at 4 cores is unreachable anyway, since
+/// q(6)=5 already equals the whole live set.
+const SLACK_MARGIN: usize = 0;
+
+/// The deadlock above, as a compile error rather than a runbook entry: growth
+/// off the smallest committee we run (n=4 → 5, q(5)=4) must be satisfiable by a
+/// fully-live committee. Raising SLACK_MARGIN breaks the build.
+const _: () = assert!(4 >= (5 - (5 - 1) / 3) + SLACK_MARGIN);
 
 // The contribution window only ever SHORTENS the registered eviction horizon.
 const _: () = assert!(LIVENESS_CONTRIBUTION_WINDOW <= LIVENESS_WINDOW_BLOCKS);
