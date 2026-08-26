@@ -334,6 +334,66 @@ where
         >= grandpa_quorum_threshold(n).saturating_add(required)
 }
 
+/// Largest registered-candidate pool the currently-proven-live voters can carry
+/// (mainnet-resilience #505, the D-parameter ramp guard).
+///
+/// This half is a CLAMP, never a verdict: it returns a seat count, so it cannot
+/// contribute a `None` from `select_authorities`. The floors are already
+/// refusal-only, and a second way to refuse is a second way to freeze rotation.
+/// It is bounded below by `ext_current` — the externals the chain already seats,
+/// counted from the current committee rather than inferred as `n_current -
+/// permissioned_pool`, which is only the same number while the permissioned pool
+/// is unchanged and silently shrinks one-for-one when an L1 core upsert grows it,
+/// turning "never de-seat a live external" into its opposite.
+///
+/// Growth must clear, for `n = permissioned_pool + r`:
+///
+/// - `live_current >= q(n) + margin` — the new shape is carried by voters we have
+///   actually seen author, with slack to spare;
+/// - `q(n) <= q(n_current) + 1` — at most one quorum step per rotation, the
+///   growth-direction mirror of the eviction rate cap;
+/// - and while `sigma_current <= margin` (the chain has no slack to spend),
+///   `q(n) <= q(n_current)` — growth is confined to the rungs where `q` is flat.
+///
+/// That last clause is what refuses the #441 shape: at 4 live cores, growing to
+/// n=5 raises `q` 3 → 4 while live stays 4, i.e. straight to zero slack. #441 was
+/// "recurring n=5 zero-slack", so the rule reproduces an incident that happened.
+/// The flat rungs are `n ≡ 1 (mod 3)` — q(6)=q(7), q(15)=q(16) — and they are the
+/// ramp's road: the final step to trustless finality costs no quorum at all.
+///
+/// Every predicate is monotone-decreasing in `r` because `q` is monotone in `n`,
+/// so scanning upward and stopping at the first failure finds the true maximum.
+pub fn registered_pool_cap(
+    requested_r: usize,
+    permissioned_pool: usize,
+    ext_current: usize,
+    n_current: usize,
+    live_current: usize,
+    margin: usize,
+    max_validators: usize,
+) -> usize {
+    let hard = requested_r.min(max_validators.saturating_sub(permissioned_pool));
+    let r_floor = ext_current.min(hard);
+    let q_current = grandpa_quorum_threshold(n_current);
+    let degraded = live_current.saturating_sub(q_current) <= margin;
+
+    let mut cap = r_floor;
+    for r in (r_floor.saturating_add(1))..=hard {
+        let q = grandpa_quorum_threshold(permissioned_pool.saturating_add(r));
+        if live_current < q.saturating_add(margin) {
+            break;
+        }
+        if q > q_current.saturating_add(1) {
+            break;
+        }
+        if degraded && q > q_current {
+            break;
+        }
+        cap = r;
+    }
+    cap
+}
+
 /// Break-glass floor (mainnet-resilience #490). Does the drawn committee
 /// contain at least one FPS-held break-glass Aura key? When the floor is armed
 /// and this returns `false`, the caller refuses the rotation exactly as it does
@@ -847,6 +907,72 @@ mod tests {
         assert!(passes_growth_slack_invariant(
             &keys, 6, 5, NOW, WINDOW, CREDIT, MARGIN, floor_lookup
         ));
+    }
+
+    // ── registered_pool_cap (#505 ramp guard) ────────────────────────
+
+    const MAXV: usize = 32;
+
+    #[test]
+    fn ramp_cap_is_never_a_refusal_and_never_de_seats() {
+        // The guard is a CLAMP, not a verdict: it returns a number, and never
+        // one below the external seats the chain already holds. A refusal here
+        // would be a second way to freeze rotation.
+        for requested in 0..8 {
+            let cap = registered_pool_cap(requested, 4, 3, 7, 7, MARGIN, MAXV);
+            assert!(cap <= requested.max(3), "cap {cap} exceeded request {requested}");
+            assert!(cap >= 3.min(requested), "cap {cap} de-seated a held external");
+        }
+    }
+
+    #[test]
+    fn ramp_cap_refuses_quorum_growth_while_degraded_the_441_shape() {
+        // #441, the incident that actually happened: "recurring n=5 zero-slack".
+        // 4 cores, no externals seated, all 4 live -> sigma_cur = 4 - q(4) = 1,
+        // which is AT the margin, so growth may not raise quorum. Going to n=5
+        // raises q 3 -> 4 while live stays 4, i.e. slack 0. Must not be offered.
+        assert_eq!(grandpa_quorum_threshold(4), 3);
+        assert_eq!(grandpa_quorum_threshold(5), 4);
+        assert_eq!(registered_pool_cap(1, 4, 0, 4, 4, MARGIN, MAXV), 0);
+    }
+
+    #[test]
+    fn ramp_cap_allows_a_q_flat_rung_while_degraded() {
+        // q is flat across n = 1 (mod 3): q(6) = q(7) = 5. Growth onto a flat
+        // rung adds a seat without adding quorum, so slack cannot fall and the
+        // degraded clause permits it. This is the rung the ramp rides.
+        assert_eq!(grandpa_quorum_threshold(6), grandpa_quorum_threshold(7));
+        assert_eq!(registered_pool_cap(3, 4, 2, 6, 6, MARGIN, MAXV), 3);
+    }
+
+    #[test]
+    fn ramp_cap_rate_limits_quorum_to_one_step() {
+        // 6 live cores, n_cur = 6 (sigma 1). Asking for 10 externals would be
+        // n = 14, q = 10 — five quorum steps in one rotation. Capped to a shape
+        // at most one quorum step above the current one.
+        let cap = registered_pool_cap(10, 4, 2, 6, 6, MARGIN, MAXV);
+        let q_new = grandpa_quorum_threshold(4 + cap);
+        assert!(
+            q_new <= grandpa_quorum_threshold(6) + 1,
+            "cap {cap} -> n {} q {q_new} jumped more than one quorum step",
+            4 + cap
+        );
+    }
+
+    #[test]
+    fn ramp_cap_honours_max_validators() {
+        let cap = registered_pool_cap(usize::MAX, 4, 0, 4, 4, MARGIN, MAXV);
+        assert!(4 + cap <= MAXV);
+    }
+
+    #[test]
+    fn ramp_cap_grows_from_a_healthy_baseline() {
+        // Undegraded: 8 live of n_cur = 8 -> sigma = 8 - q(8) = 2 > MARGIN, so
+        // the degraded clause is off and the rate limit governs. q(9) = 7 is one
+        // step above q(8) = 6 and 8 live >= 7 + 1, so one more seat is offered.
+        assert_eq!(grandpa_quorum_threshold(8), 6);
+        assert_eq!(grandpa_quorum_threshold(9), 7);
+        assert_eq!(registered_pool_cap(5, 4, 4, 8, 8, MARGIN, MAXV), 5);
     }
 
     #[test]
