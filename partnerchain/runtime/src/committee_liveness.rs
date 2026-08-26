@@ -259,6 +259,81 @@ where
             >= grandpa_quorum_threshold(selected_aura_keys.len())
 }
 
+/// Count selected members with no `last_authored` stamp — seats we have no
+/// evidence about in either direction. An undecodable key is NOT counted: it is
+/// not a newcomer owed benefit-of-the-doubt, and it already counts NOT live, so
+/// `passes_live_quorum_floor` is what catches it.
+pub fn unproven_member_count<K, F>(selected_aura_keys: &[K], mut lookup: F) -> usize
+where
+    K: AsRef<[u8]>,
+    F: FnMut([u8; 32]) -> CandidateLiveness,
+{
+    selected_aura_keys
+        .iter()
+        .filter(|key| {
+            account_bytes_from_encoded(key.as_ref())
+                .is_some_and(|acct| lookup(acct).last_authored.is_none())
+        })
+        .count()
+}
+
+/// Effective-slack invariant (mainnet-resilience #505). Composes with
+/// `passes_live_quorum_floor`, which still runs first and is unchanged: this
+/// adds a condition only on draws that GROW the authority set.
+///
+/// A larger `n` raises `q(n)`, so growth spends finality slack. Paid for by a
+/// live voter that is fine; paid for by a seat we have never seen author, the
+/// chain ends the rotation closer to a wedge than it started. The rule:
+///
+/// ```text
+/// n <= n_current                                          (always allowed)
+///   OR ( unproven <= unproven_credit
+///        AND live >= q(n) + min(margin, sigma_current) )
+/// ```
+///
+/// TWO PROPERTIES CARRY THE DESIGN, and both are load-bearing:
+///
+/// The credit is a CARDINALITY CAP, not an arithmetic bonus. Expressed as a
+/// bonus — `live + min(unproven, credit) >= q(n) + margin` — it cancels to
+/// exactly `live >= q(n)` whenever credit == margin and any unproven seat is
+/// present. Every growth draw seats a newcomer by construction, so that form is
+/// a no-op on the whole of its intended traffic while reading as a guard, and it
+/// charges the same for one unproven seat as for ten. Pinned by
+/// `growth_invariant_is_not_the_base_floor`.
+///
+/// `min(margin, sigma_current)` makes refusal impossible from a baseline that is
+/// already at or below the margin. Combined with the `n <= n_current` exemption,
+/// this gate can never be the reason a degraded chain stops rotating: it does
+/// not block the shrink that restores slack, and it asks nothing extra of a
+/// chain that has none to protect. That matters because every floor here is
+/// refusal-only — a permanent refusal freezes the committee where it stands.
+pub fn passes_growth_slack_invariant<K, F>(
+    selected_aura_keys: &[K],
+    n_current: usize,
+    live_current: usize,
+    now: u32,
+    window_blocks: u32,
+    unproven_credit: usize,
+    margin: usize,
+    lookup: F,
+) -> bool
+where
+    K: AsRef<[u8]>,
+    F: FnMut([u8; 32]) -> CandidateLiveness + Copy,
+{
+    let n = selected_aura_keys.len();
+    if n <= n_current {
+        return true;
+    }
+    if unproven_member_count(selected_aura_keys, lookup) > unproven_credit {
+        return false;
+    }
+    let sigma_current = live_current.saturating_sub(grandpa_quorum_threshold(n_current));
+    let required = if margin < sigma_current { margin } else { sigma_current };
+    live_member_count(selected_aura_keys, now, window_blocks, lookup)
+        >= grandpa_quorum_threshold(n).saturating_add(required)
+}
+
 /// Break-glass floor (mainnet-resilience #490). Does the drawn committee
 /// contain at least one FPS-held break-glass Aura key? When the floor is armed
 /// and this returns `false`, the caller refuses the rotation exactly as it does
@@ -671,6 +746,116 @@ mod tests {
             Some(1_000),
             Some(NOW - WINDOW - 1)
         )));
+    }
+
+    // ── passes_growth_slack_invariant (#505) ─────────────────────────
+
+    const CREDIT: usize = 1;
+    const MARGIN: usize = 1;
+
+    /// Four live cores, the live preprod backbone.
+    fn cores() -> Vec<Vec<u8>> {
+        alloc::vec![key(0x10), key(0x11), key(0x12), key(0x13)]
+    }
+
+    #[test]
+    fn growth_invariant_exempts_shrink_and_same_size() {
+        // The frozen-rotation answer: a restorative eviction must NEVER be
+        // refused by this gate, however degraded the shape. n <= n_current is
+        // the business of passes_live_quorum_floor alone.
+        let three = alloc::vec![key(0x10), key(0x11), key(0xD0)];
+        assert!(passes_growth_slack_invariant(
+            &three, 6, 4, NOW, WINDOW, CREDIT, MARGIN, floor_lookup
+        ));
+        let four = cores();
+        assert!(passes_growth_slack_invariant(
+            &four, 4, 4, NOW, WINDOW, CREDIT, MARGIN, floor_lookup
+        ));
+    }
+
+    #[test]
+    fn growth_invariant_caps_unproven_seats_by_cardinality() {
+        // TWO never-authored seats in one growth draw exceeds the credit and is
+        // refused even though live members alone still carry quorum:
+        // n=6, q(6)=5, 4 live cores + 2 unproven -> L=4 < 5 would fail the base
+        // floor anyway, so use 5 live + 2 unproven: n=7, q(7)=5, L=5 >= 5.
+        let mut keys = cores();
+        keys.push(key(0x14)); // 5th live
+        keys.push(key(0x00)); // unproven
+        keys.push(key(0x01)); // unproven
+        assert!(passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup));
+        assert!(!passes_growth_slack_invariant(
+            &keys, 5, 5, NOW, WINDOW, CREDIT, MARGIN, floor_lookup
+        ));
+    }
+
+    #[test]
+    fn growth_invariant_is_not_the_base_floor() {
+        // ANTI-TAUTOLOGY LOCK. The reviewed design expressed the credit as an
+        // arithmetic bonus, `L + min(A, C) >= q(n) + 1`, which at C = 1 cancels
+        // to exactly `L >= q(n)` for every draw carrying an unproven seat — and
+        // every growth draw carries one by construction, so the gate was a no-op
+        // on 100% of its target traffic. This pins the difference: a draw the
+        // base floor ACCEPTS that the growth invariant must REFUSE.
+        //
+        // Live preprod shape grown by one: n_cur=5 (4 cores + 1 live external),
+        // sigma_cur = 5 - q(5) = 1. Draw n=6 seating one unproven newcomer:
+        // L = 5, q(6) = 5. Base floor: 5 >= 5 PASSES. Growth: required =
+        // min(MARGIN, sigma_cur) = 1, so 5 >= 5 + 1 is false -> REFUSE.
+        let mut keys = cores();
+        keys.push(key(0x14)); // the live external
+        keys.push(key(0x00)); // the unproven newcomer
+        assert_eq!(keys.len(), 6);
+        assert!(
+            passes_live_quorum_floor(&keys, NOW, WINDOW, floor_lookup),
+            "precondition: the base floor accepts this draw"
+        );
+        assert!(
+            !passes_growth_slack_invariant(
+                &keys, 5, 5, NOW, WINDOW, CREDIT, MARGIN, floor_lookup
+            ),
+            "growth to zero slack must be refused — if this passes, the gate has \
+             collapsed back into passes_live_quorum_floor"
+        );
+    }
+
+    #[test]
+    fn growth_invariant_admits_a_newcomer_that_keeps_slack() {
+        // Growth onto a q-flat rung: n_cur=6 -> n=7 costs no quorum
+        // (q(6) = q(7) = 5), so one unproven seat still leaves slack.
+        // 6 live + 1 unproven: L=6 >= q(7)=5 + 1.
+        let mut keys = cores();
+        keys.push(key(0x14));
+        keys.push(key(0x15));
+        keys.push(key(0x00));
+        assert_eq!(keys.len(), 7);
+        assert!(passes_growth_slack_invariant(
+            &keys, 6, 6, NOW, WINDOW, CREDIT, MARGIN, floor_lookup
+        ));
+    }
+
+    #[test]
+    fn growth_invariant_cannot_out_refuse_the_base_floor_when_degraded() {
+        // Anti-freeze: from a baseline that is ITSELF at zero slack, required
+        // clamps to min(MARGIN, 0) = 0, so this gate demands nothing beyond the
+        // base floor and can never be the reason a degraded chain stops
+        // rotating. n_cur=6 with live_current=5 -> sigma_cur = 5 - q(6) = 0.
+        let mut keys = cores();
+        keys.push(key(0x14));
+        keys.push(key(0x15));
+        keys.push(key(0x00));
+        assert!(passes_growth_slack_invariant(
+            &keys, 6, 5, NOW, WINDOW, CREDIT, MARGIN, floor_lookup
+        ));
+    }
+
+    #[test]
+    fn unproven_member_count_ignores_undecodable_keys() {
+        // An unmappable key is not a newcomer we owe benefit-of-the-doubt to:
+        // it must not consume the credit. It already counts NOT live, so the
+        // base floor is what catches it.
+        let keys = alloc::vec![key(0x00), alloc::vec![0xAB; 8], key(0x10)];
+        assert_eq!(unproven_member_count(&keys, floor_lookup), 1);
     }
 
     #[test]
