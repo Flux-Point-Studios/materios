@@ -24,10 +24,17 @@
 //! only through (size, live count, unproven count, break-glass present) and the
 //! current committee only through (size, live count), so enumerating those
 //! summaries and synthesising a witness committee for each is exhaustive over
-//! the gate's behaviour. What is NOT modelled here is the candidate POOL: the
-//! dead-registered filter, the core-eviction filter and the ramp clamp shape
-//! which draws are *offered*, and they are covered by their own tests plus
-//! `pool_supply` below, which bounds a draw by the live candidates that exist.
+//! the gate's behaviour.
+//!
+//! The POOL is modelled too, in the second half of this file, but separately and
+//! for a specific reason: #534 was a pool bug — `filter_dead_permissioned` could
+//! evict the last break-glass holder, after which the armed floor refused every
+//! draw forever — and the gate-level model could not see it, because the gate
+//! never learns which candidates were available to draw from. It was found by
+//! reading the code. So `filtered_pool` below runs the REAL filters over a REAL
+//! `AuthoritySelectionInputs` and asks the gate about what survived, which turns
+//! "a filter removed the candidate the gate needed" from an assumption into an
+//! assertion.
 
 use crate::committee_liveness::{
     committee_covers_break_glass, grandpa_quorum_threshold, passes_growth_slack_invariant,
@@ -47,7 +54,7 @@ const WINDOW: u32 = 10_000;
 /// How a single seat looks to the liveness lookups. These are the only three
 /// shapes the predicates can distinguish: `live_member_count` keys on a recent
 /// `last_authored`, `unproven_member_count` keys on its absence.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Seat {
     /// Authored inside the window.
     Live,
@@ -584,6 +591,329 @@ fn arming_the_slack_invariant_never_removes_the_last_draw() {
                                 any_draw_accepted(c, on, p),
                                 "arming the slack invariant froze rotation: {c:?} {p:?} bg={bg}"
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Pool-filter layer (#534 follow-up)
+//
+// Everything above models the GATE: it enumerates draw summaries directly and
+// asks which the four post-draw predicates accept. That is exhaustive over the
+// gate — but #534 was a POOL bug, in `filter_dead_permissioned`, and the gate
+// model could not see it because the gate never learns which candidates were
+// available to draw from. It was found by reading the code, which is exactly
+// the coverage gap worth closing.
+//
+// This layer runs the REAL filters over a REAL `AuthoritySelectionInputs`, then
+// asks the gate about what SURVIVED. So a filter that removes the candidate the
+// gate needs is now visible as a deadlock rather than as an assumption.
+// ---------------------------------------------------------------------
+
+use crate::committee_liveness::{filter_dead_permissioned, filter_dead_registered};
+use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
+use sidechain_domain::{
+    AuraPublicKey, CandidateRegistrations, CrossChainPublicKey, CrossChainSignature, DParameter,
+    EpochNonce, GrandpaPublicKey, MainchainPublicKey, MainchainSignature, McBlockNumber,
+    McEpochNumber, McSlotNumber, McTxHash, McTxIndexInBlock, PermissionedCandidateData,
+    RegistrationData, SidechainPublicKey, SidechainSignature, StakeDelegation, UtxoId, UtxoIndex,
+    UtxoInfo,
+};
+
+/// Core-eviction thresholds, matching the runtime's `CORE_LIVENESS_*`.
+const CORE_GRACE: u32 = 14_400;
+const CORE_WINDOW: u32 = 100_800;
+/// Registered thresholds, matching `LIVENESS_*`.
+const REG_GRACE: u32 = 1_800;
+const REG_WINDOW: u32 = 28_800;
+
+fn perm_candidate(tag: u8) -> PermissionedCandidateData {
+    PermissionedCandidateData {
+        sidechain_public_key: SidechainPublicKey(alloc::vec![tag; 33]),
+        aura_public_key: AuraPublicKey(pool_key(tag)),
+        grandpa_public_key: GrandpaPublicKey(alloc::vec![tag; 32]),
+    }
+}
+
+fn reg_candidate(tag: u8) -> CandidateRegistrations {
+    let u = UtxoId { tx_hash: McTxHash([tag; 32]), index: UtxoIndex(0) };
+    CandidateRegistrations {
+        mainchain_pub_key: MainchainPublicKey([tag; 32]),
+        registrations: alloc::vec![RegistrationData {
+            registration_utxo: u,
+            sidechain_signature: SidechainSignature(alloc::vec![0; 64]),
+            mainchain_signature: MainchainSignature(alloc::vec![0; 64]),
+            cross_chain_signature: CrossChainSignature(alloc::vec![]),
+            sidechain_pub_key: SidechainPublicKey(alloc::vec![tag; 33]),
+            cross_chain_pub_key: CrossChainPublicKey(alloc::vec![]),
+            utxo_info: UtxoInfo {
+                utxo_id: u,
+                epoch_number: McEpochNumber(1),
+                block_number: McBlockNumber(1),
+                slot_number: McSlotNumber(1),
+                tx_index_within_block: McTxIndexInBlock(0),
+            },
+            tx_inputs: alloc::vec![u],
+            aura_pub_key: AuraPublicKey(pool_key(tag)),
+            grandpa_pub_key: GrandpaPublicKey(alloc::vec![tag; 32]),
+        }],
+        stake_delegation: Some(StakeDelegation(1_000)),
+    }
+}
+
+/// Distinct 32-byte key per tag. Byte 31 carries the tag so the lookup closure
+/// can recover it from the liveness account.
+fn pool_key(tag: u8) -> alloc::vec::Vec<u8> {
+    let mut k = [0u8; 32];
+    k[31] = tag;
+    k.to_vec()
+}
+
+/// Liveness shapes for the POOL layer, calibrated to the filter thresholds
+/// rather than the gate's.
+///
+/// `Seat::liveness()` is built for `WINDOW` (10_000), which sits far inside
+/// `CORE_WINDOW` (100_800) — a "dead" seat by the gate's clock is comfortably
+/// alive by the core filter's, so reusing it here would silently exercise
+/// nothing. `Dead` is therefore pushed past the LONGER of the two windows.
+///
+/// `Unproven` also has to change meaning. To `is_dead`, a candidate selected
+/// long ago that never authored is DEAD, not unproven — so the newcomer that
+/// the gate calls unproven is, at the pool layer, one that was never selected
+/// at all (`first_selected: None`, which the filters deliberately fail open on).
+/// That is the real shape of a first-time candidate and the one #511 describes.
+fn pool_liveness(seat: Seat, now: u32) -> CandidateLiveness {
+    match seat {
+        Seat::Live => CandidateLiveness {
+            first_selected: Some(0),
+            last_authored: Some(now),
+        },
+        Seat::Dead => CandidateLiveness {
+            first_selected: Some(0),
+            last_authored: Some(now - CORE_WINDOW.max(REG_WINDOW) - 1),
+        },
+        Seat::Unproven => CandidateLiveness {
+            first_selected: None,
+            last_authored: None,
+        },
+    }
+}
+
+/// One candidate's place in the pool: its tag, whether it is permissioned, its
+/// liveness shape, and whether it holds a break-glass key.
+#[derive(Clone, Copy, Debug)]
+struct PoolMember {
+    tag: u8,
+    permissioned: bool,
+    seat: Seat,
+    break_glass: bool,
+}
+
+/// Run the REAL pool filters and report what survives.
+///
+/// Returns (permissioned survivors, registered survivors) as tags, which is
+/// exactly what a draw could then be built from.
+fn filtered_pool(members: &[PoolMember], now: u32) -> (Vec<u8>, Vec<u8>) {
+    let inputs = AuthoritySelectionInputs {
+        d_parameter: DParameter {
+            num_permissioned_candidates: members.iter().filter(|m| m.permissioned).count() as u16,
+            num_registered_candidates: members.iter().filter(|m| !m.permissioned).count() as u16,
+        },
+        permissioned_candidates: members
+            .iter()
+            .filter(|m| m.permissioned)
+            .map(|m| perm_candidate(m.tag))
+            .collect(),
+        registered_candidates: members
+            .iter()
+            .filter(|m| !m.permissioned)
+            .map(|m| reg_candidate(m.tag))
+            .collect(),
+        epoch_nonce: EpochNonce(alloc::vec![7; 32]),
+    };
+
+    let seats: alloc::collections::BTreeMap<u8, Seat> =
+        members.iter().map(|m| (m.tag, m.seat)).collect();
+    let lookup = |acct: [u8; 32]| -> CandidateLiveness {
+        pool_liveness(seats.get(&acct[31]).copied().unwrap_or(Seat::Dead), now)
+    };
+    let bg: Vec<[u8; 32]> = members
+        .iter()
+        .filter(|m| m.break_glass)
+        .map(|m| {
+            let mut k = [0u8; 32];
+            k[31] = m.tag;
+            k
+        })
+        .collect();
+
+    // The runtime's order: registered filter, then core eviction.
+    let (inputs, _) = filter_dead_registered(inputs, now, REG_GRACE, REG_WINDOW, lookup);
+    let (inputs, _) = filter_dead_permissioned(
+        inputs,
+        now,
+        CORE_GRACE,
+        CORE_WINDOW,
+        crate::CORE_MAX_EVICTIONS_PER_SELECTION,
+        &bg,
+        lookup,
+    );
+
+    let perms = inputs
+        .permissioned_candidates
+        .iter()
+        .map(|c| c.aura_public_key.0[31])
+        .collect();
+    let regs = inputs
+        .registered_candidates
+        .iter()
+        .filter_map(|c| c.registrations.first())
+        .map(|r| r.aura_pub_key.0[31])
+        .collect();
+    (perms, regs)
+}
+
+/// THE #534 INVARIANT, at the layer the bug actually lived in.
+///
+/// A break-glass holder in the input pool must be in the filtered pool, for
+/// EVERY liveness shape and every mix of other candidates. This is what the
+/// gate-level model could not see: `committee_covers_break_glass` refuses a
+/// draw with no holder, and before the fix `filter_dead_permissioned` could
+/// remove the only one, so the two composed into a permanent refusal.
+#[test]
+fn the_filters_can_never_remove_a_break_glass_holder() {
+    let now = 1_000_000;
+    for holder_seat in [Seat::Live, Seat::Dead, Seat::Unproven] {
+        for other_seat in [Seat::Live, Seat::Dead, Seat::Unproven] {
+            for others in 0..4usize {
+                for others_permissioned in [false, true] {
+                    let mut members = alloc::vec![PoolMember {
+                        tag: 1,
+                        permissioned: true,
+                        seat: holder_seat,
+                        break_glass: true,
+                    }];
+                    for i in 0..others {
+                        members.push(PoolMember {
+                            tag: (10 + i) as u8,
+                            permissioned: others_permissioned,
+                            seat: other_seat,
+                            break_glass: false,
+                        });
+                    }
+                    let (perms, _regs) = filtered_pool(&members, now);
+                    assert!(
+                        perms.contains(&1u8),
+                        "the break-glass holder was filtered OUT of the pool \
+                         (holder={holder_seat:?}, {others} other {other_seat:?} \
+                         candidates, permissioned={others_permissioned}). The armed floor \
+                         would then refuse every draw, permanently."
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The exemption must not become a blanket amnesty: a dead core that holds NO
+/// break-glass key is still evicted. Without this the test above would pass on
+/// a build where eviction had simply stopped working.
+#[test]
+fn a_dead_non_holder_core_is_still_evicted() {
+    let now = 1_000_000;
+    let members = alloc::vec![
+        PoolMember { tag: 1, permissioned: true, seat: Seat::Dead, break_glass: true },
+        PoolMember { tag: 2, permissioned: true, seat: Seat::Dead, break_glass: false },
+    ];
+    let (perms, _) = filtered_pool(&members, now);
+    assert!(perms.contains(&1u8), "holder must survive");
+    assert!(
+        !perms.contains(&2u8),
+        "a dead core holding no break-glass key must still be evicted — the exemption \
+         is not a blanket amnesty"
+    );
+}
+
+/// FILTERING MUST NOT CREATE A DEADLOCK. The filters exist to shed dead weight,
+/// so they must never take a state that could rotate and leave it unable to.
+///
+/// Formally: for every pool and every flag combination, if some draw from the
+/// UNFILTERED pool is accepted, some draw from the FILTERED pool must be too.
+/// A dead candidate cannot help satisfy the live-quorum floor anyway, so
+/// removing one should never cost an acceptable draw — but "should" is the
+/// assumption #534 violated, so it is checked rather than assumed.
+#[test]
+fn filtering_never_removes_the_last_acceptable_draw() {
+    let now = 1_000_000;
+    for n_perm in 1..=4usize {
+        for n_reg in 0..=3usize {
+            for perm_seat in [Seat::Live, Seat::Dead, Seat::Unproven] {
+                for reg_seat in [Seat::Live, Seat::Dead, Seat::Unproven] {
+                    let mut members = Vec::new();
+                    for i in 0..n_perm {
+                        members.push(PoolMember {
+                            tag: (1 + i) as u8,
+                            permissioned: true,
+                            seat: perm_seat,
+                            break_glass: i == 0,
+                        });
+                    }
+                    for i in 0..n_reg {
+                        members.push(PoolMember {
+                            tag: (20 + i) as u8,
+                            permissioned: false,
+                            seat: reg_seat,
+                            break_glass: false,
+                        });
+                    }
+
+                    let live_before = members.iter().filter(|m| m.seat == Seat::Live).count();
+                    let before = Pool {
+                        total: members.len(),
+                        live: live_before,
+                        break_glass_available: true,
+                    };
+
+                    let (perms, regs) = filtered_pool(&members, now);
+                    let surviving: Vec<&PoolMember> = members
+                        .iter()
+                        .filter(|m| {
+                            if m.permissioned {
+                                perms.contains(&m.tag)
+                            } else {
+                                regs.contains(&m.tag)
+                            }
+                        })
+                        .collect();
+                    let after = Pool {
+                        total: surviving.len(),
+                        live: surviving.iter().filter(|m| m.seat == Seat::Live).count(),
+                        break_glass_available: surviving.iter().any(|m| m.break_glass),
+                    };
+
+                    for cn in 1..=6usize {
+                        for cl in 0..=cn {
+                            let c = Current { n: cn, live: cl };
+                            for slack in [false, true] {
+                                for bg in [false, true] {
+                                    let f = Flags { slack, break_glass: bg };
+                                    if any_draw_accepted(c, f, before)
+                                        && !any_draw_accepted(c, f, after)
+                                    {
+                                        panic!(
+                                            "FILTERING CREATED A DEADLOCK: {c:?} {f:?}\n  \
+                                             pool before filtering: {before:?}\n  \
+                                             pool after  filtering: {after:?}\n  \
+                                             members: {n_perm} permissioned {perm_seat:?}, \
+                                             {n_reg} registered {reg_seat:?}"
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                 }
