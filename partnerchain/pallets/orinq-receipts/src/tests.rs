@@ -629,6 +629,55 @@ fn set_break_glass_aura_keys_works_for_root() {
 }
 
 #[test]
+fn cannot_empty_the_break_glass_keys_while_the_floor_is_armed() {
+    // #534 mirror hazard. `committee_covers_break_glass` treats an EMPTY key set
+    // as "unconfigured, every committee passes", so clearing the keys while the
+    // floor is enabled turns the floor into a silent no-op while
+    // `BreakGlassFloorEnabled` still reads true on chain — a postflight that
+    // checks the flag would report ARMED with nothing enforced.
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_break_glass_aura_keys(
+            RuntimeOrigin::root(),
+            alloc::vec![[1u8; 32]]
+        ));
+        assert_ok!(OrinqReceipts::set_break_glass_floor_enabled(
+            RuntimeOrigin::root(),
+            true
+        ));
+
+        assert_noop!(
+            OrinqReceipts::set_break_glass_aura_keys(RuntimeOrigin::root(), alloc::vec![]),
+            pallet::Error::<Test>::CannotEmptyBreakGlassKeysWhileArmed
+        );
+        assert_eq!(
+            OrinqReceipts::break_glass_aura_keys(),
+            alloc::vec![[1u8; 32]],
+            "the rejected call must not have mutated storage"
+        );
+
+        // REPLACING the set is still allowed — this guards emptiness, not
+        // rotation, or key rotation would need a disarm/rearm window in which
+        // the floor is off.
+        assert_ok!(OrinqReceipts::set_break_glass_aura_keys(
+            RuntimeOrigin::root(),
+            alloc::vec![[9u8; 32], [8u8; 32]]
+        ));
+
+        // And with the floor DISARMED, clearing is legitimate again — that is
+        // the documented disarm path, not a hazard.
+        assert_ok!(OrinqReceipts::set_break_glass_floor_enabled(
+            RuntimeOrigin::root(),
+            false
+        ));
+        assert_ok!(OrinqReceipts::set_break_glass_aura_keys(
+            RuntimeOrigin::root(),
+            alloc::vec![]
+        ));
+        assert!(OrinqReceipts::break_glass_aura_keys().is_empty());
+    });
+}
+
+#[test]
 fn set_break_glass_aura_keys_rejects_non_root() {
     new_test_ext().execute_with(|| {
         assert_noop!(

@@ -623,6 +623,12 @@ pub mod pallet {
         /// `set_break_glass_aura_keys` was given more keys than `MaxCommitteeSize`.
         /// A break-glass set larger than a committee is nonsensical — reduce it.
         TooManyBreakGlassKeys,
+        /// `set_break_glass_aura_keys` was given an EMPTY set while
+        /// `BreakGlassFloorEnabled` is true (#534). An empty set means
+        /// "unconfigured" to `committee_covers_break_glass`, so every committee
+        /// would pass — the floor would read ARMED on chain while enforcing
+        /// nothing. Disarm the floor first, or pass a non-empty replacement.
+        CannotEmptyBreakGlassKeysWhileArmed,
         /// `set_pinned_committee` was given an empty member list. A pinned
         /// committee with no authors would halt production — provide ≥1 member.
         EmptyPinnedCommittee,
@@ -2394,6 +2400,16 @@ pub mod pallet {
             keys: Vec<[u8; 32]>,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            // Emptying the set while the floor is armed disarms it SILENTLY:
+            // `committee_covers_break_glass` reads an empty set as unconfigured
+            // and passes every committee, so the on-chain flag would still say
+            // ARMED with nothing enforced (#534). Replacement is unaffected —
+            // guarding rotation too would force a disarm window in which the
+            // floor is genuinely off.
+            ensure!(
+                !keys.is_empty() || !BreakGlassFloorEnabled::<T>::get(),
+                Error::<T>::CannotEmptyBreakGlassKeysWhileArmed
+            );
             let bounded: BoundedVec<[u8; 32], T::MaxCommitteeSize> =
                 keys.try_into().map_err(|_| Error::<T>::TooManyBreakGlassKeys)?;
             let count = bounded.len() as u32;

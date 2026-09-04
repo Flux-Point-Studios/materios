@@ -199,7 +199,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 237,
+    spec_version: 238,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 4,
@@ -936,6 +936,14 @@ impl pallet_session_validator_management::Config for Runtime {
         // scheduled set-change that enacts only while the old set still finalizes
         // it; a finality-frozen chain still needs R1's `Grandpa::note_stalled`
         // break-glass (the existing 2-of-3 ceremony — no new extrinsic).
+        //
+        // BreakGlassAuraKeys are passed in and are EXEMPT from eviction (#534).
+        // Without that, arming this flag while the break-glass floor is armed
+        // could evict the last holder, after which the floor refuses every draw
+        // and rotation is frozen for good — `is_dead` reads LastAuthoredBlock,
+        // which only a seated node writes, so the evicted core can never author
+        // its way back in. Read fresh here rather than cached: the exemption
+        // must track whatever Root has currently set.
         let (sanitized, cores_dropped) =
             if pallet_orinq_receipts::Pallet::<Runtime>::core_eviction_enabled() {
                 committee_liveness::filter_dead_permissioned(
@@ -944,6 +952,7 @@ impl pallet_session_validator_management::Config for Runtime {
                     CORE_LIVENESS_GRACE_BLOCKS,
                     CORE_LIVENESS_WINDOW_BLOCKS,
                     CORE_MAX_EVICTIONS_PER_SELECTION,
+                    &pallet_orinq_receipts::Pallet::<Runtime>::break_glass_aura_keys(),
                     liveness_of,
                 )
             } else {

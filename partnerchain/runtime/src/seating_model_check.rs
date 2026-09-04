@@ -323,6 +323,14 @@ fn a_finalizing_chain_can_always_rotate() {
 /// which only a SEATED node can refresh, a filtered core cannot earn its way
 /// back in. The exit is a manual lever, and this test exists to pin that the
 /// dependency is real so the runbook cannot quietly stop mentioning it.
+///
+/// The two RUNTIME-CONTROLLED routes into this state are now closed (#534):
+/// `filter_dead_permissioned` exempts break-glass holders from core eviction,
+/// and `set_break_glass_aura_keys` refuses to empty the set while the floor is
+/// armed. The state itself stays reachable — a Cardano permissioned-candidate
+/// upsert that drops the holder is an L1 action no runtime check can prevent —
+/// so the gate behaviour asserted here is deliberately unchanged, and the fixes
+/// remove the ways to GET here rather than the consequence of being here.
 #[test]
 fn break_glass_floor_with_no_available_holder_freezes_rotation() {
     let c = Current { n: 5, live: 5 };

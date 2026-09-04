@@ -132,7 +132,12 @@ where
 /// D-parameter (the count stays `(P, R)`; only the runtime candidate pool
 /// shrinks, computed deterministically from on-chain liveness state).
 ///
-/// Three independent bounds keep eviction from ever stranding the FPS backstop:
+/// Four independent bounds keep eviction from ever stranding the FPS backstop:
+///  - `break_glass_keys` are EXEMPT outright (#534): while the break-glass floor
+///    is armed, a draw seating none of them is refused, so evicting the last
+///    holder would freeze rotation permanently — and since `is_dead` reads
+///    `LastAuthoredBlock`, which only a seated node writes, the evicted core
+///    could never author its way back;
 ///  - core-specific `grace_blocks`/`window_blocks` MUCH longer than the
 ///    registered ones, so no reboot, deploy, or snapshot restore flaps a healthy
 ///    core out — only a multi-day silence reads as dead (the caller passes
@@ -163,6 +168,7 @@ pub fn filter_dead_permissioned<F>(
     grace_blocks: u32,
     window_blocks: u32,
     cap: usize,
+    break_glass_keys: &[[u8; 32]],
     mut lookup: F,
 ) -> (AuthoritySelectionInputs, u32)
 where
@@ -177,6 +183,21 @@ where
     let mut dead: alloc::vec::Vec<([u8; 32], u32)> = alloc::vec::Vec::new();
     for cand in inputs.permissioned_candidates.iter() {
         if let Some(acct) = aura_account_bytes(&cand.aura_public_key) {
+            // A break-glass holder is never evictable (#534). The armed
+            // break-glass floor refuses every draw seating none of these keys,
+            // and `is_dead` reads `LastAuthoredBlock`, which only a SEATED node
+            // writes — so evicting the last holder is ABSORBING: no draw is
+            // acceptable, rotation freezes where it stands, and the evicted core
+            // can never author its way back into the pool. Skipped BEFORE the
+            // staleness ranking, not filtered after it: a never-authored core
+            // ranks maximally stale, so an exempt holder would otherwise occupy
+            // the whole `cap` and silently shield a genuinely dead core behind
+            // it. Exempting here costs nothing in the case eviction exists for —
+            // a dead core that holds no break-glass key is still evicted, and
+            // the live-quorum floor still judges whatever set results.
+            if break_glass_keys.contains(&acct) {
+                continue;
+            }
             let liveness = lookup(acct);
             if is_dead(&liveness, now, grace_blocks, window_blocks) {
                 let staleness = match liveness.last_authored {
@@ -1094,11 +1115,84 @@ mod tests {
     }
 
     #[test]
+    fn dead_core_holding_a_break_glass_key_is_never_evicted() {
+        // #534. The break-glass floor refuses any draw seating none of these
+        // keys, and `is_dead` keys on LastAuthoredBlock, which only a SEATED
+        // node writes. So evicting the last break-glass holder from the pool is
+        // absorbing: no draw is acceptable, rotation freezes, and the evicted
+        // core can never author its way back. Eviction must not be able to
+        // reach a break-glass holder, however dead it looks.
+        let now = 2_000_000;
+        let bg = [0xC0u8; 32];
+        let very_dead = live(Some(1_000), None); // past grace, never authored
+
+        let inputs = inputs_with_perms(alloc::vec![perm(0xC0)]);
+        let (out, dropped) =
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[bg], |_| very_dead);
+        assert_eq!(dropped, 0, "a break-glass holder was evicted");
+        assert_eq!(
+            out.permissioned_candidates.len(),
+            1,
+            "the break-glass holder must stay in the pool"
+        );
+
+        // The discriminator: the SAME dead core, not holding a break-glass key,
+        // is still evicted. Without this the assertion above would also pass if
+        // eviction had simply stopped working.
+        let inputs = inputs_with_perms(alloc::vec![perm(0xC0)]);
+        let (out, dropped) = filter_dead_permissioned(
+            inputs,
+            now,
+            CORE_GRACE,
+            CORE_WINDOW,
+            1,
+            &[[0xEEu8; 32]],
+            |_| very_dead,
+        );
+        assert_eq!(dropped, 1, "a dead non-break-glass core must still be evicted");
+        assert!(out.permissioned_candidates.is_empty());
+    }
+
+    #[test]
+    fn a_break_glass_holder_does_not_consume_the_eviction_cap() {
+        // Exemption must SKIP the holder, not spend the per-selection budget on
+        // it. Ranking is stalest-first, and a never-authored core ranks
+        // maximally stale, so a naive filter-after-truncate would let the
+        // exempt holder occupy the single slot and silently protect a genuinely
+        // dead core standing behind it.
+        let now = 2_000_000;
+        let bg = [0xC0u8; 32];
+        let inputs = inputs_with_perms(alloc::vec![perm(0xC0), perm(0xD0)]);
+        let (out, dropped) = filter_dead_permissioned(
+            inputs,
+            now,
+            CORE_GRACE,
+            CORE_WINDOW,
+            1,
+            &[bg],
+            |acct| {
+                if acct == bg {
+                    live(Some(1_000), None) // maximally stale, but exempt
+                } else {
+                    live(Some(1_000), Some(now - CORE_WINDOW - 1)) // dead, evictable
+                }
+            },
+        );
+        assert_eq!(dropped, 1, "the cap was spent on the exempt holder");
+        assert_eq!(out.permissioned_candidates.len(), 1);
+        assert_eq!(
+            out.permissioned_candidates[0].aura_public_key.0,
+            alloc::vec![0xC0u8; 32],
+            "the surviving core must be the break-glass holder"
+        );
+    }
+
+    #[test]
     fn permissioned_dead_core_dropped_only_past_core_window() {
         let now = 2_000_000;
         let within = inputs_with_perms(alloc::vec![perm(0xC0)]);
         let (out, dropped) =
-            filter_dead_permissioned(within, now, CORE_GRACE, CORE_WINDOW, 1, |_| {
+            filter_dead_permissioned(within, now, CORE_GRACE, CORE_WINDOW, 1, &[], |_| {
                 live(Some(1_000), Some(now - CORE_WINDOW)) // exactly at window = live
             });
         assert_eq!(dropped, 0);
@@ -1106,7 +1200,7 @@ mod tests {
 
         let past = inputs_with_perms(alloc::vec![perm(0xC0)]);
         let (out, dropped) =
-            filter_dead_permissioned(past, now, CORE_GRACE, CORE_WINDOW, 1, |_| {
+            filter_dead_permissioned(past, now, CORE_GRACE, CORE_WINDOW, 1, &[], |_| {
                 live(Some(1_000), Some(now - CORE_WINDOW - 1)) // one past window = dead
             });
         assert_eq!(dropped, 1);
@@ -1122,7 +1216,7 @@ mod tests {
         assert!(is_dead(&live(Some(1_000), stale), now, GRACE, WINDOW)); // reg WOULD evict
         let inputs = inputs_with_perms(alloc::vec![perm(0xC0)]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |_| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |_| {
                 live(Some(1_000), stale)
             });
         assert_eq!(dropped, 0);
@@ -1134,7 +1228,7 @@ mod tests {
         let now = 1_000_000;
         let inputs = inputs_with_perms(alloc::vec![perm(0xC0)]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |_| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |_| {
                 live(Some(now - CORE_GRACE / 2), None) // freshly (re)added, within grace
             });
         assert_eq!(dropped, 0);
@@ -1147,7 +1241,7 @@ mod tests {
         let inputs =
             inputs_with_perms(alloc::vec![perm(0xC0), perm(0xC1), perm(0xC2), perm(0xC3)]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |_| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |_| {
                 live(Some(1_000), Some(now - 10)) // all live
             });
         assert_eq!(dropped, 0);
@@ -1162,7 +1256,7 @@ mod tests {
         let inputs =
             inputs_with_perms(alloc::vec![perm(0xD0), perm(0xD1), perm(0x10), perm(0x11)]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |acct| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |acct| {
                 match acct[0] >> 4 {
                     0xD => live(Some(1_000), Some(now - CORE_WINDOW - 1)), // dead
                     _ => live(Some(1_000), Some(now - 10)),                // live
@@ -1186,7 +1280,7 @@ mod tests {
         let now = 2_000_000;
         let inputs = inputs_with_perms(alloc::vec![perm(0xB0), perm(0xA0)]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |acct| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |acct| {
                 match acct[0] {
                     0xA0 => live(Some(1_000), Some(now - CORE_WINDOW - 1_000)), // stalest
                     0xB0 => live(Some(1_000), Some(now - CORE_WINDOW - 1)),     // dead, fresher
@@ -1205,7 +1299,7 @@ mod tests {
         let now = 2_000_000;
         let inputs = inputs_with_perms(alloc::vec![perm(0xA0), perm(0xB0)]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |acct| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |acct| {
                 match acct[0] {
                     0xA0 => live(Some(1_000), Some(now - CORE_WINDOW - 5)), // authored, dead
                     0xB0 => live(Some(1_000), None),                        // never authored
@@ -1225,7 +1319,7 @@ mod tests {
         let mut inputs = inputs_with_perms(alloc::vec![perm(0xD0)]);
         inputs.registered_candidates = alloc::vec![cand(0x40, 0x44)];
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |_| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |_| {
                 live(Some(1_000), Some(now - CORE_WINDOW - 1)) // everything reads dead
             });
         assert_eq!(dropped, 1); // only the one core
@@ -1240,7 +1334,7 @@ mod tests {
         p.aura_public_key = AuraPublicKey(alloc::vec![0x66; 16]); // short, unmappable
         let inputs = inputs_with_perms(alloc::vec![p]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, |_| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[], |_| {
                 live(Some(1), None) // would be dead if mappable
             });
         assert_eq!(dropped, 0);
@@ -1252,7 +1346,7 @@ mod tests {
         let now = 2_000_000;
         let inputs = inputs_with_perms(alloc::vec![perm(0xD0)]);
         let (out, dropped) =
-            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 0, |_| {
+            filter_dead_permissioned(inputs, now, CORE_GRACE, CORE_WINDOW, 0, &[], |_| {
                 live(Some(1_000), Some(now - CORE_WINDOW - 1)) // dead, but cap=0
             });
         assert_eq!(dropped, 0);
