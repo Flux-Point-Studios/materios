@@ -180,22 +180,35 @@ where
     // Rank every dead core by staleness (greatest first), ties by key bytes, so
     // the choice of which core to drop is identical on every node — a forced
     // node-local choice would risk divergent committees across the network.
+    // Break-glass holders currently in the pool. The exemption below is scoped
+    // to these, and only where it is load-bearing.
+    let holders_in_pool: alloc::vec::Vec<[u8; 32]> = inputs
+        .permissioned_candidates
+        .iter()
+        .filter_map(|c| aura_account_bytes(&c.aura_public_key))
+        .filter(|a| break_glass_keys.contains(a))
+        .collect();
+
     let mut dead: alloc::vec::Vec<([u8; 32], u32)> = alloc::vec::Vec::new();
     for cand in inputs.permissioned_candidates.iter() {
         if let Some(acct) = aura_account_bytes(&cand.aura_public_key) {
-            // A break-glass holder is never evictable (#534). The armed
-            // break-glass floor refuses every draw seating none of these keys,
-            // and `is_dead` reads `LastAuthoredBlock`, which only a SEATED node
-            // writes — so evicting the last holder is ABSORBING: no draw is
-            // acceptable, rotation freezes where it stands, and the evicted core
-            // can never author its way back into the pool. Skipped BEFORE the
-            // staleness ranking, not filtered after it: a never-authored core
-            // ranks maximally stale, so an exempt holder would otherwise occupy
-            // the whole `cap` and silently shield a genuinely dead core behind
-            // it. Exempting here costs nothing in the case eviction exists for —
-            // a dead core that holds no break-glass key is still evicted, and
-            // the live-quorum floor still judges whatever set results.
-            if break_glass_keys.contains(&acct) {
+            // #534, NARROWED to the case its justification actually covers.
+            // Evicting the LAST break-glass holder is absorbing: the armed floor
+            // then refuses every draw, and `is_dead` reads `LastAuthoredBlock`,
+            // which only a SEATED node writes, so the evicted core can never
+            // author its way back. That argument covers the last holder and
+            // nothing else. With a second holder in the pool the floor stays
+            // satisfiable, so a dead holder MUST still be shed — exempting every
+            // holder would silently disable eviction for exactly the FPS cores
+            // it exists to drop, re-opening the q(n)-inflation wedge with no
+            // operator signal at all (`cores_dropped` stays 0, so the caller's
+            // warn never fires).
+            //
+            // Skipped BEFORE the staleness ranking rather than filtered after,
+            // because a never-authored core ranks maximally stale and would
+            // otherwise consume the whole `cap` and shield a genuinely dead core
+            // standing behind it.
+            if holders_in_pool.len() <= 1 && break_glass_keys.contains(&acct) {
                 continue;
             }
             let liveness = lookup(acct);
@@ -213,7 +226,19 @@ where
     }
     dead.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     dead.truncate(cap);
-    let evict: alloc::vec::Vec<[u8; 32]> = dead.into_iter().map(|(acct, _)| acct).collect();
+    let mut evict: alloc::vec::Vec<[u8; 32]> = dead.into_iter().map(|(acct, _)| acct).collect();
+
+    // Cap-independent backstop: at least one break-glass holder must survive
+    // every selection. The skip above already protects a lone holder, but with
+    // `cap > 1` and several all-dead holders the ranking could take the last one
+    // out in a single pass, which is the absorbing state again. Retaining the
+    // LEAST stale holder — the tail of the staleness-ordered list — is
+    // deterministic, so every node retains the same one.
+    if !holders_in_pool.is_empty() && holders_in_pool.iter().all(|h| evict.contains(h)) {
+        if let Some(pos) = evict.iter().rposition(|a| holders_in_pool.contains(a)) {
+            evict.remove(pos);
+        }
+    }
 
     let mut dropped: u32 = 0;
     inputs.permissioned_candidates.retain(|cand| {
@@ -1112,6 +1137,29 @@ mod tests {
         assert!(CORE_WINDOW > WINDOW);
         assert_eq!(CORE_GRACE, 14_400);
         assert_eq!(CORE_WINDOW, 100_800);
+    }
+
+    #[test]
+    fn a_dead_holder_is_evicted_when_another_holder_survives() {
+        // The exemption is justified ONLY by the absorbing state: evicting the
+        // LAST holder leaves the armed floor unsatisfiable forever. With a
+        // second live holder in the pool that argument does not apply — the
+        // floor stays satisfiable — so a dead holder must still be shed, or
+        // eviction is silently disabled for exactly the cores it exists to drop.
+        let now = 2_000_000;
+        let bg_dead = [0xC0u8; 32];
+        let bg_live = [0xC1u8; 32];
+        let inputs = inputs_with_perms(alloc::vec![perm(0xC0), perm(0xC1)]);
+        let (out, dropped) = filter_dead_permissioned(
+            inputs, now, CORE_GRACE, CORE_WINDOW, 1, &[bg_dead, bg_live],
+            |acct| {
+                if acct == bg_dead { live(Some(1_000), None) }        // dead
+                else { live(Some(1_000), Some(now)) }                  // live
+            },
+        );
+        assert_eq!(dropped, 1, "a dead holder with a LIVE sibling holder must still be evicted");
+        assert_eq!(out.permissioned_candidates.len(), 1);
+        assert_eq!(out.permissioned_candidates[0].aura_public_key.0, alloc::vec![0xC1u8; 32]);
     }
 
     #[test]

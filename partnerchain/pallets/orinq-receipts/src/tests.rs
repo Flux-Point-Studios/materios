@@ -576,6 +576,22 @@ fn break_glass_floor_disabled_and_empty_by_default() {
 #[test]
 fn set_break_glass_floor_enabled_works_for_root() {
     new_test_ext().execute_with(|| {
+        // Arming with NO keys seeded is now refused (#534). It produced the
+        // silent no-op the whole floor exists to avoid: `BreakGlassFloorEnabled`
+        // reads true while `committee_covers_break_glass` passes every committee,
+        // so a postflight checking the flag reports ARMED with nothing enforced.
+        // Seed-before-arm was documented but only runbook-enforced; this test
+        // previously encoded the hazard as acceptable behaviour.
+        assert_noop!(
+            OrinqReceipts::set_break_glass_floor_enabled(RuntimeOrigin::root(), true),
+            pallet::Error::<Test>::CannotEmptyBreakGlassKeysWhileArmed
+        );
+        assert!(!OrinqReceipts::break_glass_floor_enabled());
+
+        assert_ok!(OrinqReceipts::set_break_glass_aura_keys(
+            RuntimeOrigin::root(),
+            alloc::vec![[7u8; 32]]
+        ));
         assert_ok!(OrinqReceipts::set_break_glass_floor_enabled(
             RuntimeOrigin::root(),
             true

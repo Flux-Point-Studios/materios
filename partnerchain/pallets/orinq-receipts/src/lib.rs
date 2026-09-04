@@ -2346,6 +2346,16 @@ pub mod pallet {
             enabled: bool,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            // The empty set reads as "unconfigured" to
+            // `committee_covers_break_glass`, so arming before seeding produces
+            // the same silent no-op the `set_break_glass_aura_keys` guard
+            // rejects: the flag says ARMED while nothing is enforced. Guarding
+            // only the clear side left this half open — seed-before-arm was
+            // runbook-enforced, not code-enforced.
+            ensure!(
+                !enabled || !BreakGlassAuraKeys::<T>::get().is_empty(),
+                Error::<T>::CannotEmptyBreakGlassKeysWhileArmed
+            );
             BreakGlassFloorEnabled::<T>::put(enabled);
             Self::deposit_event(Event::BreakGlassFloorEnabledUpdated { enabled });
             Ok(())

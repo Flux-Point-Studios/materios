@@ -952,7 +952,17 @@ impl pallet_session_validator_management::Config for Runtime {
                     CORE_LIVENESS_GRACE_BLOCKS,
                     CORE_LIVENESS_WINDOW_BLOCKS,
                     CORE_MAX_EVICTIONS_PER_SELECTION,
-                    &pallet_orinq_receipts::Pallet::<Runtime>::break_glass_aura_keys(),
+                    // Inert while the floor is disarmed: the exemption only
+                    // buys anything when a draw seating no holder would be
+                    // REFUSED. Disarmed, a dead holder would be un-evictable for
+                    // nothing — and this commit's own `ensure!` makes
+                    // {disarmed, seeded} a mandatory transit state for clearing
+                    // keys, so that window is guaranteed to occur.
+                    &if pallet_orinq_receipts::Pallet::<Runtime>::break_glass_floor_enabled() {
+                        pallet_orinq_receipts::Pallet::<Runtime>::break_glass_aura_keys().to_vec()
+                    } else {
+                        alloc::vec::Vec::new()
+                    },
                     liveness_of,
                 )
             } else {
