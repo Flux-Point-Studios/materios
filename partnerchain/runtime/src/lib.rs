@@ -7,6 +7,9 @@ extern crate alloc;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod seating_model_check;
+
 pub mod committee_liveness;
 pub mod input_sanity;
 pub mod migrations;
