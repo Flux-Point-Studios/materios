@@ -623,12 +623,6 @@ pub mod pallet {
         /// `set_break_glass_aura_keys` was given more keys than `MaxCommitteeSize`.
         /// A break-glass set larger than a committee is nonsensical — reduce it.
         TooManyBreakGlassKeys,
-        /// `set_break_glass_aura_keys` was given an EMPTY set while
-        /// `BreakGlassFloorEnabled` is true (#534). An empty set means
-        /// "unconfigured" to `committee_covers_break_glass`, so every committee
-        /// would pass — the floor would read ARMED on chain while enforcing
-        /// nothing. Disarm the floor first, or pass a non-empty replacement.
-        CannotEmptyBreakGlassKeysWhileArmed,
         /// `set_pinned_committee` was given an empty member list. A pinned
         /// committee with no authors would halt production — provide ≥1 member.
         EmptyPinnedCommittee,
@@ -666,6 +660,12 @@ pub mod pallet {
         /// race-refund in-flight receipts whose signers are still attesting,
         /// stealing the submitter→signer flow. Raise the proposed value.
         ReceiptExpiryBlocksTooLow,
+        /// `set_break_glass_aura_keys` was given an EMPTY set while
+        /// `BreakGlassFloorEnabled` is true (#534). An empty set means
+        /// "unconfigured" to `committee_covers_break_glass`, so every committee
+        /// would pass — the floor would read ARMED on chain while enforcing
+        /// nothing. Disarm the floor first, or pass a non-empty replacement.
+        CannotEmptyBreakGlassKeysWhileArmed,
     }
 
     // ── Genesis ──────────────────────────────────────────────────────────
