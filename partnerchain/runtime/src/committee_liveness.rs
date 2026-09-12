@@ -133,11 +133,13 @@ where
 /// shrinks, computed deterministically from on-chain liveness state).
 ///
 /// Four independent bounds keep eviction from ever stranding the FPS backstop:
-///  - `break_glass_keys` are EXEMPT outright (#534): while the break-glass floor
-///    is armed, a draw seating none of them is refused, so evicting the last
-///    holder would freeze rotation permanently — and since `is_dead` reads
-///    `LastAuthoredBlock`, which only a seated node writes, the evicted core
-///    could never author its way back;
+///  - the LAST `break_glass_keys` holder left in the pool is exempt (#534):
+///    while the break-glass floor is armed, a draw seating none of them is
+///    refused, so evicting the last holder would freeze rotation permanently —
+///    and since `is_dead` reads `LastAuthoredBlock`, which only a seated node
+///    writes, the evicted core could never author its way back. With two or
+///    more holders in the pool the floor stays satisfiable and a dead holder is
+///    shed like any other core;
 ///  - core-specific `grace_blocks`/`window_blocks` MUCH longer than the
 ///    registered ones, so no reboot, deploy, or snapshot restore flaps a healthy
 ///    core out — only a multi-day silence reads as dead (the caller passes
@@ -1163,13 +1165,13 @@ mod tests {
     }
 
     #[test]
-    fn dead_core_holding_a_break_glass_key_is_never_evicted() {
+    fn a_dead_holder_is_never_evicted_when_it_is_the_last_holder() {
         // #534. The break-glass floor refuses any draw seating none of these
         // keys, and `is_dead` keys on LastAuthoredBlock, which only a SEATED
         // node writes. So evicting the last break-glass holder from the pool is
         // absorbing: no draw is acceptable, rotation freezes, and the evicted
         // core can never author its way back. Eviction must not be able to
-        // reach a break-glass holder, however dead it looks.
+        // reach the pool's only holder, however dead it looks.
         let now = 2_000_000;
         let bg = [0xC0u8; 32];
         let very_dead = live(Some(1_000), None); // past grace, never authored

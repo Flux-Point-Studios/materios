@@ -937,13 +937,14 @@ impl pallet_session_validator_management::Config for Runtime {
         // it; a finality-frozen chain still needs R1's `Grandpa::note_stalled`
         // break-glass (the existing 2-of-3 ceremony — no new extrinsic).
         //
-        // BreakGlassAuraKeys are passed in and are EXEMPT from eviction (#534).
-        // Without that, arming this flag while the break-glass floor is armed
-        // could evict the last holder, after which the floor refuses every draw
-        // and rotation is frozen for good — `is_dead` reads LastAuthoredBlock,
-        // which only a seated node writes, so the evicted core can never author
-        // its way back in. Read fresh here rather than cached: the exemption
-        // must track whatever Root has currently set.
+        // BreakGlassAuraKeys are passed in so the LAST holder left in the pool
+        // is exempt from eviction (#534). Without that, arming this flag while
+        // the break-glass floor is armed could evict the last holder, after
+        // which the floor refuses every draw and rotation is frozen for good —
+        // `is_dead` reads LastAuthoredBlock, which only a seated node writes,
+        // so the evicted core can never author its way back in. Any other
+        // holder is shed like any other dead core. Read fresh here rather than
+        // cached: the exemption must track whatever Root has currently set.
         let (sanitized, cores_dropped) =
             if pallet_orinq_receipts::Pallet::<Runtime>::core_eviction_enabled() {
                 committee_liveness::filter_dead_permissioned(
