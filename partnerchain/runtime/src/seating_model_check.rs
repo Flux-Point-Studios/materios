@@ -779,8 +779,8 @@ fn filtered_pool(members: &[PoolMember], now: u32) -> (Vec<u8>, Vec<u8>) {
 
 /// THE #534 INVARIANT, at the layer the bug actually lived in.
 ///
-/// A break-glass holder in the input pool must be in the filtered pool, for
-/// EVERY liveness shape and every mix of other candidates. This is what the
+/// A pool's ONLY break-glass holder must be in the filtered pool, for every
+/// liveness shape and every mix of other candidates. This is what the
 /// gate-level model could not see: `committee_covers_break_glass` refuses a
 /// draw with no holder, and before the fix `filter_dead_permissioned` could
 /// remove the only one, so the two composed into a permanent refusal.
@@ -819,9 +819,9 @@ fn the_filters_can_never_remove_a_break_glass_holder() {
     }
 }
 
-/// The exemption must not become a blanket amnesty: a dead core that holds NO
-/// break-glass key is still evicted. Without this the test above would pass on
-/// a build where eviction had simply stopped working.
+/// Eviction still runs next to an exempt holder: a dead core that holds NO
+/// break-glass key is evicted. Without this the test above would pass on a
+/// build where eviction had simply stopped working.
 #[test]
 fn a_dead_non_holder_core_is_still_evicted() {
     let now = 1_000_000;
@@ -836,6 +836,78 @@ fn a_dead_non_holder_core_is_still_evicted() {
         "a dead core holding no break-glass key must still be evicted — the exemption \
          is not a blanket amnesty"
     );
+}
+
+/// The exemption is scoped to the LAST holder. With a second, live holder in
+/// the pool the floor stays satisfiable, so a dead holder is shed like any
+/// other dead core. This is the discriminator between the shipped rule and the
+/// blanket amnesty the security review rejected: a blanket exemption keeps the
+/// dead holder and this test fails.
+#[test]
+fn a_dead_holder_is_evicted_when_a_live_holder_shares_the_pool() {
+    let now = 1_000_000;
+    let members = alloc::vec![
+        PoolMember { tag: 1, permissioned: true, seat: Seat::Dead, break_glass: true },
+        PoolMember { tag: 2, permissioned: true, seat: Seat::Live, break_glass: true },
+    ];
+    let (perms, _) = filtered_pool(&members, now);
+    assert!(
+        !perms.contains(&1u8),
+        "a dead holder with a live sibling holder must be evicted — the exemption covers \
+         only the last holder"
+    );
+    assert!(perms.contains(&2u8), "the live holder must survive");
+}
+
+/// With two or more holders in the pool the exemption changes NOTHING: the
+/// filtered pool is identical to the one produced with no break-glass keys at
+/// all. This pins the live shape — four seeded keys, all permissioned — as a
+/// behaviour-neutral upgrade, for every liveness assignment of the holders and
+/// every liveness assignment of up to two non-holder cores. Each member's
+/// liveness is enumerated independently: eviction is capped and ranked by
+/// staleness, so a mixed pool (one live core beside one dead one) exercises
+/// the ranking in a way uniform pools cannot.
+#[test]
+fn the_exemption_is_inert_with_two_or_more_holders_in_the_pool() {
+    let now = 1_000_000;
+    let seats = [Seat::Live, Seat::Dead, Seat::Unproven];
+    let seat_of = |combo: usize, i: usize| seats[(combo / 3usize.pow(i as u32)) % 3];
+    for n_holders in 2..=4usize {
+        for holder_combo in 0..3usize.pow(n_holders as u32) {
+            for n_others in 0..=2usize {
+                for other_combo in 0..3usize.pow(n_others as u32) {
+                    let mut with_keys = Vec::new();
+                    for i in 0..n_holders {
+                        with_keys.push(PoolMember {
+                            tag: (1 + i) as u8,
+                            permissioned: true,
+                            seat: seat_of(holder_combo, i),
+                            break_glass: true,
+                        });
+                    }
+                    for i in 0..n_others {
+                        with_keys.push(PoolMember {
+                            tag: (10 + i) as u8,
+                            permissioned: true,
+                            seat: seat_of(other_combo, i),
+                            break_glass: false,
+                        });
+                    }
+                    let without_keys: Vec<PoolMember> = with_keys
+                        .iter()
+                        .map(|m| PoolMember { break_glass: false, ..*m })
+                        .collect();
+                    assert_eq!(
+                        filtered_pool(&with_keys, now),
+                        filtered_pool(&without_keys, now),
+                        "with {n_holders} holders (liveness combo {holder_combo}) and {n_others} \
+                         non-holders (liveness combo {other_combo}), the exemption changed the \
+                         filtered pool"
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// FILTERING MUST NOT CREATE A DEADLOCK. The filters exist to shed dead weight,
