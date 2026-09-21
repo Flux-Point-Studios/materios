@@ -1,0 +1,80 @@
+{
+  "repo": "materios",
+  "primitives": [
+    {
+      "id": "orinq-receipts-pallet",
+      "name": "Orinq receipts pallet",
+      "desc": "Receipt registry with M-of-N committee attestation, availability certification, anchor records, attestor bonds and slashing, and fee escrow \u2014 the on-chain truth every other primitive commits to.",
+      "kind": "pallet",
+      "paths": [
+        "partnerchain/pallets/orinq-receipts"
+      ],
+      "consumes": [],
+      "status": "live"
+    },
+    {
+      "id": "motra-fee-resource",
+      "name": "MOTRA fee resource",
+      "desc": "Non-transferable transaction-fee resource generated from MATRA holdings (NIGHT/DUST model), charged by a signed extension, with sponsor delegation.",
+      "kind": "pallet",
+      "paths": [
+        "partnerchain/pallets/motra"
+      ],
+      "consumes": [],
+      "status": "live"
+    },
+    {
+      "id": "billing-pallet",
+      "name": "Billing pallet",
+      "desc": "Application-layer MATRA billing (pay_request) for API calls, metering and attestation evidence \u2014 the user-facing spend surface, distinct from MOTRA tx fees.",
+      "kind": "pallet",
+      "paths": [
+        "partnerchain/pallets/billing"
+      ],
+      "consumes": [],
+      "status": "live"
+    },
+    {
+      "id": "tee-attestation-pallet",
+      "name": "TEE attestation pallet",
+      "desc": "Hardware attestation-evidence registry (secp256r1 and ARM TrustZone phone attestors) binding TEE quotes to receipts.",
+      "kind": "pallet",
+      "paths": [
+        "partnerchain/pallets/tee-attestation"
+      ],
+      "consumes": [
+        "orinq-receipts-pallet"
+      ],
+      "status": "live"
+    },
+    {
+      "id": "committee-seating-gate",
+      "name": "Committee seating gate",
+      "desc": "Composed authority-selection gate: input sanitizer, dead-registered and dead-core liveness filters, seat-ramp clamp, live-quorum floor, growth-slack invariant, break-glass floor and pinned-committee override; refuses (keep-current) rather than seat a committee that cannot finalize.",
+      "kind": "engine",
+      "paths": [
+        "partnerchain/runtime/src/committee_liveness.rs",
+        "partnerchain/runtime/src/input_sanity.rs",
+        "partnerchain/vendor/authority-selection-inherents",
+        "partnerchain/vendor/pallet-session-validator-management"
+      ],
+      "consumes": [
+        "orinq-receipts-pallet",
+        "main-chain-follower"
+      ],
+      "status": "live"
+    },
+    {
+      "id": "main-chain-follower",
+      "name": "Main-chain follower",
+      "desc": "Cardano main-chain follower backends (db-sync and yaci-store with Mithril-certified stake) supplying candidate registrations and the D-parameter to authority selection.",
+      "kind": "engine",
+      "paths": [
+        "partnerchain/vendor/db-sync-follower",
+        "partnerchain/vendor/yaci-follower"
+      ],
+      "consumes": [],
+      "status": "live"
+    }
+  ]
+}
