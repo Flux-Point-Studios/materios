@@ -1,0 +1,38 @@
+when:
+  - event: [push, pull_request]
+    branch: main
+
+# Pinned to the Node-2 agent (its hostname is the agent container id). The
+# other agent, sat230, shares a disk with the SaturnSwap production node and
+# caps steps at 8 GB, which this cold build does not fit.
+labels:
+  hostname: 307a575667df
+
+steps:
+  # Advisory, as in the GitHub workflow (continue-on-error): main is not
+  # rustfmt-clean.
+  - name: fmt
+    image: rust:1.85.0-bookworm
+    failure: ignore
+    directory: partnerchain
+    commands:
+      - cargo fmt --all -- --check
+
+  # Image tag matches partnerchain/rust-toolchain.toml. No cargo cache: a
+  # persistent one would need a host volume, which only trusted repos get.
+  - name: check-test
+    image: rust:1.85.0-bookworm
+    directory: partnerchain
+    environment:
+      # Node-2 also runs a validator and two cardano-nodes; one rustc per
+      # physical core keeps the build clear of the OOM killer.
+      CARGO_BUILD_JOBS: "8"
+    commands:
+      - cat rust-toolchain.toml
+      - rustup show active-toolchain
+      - rustup target add wasm32-unknown-unknown
+      - rustup component add rust-src
+      - apt-get update
+      - apt-get install -y --no-install-recommends clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
+      - cargo check --workspace --all-targets --locked
+      - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing --no-fail-fast
