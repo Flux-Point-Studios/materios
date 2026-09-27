@@ -496,8 +496,8 @@ def test_proxy_to_another_host_or_port_does_not_implicate_the_authority(tmp_path
 
 
 def test_proxy_to_another_address_of_the_authority_is_refused(tmp_path):
-    node = dict(authority("node --rpc-methods unsafe --rpc-port 9945"), addresses=["172.18.0.1", "val1.lan"])
-    nginx = "location /rpc { proxy_pass http://172.18.0.1:9945/; }"
+    node = dict(authority("node --rpc-methods unsafe --rpc-port 9950"), addresses=["10.1.2.3", "val1.lan"])
+    nginx = "location /rpc { proxy_pass http://10.1.2.3:9950/; }"
     assert rpc_findings(tmp_path, [node], nginx) == [
         "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
