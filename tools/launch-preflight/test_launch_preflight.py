@@ -2,7 +2,8 @@
 
 The preprod v6 fixture is the raw chain spec the preprod network publishes; its
 genesis hash was read from a live node, so the genesis-hash test checks this
-implementation against the reference one.
+implementation against the reference one. Cardano is served by a local HTTP
+server that answers with Kupo's response shapes.
 """
 import copy
 import gzip
@@ -10,9 +11,12 @@ import hashlib
 import json
 import os
 import shutil
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import base58
+import cbor2
 import pytest
 import zstandard
 from nacl import signing
@@ -69,6 +73,8 @@ def ss58(account: bytes, prefix: int = 42) -> str:
 
 
 ALICE = bytes.fromhex(SP_KEYRING["sr25519"]["//Alice"])
+BOB = bytes.fromhex(SP_KEYRING["sr25519"]["//Bob"])
+CHARLIE = bytes.fromhex(SP_KEYRING["sr25519"]["//Charlie"])
 
 
 @pytest.fixture(scope="session")
@@ -111,6 +117,11 @@ def account_key(account: bytes) -> bytes:
     return lp.storage_key("System", "Account") + hashlib.blake2b(account, digest_size=16).digest() + account
 
 
+def genesis_accounts(spec: lp.Spec) -> list[bytes]:
+    prefix = lp.storage_key("System", "Account")
+    return sorted(key[48:] for key in spec.storage if key.startswith(prefix))
+
+
 def endow(spec: lp.Spec, account: bytes, free: int) -> None:
     """Set an account's free balance and move TotalIssuance with it."""
     old = spec.storage.get(account_key(account))
@@ -120,8 +131,21 @@ def endow(spec: lp.Spec, account: bytes, free: int) -> None:
     put(spec, "Balances", "TotalIssuance", (issuance + delta).to_bytes(16, "little"))
 
 
+def aura_keys(spec: lp.Spec) -> list[bytes]:
+    raw = spec.value("Aura", "Authorities")
+    count, pos = lp.read_compact(raw, 0)
+    return [raw[pos + 32 * i:pos + 32 * i + 32] for i in range(count)]
+
+
 def messages(findings) -> list[str]:
     return [str(f) for f in findings]
+
+
+def msig(threshold, *members) -> dict:
+    return {"threshold": threshold, "members": [ss58(m) for m in members]}
+
+
+NO_CARDANO = lp.CardanoView(lock=None, candidates=[])
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +244,8 @@ def test_extra_well_known_keys_are_named_with_their_label(spec, meta, tmp_path):
     keys, phrase_hash = lp.load_well_known([path])
     launch = {"roles": {"multisig_members": [ss58(exposed)],
                         "committee": [ss58(hashlib.blake2b(ecdsa_pub, digest_size=32).digest())]}}
-    found = messages(lp.check_dev_keys(spec, meta, launch, pub(signing.SigningKey.generate()), keys, phrase_hash))
+    found = messages(lp.check_dev_keys(spec, meta, launch, NO_CARDANO, pub(signing.SigningKey.generate()),
+                                       keys, phrase_hash))
     assert "[1 dev-keys] roles.multisig_members[0]: exposed multisig member (sr25519)" in found
     assert "[1 dev-keys] roles.committee[0]: exposed cross-chain key (ecdsa)" in found
 
@@ -236,7 +261,7 @@ def test_malformed_extra_table_is_an_input_error(tmp_path, entries, error):
 
 
 # ---------------------------------------------------------------------------
-# Rule 6: checkpoint canary (genesis hash, code hash, chain-spec hash)
+# Rule 6: checkpoint canary (genesis hash, code hash, chain-spec hash, launch manifest)
 # ---------------------------------------------------------------------------
 
 def test_genesis_hash_matches_the_live_preprod_genesis(spec):
@@ -249,20 +274,23 @@ def pub(key: signing.SigningKey) -> bytes:
     return key.verify_key.encode()
 
 
-def test_signed_manifest_for_this_spec_passes(spec):
+LAUNCH = {"roles": {}}
+
+
+def test_signed_manifest_for_this_spec_and_launch_passes(spec):
     key = signing.SigningKey.generate()
-    assert lp.check_checkpoint(spec, lp.signed_manifest(spec, key), pub(key)) == []
+    assert lp.check_checkpoint(spec, LAUNCH, lp.signed_manifest(spec, LAUNCH, key), pub(key)) == []
 
 
 def test_changed_genesis_storage_breaks_genesis_and_spec_hash(preprod_path, tmp_path):
     key = signing.SigningKey.generate()
-    signed = lp.signed_manifest(lp.load_spec(str(preprod_path)), key)
+    signed = lp.signed_manifest(lp.load_spec(str(preprod_path)), LAUNCH, key)
     doc = json.loads(preprod_path.read_text())
     alice_key = "0x" + account_key(ALICE).hex()
     doc["genesis"]["raw"]["top"][alice_key] = "0x" + (bytes(16) + (1).to_bytes(16, "little") + bytes(48)).hex()
     tampered = tmp_path / "tampered.json"
     tampered.write_text(json.dumps(doc))
-    found = messages(lp.check_checkpoint(lp.load_spec(str(tampered)), signed, pub(key)))
+    found = messages(lp.check_checkpoint(lp.load_spec(str(tampered)), LAUNCH, signed, pub(key)))
     assert any("genesis_hash is 0x" in m for m in found)
     assert any("chain_spec_hash is 0x" in m for m in found)
     assert not any("code_hash" in m for m in found)
@@ -270,24 +298,38 @@ def test_changed_genesis_storage_breaks_genesis_and_spec_hash(preprod_path, tmp_
 
 def test_changed_runtime_code_breaks_code_hash(spec):
     key = signing.SigningKey.generate()
-    signed = lp.signed_manifest(spec, key)
+    signed = lp.signed_manifest(spec, LAUNCH, key)
     signed["code_hash"] = "0x" + bytes(32).hex()
-    found = messages(lp.check_checkpoint(spec, signed, pub(key)))
+    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, pub(key)))
     assert any("code_hash is 0x" in m for m in found)
     assert any("signature does not verify" in m for m in found)
 
 
+def test_launch_manifest_changed_after_signing_is_refused(spec):
+    key = signing.SigningKey.generate()
+    signed = lp.signed_manifest(spec, {"roles": {}, "supply": {"genesis_lock": {"utxo": "aa" * 32 + "#0"}}}, key)
+    moved = {"roles": {}, "supply": {"genesis_lock": {"utxo": "bb" * 32 + "#0"}}}
+    found = messages(lp.check_checkpoint(spec, moved, signed, pub(key)))
+    assert len(found) == 1 and found[0].startswith("[6 checkpoint] launch_manifest_hash is 0x")
+
+
+def test_launch_manifest_hash_ignores_key_order_and_whitespace():
+    a = {"roles": {"oracle": []}, "supply": {"genesis_lock": {"utxo": "u", "address": "a"}}}
+    b = json.loads('{"supply": {"genesis_lock": {"address": "a",  "utxo": "u"}}, "roles": {"oracle": []}}')
+    assert lp.launch_manifest_hash(a) == lp.launch_manifest_hash(b)
+
+
 def test_manifest_signed_by_another_key_is_refused(spec):
-    signed = lp.signed_manifest(spec, signing.SigningKey.generate())
-    found = messages(lp.check_checkpoint(spec, signed, pub(signing.SigningKey.generate())))
+    signed = lp.signed_manifest(spec, LAUNCH, signing.SigningKey.generate())
+    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, pub(signing.SigningKey.generate())))
     assert found == ["[6 checkpoint] signed manifest signature does not verify under the pinned launch key"]
 
 
 def test_code_substitutes_are_refused(spec):
     key = signing.SigningKey.generate()
-    signed = lp.signed_manifest(spec, key)
+    signed = lp.signed_manifest(spec, LAUNCH, key)
     spec.doc["codeSubstitutes"] = {"1": "0x00"}
-    found = messages(lp.check_checkpoint(spec, signed, pub(key)))
+    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, pub(key)))
     assert "[6 checkpoint] chain spec carries codeSubstitutes" in found
 
 
@@ -322,30 +364,46 @@ def test_truncated_observation_config_is_an_input_error(spec):
 
 
 def test_malformed_manifest_is_refused(spec):
-    found = messages(lp.check_checkpoint(spec, {"genesis_hash": "0x00"}, pub(signing.SigningKey.generate())))
+    found = messages(lp.check_checkpoint(spec, LAUNCH, {"genesis_hash": "0x00"},
+                                         pub(signing.SigningKey.generate())))
     assert len(found) == 1 and "signed manifest is malformed" in found[0]
+
+
+@pytest.mark.parametrize("argv", [
+    "node --validator --wasm-runtime-overrides /srv/overrides",
+    ["node", "--validator", "--wasm-runtime-overrides=/srv/overrides"],
+])
+def test_authority_with_a_wasm_override_is_refused(argv):
+    launch = {"nodes": [authority(argv)]}
+    assert messages(lp.check_code_overrides(launch)) == [
+        "[6 checkpoint] authority val1 runs --wasm-runtime-overrides: a local runtime would replace "
+        "the signed runtime code"]
+
+
+def test_wasm_override_on_a_non_authority_is_out_of_scope():
+    node = {"name": "rpc", "host": "r", "authority": False, "argv": "node --wasm-runtime-overrides /o"}
+    assert lp.check_code_overrides({"nodes": [node]}) == []
 
 
 # ---------------------------------------------------------------------------
 # Rule 1: well-known keys
 # ---------------------------------------------------------------------------
 
-def dev_key_findings(spec, meta, known, launch=None, manifest_key=None):
+def dev_key_findings(spec, meta, known, launch=None, manifest_key=None, cardano=NO_CARDANO):
     keys, phrase_hash = known
     launch = {"roles": {}} if launch is None else launch
-    return messages(lp.check_dev_keys(spec, meta, launch, manifest_key or pub(signing.SigningKey.generate()),
+    return messages(lp.check_dev_keys(spec, meta, launch, cardano, manifest_key or pub(signing.SigningKey.generate()),
                                       keys, phrase_hash))
 
 
 def test_preprod_genesis_names_alice_as_an_endowed_account(spec, meta, known):
     found = dev_key_findings(spec, meta, known)
     assert "[1 dev-keys] System.Account: //Alice (sr25519) is in genesis" in found
-    assert all("//Alice (sr25519)" in m for m in found)
 
 
 def test_dev_key_in_sudo_and_authorities_is_named_by_storage_item(spec, meta, known):
     bob_ed = bytes.fromhex(SP_KEYRING["ed25519"]["//Bob"])
-    put(spec, "Sudo", "Key", bytes.fromhex(SP_KEYRING["sr25519"]["//Charlie"]))
+    put(spec, "Sudo", "Key", CHARLIE)
     put(spec, "Grandpa", "Authorities", lp.compact(1) + bob_ed + (1).to_bytes(8, "little"))
     found = dev_key_findings(spec, meta, known)
     assert "[1 dev-keys] Sudo.Key: //Charlie (sr25519) is in genesis" in found
@@ -369,12 +427,11 @@ def test_ecdsa_account_form_and_retired_key_are_named(spec, meta, known):
 
 
 def test_secret_uri_or_garbage_in_a_role_is_refused_without_echoing_it(spec, meta, known):
-    launch = {"roles": {"multisig_members": ["//Bob//stash", "not a key", 7]}}
+    launch = {"roles": {"multisig_members": ["//Bob//stash", "not a key"]}}
     found = dev_key_findings(spec, meta, known, launch)
     assert "[1 dev-keys] roles.multisig_members[0]: well-known secret URI //Bob//stash" in found
     assert any(m.startswith("[1 dev-keys] roles.multisig_members[1]:") for m in found)
-    assert "[1 dev-keys] roles.multisig_members[2]: not a public key string" in found
-    assert not any("not a key" in m.split(":", 1)[1] for m in found)
+    assert not any("not a key" in m for m in found)
 
 
 def test_bad_ss58_checksum_is_refused(spec, meta, known):
@@ -387,7 +444,7 @@ def test_bad_ss58_checksum_is_refused(spec, meta, known):
 def test_fresh_role_keys_add_no_findings(spec, meta, known):
     base = dev_key_findings(spec, meta, known)
     launch = {"roles": {"anchor_signer": [ss58(fresh_account())], "oracle": ["0x" + fresh_account().hex()]}}
-    assert dev_key_findings(spec, meta, known, launch) == base
+    assert sorted(set(dev_key_findings(spec, meta, known, launch)) - set(base)) == []
 
 
 def test_dev_keyring_flags_and_dev_uris_in_node_launch_are_named(spec, meta, known):
@@ -415,13 +472,26 @@ def test_any_derivation_of_the_dev_phrase_in_a_launch_config_is_named(spec, meta
     assert not any(word in m for m in found for word in ("rpc", "materios", "cdn"))
 
 
+def test_dev_phrase_uri_with_a_password_is_named_without_the_password(spec, meta, known):
+    launch = {"roles": {"oracle": ["//Feed///hunter2"]}, "nodes": [
+        {"name": "aw", "host": "h1", "argv": ["worker", "--suri=//Alice///s3cret"],
+         "env": {"SIGNER_URI": "//Alice//anchor///quartz-9"}},
+    ]}
+    found = dev_key_findings(spec, meta, known, launch)
+    assert "[1 dev-keys] roles.oracle[0]: well-known secret URI //Feed" in found
+    assert "[1 dev-keys] node aw: launch config names //Alice" in found
+    assert "[1 dev-keys] node aw: launch config names //Alice//anchor" in found
+    assert not any(secret in m for m in found for secret in ("hunter2", "s3cret", "quartz"))
+
+
 def test_dev_mnemonic_in_a_launch_config_is_detected_by_hash(spec, meta):
     keys, _ = lp.load_well_known()
     phrase = "one two three four five six seven eight nine ten eleven twelve"
     phrase_hash = lp.blake2_256(phrase.encode()).hex()
     launch = {"roles": {}, "nodes": [{"name": "v1", "host": "h1", "argv": [],
                                       "env": {"SEED": f"  {phrase.replace(' ', '   ')}//Alice"}}]}
-    found = messages(lp.check_dev_keys(spec, meta, launch, pub(signing.SigningKey.generate()), keys, phrase_hash))
+    found = messages(lp.check_dev_keys(spec, meta, launch, NO_CARDANO, pub(signing.SigningKey.generate()),
+                                       keys, phrase_hash))
     assert "[1 dev-keys] node v1: launch config holds the dev mnemonic" in found
 
 
@@ -435,6 +505,201 @@ def test_dev_key_embedded_in_runtime_code_is_named(spec, meta, known):
         b"\0asm" + bytes(4) + bytes.fromhex(SP_KEYRING["sr25519"]["//Dave"]))
     found = dev_key_findings(spec, meta, known)
     assert "[1 dev-keys] :code (runtime WASM): //Dave (sr25519) is in genesis" in found
+
+
+# Multisig accounts. The vector is @polkadot/util-crypto createKeyMulti([//Alice, //Bob,
+# //Charlie], 2), the address Polkadot's documentation gives for that multisig.
+ALICE_BOB_CHARLIE_2 = "5DjYJStmdZ2rcqXbXGX7TW85JsrW6uG4y9MUcLq2BoPMpRA7"
+
+
+def test_multisig_account_matches_polkadot_js():
+    assert ss58(lp.multisig_account([CHARLIE, ALICE, BOB], 2)) == ALICE_BOB_CHARLIE_2
+    assert lp.multisig_account([ALICE, BOB], 1).hex() == \
+        "4c5901223c7c52585646634e70dd46ad3faf1270f84a4673b5b4a4e126474073"
+
+
+def sudo_launch(entry, **roles) -> dict:
+    return {"roles": {"sudo": [entry], **roles}}
+
+
+@pytest.mark.parametrize("threshold", [1, 2])
+def test_sudo_multisig_with_a_dev_member_is_refused(spec, meta, known, threshold):
+    m1, m2 = fresh_account(), fresh_account()
+    put(spec, "Sudo", "Key", lp.multisig_account([ALICE, m1, m2], threshold))
+    found = dev_key_findings(spec, meta, known, sudo_launch(msig(threshold, ALICE, m1, m2)))
+    assert "[1 dev-keys] roles.sudo[0].members[0]: //Alice (sr25519)" in found
+    assert not any("Sudo.Key" in m for m in found)
+
+
+def test_sudo_key_that_is_not_the_declared_multisig_is_refused(spec, meta, known):
+    m1, m2, m3 = fresh_account(), fresh_account(), fresh_account()
+    hidden = lp.multisig_account([ALICE, m1, m2], 2)
+    put(spec, "Sudo", "Key", hidden)
+    found = dev_key_findings(spec, meta, known, sudo_launch(msig(2, m1, m2, m3)))
+    assert f"[1 dev-keys] Sudo.Key {ss58(hidden)} is not the account roles.sudo declares: " \
+           "who holds Root is unchecked" in found
+
+
+def test_undeclared_sudo_role_leaves_root_unchecked(spec, meta, known):
+    found = dev_key_findings(spec, meta, known, {"roles": {}})
+    assert "[1 dev-keys] roles.sudo is not declared" in found
+    sudo = spec.value("Sudo", "Key")
+    assert f"[1 dev-keys] Sudo.Key {ss58(sudo)} is not the account roles.sudo declares: " \
+           "who holds Root is unchecked" in found
+
+
+def test_sudo_declared_as_its_multisig_of_held_keys_passes(spec, meta, known):
+    members = [fresh_account() for _ in range(3)]
+    put(spec, "Sudo", "Key", lp.multisig_account(members, 2))
+    found = dev_key_findings(spec, meta, known, sudo_launch(msig(2, *members)))
+    assert not any("roles.sudo" in m or "Sudo.Key" in m for m in found)
+
+
+def test_sudo_role_with_no_sudo_in_genesis_is_refused(spec, meta, known):
+    del spec.storage[lp.storage_key("Sudo", "Key")]
+    found = dev_key_findings(spec, meta, known, sudo_launch(ss58(fresh_account())))
+    assert "[1 dev-keys] roles.sudo declares a key, but genesis sets no Sudo.Key" in found
+    assert not any("Sudo.Key" in m and "is not the account" in m
+                   for m in dev_key_findings(spec, meta, known, {"roles": {"sudo": []}}))
+
+
+def test_nested_multisig_members_are_checked(spec, meta, known):
+    inner = msig(2, BOB, fresh_account())
+    outer = {"threshold": 2, "members": [inner, ss58(fresh_account())]}
+    found = dev_key_findings(spec, meta, known, {"roles": {"recovery_friends": [outer]}})
+    assert "[1 dev-keys] roles.recovery_friends[0].members[0].members[0]: //Bob (sr25519)" in found
+
+
+def test_multisig_that_lists_a_member_twice_is_refused(spec, meta, known):
+    member = fresh_account()
+    found = dev_key_findings(spec, meta, known, {"roles": {"treasury": [msig(2, member, member)]}})
+    assert "[1 dev-keys] roles.treasury[0]: a multisig lists a member twice" in found
+
+
+def test_every_genesis_account_must_be_declared(spec, meta, known):
+    member = fresh_account()
+    hidden = lp.multisig_account([ALICE, member], 1)
+    endow(spec, hidden, 500_000 * MATRA)
+    found = dev_key_findings(spec, meta, known, {"roles": {}})
+    assert f"[1 dev-keys] genesis account {ss58(hidden)} is not declared in any role: " \
+           "who holds it is unchecked" in found
+    declared = {"roles": {"endowed": [ss58(a) for a in genesis_accounts(spec) if a != hidden]
+                          + [msig(1, ALICE, member)]}}
+    assert not any("is not declared in any role" in m for m in dev_key_findings(spec, meta, known, declared))
+
+
+def test_genesis_account_declared_as_a_multisig_with_a_dev_member_is_refused(spec, meta, known):
+    m1 = fresh_account()
+    hidden = lp.multisig_account([ALICE, m1], 1)
+    endow(spec, hidden, 500_000 * MATRA)
+    launch = {"roles": {"endowed": [msig(1, ALICE, m1)]}}
+    found = dev_key_findings(spec, meta, known, launch)
+    assert "[1 dev-keys] roles.endowed[0].members[0]: //Alice (sr25519)" in found
+    assert not any(ss58(hidden) in m for m in found)
+
+
+def test_every_off_chain_role_must_be_declared(spec, meta, known):
+    found = dev_key_findings(spec, meta, known, {"roles": {"attestors": [ss58(fresh_account())]}})
+    for role in ("sudo", "anchor_signer", "oracle"):
+        assert f"[1 dev-keys] roles.{role} is not declared" in found
+    assert not any("roles.attestors is" in m for m in found)
+
+
+@pytest.mark.parametrize("role", ["anchor_signer", "attestors"])
+def test_roles_that_always_run_must_name_a_key(spec, meta, known, role):
+    found = dev_key_findings(spec, meta, known, {"roles": {role: []}})
+    assert f"[1 dev-keys] roles.{role} is empty: name the key that runs it" in found
+
+
+def test_oracle_declared_empty_states_that_none_runs(spec, meta, known):
+    found = dev_key_findings(spec, meta, known, {"roles": {"oracle": []}})
+    assert not any("roles.oracle" in m for m in found)
+
+
+@pytest.mark.parametrize("doc, message", [
+    ({"chainType": "Local", "name": "Materios"},
+     "chain spec chainType is 'Local', not 'Live': the anchor worker treats the chain as a test "
+     "network and accepts a dev signer"),
+    ({"chainType": "Live", "name": "Materios Local Mainnet"},
+     "chain spec name 'Materios Local Mainnet' reads as a test network: the anchor worker treats "
+     "the chain as one and accepts a dev signer"),
+    ({"chainType": "Live", "name": "Materios Preprod v6"},
+     "chain spec name 'Materios Preprod v6' reads as a test network: the anchor worker treats "
+     "the chain as one and accepts a dev signer"),
+    ({"chainType": {"Custom": "staging"}, "name": "Materios"},
+     "chain spec chainType is {'Custom': 'staging'}, not 'Live': the anchor worker treats the chain "
+     "as a test network and accepts a dev signer"),
+])
+def test_a_spec_the_anchor_worker_reads_as_a_test_network_is_refused(spec, doc, message):
+    spec.doc.update(doc)
+    assert messages(lp.check_chain_identity(spec)) == [f"[1 dev-keys] {message}"]
+
+
+def test_a_live_spec_with_a_plain_name_passes_the_chain_identity_check(spec):
+    spec.doc.update({"chainType": "Live", "name": "Materios"})
+    assert lp.check_chain_identity(spec) == []
+
+
+def test_test_network_names_are_one_pattern_shared_with_the_anchor_worker():
+    shared = json.loads((HERE / "test_networks.json").read_text())
+    assert shared == {"chain_types": ["Development", "Local"],
+                      "name_pattern": "\\b(preprod|testnet|devnet|development|local)\\b"}
+
+
+# ---------------------------------------------------------------------------
+# Rule 1 and 3: the Cardano permissioned candidates (the committee after the first rotation)
+# ---------------------------------------------------------------------------
+
+def candidate(aura: bytes, gran: bytes | None = None, sidechain: bytes | None = None) -> lp.Candidate:
+    return lp.Candidate(sidechain or bytes([2]) + fresh_account(),
+                        {"aura": aura, "gran": gran or fresh_account()})
+
+
+def test_dev_key_in_a_cardano_permissioned_candidate_is_named(spec, meta, known):
+    alice_ed = bytes.fromhex(SP_KEYRING["ed25519"]["//Alice"])
+    cardano = lp.CardanoView(lock=None, candidates=[candidate(fresh_account()), candidate(ALICE, alice_ed)])
+    found = dev_key_findings(spec, meta, known, cardano=cardano)
+    assert "[1 dev-keys] Cardano permissioned candidate 1 aura: //Alice (sr25519)" in found
+    assert "[1 dev-keys] Cardano permissioned candidate 1 gran: //Alice (ed25519)" in found
+
+
+def legacy_datum(rows) -> bytes:
+    return cbor2.dumps([list(row) for row in rows])
+
+
+def versioned_datum(appendix, version) -> bytes:
+    return cbor2.dumps([cbor2.CBORTag(121, []), appendix, version])
+
+
+def test_permissioned_candidate_datums_decode_in_every_partner_chains_format():
+    sc, aura, gran = bytes([2]) * 33, bytes([1]) * 32, bytes([3]) * 32
+    want = [lp.Candidate(sc, {"aura": aura, "gran": gran})]
+    assert lp.decode_candidates(legacy_datum([(sc, aura, gran)])) == want
+    assert lp.decode_candidates(versioned_datum([[sc, aura, gran]], 0)) == want
+    v1 = versioned_datum([[sc, [[b"aura", aura], [b"gran", gran]]]], 1)
+    assert lp.decode_candidates(v1) == want
+
+
+def test_three_legacy_candidates_are_not_read_as_a_versioned_datum():
+    rows = [(bytes([2]) * 33, bytes([i]) * 32, bytes([9]) * 32) for i in range(3)]
+    assert [c.keys["aura"] for c in lp.decode_candidates(legacy_datum(rows))] == [bytes([i]) * 32 for i in range(3)]
+
+
+@pytest.mark.parametrize("raw", [
+    b"\xff\x00",
+    cbor2.dumps({"not": "a list"}),
+    versioned_datum([[b"\x02" * 33, b"\x01" * 32]], 0),
+    versioned_datum([], 7),
+    versioned_datum([[b"\x02" * 33, [[b"toolong", b"\x01"]]]], 1),
+])
+def test_undecodable_candidate_datum_is_an_input_error(raw):
+    with pytest.raises(lp.InputError, match="permissioned candidates"):
+        lp.decode_candidates(raw)
+
+
+def test_permissioned_candidates_policy_is_read_from_genesis(spec):
+    assert lp.permissioned_candidates_policy(spec).hex() == \
+        "ef2890d1e98247819abcf2df6e891824ed950a4216d36c71ee6f9974"
 
 
 # ---------------------------------------------------------------------------
@@ -506,17 +771,21 @@ def test_zero_baseline_is_refused(spec, runtime_meta):
 # Rule 3: unsafe RPC on authorities
 # ---------------------------------------------------------------------------
 
-def rpc_findings(tmp_path, nodes, nginx=None, proxy_host="edge"):
+def rpc_findings(tmp_path, nodes, config=None, proxy_host="edge", kind="nginx", authorities=()):
     proxies = []
-    if nginx is not None:
-        conf = tmp_path / "nginx.conf"
-        conf.write_text(nginx)
-        proxies = [{"name": "public-rpc", "host": proxy_host, "config": str(conf)}]
-    return messages(lp.check_rpc({"nodes": nodes, "rpc_proxies": proxies}))
+    if config is not None:
+        conf = tmp_path / ("proxy.yml" if kind == "cloudflared" else "nginx.conf")
+        conf.write_text(config)
+        proxies = [{"name": "public-rpc", "host": proxy_host, "kind": kind, "config": str(conf)}]
+    return messages(lp.check_rpc({"nodes": nodes, "rpc_proxies": proxies}, list(authorities)))
 
 
-def authority(argv, host="val1", name="val1"):
-    return {"name": name, "host": host, "authority": True, "argv": argv}
+def authority(argv, host="val1", name="val1", aura=None):
+    return {"name": name, "host": host, "authority": True, "aura": "0x" + (aura or fresh_account()).hex(),
+            "argv": argv}
+
+
+UNSAFE_9945 = "node --validator --rpc-methods unsafe --rpc-port 9945"
 
 
 def test_unsafe_methods_on_an_external_listener_are_refused(tmp_path):
@@ -556,6 +825,128 @@ def test_proxy_to_another_address_of_the_authority_is_refused(tmp_path):
     nginx = "location /rpc { proxy_pass http://10.1.2.3:9950/; }"
     assert rpc_findings(tmp_path, [node], nginx) == [
         "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+@pytest.mark.parametrize("target", [
+    "http://LOCALHOST:9945", "http://localhost.:9945", "http://rpc.localhost:9945", "http://127.1:9945",
+    "http://127.0.0.2:9945", "http://2130706433:9945", "http://[::ffff:127.0.0.1]:9945",
+    "http://[::1]:9945", "http://0.0.0.0:9945", "ws://127.0.0.1:9945",
+])
+def test_every_spelling_of_the_proxy_host_itself_reaches_the_authority(tmp_path, target):
+    nginx = f"location / {{ proxy_pass {target}; }}"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_nginx_stream_proxy_is_a_route(tmp_path):
+    nginx = "stream { server { listen 8443; proxy_pass 127.0.0.1:9945; } }"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_nginx_stream_proxy_to_an_upstream_is_a_route(tmp_path):
+    nginx = "stream { upstream rpc { server val1:9945 weight=2; } server { listen 8443; proxy_pass rpc; } }"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+@pytest.mark.parametrize("directive", ["grpc_pass grpc://127.0.0.1:9945", "uwsgi_pass 127.0.0.1:9945",
+                                       "fastcgi_pass localhost:9945", "scgi_pass 127.0.0.1:9945"])
+def test_every_nginx_forwarding_directive_is_a_route(tmp_path, directive):
+    nginx = f"location / {{ {directive}; }}"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_nginx_include_is_followed(tmp_path):
+    (tmp_path / "conf.d").mkdir()
+    (tmp_path / "conf.d" / "rpc.conf").write_text("location / { proxy_pass http://127.0.0.1:9945; }")
+    nginx = "http { server { listen 80; include conf.d/*.conf; } }"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_nginx_include_absolute_path_is_followed(tmp_path):
+    route = tmp_path / "route.inc"
+    route.write_text("location / { proxy_pass http://127.0.0.1:9945; }")
+    nginx = f"http {{ server {{ listen 80; include {route}; }} }}"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_nginx_include_that_cannot_be_read_is_an_input_error(tmp_path):
+    nginx = "http { server { listen 80; include /nonexistent/nginx/rpc.inc; location / { proxy_pass http://x:1; } } }"
+    with pytest.raises(lp.InputError, match="include /nonexistent/nginx/rpc.inc matches no file"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1")
+
+
+def test_nginx_dump_carries_its_includes(tmp_path):
+    dump = ("# configuration file /etc/nginx/nginx.conf:\n"
+            "stream { include /etc/nginx/streams/*.conf; }\n"
+            "http { include /etc/nginx/rpc-route.inc; }\n\n"
+            "# configuration file /etc/nginx/rpc-route.inc:\n"
+            "server { location / { proxy_pass http://127.0.0.1:9945; } }\n")
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], dump, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_nginx_dump_missing_an_included_file_is_an_input_error(tmp_path):
+    dump = ("# configuration file /etc/nginx/nginx.conf:\n"
+            "http { include /etc/nginx/rpc-route.inc; server { location / { proxy_pass http://x:1; } } }\n")
+    with pytest.raises(lp.InputError, match="include /etc/nginx/rpc-route.inc"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], dump, "val1")
+
+
+@pytest.mark.parametrize("config, error", [
+    ("events {}\nhttp { server { listen 80; root /srv; } }", "has no forwarding route"),
+    ("location / { proxy_pass http://unix:/run/node.sock; }", "unix socket"),
+    ("location / { proxy_pass http://$backend; }", "is a variable"),
+    ("location / { uwsgi_pass val1; }", "names no port"),
+])
+def test_nginx_config_the_preflight_cannot_bound_is_an_input_error(tmp_path, config, error):
+    with pytest.raises(lp.InputError, match=error):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], config, "val1")
+
+
+CLOUDFLARED = """\
+tunnel: 00000000-0000-0000-0000-000000000000
+credentials-file: /etc/cloudflared/tunnel.json
+ingress:
+  - hostname: status.example.org
+    service: http_status:204
+  - hostname: rpc.example.org
+    service: {service}
+  - service: http_status:404
+"""
+
+
+@pytest.mark.parametrize("service", ["http://localhost:9945", "'ws://127.0.0.1:9945'", "tcp://[::1]:9945",
+                                     "https://LOCALHOST:9945/rpc"])
+def test_cloudflared_ingress_is_a_route(tmp_path, service):
+    config = CLOUDFLARED.format(service=service)
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], config, "val1", "cloudflared") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_cloudflared_single_origin_url_is_a_route(tmp_path):
+    config = "tunnel: t\nurl: http://127.0.0.1:9945\n"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], config, "val1", "cloudflared") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+@pytest.mark.parametrize("config, error", [
+    (CLOUDFLARED.format(service="unix:/run/node.sock"), "cannot tell which node"),
+    (CLOUDFLARED.format(service="bastion"), "cannot tell which node"),
+    (CLOUDFLARED.format(service="socks5"), "cannot tell which node"),
+    (CLOUDFLARED.format(service="tcp://val1"), "names no port"),
+    (CLOUDFLARED.format(service="http://val1:9945") + "warp-routing:\n  enabled: true\n", "warp-routing"),
+    (CLOUDFLARED.format(service="http://val1:9945") + "originRequest:\n  bastionMode: true\n", "bastion"),
+    ("tunnel: t\ningress:\n  - service: http_status:404\n", "has no forwarding route"),
+    ("ingress: [unclosed", "not YAML"),
+])
+def test_cloudflared_config_the_preflight_cannot_bound_is_an_input_error(tmp_path, config, error):
+    with pytest.raises(lp.InputError, match=error):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], config, "val1", "cloudflared")
 
 
 def test_non_authority_nodes_are_out_of_scope(tmp_path):
@@ -605,9 +996,30 @@ def test_unknown_rpc_methods_value_is_refused(tmp_path):
     assert found == ["[3 rpc] node val1: unknown --rpc-methods everything"]
 
 
-def test_variable_proxy_target_cannot_be_checked(tmp_path):
-    with pytest.raises(lp.InputError, match="is a variable"):
-        rpc_findings(tmp_path, [authority("node")], "location / { proxy_pass http://$backend; }")
+def test_every_authority_needs_a_node_entry(tmp_path):
+    listed, missing = fresh_account(), fresh_account()
+    authorities = [("genesis Aura.Authorities[0]", listed), ("Cardano permissioned candidate 0", missing)]
+    found = rpc_findings(tmp_path, [authority("node --validator --rpc-methods safe", aura=listed)],
+                         authorities=authorities)
+    assert found == [f"[3 rpc] Cardano permissioned candidate 0 (aura 0x{missing.hex()}) has no authority "
+                     "node in the launch manifest: its RPC listeners are unchecked"]
+
+
+def test_authority_left_out_of_nodes_behind_a_proxy_is_refused(tmp_path):
+    nginx = "location / { proxy_pass http://127.0.0.1:9945; }"
+    aura = fresh_account()
+    found = rpc_findings(tmp_path, [], nginx, "val1", authorities=[("genesis Aura.Authorities[0]", aura)])
+    assert found == [f"[3 rpc] genesis Aura.Authorities[0] (aura 0x{aura.hex()}) has no authority node in the "
+                     "launch manifest: its RPC listeners are unchecked"]
+
+
+def test_authorities_come_from_genesis_aura_and_the_cardano_candidates(spec):
+    extra = fresh_account()
+    cardano = lp.CardanoView(lock=None, candidates=[candidate(extra)])
+    labels = lp.authorities(spec, cardano)
+    assert [aura for _, aura in labels] == aura_keys(spec) + [extra]
+    assert labels[0][0] == "genesis Aura.Authorities[0]"
+    assert labels[-1][0] == "Cardano permissioned candidate 0"
 
 
 # ---------------------------------------------------------------------------
@@ -617,10 +1029,27 @@ def test_variable_proxy_target_cannot_be_checked(tmp_path):
 # A preprod cert-daemon account. Its chain-spec source endows BondRequirement +
 # 100 MATRA; the genesis preprod actually launched with gave it 100 MATRA.
 PREPROD_ATTESTOR = bytes.fromhex("44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9480a517a97f189964b")
-SUPPLY = {"cardano_backing": 210_100_000 * MATRA}
 FLOOR = 1_000 * MATRA + 500 + 100 * MATRA
 RESERVES = {"ValidatorEmissionReserve": 150_000_000 * MATRA, "AttestationRewardReserve": 50_000_000 * MATRA}
 RUNTIME_CONSTANTS = dict(RESERVES, ValidatorRewardPerEra=VALIDATOR_REWARD_PER_ERA)
+# Bech32 mainnet enterprise addresses for the payment credential 0x5c * 28: one a script, one a key.
+SCRIPT_ADDRESS = "addr1w9w9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqelrggd"
+KEY_ADDRESS = "addr1v9w9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqshlgld"
+TEST_SCRIPT_ADDRESS = "addr_test1wpw9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqzhh58g"
+LOCK_TX = "5a" * 32
+LOCK = {"utxo": f"{LOCK_TX}#1", "address": SCRIPT_ADDRESS}
+
+
+def kupo_output(address=SCRIPT_ADDRESS, assets=None, tx=LOCK_TX, index=1, datum_hash=None) -> dict:
+    """An unspent output as Kupo's /matches returns it."""
+    return {"transaction_index": 0, "transaction_id": tx, "output_index": index, "address": address,
+            "value": {"coins": 2_000_000, "assets": assets or {}},
+            "datum_hash": datum_hash, "datum_type": "inline" if datum_hash else None, "script_hash": None,
+            "created_at": {"slot_no": 1, "header_hash": "00" * 32}, "spent_at": None}
+
+
+def locked(amount, address=SCRIPT_ADDRESS, unit=lp.CMATRA_UNIT) -> lp.CardanoView:
+    return lp.CardanoView(lock=kupo_output(address, {unit: amount}), candidates=[])
 
 
 def with_constants(metadata_v14: dict, constants=None) -> dict:
@@ -641,9 +1070,16 @@ def roster(spec) -> list[str]:
     return [ss58(attestor)]
 
 
-def supply_findings(spec, meta, attestors, fee_buffer, supply=SUPPLY):
-    launch = {"roles": {"attestors": attestors}, "economics": {"fee_buffer": fee_buffer}, "supply": supply}
-    return messages(lp.check_supply(spec, meta, launch))
+def issuance_of(spec) -> int:
+    return int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
+
+
+def supply_findings(spec, meta, attestors, fee_buffer, cardano=None, lock=LOCK):
+    if cardano is None:
+        cardano = locked(issuance_of(spec) + 200_000_000 * MATRA)
+    launch = {"roles": {"attestors": attestors}, "economics": {"fee_buffer": fee_buffer},
+              "supply": {"genesis_lock": lock}}
+    return messages(lp.check_supply(spec, meta, launch, cardano))
 
 
 def test_attestor_endowed_at_bond_plus_ed_plus_buffer_passes(spec, runtime_meta):
@@ -671,58 +1107,96 @@ def test_unendowed_attestor_is_refused(spec, runtime_meta):
     assert len(found) == 1 and "is endowed 0" in found[0]
 
 
+def test_multisig_attestor_is_sized_by_its_account(spec, runtime_meta):
+    members = [fresh_account(), fresh_account()]
+    endow(spec, lp.multisig_account(members, 2), FLOOR)
+    launch_attestors = [msig(2, *members)]
+    assert supply_findings(spec, runtime_meta, launch_attestors, 100 * MATRA) == []
+
+
 def test_endowment_floor_needs_every_input(spec, runtime_meta):
     found = supply_findings(spec, runtime_meta, [ss58(PREPROD_ATTESTOR)], None)
     assert found[0].startswith("[4 supply] cannot size attestor endowments")
 
 
-def test_runtime_emission_reserves_on_top_of_a_cardano_backed_genesis_are_refused(spec, runtime_meta):
+def test_runtime_emission_reserves_above_the_cardano_lock_are_refused(spec, runtime_meta):
     attestors = roster(spec)
-    issuance = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
-    backing = issuance
-    found = supply_findings(spec, runtime_meta, attestors, 0, {"cardano_backing": backing})
+    issuance = issuance_of(spec)
+    found = supply_findings(spec, runtime_meta, attestors, 0, locked(issuance))
     assert found == [f"[4 supply] Materios can issue {issuance + 200_000_000 * MATRA} (genesis {issuance} "
-                     f"+ runtime emission reserves {200_000_000 * MATRA}) against {backing} locked on "
-                     "Cardano: the difference is reserve counted both as cMATRA and as MATRA"]
+                     f"+ runtime emission reserves {200_000_000 * MATRA}) against {issuance} cMATRA "
+                     f"locked on Cardano at {LOCK_TX}#1: the difference is reserve counted both as "
+                     "cMATRA and as MATRA"]
 
 
-def test_genesis_and_emission_reserves_fully_backed_pass(spec, runtime_meta):
+def test_genesis_and_emission_reserves_fully_locked_pass(spec, runtime_meta):
     assert supply_findings(spec, runtime_meta, roster(spec), 0) == []
 
 
 def test_genesis_issuance_above_the_cardano_lock_is_refused(spec, metadata_v14):
     no_emission = {"ValidatorEmissionReserve": 0, "AttestationRewardReserve": 0}
     meta = lp.Metadata.from_v14(with_constants(metadata_v14, no_emission))
-    found = supply_findings(spec, meta, roster(spec), 0, {"cardano_backing": 975_000 * MATRA})
+    found = supply_findings(spec, meta, roster(spec), 0, locked(975_000 * MATRA))
     assert len(found) == 1 and "counted both as cMATRA and as MATRA" in found[0]
 
 
-def test_runtime_that_hides_its_emission_reserves_is_refused(spec, meta):
-    found = supply_findings(spec, meta, roster(spec), 0)
-    assert found == ["[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve, "
-                     "OrinqReceipts.AttestationRewardReserve: what the runtime mints after genesis is unbounded "
-                     "here, so the supply cannot be checked against the Cardano lock"]
+def test_the_backing_is_what_cardano_holds_not_a_declared_number(spec, runtime_meta):
+    """A launch that names the whole 277.5M reserve as backing but locked only
+    G on Cardano is refused on what Cardano holds."""
+    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(975_000 * MATRA))
+    assert any(f"against {975_000 * MATRA} cMATRA locked on Cardano" in m for m in found)
+
+
+def test_lock_that_is_spent_or_unindexed_is_refused(spec, runtime_meta):
+    found = supply_findings(spec, runtime_meta, roster(spec), 0, lp.CardanoView(lock=None, candidates=[]))
+    assert found == [f"[4 supply] the genesis lock {LOCK_TX}#1 is not an unspent output the Kupo index "
+                     "holds: nothing backs genesis issuance"]
+
+
+def test_lock_at_a_key_address_is_refused(spec, runtime_meta):
+    lock = dict(LOCK, address=KEY_ADDRESS)
+    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(10**18, KEY_ADDRESS), lock)
+    assert found == [f"[4 supply] the genesis lock {LOCK_TX}#1 sits at {KEY_ADDRESS}, whose payment "
+                     "credential is a key: its holder can spend the backing"]
+
+
+def test_lock_somewhere_other_than_declared_is_refused(spec, runtime_meta):
+    other = "addr1wxw9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqp5f7c3"
+    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(10**18, other))
+    assert f"[4 supply] the genesis lock {LOCK_TX}#1 sits at {other}, not the declared {SCRIPT_ADDRESS}" in found
+
+
+def test_lock_on_a_test_network_is_refused(spec, runtime_meta):
+    lock = dict(LOCK, address=TEST_SCRIPT_ADDRESS)
+    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(10**18, TEST_SCRIPT_ADDRESS), lock)
+    assert f"[4 supply] the genesis lock address {TEST_SCRIPT_ADDRESS} is not a Cardano mainnet address" in found
+
+
+def test_lock_holding_another_token_backs_nothing(spec, runtime_meta):
+    cardano = locked(10**18, unit="98c61f406f7c8df11ccff49ca1631d8bca9663894537c6c5ee5ed418.634d41545241")
+    found = supply_findings(spec, runtime_meta, roster(spec), 0, cardano)
+    assert any("against 0 cMATRA locked on Cardano" in m for m in found)
 
 
 def test_issuance_below_what_genesis_accounts_hold_is_refused(spec, runtime_meta):
-    held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
+    held = issuance_of(spec)
     put(spec, "Balances", "TotalIssuance", (1).to_bytes(16, "little"))
-    found = supply_findings(spec, runtime_meta, [], 0, {"cardano_backing": held + 200_000_000 * MATRA - 1})
+    found = supply_findings(spec, runtime_meta, [], 0, locked(held + 200_000_000 * MATRA - 1))
     assert f"[4 supply] Balances.TotalIssuance stores 1, but genesis accounts hold {held}" in found
     assert any(f"(genesis {held} + runtime emission reserves" in m for m in found)
 
 
 def test_missing_issuance_is_refused_and_accounts_still_count(spec, runtime_meta):
-    held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
+    held = issuance_of(spec)
     del spec.storage[lp.storage_key("Balances", "TotalIssuance")]
-    found = supply_findings(spec, runtime_meta, [], 0)
+    found = supply_findings(spec, runtime_meta, [], 0, locked(held + 200_000_000 * MATRA))
     assert f"[4 supply] Balances.TotalIssuance stores 0, but genesis accounts hold {held}" in found
 
 
 def test_reserved_balances_count_toward_issuance(spec, runtime_meta):
     account = fresh_account()
     spec.storage[account_key(account)] = bytes(32) + (5 * MATRA).to_bytes(16, "little") + bytes(32)
-    held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little") + 5 * MATRA
+    held = issuance_of(spec) + 5 * MATRA
     found = supply_findings(spec, runtime_meta, [], 0)
     assert f"[4 supply] Balances.TotalIssuance stores {held - 5 * MATRA}, but genesis accounts hold {held}" in found
 
@@ -732,9 +1206,102 @@ def test_empty_attestor_roster_is_refused(spec, runtime_meta):
     assert "[4 supply] roles.attestors names no account: the endowment floor has nothing to check" in found
 
 
-def test_undeclared_backing_is_refused(spec, runtime_meta):
-    found = supply_findings(spec, runtime_meta, roster(spec), 0, {})
-    assert found == ["[4 supply] supply.cardano_backing must be declared as an integer"]
+def test_runtime_that_hides_its_emission_reserves_is_refused(spec, meta):
+    found = supply_findings(spec, meta, roster(spec), 0)
+    assert found == ["[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve, "
+                     "OrinqReceipts.AttestationRewardReserve: what the runtime mints after genesis is unbounded "
+                     "here, so the supply cannot be checked against the Cardano lock"]
+
+
+# ---------------------------------------------------------------------------
+# Kupo: what Cardano holds
+# ---------------------------------------------------------------------------
+
+class Kupo:
+    """A local server that answers like Kupo: /health, /matches/<pattern>?unspent, /datums/<hash>."""
+
+    def __init__(self):
+        self.routes, self.accept = {}, []
+        self.routes["/health"] = {"connection_status": "connected", "most_recent_checkpoint": 1000,
+                                  "most_recent_node_tip": 1010}
+        kupo = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                kupo.accept.append(self.headers.get("Accept"))
+                if self.path not in kupo.routes:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                body = json.dumps(kupo.routes[self.path]).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def serve(self, spec: lp.Spec, lock_output: dict | None, candidates_datum: bytes, lock=LOCK):
+        tx, _, index = lock["utxo"].partition("#")
+        self.routes[f"/matches/{index}@{tx}?unspent"] = [lock_output] if lock_output else []
+        policy = lp.permissioned_candidates_policy(spec).hex()
+        datum_hash = hashlib.blake2b(candidates_datum, digest_size=32).hexdigest()
+        self.routes[f"/matches/{policy}.*?unspent"] = [
+            kupo_output(TEST_SCRIPT_ADDRESS, {policy: 1}, "cc" * 32, 0, datum_hash)]
+        self.routes[f"/datums/{datum_hash}"] = {"datum": candidates_datum.hex()}
+
+
+@pytest.fixture
+def kupo():
+    server = Kupo()
+    yield server
+    server.server.shutdown()
+
+
+def genesis_candidates_datum(spec) -> bytes:
+    raw = spec.value("Grandpa", "Authorities")
+    count, pos = lp.read_compact(raw, 0)
+    grandpa = [raw[pos + 40 * i:pos + 40 * i + 32] for i in range(count)]
+    return legacy_datum([(bytes([2]) + fresh_account(), aura, gran) for aura, gran in zip(aura_keys(spec), grandpa)])
+
+
+def test_cardano_view_reads_the_lock_and_the_candidates_from_kupo(spec, kupo):
+    output = kupo_output(assets={lp.CMATRA_UNIT: 7})
+    kupo.serve(spec, output, genesis_candidates_datum(spec))
+    view = lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+    assert view.lock == output
+    assert [c.keys["aura"] for c in view.candidates] == aura_keys(spec)
+    assert set(kupo.accept) == {"application/json"}
+
+
+def test_kupo_with_no_candidates_datum_is_an_input_error(spec, kupo):
+    kupo.serve(spec, None, legacy_datum([]))
+    kupo.routes[f"/matches/{lp.permissioned_candidates_policy(spec).hex()}.*?unspent"] = []
+    with pytest.raises(lp.InputError, match="no unspent output holding the permissioned candidates token"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+def test_kupo_behind_its_node_is_an_input_error(spec, kupo):
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    kupo.routes["/health"] = {"connection_status": "connected", "most_recent_checkpoint": 1000,
+                              "most_recent_node_tip": 5000}
+    with pytest.raises(lp.InputError, match="Kupo is 4000 slots behind its node"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+def test_unreachable_kupo_is_an_input_error(spec):
+    with pytest.raises(lp.InputError, match="Kupo request /health failed"):
+        lp.cardano_view("http://127.0.0.1:9", spec, {"supply": {"genesis_lock": LOCK}})
+
+
+def test_kupo_url_must_be_http():
+    with pytest.raises(lp.InputError, match="--kupo must be an http"):
+        lp.kupo_get("file:///etc/passwd", "/health")
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +1319,20 @@ def test_perp_engine_in_the_metadata_is_refused(metadata_v14):
         "[5 pallets] PerpEngine is in the runtime metadata"]
 
 
+def test_perp_engine_under_another_name_is_refused(metadata_v14):
+    v14 = copy.deepcopy(metadata_v14)
+    v14["pallets"].append({"name": "Perp", "storage": None, "constants": []})
+    v14["types"]["types"].append({"id": 10_000, "type": {"path": ["pallet_perp_engine", "pallet", "Call"]}})
+    assert messages(lp.check_pallets(lp.Metadata.from_v14(v14))) == [
+        "[5 pallets] the runtime metadata carries pallet_perp_engine types: PerpEngine under another name"]
+
+
+def test_metadata_without_types_is_an_input_error(metadata_v14):
+    v14 = {k: v for k, v in metadata_v14.items() if k != "types"}
+    with pytest.raises(lp.InputError, match="types"):
+        lp.Metadata.from_v14(v14)
+
+
 # ---------------------------------------------------------------------------
 # End to end through the CLI, with the real subwasm
 # ---------------------------------------------------------------------------
@@ -762,113 +1343,243 @@ def subwasm() -> str:
     return path
 
 
-def clean_launch(tmp_path, attestor: bytes) -> dict:
-    conf = tmp_path / "rpc.conf"
-    conf.write_text("location / { proxy_pass http://rpc-node:9944; }")
-    return {
-        "roles": {"anchor_signer": [ss58(fresh_account())], "attestors": [ss58(attestor)],
-                  "multisig_members": [ss58(fresh_account()) for _ in range(3)]},
-        "economics": dict(TUNED, fee_buffer=100 * MATRA),
-        "supply": {"cardano_backing": 202_000_000 * MATRA},
-        "nodes": [authority("materios-node --validator --rpc-methods safe")],
-        "rpc_proxies": [{"name": "public-rpc", "host": "edge", "config": str(conf)}],
-    }
+class Launch:
+    """A clean launch: the preprod genesis with //Alice removed, Root held by a
+    multisig of fresh keys, the tuned rewards stored, one attestor endowed at the
+    floor, the chain renamed, every account and authority declared, and Cardano
+    holding the lock and the candidates. Every rule accepts it."""
+
+    def __init__(self, preprod_path, tmp_path, kupo):
+        spec = lp.load_spec(str(preprod_path))
+        del spec.storage[account_key(ALICE)]
+        spec.doc.update({"name": "Materios", "id": "materios"})
+        put(spec, "OrinqReceipts", "AttestationRewardPerSigner", (1 * MATRA).to_bytes(16, "little"))
+        put(spec, "OrinqReceipts", "EraCapBaselineAttestorCount", (32).to_bytes(4, "little"))
+        self.sudo_members = [fresh_account() for _ in range(3)]
+        put(spec, "Sudo", "Key", lp.multisig_account(self.sudo_members, 2))
+        self.attestor = fresh_account()
+        endow(spec, self.attestor, FLOOR)
+        prefix = lp.storage_key("System", "Account")
+        issuance = sum(int.from_bytes(v[16:32], "little") for k, v in spec.storage.items() if k.startswith(prefix))
+        put(spec, "Balances", "TotalIssuance", issuance.to_bytes(16, "little"))
+        self.spec = spec
+        self.tmp_path, self.kupo = tmp_path, kupo
+        conf = tmp_path / "rpc.conf"
+        conf.write_text("location / { proxy_pass http://rpc-node:9944; }")
+        sudo = lp.multisig_account(self.sudo_members, 2)
+        self.launch = {
+            "roles": {"sudo": [msig(2, *self.sudo_members)], "anchor_signer": [ss58(fresh_account())],
+                      "attestors": [ss58(self.attestor)], "oracle": [],
+                      "endowed": [ss58(a) for a in genesis_accounts(spec) if a not in (self.attestor, sudo)]},
+            "economics": dict(TUNED, fee_buffer=100 * MATRA),
+            "supply": {"genesis_lock": LOCK},
+            "nodes": [authority("materios-node --validator --rpc-methods safe", f"val{i}", f"val{i}", aura)
+                      for i, aura in enumerate(aura_keys(spec))],
+            "rpc_proxies": [{"name": "public-rpc", "host": "edge", "kind": "nginx", "config": str(conf)}],
+        }
+        self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
+        self.candidates = genesis_candidates_datum(spec)
+
+    def spec_path(self) -> Path:
+        self.spec.doc["genesis"]["raw"]["top"] = {"0x" + k.hex(): "0x" + v.hex() for k, v in self.spec.storage.items()}
+        path = self.tmp_path / "clean-raw.json"
+        path.write_text(json.dumps(self.spec.doc))
+        return path
+
+    def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
+        spec_path = self.spec_path()
+        self.kupo.serve(lp.load_spec(str(spec_path)), self.lock_output, self.candidates,
+                        self.launch["supply"]["genesis_lock"])
+        return run_cli(self.tmp_path, spec_path, self.launch, capsys, self.kupo.url, key, manifest_key, extra,
+                       signed_launch)
 
 
-def clean_spec(preprod_path, tmp_path, attestor: bytes) -> Path:
-    """The preprod genesis with //Alice removed, the tuned rewards stored and one
-    attestor endowed at the floor: a spec every rule accepts."""
-    spec = lp.load_spec(str(preprod_path))
-    del spec.storage[account_key(ALICE)]
-    put(spec, "OrinqReceipts", "AttestationRewardPerSigner", (1 * MATRA).to_bytes(16, "little"))
-    put(spec, "OrinqReceipts", "EraCapBaselineAttestorCount", (32).to_bytes(4, "little"))
-    endow(spec, attestor, FLOOR)
-    prefix = lp.storage_key("System", "Account")
-    issuance = sum(int.from_bytes(v[16:32], "little") for k, v in spec.storage.items() if k.startswith(prefix))
-    put(spec, "Balances", "TotalIssuance", issuance.to_bytes(16, "little"))
-    spec.doc["genesis"]["raw"]["top"] = {"0x" + k.hex(): "0x" + v.hex() for k, v in spec.storage.items()}
-    path = tmp_path / "clean-raw.json"
-    path.write_text(json.dumps(spec.doc))
-    return path
-
-
-def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, key=None, manifest_key=None,
-            extra=()) -> tuple[int, str]:
+def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=None, manifest_key=None,
+            extra=(), signed_launch=None) -> tuple[int, str]:
     key = key or signing.SigningKey.generate()
     seed = tmp_path / "launch.key"
     seed.write_text(key.encode().hex())
     signed, launch_path = tmp_path / "signed.json", tmp_path / "launch.json"
-    assert lp.main(["sign", "--spec", str(spec_path), "--key", str(seed), "--out", str(signed)]) == 0
+    launch_path.write_text(json.dumps(signed_launch or launch))
+    assert lp.main(["sign", "--spec", str(spec_path), "--launch", str(launch_path), "--key", str(seed),
+                    "--out", str(signed)]) == 0
     launch_path.write_text(json.dumps(launch))
     capsys.readouterr()
     code = lp.main(["check", "--spec", str(spec_path), "--launch", str(launch_path),
                     "--signed-manifest", str(signed), "--manifest-key", "0x" + (manifest_key or pub(key)).hex(),
-                    "--subwasm", subwasm(), *extra])
+                    "--kupo", kupo_url, "--subwasm", subwasm(), *extra])
     return code, capsys.readouterr().out
 
 
-def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path, tmp_path, capsys):
-    launch = clean_launch(tmp_path, PREPROD_ATTESTOR)
-    launch["roles"]["anchor_signer"] = [ss58(ALICE)]
-    code, out = run_cli(tmp_path, preprod_path, launch, capsys)
+@pytest.fixture
+def clean(preprod_path, tmp_path, kupo, monkeypatch, metadata_v14):
+    """No built runtime passes yet (PerpEngine, undeclared emission reserves), so
+    the extractor returns the fixture metadata with the reserves declared."""
+    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
+    return Launch(preprod_path, tmp_path, kupo)
+
+
+def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path, tmp_path, capsys, kupo):
+    spec = lp.load_spec(str(preprod_path))
+    kupo.serve(spec, kupo_output(assets={lp.CMATRA_UNIT: 975_000 * MATRA}), genesis_candidates_datum(spec))
+    launch = {"roles": {"anchor_signer": [ss58(ALICE)], "attestors": [ss58(PREPROD_ATTESTOR)], "oracle": [],
+                        "sudo": [ss58(fresh_account())]},
+              "economics": dict(TUNED, fee_buffer=100 * MATRA), "supply": {"genesis_lock": LOCK},
+              "nodes": [], "rpc_proxies": []}
+    code, out = run_cli(tmp_path, preprod_path, launch, capsys, kupo.url)
     assert code == 1
     assert "MAINNET LAUNCH PREFLIGHT: REFUSE" in out
     assert "[1 dev-keys] roles.anchor_signer[0]: //Alice (sr25519)" in out
     assert "[1 dev-keys] System.Account: //Alice (sr25519) is in genesis" in out
+    assert "[1 dev-keys] chain spec name 'Materios Preprod v6' reads as a test network" in out
+    assert "[1 dev-keys] Sudo.Key 5D1Anh" in out
     assert "[2 rewards] OrinqReceipts.AttestationRewardPerSigner stores 10000000, declared 1000000" in out
+    assert "[3 rpc] genesis Aura.Authorities[0]" in out
     assert "[4 supply] roles.attestors[0] is endowed 100000000" in out
     assert "[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve" in out
 
 
-def test_cli_passes_a_clean_launch(preprod_path, tmp_path, capsys, monkeypatch, metadata_v14):
-    """No built runtime passes yet (PerpEngine, undeclared emission reserves), so
-    the extractor returns the fixture metadata with the reserves declared."""
-    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
-    attestor = fresh_account()
-    code, out = run_cli(tmp_path, clean_spec(preprod_path, tmp_path, attestor),
-                        clean_launch(tmp_path, attestor), capsys)
+def test_cli_passes_a_clean_launch(clean, capsys):
+    code, out = clean.run(capsys)
     assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
 
 
-def test_cli_names_keys_from_an_extra_table(preprod_path, tmp_path, capsys, monkeypatch, metadata_v14):
-    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
-    attestor, exposed = fresh_account(), fresh_account()
-    launch = clean_launch(tmp_path, attestor)
-    launch["roles"]["multisig_members"][0] = ss58(exposed)
-    extra = extra_table(tmp_path, [{"label": "exposed member", "scheme": "sr25519", "public": exposed.hex()}])
-    code, out = run_cli(tmp_path, clean_spec(preprod_path, tmp_path, attestor), launch, capsys,
-                        extra=["--extra-well-known", str(extra)])
+@pytest.mark.parametrize("threshold", [1, 2])
+def test_cli_refuses_root_held_by_a_multisig_with_a_dev_member(clean, capsys, threshold):
+    members = [ALICE, *clean.sudo_members[:2]]
+    put(clean.spec, "Sudo", "Key", lp.multisig_account(members, threshold))
+    clean.launch["roles"]["sudo"] = [msig(threshold, *members)]
+    code, out = clean.run(capsys)
     assert code == 1
-    assert "[1 dev-keys] roles.multisig_members[0]: exposed member (sr25519)" in out
+    assert "[1 dev-keys] roles.sudo[0].members[0]: //Alice (sr25519)" in out
 
 
-def test_cli_refuses_a_manifest_pinned_to_another_key(preprod_path, tmp_path, capsys):
-    attestor = fresh_account()
-    code, out = run_cli(tmp_path, clean_spec(preprod_path, tmp_path, attestor), clean_launch(tmp_path, attestor),
-                        capsys, manifest_key=pub(signing.SigningKey.generate()))
+def test_cli_refuses_root_held_by_an_undeclared_multisig(clean, capsys):
+    hidden = lp.multisig_account([ALICE, *clean.sudo_members[:2]], 2)
+    put(clean.spec, "Sudo", "Key", hidden)
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[1 dev-keys] Sudo.Key {ss58(hidden)} is not the account roles.sudo declares" in out
+
+
+def test_cli_refuses_a_launch_that_leaves_off_chain_roles_out(clean, capsys):
+    clean.launch["roles"] = {k: v for k, v in clean.launch["roles"].items() if k in ("attestors", "endowed", "sudo")}
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[1 dev-keys] roles.anchor_signer is not declared" in out
+    assert "[1 dev-keys] roles.oracle is not declared" in out
+
+
+def test_cli_refuses_an_authority_left_out_of_the_nodes(clean, capsys):
+    dropped = clean.launch["nodes"].pop()
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[3 rpc] genesis Aura.Authorities[3] (aura {dropped['aura']}) has no authority node" in out
+
+
+def test_cli_refuses_unsafe_rpc_behind_a_cloudflared_tunnel(clean, capsys):
+    tunnel = clean.tmp_path / "tunnel.yml"
+    tunnel.write_text(CLOUDFLARED.format(service="http://localhost:9945"))
+    clean.launch["nodes"][0]["argv"] = UNSAFE_9945
+    clean.launch["rpc_proxies"] = [{"name": "tunnel", "host": "val0", "kind": "cloudflared", "config": str(tunnel)}]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[3 rpc] authority val0 serves unsafe RPC methods behind proxy tunnel" in out
+
+
+def test_cli_refuses_a_lock_smaller_than_what_materios_can_issue(clean, capsys):
+    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 975_000 * MATRA})
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "counted both as cMATRA and as MATRA" in out
+
+
+def test_cli_refuses_a_launch_manifest_edited_after_signing(clean, capsys):
+    signed_launch = copy.deepcopy(clean.launch)
+    signed_launch["roles"]["anchor_signer"] = [ss58(fresh_account())]
+    code, out = clean.run(capsys, signed_launch=signed_launch)
+    assert code == 1
+    assert "[6 checkpoint] launch_manifest_hash is 0x" in out
+
+
+def test_cli_refuses_a_local_chain_type(clean, capsys):
+    clean.spec.doc["chainType"] = "Local"
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[1 dev-keys] chain spec chainType is 'Local', not 'Live'" in out
+
+
+def test_cli_refuses_a_dev_key_in_the_cardano_committee(clean, capsys):
+    clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), ALICE, fresh_account())])
+    clean.launch["nodes"].append(authority("materios-node --validator --rpc-methods safe", "val9", "val9", ALICE))
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[1 dev-keys] Cardano permissioned candidate 0 aura: //Alice (sr25519)" in out
+
+
+def test_cli_names_keys_from_an_extra_table(clean, capsys):
+    exposed = fresh_account()
+    clean.launch["roles"]["anchor_signer"] = [ss58(exposed)]
+    extra = extra_table(clean.tmp_path, [{"label": "exposed member", "scheme": "sr25519", "public": exposed.hex()}])
+    code, out = clean.run(capsys, extra=["--extra-well-known", str(extra)])
+    assert code == 1
+    assert "[1 dev-keys] roles.anchor_signer[0]: exposed member (sr25519)" in out
+
+
+def test_cli_refuses_a_manifest_pinned_to_another_key(clean, capsys):
+    code, out = clean.run(capsys, manifest_key=pub(signing.SigningKey.generate()))
     assert code == 1
     assert "[6 checkpoint] signed manifest signature does not verify" in out
 
 
+VALID_LOCK = {"genesis_lock": LOCK}
+
+
 @pytest.mark.parametrize("launch, error", [
-    ({"roles": {"oracle": "5Grw"}}, "roles must map each role to a list"),
-    ({"roles": {}, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),
-    ({"roles": {}, "rpc_proxies": [{"name": "p", "host": "h"}]}, "rpc_proxies\\[0\\] needs"),
-    ({"roles": {}, "nodes": [{"name": "v1", "host": "h", "authority": True, "addresses": "10.0.0.1"}]},
-     "nodes\\[0\\] addresses must be a list"),
-    ({"roles": {}, "nodes": [{"name": "v1", "host": "h", "argv": "node --validator"}]},
+    ([], "launch manifest must be a JSON object"),
+    ({"roles": {}, "rpc_proxy": [], "supply": VALID_LOCK}, "unknown launch manifest field rpc_proxy"),
+    ({"roles": {"oracle": "5Grw"}, "supply": VALID_LOCK}, "roles.oracle must be a list"),
+    ({"roles": {"oracle": [7]}, "supply": VALID_LOCK}, "roles.oracle\\[0\\] must be a public key string"),
+    ({"roles": {"sudo": [{"threshold": 0, "members": ["a", "b"]}]}, "supply": VALID_LOCK},
+     "roles.sudo\\[0\\] threshold must be an integer from 1 to 2"),
+    ({"roles": {"sudo": [{"threshold": 1, "members": ["a"]}]}, "supply": VALID_LOCK},
+     "roles.sudo\\[0\\] members must list at least two"),
+    ({"roles": {"sudo": [{"threshold": 1, "members": ["a", "b"], "note": 1}]}, "supply": VALID_LOCK},
+     "roles.sudo\\[0\\] must hold exactly threshold and members"),
+    ({"roles": {}, "economics": [], "supply": VALID_LOCK}, "economics must be an object"),
+    ({"roles": {}}, "supply.genesis_lock is required"),
+    ({"roles": {}, "supply": []}, "supply must be an object"),
+    ({"roles": {}, "supply": {"cardano_backing": 1, **VALID_LOCK}}, "unknown supply field cardano_backing"),
+    ({"roles": {}, "supply": {"genesis_lock": {"utxo": "zz#0", "address": SCRIPT_ADDRESS}}},
+     "supply.genesis_lock.utxo must be <64 hex>#<index>"),
+    ({"roles": {}, "supply": VALID_LOCK, "nodes": {"a": 1}}, "nodes must be a list"),
+    ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),
+    ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": [{"name": "p", "host": "h", "config": "c"}]},
+     "rpc_proxies\\[0\\] kind must be nginx or cloudflared"),
+    ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": {"p": 1}}, "rpc_proxies must be a list"),
+    ({"roles": {}, "supply": VALID_LOCK,
+      "nodes": [{"name": "v1", "host": "h", "authority": True, "aura": "0x" + "11" * 32, "addresses": "10.0.0.1"}]},
+     "nodes\\[0\\] addresses must be a list of strings"),
+    ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1", "host": "h", "argv": "node --validator"}]},
      "nodes\\[0\\] must declare authority as true or false"),
+    ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1", "host": "h", "authority": True}]},
+     "nodes\\[0\\] is an authority and must declare its aura public key"),
+    ({"roles": {}, "supply": VALID_LOCK,
+      "nodes": [{"name": "v1", "host": "h", "authority": False, "env": ["SIGNER_URI=//Alice"]}]},
+     "nodes\\[0\\] env must map names to strings"),
+    ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1", "host": "h", "authority": False, "argv": 7}]},
+     "nodes\\[0\\] argv must be a string or a list of strings"),
 ])
-def test_malformed_launch_manifest_is_an_input_error(spec, meta, launch, error):
+def test_malformed_launch_manifest_is_an_input_error(launch, error):
     with pytest.raises(lp.InputError, match=error):
-        lp.run_checks(spec, meta, launch, {}, "0x00")
+        lp.validate_launch(launch)
 
 
 @pytest.mark.parametrize("manifest_key", ["0xzz", "0x" + "00" * 31])
-def test_malformed_manifest_key_is_an_input_error(spec, meta, manifest_key):
+def test_malformed_manifest_key_is_an_input_error(manifest_key):
     with pytest.raises(lp.InputError, match="--manifest-key"):
-        lp.run_checks(spec, meta, {"roles": {}}, {}, manifest_key)
+        lp.pinned_key(manifest_key)
 
 
 def test_non_numeric_rpc_port_is_an_input_error(tmp_path):
@@ -886,7 +1597,10 @@ def test_decompression_bomb_is_an_input_error(monkeypatch):
 def test_unreadable_signing_key_is_an_input_error_that_does_not_echo_it(preprod_path, tmp_path, capsys):
     key = tmp_path / "bad.key"
     key.write_text("not-a-seed-value")
-    assert lp.main(["sign", "--spec", str(preprod_path), "--key", str(key), "--out", str(tmp_path / "o")]) == 2
+    launch = tmp_path / "launch.json"
+    launch.write_text(json.dumps({"roles": {}, "supply": VALID_LOCK}))
+    assert lp.main(["sign", "--spec", str(preprod_path), "--launch", str(launch), "--key", str(key),
+                    "--out", str(tmp_path / "o")]) == 2
     err = capsys.readouterr().err
     assert "cannot load the launch signing key" in err and "not-a-seed-value" not in err
 
@@ -895,6 +1609,6 @@ def test_cli_refuses_a_non_raw_spec_as_an_input_error(tmp_path, capsys):
     plain = tmp_path / "plain.json"
     plain.write_text(json.dumps({"genesis": {"runtimeGenesis": {"patch": {}}}}))
     code = lp.main(["check", "--spec", str(plain), "--launch", str(plain), "--signed-manifest", str(plain),
-                    "--manifest-key", "0x00", "--subwasm", "subwasm"])
+                    "--manifest-key", "0x00", "--kupo", "http://127.0.0.1:9", "--subwasm", "subwasm"])
     assert code == 2
     assert "needs the raw chain spec" in capsys.readouterr().err

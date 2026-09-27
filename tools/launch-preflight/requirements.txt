@@ -1,5 +1,7 @@
 base58==2.1.1
+cbor2==6.1.4
 pynacl==1.6.2
 pytest==9.0.3
+PyYAML==6.0.3
 xxhash==3.6.0
 zstandard==0.25.0
