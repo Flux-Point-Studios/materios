@@ -164,7 +164,7 @@ call filter, so none of them is a way around the delay.
 
 | Call | Why it may skip the delay |
 |------|---------------------------|
-| `Grandpa.note_stalled` with a delay of at most 100 blocks | Finality break-glass. It forces the GRANDPA set the session already selected at the next session boundary; it cannot choose that set. The bound keeps the forced change, and GRANDPA's refusal of another one for twice the delay, inside one session, so a stall never blocks the next rotation. A longer stall is scheduled. |
+| `Grandpa.note_stalled` with a delay of at most 100 blocks | Finality break-glass. It forces the GRANDPA set the session already selected at the next session boundary; it cannot choose that set. In a session of at least 200 blocks the bound keeps the forced change, and GRANDPA's refusal of another one for twice the delay, inside one session, so a stall never blocks the next rotation. Preprod sessions are 600 slots; the 60-slot dev chain does not meet this. A longer stall is scheduled. |
 | `TeeAttestation.set_disabled(true)` | Kill-switch, stopping direction only. |
 | `Billing.governance_set_debits_enabled(false)` | Kill-switch, stopping direction only. |
 | `Treasury.remove_approval`, `Treasury.void_spend` | Withdraw a spend before it pays out. |
