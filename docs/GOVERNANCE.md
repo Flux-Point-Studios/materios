@@ -197,7 +197,10 @@ the short ones on the upgrade that adds the pallet, and
    publish the call itself alongside it.
 2. Until the call is enacted the guardian may `RootTimelock.cancel(id)`. The
    one exception is a task whose call is `RootTimelock.set_guardian` itself,
-   which the guardian cannot veto.
+   which the guardian cannot veto. `set_guardian` is therefore scheduled on
+   its own: `schedule` refuses a wrapper that carries it, so a batch can
+   neither hand the guardian a veto over its replacement nor carry other
+   calls past the veto.
 3. From `ready_at`, and for `EnactmentWindow` (7 days) after it, any signed
    account may submit `RootTimelock.enact(id, call)`. The call must hash to
    the scheduled hash and must not now classify into a longer class than the
@@ -217,9 +220,11 @@ carried twice, once in `schedule` and once in `enact`.
 
 The guardian is one signed account, normally a multisig held apart from the
 sudo custody, stored in `RootTimelock.Guardian`. It can veto (`cancel`) and
-co-sign a recovery-class call (`fast_track`, which makes it ready at once). It
-cannot schedule, enact early anything outside the recovery class, or veto its
-own replacement. Root cannot cancel: a compromised sudo key would otherwise
+co-sign a recovery-class call (`fast_track`, which makes a pending task ready
+at once). A fast-track only brings a task forward: it cannot extend a ready
+task's enactment window or revive an expired one. The guardian cannot
+schedule, enact early anything outside the recovery class, or veto its own
+replacement. Root cannot cancel: a compromised sudo key would otherwise
 veto every attempt to replace it. With no guardian set, nothing can be vetoed.
 
 ### Changing a delay
@@ -232,8 +237,10 @@ fast-track it. Tasks already scheduled keep the `ready_at` they were given.
 ### Treasury
 
 `MaxSpend` bounds the treasury spends Root approves in one extrinsic to
-15,000 MATRA. Moving more takes several scheduled tasks, each public for the
-whole delay. The `Balances` force calls can still move treasury funds, after
+15,000 MATRA. pallet-treasury counts every spend inside one dispatch against
+that cap, so a batch of smaller spends in one enactment is bounded too.
+Moving more takes several scheduled tasks, each public for the whole delay
+and each vetoable on its own. The `Balances` force calls can still move treasury funds, after
 the standard delay.
 
 ## Security Considerations

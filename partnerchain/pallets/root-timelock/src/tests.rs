@@ -236,6 +236,42 @@ fn the_guardian_cannot_veto_its_own_replacement() {
 }
 
 #[test]
+fn a_guardian_change_is_scheduled_only_on_its_own() {
+    new_test_ext().execute_with(|| {
+        let wrapped = RuntimeCall::System(frame_system::Call::kill_prefix {
+            prefix: KEY.to_vec(),
+            subkeys: 0,
+        });
+        assert_noop!(
+            RootTimelock::schedule(RuntimeOrigin::root(), Box::new(wrapped)),
+            Error::<Test>::GuardianChangeNotAlone
+        );
+        assert_eq!(crate::NextTaskId::<Test>::get(), 0);
+    });
+}
+
+#[test]
+fn a_fast_track_never_extends_or_revives_a_task() {
+    new_test_ext().execute_with(|| {
+        let fast_track = |id| RootTimelock::fast_track(RuntimeOrigin::signed(GUARDIAN), id);
+        let ready = schedule(recovery_call());
+        let expired = schedule(recovery_call());
+        let ready_at = 1 + 2;
+
+        System::set_block_number(ready_at);
+        assert_noop!(fast_track(ready), Error::<Test>::AlreadyReady);
+
+        System::set_block_number(ready_at + 5 + 1);
+        assert_noop!(fast_track(expired), Error::<Test>::AlreadyReady);
+        assert_eq!(
+            Tasks::<Test>::get(expired).map(|t| t.ready_at),
+            Some(ready_at)
+        );
+        assert_noop!(enact(expired, recovery_call()), Error::<Test>::Expired);
+    });
+}
+
+#[test]
 fn guardian_fast_tracks_recovery_calls_only() {
     new_test_ext().execute_with(|| {
         let recovery = schedule(recovery_call());

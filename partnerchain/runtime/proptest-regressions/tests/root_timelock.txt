@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5fe1d8dc03dae057fb9d5d23eb19332c66b794afba3d51f4f8a77b9772e31cce # shrinks to actions = [Schedule { wrapper: Plain, target: Lever { which: 0, on: false } }, FastTrack { pick: 0 }, FastTrack { pick: 0 }]

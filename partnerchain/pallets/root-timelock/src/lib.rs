@@ -111,6 +111,13 @@ impl<BlockNumber: Copy + Ord + Default> DelayTable<BlockNumber> {
 /// Maps a call to the class whose delay it must wait.
 pub trait ClassifyCall<Call> {
     fn class_of(call: &Call) -> CallClass;
+
+    /// Whether `call` is a wrapper, such as a batch, that dispatches this
+    /// pallet's `set_guardian` in turn. The guardian cannot veto a guardian
+    /// change, so one is scheduled only on its own: a wrapper would either
+    /// hand the guardian a veto over its replacement or carry other calls
+    /// past the veto.
+    fn wraps_guardian_change(call: &Call) -> bool;
 }
 
 pub type TaskId = u32;
@@ -258,6 +265,11 @@ pub mod pallet {
         /// The call now classifies into a longer class than the one it
         /// waited; schedule it again.
         ClassRaised,
+        /// A `set_guardian` inside a wrapper; schedule it on its own.
+        GuardianChangeNotAlone,
+        /// The task is already ready or has expired. A fast-track only brings
+        /// a pending task forward; it never extends or revives one.
+        AlreadyReady,
     }
 
     #[pallet::hooks]
@@ -295,6 +307,10 @@ pub mod pallet {
             call: Box<<T as Config>::RuntimeCall>,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            ensure!(
+                !T::Classifier::wraps_guardian_change(&call),
+                Error::<T>::GuardianChangeNotAlone
+            );
             let class = T::Classifier::class_of(&call);
             let vetoable = !matches!(call.is_sub_type(), Some(Call::set_guardian { .. }));
             let ready_at = frame_system::Pallet::<T>::block_number()
@@ -335,7 +351,8 @@ pub mod pallet {
             Ok(())
         }
 
-        /// The guardian's co-signature: a `Recovery` task becomes ready now.
+        /// The guardian's co-signature: a pending `Recovery` task becomes
+        /// ready now.
         #[pallet::call_index(2)]
         #[pallet::weight((
             T::DbWeight::get().reads_writes(2, 1).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
@@ -349,7 +366,9 @@ pub mod pallet {
                     task.class == CallClass::Recovery,
                     Error::<T>::NotFastTrackable
                 );
-                task.ready_at = frame_system::Pallet::<T>::block_number();
+                let now = frame_system::Pallet::<T>::block_number();
+                ensure!(now < task.ready_at, Error::<T>::AlreadyReady);
+                task.ready_at = now;
                 Ok::<(), DispatchError>(())
             })?;
             Self::deposit_event(Event::FastTracked { id });

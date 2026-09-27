@@ -873,6 +873,97 @@ fn replacing_the_guardian_waits_the_long_delay_and_cannot_be_vetoed() {
     });
 }
 
+/// The inner result of the last `Sudo.sudo` dispatch.
+fn last_sudo_result() -> Result<(), DispatchError> {
+    System::events()
+        .into_iter()
+        .rev()
+        .find_map(|record| match record.event {
+            RuntimeEvent::Sudo(pallet_sudo::Event::Sudid { sudo_result }) => Some(sudo_result),
+            _ => None,
+        })
+        .expect("a sudo call ran")
+}
+
+#[test]
+fn a_guardian_change_is_scheduled_only_on_its_own() {
+    new_test_ext().execute_with(|| {
+        let replace = || {
+            timelock(pallet_root_timelock::Call::set_guardian {
+                guardian: Some(acct(Bob)),
+            })
+        };
+        let wrapped = vec![
+            batch(vec![replace()]),
+            RuntimeCall::Utility(pallet_utility::Call::batch_all {
+                calls: vec![remark(), replace()],
+            }),
+            RuntimeCall::Utility(pallet_utility::Call::force_batch {
+                calls: vec![replace()],
+            }),
+            batch(vec![batch(vec![replace()])]),
+            with_weight(replace()),
+            dispatch_as_root(replace()),
+            sudo(replace()),
+        ];
+        for call in wrapped {
+            assert_ok!(signed(
+                SUDO,
+                sudo(timelock(pallet_root_timelock::Call::schedule {
+                    call: Box::new(call.clone())
+                }))
+            ));
+            assert_eq!(
+                last_sudo_result(),
+                Err(timelock_error(
+                    pallet_root_timelock::Error::GuardianChangeNotAlone
+                )),
+                "{call:?}"
+            );
+        }
+        assert_eq!(Tasks::<Runtime>::iter().count(), 0);
+
+        // On its own it is scheduled, and cannot be vetoed.
+        let id = schedule(replace());
+        assert!(!task(id).vetoable);
+    });
+}
+
+#[test]
+fn a_fast_track_never_extends_or_revives_a_task() {
+    new_test_ext().execute_with(|| {
+        let lever =
+            orinq(pallet_orinq_receipts::pallet::Call::set_core_eviction_enabled { enabled: true });
+        let fast_track = |id| {
+            signed(
+                GUARDIAN,
+                timelock(pallet_root_timelock::Call::fast_track { id }),
+            )
+        };
+        let id = schedule(lever.clone());
+        let ready_at = 1 + DELAYS.recovery;
+
+        System::set_block_number(ready_at);
+        assert_eq!(
+            fast_track(id),
+            Err(timelock_error(pallet_root_timelock::Error::AlreadyReady))
+        );
+
+        let expired = ready_at + RootTimelockEnactmentWindow::get() + 1;
+        System::set_block_number(expired);
+        assert_eq!(
+            fast_track(id),
+            Err(timelock_error(pallet_root_timelock::Error::AlreadyReady))
+        );
+        assert_eq!(task(id).ready_at, ready_at);
+        assert_eq!(
+            enact(id, lever),
+            Err(timelock_error(pallet_root_timelock::Error::Expired))
+        );
+        assert!(!pallet_orinq_receipts::CoreEvictionEnabled::<Runtime>::get());
+    });
+}
+
 #[test]
 fn recovery_admin_calls_are_behind_the_delay() {
     new_test_ext().execute_with(|| {
@@ -892,7 +983,7 @@ fn recovery_admin_calls_are_behind_the_delay() {
 }
 
 #[test]
-fn treasury_spends_in_one_dispatch_are_bounded() {
+fn treasury_spends_in_one_enactment_are_bounded() {
     new_test_ext().execute_with(|| {
         // 15,000 MATRA at 6 decimals.
         assert_eq!(MaxSpend::get(), 15_000 * 1_000_000);
@@ -902,25 +993,41 @@ fn treasury_spends_in_one_dispatch_are_bounded() {
                 beneficiary: acct(Bob).into(),
             })
         };
-        let as_root = |call: RuntimeCall| {
-            call.dispatch(RuntimeOrigin::root())
-                .map(|_| ())
-                .map_err(|e| e.error)
+        let over_cap = || -> Result<(), DispatchError> {
+            Err(pallet_treasury::Error::<Runtime>::InsufficientPermission.into())
         };
-        let over_cap: DispatchError =
-            pallet_treasury::Error::<Runtime>::InsufficientPermission.into();
-        assert_eq!(as_root(spend(MaxSpend::get() + 1)), Err(over_cap));
 
-        // The cap covers the sum approved inside one dispatch, so an enacted
-        // batch cannot split a larger spend.
+        let over = spend(MaxSpend::get() + 1);
+        // The cap covers the sum approved inside one enactment, so a batch
+        // cannot split a larger spend across calls that each fit.
         let half = MaxSpend::get() / 2 + 1;
         let split = RuntimeCall::Utility(pallet_utility::Call::batch_all {
             calls: vec![spend(half), spend(half)],
         });
-        assert_eq!(as_root(split), Err(over_cap));
+        let split_leniently = batch(vec![spend(half), spend(half)]);
+        let at_cap = spend(MaxSpend::get());
+        let ids: Vec<TaskId> = [&over, &split, &split_leniently, &at_cap]
+            .into_iter()
+            .map(|call| schedule(call.clone()))
+            .collect();
+
+        System::set_block_number(1 + DELAYS.standard);
+        assert_eq!(enact(ids[0], over), over_cap());
+        assert_eq!(enact(ids[1], split), over_cap());
         assert!(pallet_treasury::Approvals::<Runtime>::get().is_empty());
 
-        assert_ok!(as_root(spend(MaxSpend::get())));
+        assert_ok!(enact(ids[2], split_leniently));
+        System::assert_has_event(
+            pallet_utility::Event::BatchInterrupted {
+                index: 1,
+                error: over_cap().unwrap_err(),
+            }
+            .into(),
+        );
+        assert_eq!(pallet_treasury::Approvals::<Runtime>::get().len(), 1);
+
+        assert_ok!(enact(ids[3], at_cap));
+        assert_eq!(pallet_treasury::Approvals::<Runtime>::get().len(), 2);
     });
 }
 
@@ -1297,11 +1404,16 @@ impl Model {
                     timelock(pallet_root_timelock::Call::fast_track { id }),
                 );
                 match self.tasks.get_mut(&id) {
-                    Some(pending) if pending.class == CallClass::Recovery => {
+                    Some(pending) if pending.class != CallClass::Recovery => {
+                        assert_eq!(result, Err(timelock_error(E::NotFastTrackable)))
+                    }
+                    Some(pending) if self.now >= pending.ready_at => {
+                        assert_eq!(result, Err(timelock_error(E::AlreadyReady)))
+                    }
+                    Some(pending) => {
                         assert_ok!(result);
                         pending.ready_at = self.now;
                     }
-                    Some(_) => assert_eq!(result, Err(timelock_error(E::NotFastTrackable))),
                     None => assert_eq!(result, Err(timelock_error(E::UnknownTask))),
                 }
             }

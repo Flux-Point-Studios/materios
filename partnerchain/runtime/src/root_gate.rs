@@ -8,6 +8,7 @@
 //! call once its delay has passed.
 
 use crate::{IntentSettlementDefaultMinSignerThreshold, Runtime, RuntimeCall};
+use core::slice;
 use frame_support::traits::Contains;
 use pallet_root_timelock::{CallClass, ClassifyCall, Delays};
 
@@ -62,6 +63,39 @@ fn runs_at_once(call: &RuntimeCall) -> bool {
     }
 }
 
+/// The calls a wrapper dispatches in turn when it runs as Root.
+struct Wrapped<'a> {
+    calls: &'a [RuntimeCall],
+    /// Whether they run under an origin the wrapper names instead of Root.
+    under_another_origin: bool,
+}
+
+fn wrapped(call: &RuntimeCall) -> Option<Wrapped<'_>> {
+    let (calls, under_another_origin) = match call {
+        RuntimeCall::Sudo(
+            pallet_sudo::Call::sudo { call }
+            | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
+        )
+        | RuntimeCall::Utility(pallet_utility::Call::with_weight { call, .. }) => {
+            (slice::from_ref(call.as_ref()), false)
+        }
+        RuntimeCall::Sudo(pallet_sudo::Call::sudo_as { call, .. })
+        | RuntimeCall::Utility(pallet_utility::Call::dispatch_as { call, .. }) => {
+            (slice::from_ref(call.as_ref()), true)
+        }
+        RuntimeCall::Utility(
+            pallet_utility::Call::batch { calls }
+            | pallet_utility::Call::batch_all { calls }
+            | pallet_utility::Call::force_batch { calls },
+        ) => (calls.as_slice(), false),
+        _ => return None,
+    };
+    Some(Wrapped {
+        calls,
+        under_another_origin,
+    })
+}
+
 /// `pallet_root_timelock::Config::Classifier`. A wrapper waits the longest
 /// class of the calls it carries, so a batch cannot hide a long call among
 /// standard ones.
@@ -69,28 +103,21 @@ pub struct TimelockClassifier;
 
 impl ClassifyCall<RuntimeCall> for TimelockClassifier {
     fn class_of(call: &RuntimeCall) -> CallClass {
-        match call {
-            RuntimeCall::Sudo(
-                pallet_sudo::Call::sudo { call }
-                | pallet_sudo::Call::sudo_unchecked_weight { call, .. },
-            )
-            | RuntimeCall::Utility(pallet_utility::Call::with_weight { call, .. }) => {
-                Self::class_of(call)
-            }
-            // Under another origin a recovery call is not a recovery call.
-            RuntimeCall::Sudo(pallet_sudo::Call::sudo_as { call, .. })
-            | RuntimeCall::Utility(pallet_utility::Call::dispatch_as { call, .. }) => {
-                Self::class_of(call).max(CallClass::Standard)
-            }
-            RuntimeCall::Utility(
-                pallet_utility::Call::batch { calls }
-                | pallet_utility::Call::batch_all { calls }
-                | pallet_utility::Call::force_batch { calls },
-            ) => calls
+        if let Some(wrapped) = wrapped(call) {
+            let class = wrapped
+                .calls
                 .iter()
                 .map(Self::class_of)
                 .max()
-                .unwrap_or(CallClass::Recovery),
+                .unwrap_or(CallClass::Recovery);
+            // Under another origin a recovery call is not a recovery call.
+            return if wrapped.under_another_origin {
+                class.max(CallClass::Standard)
+            } else {
+                class
+            };
+        }
+        match call {
             // The committee and finality levers the chain is recovered with.
             // They can change who holds authority, so they wait the recovery
             // delay unless the guardian co-signs with `fast_track`.
@@ -118,6 +145,17 @@ impl ClassifyCall<RuntimeCall> for TimelockClassifier {
             RuntimeCall::RootTimelock(call) => call.class(),
             _ => CallClass::Standard,
         }
+    }
+
+    fn wraps_guardian_change(call: &RuntimeCall) -> bool {
+        wrapped(call).is_some_and(|wrapped| {
+            wrapped.calls.iter().any(|inner| {
+                matches!(
+                    inner,
+                    RuntimeCall::RootTimelock(pallet_root_timelock::Call::set_guardian { .. })
+                ) || Self::wraps_guardian_change(inner)
+            })
+        })
     }
 }
 

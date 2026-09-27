@@ -28,7 +28,8 @@ parameter_types! {
 
 /// `remark` stands in for a recovery call whose class depends on state (it
 /// becomes long while `RemarkIsLong` is set), `kill_storage` for a long-delay
-/// call, and everything else is standard.
+/// call, `kill_prefix` for a wrapper that carries a `set_guardian`, and
+/// everything else is standard.
 pub struct TestClassifier;
 impl ClassifyCall<RuntimeCall> for TestClassifier {
     fn class_of(call: &RuntimeCall) -> CallClass {
@@ -37,10 +38,19 @@ impl ClassifyCall<RuntimeCall> for TestClassifier {
                 CallClass::Long
             }
             RuntimeCall::System(frame_system::Call::remark { .. }) => CallClass::Recovery,
-            RuntimeCall::System(frame_system::Call::kill_storage { .. }) => CallClass::Long,
+            RuntimeCall::System(
+                frame_system::Call::kill_storage { .. } | frame_system::Call::kill_prefix { .. },
+            ) => CallClass::Long,
             RuntimeCall::RootTimelock(call) => call.class(),
             _ => CallClass::Standard,
         }
+    }
+
+    fn wraps_guardian_change(call: &RuntimeCall) -> bool {
+        matches!(
+            call,
+            RuntimeCall::System(frame_system::Call::kill_prefix { .. })
+        )
     }
 }
 
