@@ -1,0 +1,5 @@
+base58==2.1.1
+pynacl==1.6.2
+pytest==9.0.3
+xxhash==3.6.0
+zstandard==0.25.0

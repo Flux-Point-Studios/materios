@@ -1,0 +1,287 @@
+{
+ "dev_phrase_blake2_256": "2080870422982ac1d8ac77ca2eb39ec85df8dadef289844ffdcd14ea604d9c2d",
+ "keys": [
+  {
+   "label": "dev phrase root",
+   "scheme": "sr25519",
+   "public": "46ebddef8cd9bb167dc30878d7113b7e168e6f0646beffd77d69d39bad76b47a",
+   "account": "46ebddef8cd9bb167dc30878d7113b7e168e6f0646beffd77d69d39bad76b47a"
+  },
+  {
+   "label": "dev phrase root",
+   "scheme": "ed25519",
+   "public": "345071da55e5dccefaaa440339415ef9f2663338a38f7da0df21be5ab4e055ef",
+   "account": "345071da55e5dccefaaa440339415ef9f2663338a38f7da0df21be5ab4e055ef"
+  },
+  {
+   "label": "dev phrase root",
+   "scheme": "ecdsa",
+   "public": "035b26108e8b97479c547da4860d862dc08ab2c29ada449c74d5a9a58a6c46a8c4",
+   "account": "bc9539b36a87a586b1aa20fbe23a1db3ef3edcd65b44a2dc4444cc552687633f"
+  },
+  {
+   "label": "//Alice",
+   "scheme": "sr25519",
+   "public": "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
+   "account": "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
+  },
+  {
+   "label": "//Alice",
+   "scheme": "ed25519",
+   "public": "88dc3417d5058ec4b4503e0c12ea1a0a89be200fe98922423d4334014fa6b0ee",
+   "account": "88dc3417d5058ec4b4503e0c12ea1a0a89be200fe98922423d4334014fa6b0ee"
+  },
+  {
+   "label": "//Alice",
+   "scheme": "ecdsa",
+   "public": "020a1091341fe5664bfa1782d5e04779689068c916b04cb365ec3153755684d9a1",
+   "account": "01e552298e47454041ea31273b4b630c64c104e4514aa3643490b8aaca9cf8ed"
+  },
+  {
+   "label": "//Bob",
+   "scheme": "sr25519",
+   "public": "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48",
+   "account": "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48"
+  },
+  {
+   "label": "//Bob",
+   "scheme": "ed25519",
+   "public": "d17c2d7823ebf260fd138f2d7e27d114c0145d968b5ff5006125f2414fadae69",
+   "account": "d17c2d7823ebf260fd138f2d7e27d114c0145d968b5ff5006125f2414fadae69"
+  },
+  {
+   "label": "//Bob",
+   "scheme": "ecdsa",
+   "public": "0390084fdbf27d2b79d26a4f13f0ccd982cb755a661969143c37cbc49ef5b91f27",
+   "account": "3f6eaf1be5add88d84ca8b02d350074935dbf04f53f4287cb6abfd6b33413f8f"
+  },
+  {
+   "label": "//Charlie",
+   "scheme": "sr25519",
+   "public": "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22",
+   "account": "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22"
+  },
+  {
+   "label": "//Charlie",
+   "scheme": "ed25519",
+   "public": "439660b36c6c03afafca027b910b4fecf99801834c62a5e6006f27d978de234f",
+   "account": "439660b36c6c03afafca027b910b4fecf99801834c62a5e6006f27d978de234f"
+  },
+  {
+   "label": "//Charlie",
+   "scheme": "ecdsa",
+   "public": "0389411795514af1627765eceffcbd002719f031604fadd7d188e2dc585b4e1afb",
+   "account": "6672035dd6010e55e08eb707d171b5ec790bfea44f93ea8b1d22503033de45cd"
+  },
+  {
+   "label": "//Dave",
+   "scheme": "sr25519",
+   "public": "306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20",
+   "account": "306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20"
+  },
+  {
+   "label": "//Dave",
+   "scheme": "ed25519",
+   "public": "5e639b43e0052c47447dac87d6fd2b6ec50bdd4d0f614e4299c665249bbd09d9",
+   "account": "5e639b43e0052c47447dac87d6fd2b6ec50bdd4d0f614e4299c665249bbd09d9"
+  },
+  {
+   "label": "//Dave",
+   "scheme": "ecdsa",
+   "public": "03bc9d0ca094bd5b8b3225d7651eac5d18c1c04bf8ae8f8b263eebca4e1410ed0c",
+   "account": "2452e6b66a46450f6858ef72934278407eb42de707c9abe67b8cb41707565ef3"
+  },
+  {
+   "label": "//Eve",
+   "scheme": "sr25519",
+   "public": "e659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
+   "account": "e659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e"
+  },
+  {
+   "label": "//Eve",
+   "scheme": "ed25519",
+   "public": "1dfe3e22cc0d45c70779c1095f7489a8ef3cf52d62fbd8c2fa38c9f1723502b5",
+   "account": "1dfe3e22cc0d45c70779c1095f7489a8ef3cf52d62fbd8c2fa38c9f1723502b5"
+  },
+  {
+   "label": "//Eve",
+   "scheme": "ecdsa",
+   "public": "031d10105e323c4afce225208f71a6441ee327a65b9e646e772500c74d31f669aa",
+   "account": "b71a0812a1edaa236625ba525279201448be05f3a97c02f796db63944bf29895"
+  },
+  {
+   "label": "//Ferdie",
+   "scheme": "sr25519",
+   "public": "1cbd2d43530a44705ad088af313e18f80b53ef16b36177cd4b77b846f2a5f07c",
+   "account": "1cbd2d43530a44705ad088af313e18f80b53ef16b36177cd4b77b846f2a5f07c"
+  },
+  {
+   "label": "//Ferdie",
+   "scheme": "ed25519",
+   "public": "568cb4a574c6d178feb39c27dfc8b3f789e5f5423e19c71633c748b9acf086b5",
+   "account": "568cb4a574c6d178feb39c27dfc8b3f789e5f5423e19c71633c748b9acf086b5"
+  },
+  {
+   "label": "//Ferdie",
+   "scheme": "ecdsa",
+   "public": "0291f1217d5a04cb83312ee3d88a6e6b33284e053e6ccfc3a90339a0299d12967c",
+   "account": "fb5ead485f2af13bc4ad5ec43055c15cfe893ed543f8052f2db45cc5c73d0a30"
+  },
+  {
+   "label": "//Alice//stash",
+   "scheme": "sr25519",
+   "public": "be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25f",
+   "account": "be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25f"
+  },
+  {
+   "label": "//Alice//stash",
+   "scheme": "ed25519",
+   "public": "451781cd0c5504504f69ceec484cc66e4c22a2b6a9d20fb1a426d91ad074a2a8",
+   "account": "451781cd0c5504504f69ceec484cc66e4c22a2b6a9d20fb1a426d91ad074a2a8"
+  },
+  {
+   "label": "//Alice//stash",
+   "scheme": "ecdsa",
+   "public": "03c6a1c2194fa966d30bc4b9c4d5140e9a899d456372dae0e4ef230fd7d2197e72",
+   "account": "0dcdff87f204fcf502c4cdd417ca73df9d06bf640d2f50af5fbe8225fe026b4b"
+  },
+  {
+   "label": "//Bob//stash",
+   "scheme": "sr25519",
+   "public": "fe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e",
+   "account": "fe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e"
+  },
+  {
+   "label": "//Bob//stash",
+   "scheme": "ed25519",
+   "public": "292684abbb28def63807c5f6e84e9e8689769eb37b1ab130d79dbfbf1b9a0d44",
+   "account": "292684abbb28def63807c5f6e84e9e8689769eb37b1ab130d79dbfbf1b9a0d44"
+  },
+  {
+   "label": "//Bob//stash",
+   "scheme": "ecdsa",
+   "public": "03b9a427c7067d109c69e55d3d196a7d84d5f607fe30c3896846bfdf72a3d782b9",
+   "account": "8140beed032fe6592e6b19e905ac3146465fcb2cc01de4abd0fed2c13a8ae3e2"
+  },
+  {
+   "label": "//Charlie//stash",
+   "scheme": "sr25519",
+   "public": "1e07379407fecc4b89eb7dbd287c2c781cfb1907a96947a3eb18e4f8e7198625",
+   "account": "1e07379407fecc4b89eb7dbd287c2c781cfb1907a96947a3eb18e4f8e7198625"
+  },
+  {
+   "label": "//Charlie//stash",
+   "scheme": "ed25519",
+   "public": "dd6a6118b6c11c9c9e5a4f34ed3d545e2c74190f90365c60c230fa82e9423bb9",
+   "account": "dd6a6118b6c11c9c9e5a4f34ed3d545e2c74190f90365c60c230fa82e9423bb9"
+  },
+  {
+   "label": "//Charlie//stash",
+   "scheme": "ecdsa",
+   "public": "0321f1c1db865735970545046b960401056d7f58b95a12619aac4d9e3121349ebb",
+   "account": "62cb88bb1e8556d6ac19c961e601ae090a05fa8a414e76f407e0512603984e96"
+  },
+  {
+   "label": "//Dave//stash",
+   "scheme": "sr25519",
+   "public": "e860f1b1c7227f7c22602f53f15af80747814dffd839719731ee3bba6edc126c",
+   "account": "e860f1b1c7227f7c22602f53f15af80747814dffd839719731ee3bba6edc126c"
+  },
+  {
+   "label": "//Dave//stash",
+   "scheme": "ed25519",
+   "public": "1d0432d75331ab299065bee79cdb1bdc2497c597a3087b4d955c67e3c000c1e2",
+   "account": "1d0432d75331ab299065bee79cdb1bdc2497c597a3087b4d955c67e3c000c1e2"
+  },
+  {
+   "label": "//Dave//stash",
+   "scheme": "ecdsa",
+   "public": "02146b69e8b8723f198adfed1c224adaf3054585a7fb6f0f609ea6b0cbb5d21fed",
+   "account": "8455a656286fe7a47ac3820c75524b327a6c3d8b5c3d424176951c25ef743042"
+  },
+  {
+   "label": "//Eve//stash",
+   "scheme": "sr25519",
+   "public": "8ac59e11963af19174d0b94d5d78041c233f55d2e19324665bafdfb62925af2d",
+   "account": "8ac59e11963af19174d0b94d5d78041c233f55d2e19324665bafdfb62925af2d"
+  },
+  {
+   "label": "//Eve//stash",
+   "scheme": "ed25519",
+   "public": "c833bdd2e1a7a18acc1c11f8596e2e697bb9b42d6b6051e474091a1d43a294d7",
+   "account": "c833bdd2e1a7a18acc1c11f8596e2e697bb9b42d6b6051e474091a1d43a294d7"
+  },
+  {
+   "label": "//Eve//stash",
+   "scheme": "ecdsa",
+   "public": "02b6e53795472f28ca50bef380e9a9e0882bce5d25ad35d57b8fd9beda3a3115b4",
+   "account": "cb4267cf5374f84a104d5f74956c4660e747ec3556aa685bf101bd3f6eb39382"
+  },
+  {
+   "label": "//Ferdie//stash",
+   "scheme": "sr25519",
+   "public": "101191192fc877c24d725b337120fa3edc63d227bbc92705db1e2cb65f56981a",
+   "account": "101191192fc877c24d725b337120fa3edc63d227bbc92705db1e2cb65f56981a"
+  },
+  {
+   "label": "//Ferdie//stash",
+   "scheme": "ed25519",
+   "public": "199d749dbf4b8135cb1f3c8fd697a390fc0679881a8a110c1d06375b3b62cd09",
+   "account": "199d749dbf4b8135cb1f3c8fd697a390fc0679881a8a110c1d06375b3b62cd09"
+  },
+  {
+   "label": "//Ferdie//stash",
+   "scheme": "ecdsa",
+   "public": "03ff3ae4112da5d2e7c187e47481c2322791c9da00b28a34523b7aa81d37eb2b3d",
+   "account": "1506715124f1fd6b515f594ed37faf8b540a54e88fcea95c5e033459c3c4e6ee"
+  },
+  {
+   "label": "//One",
+   "scheme": "sr25519",
+   "public": "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a",
+   "account": "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a"
+  },
+  {
+   "label": "//One",
+   "scheme": "ed25519",
+   "public": "16f97016bbea8f7b45ae6757b49efc1080accc175d8f018f9ba719b60b0815e4",
+   "account": "16f97016bbea8f7b45ae6757b49efc1080accc175d8f018f9ba719b60b0815e4"
+  },
+  {
+   "label": "//One",
+   "scheme": "ecdsa",
+   "public": "036c6ae73d36d0c02b54d7877a57b1734b8e096134bd2c1b829431aa38f18bcce1",
+   "account": "400098782d72cf06b10a0ca1e9324dcf2ca0a4b0028ecdeeb97f7108cee06ef7"
+  },
+  {
+   "label": "//Two",
+   "scheme": "sr25519",
+   "public": "1254f7017f0b8347ce7ab14f96d818802e7e9e0c0d1b7c9acb3c726b080e7a03",
+   "account": "1254f7017f0b8347ce7ab14f96d818802e7e9e0c0d1b7c9acb3c726b080e7a03"
+  },
+  {
+   "label": "//Two",
+   "scheme": "ed25519",
+   "public": "5079bcd20fd97d7d2f752c4607012600b401950260a91821f73e692071c82bf5",
+   "account": "5079bcd20fd97d7d2f752c4607012600b401950260a91821f73e692071c82bf5"
+  },
+  {
+   "label": "//Two",
+   "scheme": "ecdsa",
+   "public": "020a617391de0e0291310bf7792bb41d9573e8a054b686205da5553e08fac6d0b8",
+   "account": "ec6357524928b2ecf8f316aba8491b2f01dc74c96b590135d50f53f587e0117f"
+  },
+  {
+   "label": "retired validator key, mnemonic published on-chain",
+   "scheme": "sr25519",
+   "public": "7e27bb13fd6fb62cc0e7c59916952c8c214960904208295a0d70c4c48e2a9a29",
+   "account": "7e27bb13fd6fb62cc0e7c59916952c8c214960904208295a0d70c4c48e2a9a29"
+  },
+  {
+   "label": "retired validator key, mnemonic published on-chain",
+   "scheme": "ed25519",
+   "public": "6c484a9d5a8d0182e0f3bf9d8ffc4ca7070fd08da47329afca79f4b3df6aaa7e",
+   "account": "6c484a9d5a8d0182e0f3bf9d8ffc4ca7070fd08da47329afca79f4b3df6aaa7e"
+  }
+ ]
+}
