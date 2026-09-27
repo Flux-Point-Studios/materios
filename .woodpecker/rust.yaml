@@ -2,11 +2,13 @@ when:
   - event: [push, pull_request]
     branch: main
 
-# Pinned to the Node-2 agent (its hostname is the agent container id). The
-# other agent, sat230, shares a disk with the SaturnSwap production node and
-# caps steps at 8 GB, which this cold build does not fit.
+# Pinned to the Node-2 agent. The other agent, sat230, shares a disk with the
+# SaturnSwap production node and caps steps at 8 GB, which this cold build does
+# not fit. The pin uses the one custom label only Node-2 carries: the agent's
+# hostname label is its container id, which changes whenever the container is
+# recreated and then leaves every pipeline pinned to it pending.
 labels:
-  hostname: 307a575667df
+  arm64-emu: "true"
 
 steps:
   # Advisory, as in the GitHub workflow (continue-on-error): main is not
