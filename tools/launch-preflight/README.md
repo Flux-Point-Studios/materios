@@ -21,8 +21,8 @@ It reads:
 |---|---|
 | 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role, in an authority's launch command or environment (`--alice`, `--dev`, `//Bob`, the dev mnemonic), or as the manifest signing key. "Well-known" is every sp-keyring key (`//Alice` .. `//Ferdie`, their `//stash` accounts, `//One`, `//Two`) and the dev-phrase root under sr25519, ed25519 and ecdsa, retired keys whose secret was published, keys whose seed a public repo commits, and every key in an `--extra-well-known` table. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values. |
-| 3 rpc | An authority serves unsafe RPC methods (`--rpc-methods unsafe`, or the default on a loopback listener) on an external listener or behind a proxy route. |
-| 4 supply | An attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, or genesis issuance plus the runtime's emission reserves exceeds the cMATRA locked on Cardano to back it: the reserve would be counted both as cMATRA and as MATRA. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. |
+| 3 rpc | An authority serves unsafe RPC methods (`--rpc-methods unsafe`, or the default on a loopback listener) on an external listener or behind a proxy route, or a node runs `--validator` without being declared an authority. |
+| 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA locked on Cardano to back it: the reserve would be counted both as cMATRA and as MATRA. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. |
 | 5 pallets | `PerpEngine` is in the runtime metadata. |
 | 6 checkpoint | The genesis hash, runtime code hash or chain-spec hash differs from the signed launch manifest, the signature does not verify under the pinned key, or the spec carries `codeSubstitutes`. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts: that observation has no checkpoint, so its first run counts every transfer to the watched address since Cardano genesis, the genesis lock included. |
 
@@ -79,7 +79,8 @@ JSON (sorted keys, no whitespace).
 
 - `roles` maps any role name to public keys (SS58, or 0x-hex 32-byte accounts
   and 33-byte ECDSA keys). Never a secret URI. `attestors` are the accounts that
-  bond at genesis and get the endowment floor check.
+  bond at genesis and get the endowment floor check; it must not be empty.
+- Every node declares `authority` as `true` or `false`.
 - `supply.cardano_backing` is the cMATRA locked on Cardano for Materios issuance.
 - A proxy route matches an authority when its `proxy_pass` target (or nginx
   `upstream` server) is the authority's RPC port on its `host` or on any of its

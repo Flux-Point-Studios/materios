@@ -112,7 +112,12 @@ def account_key(account: bytes) -> bytes:
 
 
 def endow(spec: lp.Spec, account: bytes, free: int) -> None:
+    """Set an account's free balance and move TotalIssuance with it."""
+    old = spec.storage.get(account_key(account))
+    delta = free - (int.from_bytes(old[16:32], "little") if old else 0)
     spec.storage[account_key(account)] = bytes(16) + free.to_bytes(16, "little") + bytes(48)
+    issuance = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
+    put(spec, "Balances", "TotalIssuance", (issuance + delta).to_bytes(16, "little"))
 
 
 def messages(findings) -> list[str]:
@@ -480,6 +485,13 @@ def test_non_authority_nodes_are_out_of_scope(tmp_path):
     assert rpc_findings(tmp_path, [node]) == []
 
 
+def test_validator_not_declared_an_authority_is_refused(tmp_path):
+    node = {"name": "v9", "host": "h9", "authority": False,
+            "argv": "node --validator --rpc-methods unsafe --rpc-external"}
+    assert rpc_findings(tmp_path, [node]) == [
+        "[3 rpc] node v9 runs --validator but is not declared an authority"]
+
+
 def test_unknown_rpc_methods_value_is_refused(tmp_path):
     found = rpc_findings(tmp_path, [authority("node --rpc-methods everything")])
     assert found == ["[3 rpc] node val1: unknown --rpc-methods everything"]
@@ -515,6 +527,13 @@ def with_reserves(metadata_v14: dict, reserves=RESERVES) -> dict:
 @pytest.fixture
 def reserve_meta(metadata_v14) -> lp.Metadata:
     return lp.Metadata.from_v14(with_reserves(metadata_v14))
+
+
+def roster(spec) -> list[str]:
+    """One attestor endowed at the floor, so a supply test sees only what it sets up."""
+    attestor = fresh_account()
+    endow(spec, attestor, FLOOR)
+    return [ss58(attestor)]
 
 
 def supply_findings(spec, meta, attestors, fee_buffer, supply=SUPPLY):
@@ -553,34 +572,63 @@ def test_endowment_floor_needs_every_input(spec, reserve_meta):
 
 
 def test_runtime_emission_reserves_on_top_of_a_cardano_backed_genesis_are_refused(spec, reserve_meta):
+    attestors = roster(spec)
     issuance = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
     backing = issuance
-    found = supply_findings(spec, reserve_meta, [], 0, {"cardano_backing": backing})
+    found = supply_findings(spec, reserve_meta, attestors, 0, {"cardano_backing": backing})
     assert found == [f"[4 supply] Materios can issue {issuance + 200_000_000 * MATRA} (genesis {issuance} "
                      f"+ runtime emission reserves {200_000_000 * MATRA}) against {backing} locked on "
                      "Cardano: the difference is reserve counted both as cMATRA and as MATRA"]
 
 
 def test_genesis_and_emission_reserves_fully_backed_pass(spec, reserve_meta):
-    assert supply_findings(spec, reserve_meta, [], 0) == []
+    assert supply_findings(spec, reserve_meta, roster(spec), 0) == []
 
 
 def test_genesis_issuance_above_the_cardano_lock_is_refused(spec, metadata_v14):
     no_emission = {"ValidatorEmissionReserve": 0, "AttestationRewardReserve": 0}
     meta = lp.Metadata.from_v14(with_reserves(metadata_v14, no_emission))
-    found = supply_findings(spec, meta, [], 0, {"cardano_backing": 975_000 * MATRA})
+    found = supply_findings(spec, meta, roster(spec), 0, {"cardano_backing": 975_000 * MATRA})
     assert len(found) == 1 and "counted both as cMATRA and as MATRA" in found[0]
 
 
 def test_runtime_that_hides_its_emission_reserves_is_refused(spec, meta):
-    found = supply_findings(spec, meta, [], 0)
+    found = supply_findings(spec, meta, roster(spec), 0)
     assert found == ["[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve, "
                      "OrinqReceipts.AttestationRewardReserve: what the runtime mints after genesis is unbounded "
                      "here, so the supply cannot be checked against the Cardano lock"]
 
 
+def test_issuance_below_what_genesis_accounts_hold_is_refused(spec, reserve_meta):
+    held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
+    put(spec, "Balances", "TotalIssuance", (1).to_bytes(16, "little"))
+    found = supply_findings(spec, reserve_meta, [], 0, {"cardano_backing": held + 200_000_000 * MATRA - 1})
+    assert f"[4 supply] Balances.TotalIssuance stores 1, but genesis accounts hold {held}" in found
+    assert any(f"(genesis {held} + runtime emission reserves" in m for m in found)
+
+
+def test_missing_issuance_is_refused_and_accounts_still_count(spec, reserve_meta):
+    held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
+    del spec.storage[lp.storage_key("Balances", "TotalIssuance")]
+    found = supply_findings(spec, reserve_meta, [], 0)
+    assert f"[4 supply] Balances.TotalIssuance stores 0, but genesis accounts hold {held}" in found
+
+
+def test_reserved_balances_count_toward_issuance(spec, reserve_meta):
+    account = fresh_account()
+    spec.storage[account_key(account)] = bytes(32) + (5 * MATRA).to_bytes(16, "little") + bytes(32)
+    held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little") + 5 * MATRA
+    found = supply_findings(spec, reserve_meta, [], 0)
+    assert f"[4 supply] Balances.TotalIssuance stores {held - 5 * MATRA}, but genesis accounts hold {held}" in found
+
+
+def test_empty_attestor_roster_is_refused(spec, reserve_meta):
+    found = supply_findings(spec, reserve_meta, [], 0)
+    assert "[4 supply] roles.attestors names no account: the endowment floor has nothing to check" in found
+
+
 def test_undeclared_backing_is_refused(spec, reserve_meta):
-    found = supply_findings(spec, reserve_meta, [], 0, {})
+    found = supply_findings(spec, reserve_meta, roster(spec), 0, {})
     assert found == ["[4 supply] supply.cardano_backing must be declared as an integer"]
 
 
@@ -702,8 +750,10 @@ def test_cli_refuses_a_manifest_pinned_to_another_key(preprod_path, tmp_path, ca
     ({"roles": {"oracle": "5Grw"}}, "roles must map each role to a list"),
     ({"roles": {}, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),
     ({"roles": {}, "rpc_proxies": [{"name": "p", "host": "h"}]}, "rpc_proxies\\[0\\] needs"),
-    ({"roles": {}, "nodes": [{"name": "v1", "host": "h", "addresses": "10.0.0.1"}]},
+    ({"roles": {}, "nodes": [{"name": "v1", "host": "h", "authority": True, "addresses": "10.0.0.1"}]},
      "nodes\\[0\\] addresses must be a list"),
+    ({"roles": {}, "nodes": [{"name": "v1", "host": "h", "argv": "node --validator"}]},
+     "nodes\\[0\\] must declare authority as true or false"),
 ])
 def test_malformed_launch_manifest_is_an_input_error(spec, meta, launch, error):
     with pytest.raises(lp.InputError, match=error):

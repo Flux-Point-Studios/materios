@@ -524,9 +524,12 @@ def check_rpc(launch: dict) -> list[Finding]:
             proxied.add((proxy["host"] if host in LOOPBACK else host, port, proxy["name"]))
     findings = []
     for node in launch.get("nodes", []):
-        if not node.get("authority"):
-            continue
         argv = node_argv(node)
+        if not node["authority"]:
+            if "--validator" in argv:
+                findings.append(Finding("3 rpc", f"node {node['name']} runs --validator but is not "
+                                                 "declared an authority"))
+            continue
         methods = (_flag(argv, "--rpc-methods") or "auto").lower()
         if methods not in ("auto", "safe", "unsafe"):
             findings.append(Finding("3 rpc", f"node {node['name']}: unknown --rpc-methods {methods}"))
@@ -557,16 +560,20 @@ def free_balance(spec: Spec, account: bytes) -> int:
 def check_supply(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     findings = []
     economics, supply = launch.get("economics", {}), launch.get("supply", {})
+    attestors = launch.get("roles", {}).get("attestors", [])
     bond_raw = spec.value("OrinqReceipts", "BondRequirement")
     ed_raw = meta.constants.get(("Balances", "ExistentialDeposit"))
     fee_buffer = economics.get("fee_buffer")
+    if not attestors:
+        findings.append(Finding("4 supply", "roles.attestors names no account: the endowment floor "
+                                            "has nothing to check"))
     if bond_raw is None or ed_raw is None or not isinstance(fee_buffer, int):
         findings.append(Finding("4 supply", "cannot size attestor endowments: needs OrinqReceipts."
                                             "BondRequirement in genesis, Balances.ExistentialDeposit "
                                             "in metadata and economics.fee_buffer declared"))
     else:
         floor = int.from_bytes(bond_raw, "little") + int.from_bytes(ed_raw, "little") + fee_buffer
-        for i, text in enumerate(launch.get("roles", {}).get("attestors", [])):
+        for i, text in enumerate(attestors):
             try:
                 account = decode_public_key(text)
             except (ValueError, TypeError):
@@ -578,7 +585,14 @@ def check_supply(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                 findings.append(Finding("4 supply", f"roles.attestors[{i}] is endowed {balance}, below "
                                                     f"bond + existential deposit + fee buffer = {floor}"))
     issuance_raw = spec.value("Balances", "TotalIssuance")
-    issuance = int.from_bytes(issuance_raw, "little") if issuance_raw else 0
+    stored = int.from_bytes(issuance_raw, "little") if issuance_raw else 0
+    prefix = storage_key("System", "Account")
+    held = sum(int.from_bytes(info[16:32], "little") + int.from_bytes(info[32:48], "little")
+               for key, info in spec.storage.items() if key.startswith(prefix))
+    if stored != held:
+        findings.append(Finding("4 supply", f"Balances.TotalIssuance stores {stored}, but genesis accounts "
+                                            f"hold {held}"))
+    issuance = max(stored, held)
     backing = supply.get("cardano_backing")
     missing = [name for name in EMISSION_RESERVES if ("OrinqReceipts", name) not in meta.constants]
     if missing:
@@ -682,6 +696,8 @@ def validate_launch(launch: dict) -> None:
     for i, node in enumerate(launch.get("nodes", [])):
         if not isinstance(node.get("name"), str) or not isinstance(node.get("host"), str):
             raise InputError(f"launch manifest nodes[{i}] needs a name and a host")
+        if not isinstance(node.get("authority"), bool):
+            raise InputError(f"launch manifest nodes[{i}] must declare authority as true or false")
         if not isinstance(node.get("addresses", []), list):
             raise InputError(f"launch manifest nodes[{i}] addresses must be a list")
     for i, proxy in enumerate(launch.get("rpc_proxies", [])):
