@@ -17,14 +17,18 @@ Rules, each of which refuses on its own:
   3 rpc          an authority serves unsafe RPC methods on an external or
                  proxied listener
   4 supply       an attestor endowment below bond + existential deposit + fee
-                 buffer, or Materios issuance not backed by locked cMATRA (the
-                 reserve counted both on Cardano and on Materios)
+                 buffer, or genesis issuance plus the runtime's emission
+                 reserves not backed by locked cMATRA (the reserve counted both
+                 on Cardano and on Materios)
   5 pallets      PerpEngine in the runtime metadata
   6 checkpoint   genesis hash, runtime code hash or chain-spec hash differ from
-                 the signed launch manifest, or the spec carries code substitutes
+                 the signed launch manifest, the spec carries code substitutes,
+                 or genesis turns on a Cardano deposit observation that has no
+                 checkpoint
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
-        --signed-manifest signed.json --manifest-key 0x<ed25519 pubkey> [--subwasm PATH]
+        --signed-manifest signed.json --manifest-key 0x<ed25519 pubkey> \\
+        [--extra-well-known exposed.json ...] [--subwasm PATH]
     launch_preflight.py sign --spec raw.json --key <ed25519 seed file> --out signed.json
 
 Exit 0 only when every rule passes; 1 with every reason when any refuses;
@@ -56,6 +60,8 @@ CODE_BOMB_LIMIT = 50 * 1024 * 1024
 DOMAIN = b"materios-launch-manifest-v1"
 DOMAIN_32 = DOMAIN.ljust(32, b"\0")
 FORBIDDEN_PALLETS = ("PerpEngine",)
+EMISSION_RESERVES = ("ValidatorEmissionReserve", "AttestationRewardReserve")
+POLICY_ID_LEN = 28
 REWARD_ITEMS = (
     ("attestation_reward_per_signer", "AttestationRewardPerSigner", 16),
     ("era_cap_base", "EraCapBase", 16),
@@ -345,15 +351,30 @@ class KnownKey:
         return f"{self.label} ({self.scheme})"
 
 
-def load_well_known(path: Path = HERE / "well_known_keys.json") -> tuple[list[KnownKey], str]:
-    table = json.loads(path.read_text())
+def load_well_known(extra: list[Path] = ()) -> tuple[list[KnownKey], str]:
+    """The public table plus operator tables of keys whose exposure must not be
+    named in a public repo. A 33-byte ECDSA key also matches the blake2-256
+    account it maps to."""
+    base = HERE / "well_known_keys.json"
     keys = []
-    for entry in table["keys"]:
-        for field in ("public", "account"):
-            needle = bytes.fromhex(entry[field])
-            if not any(k.needle == needle for k in keys):
-                keys.append(KnownKey(entry["label"], entry["scheme"], needle))
-    return keys, table["dev_phrase_blake2_256"]
+    for path in (base, *extra):
+        try:
+            entries = json.loads(Path(path).read_text())["keys"]
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            raise InputError(f"cannot read key table {path}: {e}") from e
+        for i, entry in enumerate(entries):
+            if not all(isinstance(entry.get(f), str) for f in ("label", "scheme", "public")):
+                raise InputError(f"key table {path}: keys[{i}] needs a label, a scheme and a public key")
+            try:
+                public = bytes.fromhex(entry["public"].removeprefix("0x"))
+            except ValueError as e:
+                raise InputError(f"key table {path}: keys[{i}] public is not hex") from e
+            if len(public) not in (32, 33):
+                raise InputError(f"key table {path}: keys[{i}] public is {len(public)} bytes; expected 32 or 33")
+            for needle in (public, blake2_256(public)) if len(public) == 33 else (public,):
+                if not any(k.needle == needle for k in keys):
+                    keys.append(KnownKey(entry["label"], entry["scheme"], needle))
+    return keys, json.loads(base.read_text())["dev_phrase_blake2_256"]
 
 
 def decode_public_key(text: str) -> bytes:
@@ -516,7 +537,8 @@ def check_rpc(launch: dict) -> list[Finding]:
         if not port_flag.isdigit():
             raise InputError(f"node {node['name']}: --rpc-port {port_flag} is not a port")
         port = int(port_flag)
-        via = sorted(name for host, p, name in proxied if host == node["host"] and p == port)
+        addresses = {node["host"], *node.get("addresses", [])}
+        via = sorted(name for host, p, name in proxied if host in addresses and p == port)
         if unsafe and external:
             findings.append(Finding("3 rpc", f"authority {node['name']} serves unsafe RPC methods "
                                              "on an external listener"))
@@ -557,15 +579,23 @@ def check_supply(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                                                     f"bond + existential deposit + fee buffer = {floor}"))
     issuance_raw = spec.value("Balances", "TotalIssuance")
     issuance = int.from_bytes(issuance_raw, "little") if issuance_raw else 0
-    backing, emission = supply.get("cardano_backing"), supply.get("runtime_emission_cap")
-    if not isinstance(backing, int) or not isinstance(emission, int):
-        findings.append(Finding("4 supply", "supply.cardano_backing and supply.runtime_emission_cap "
-                                            "must be declared as integers"))
-    elif issuance + emission > backing:
-        findings.append(Finding("4 supply", f"Materios can issue {issuance + emission} (genesis "
-                                            f"{issuance} + runtime emission {emission}) against "
-                                            f"{backing} locked on Cardano: the difference is reserve "
-                                            "counted both as cMATRA and as MATRA"))
+    backing = supply.get("cardano_backing")
+    missing = [name for name in EMISSION_RESERVES if ("OrinqReceipts", name) not in meta.constants]
+    if missing:
+        findings.append(Finding("4 supply", "the runtime metadata does not declare "
+                                            + ", ".join(f"OrinqReceipts.{name}" for name in missing)
+                                            + ": what the runtime mints after genesis is unbounded here, "
+                                              "so the supply cannot be checked against the Cardano lock"))
+    if not isinstance(backing, int) or isinstance(backing, bool):
+        findings.append(Finding("4 supply", "supply.cardano_backing must be declared as an integer"))
+    elif not missing:
+        emission = sum(int.from_bytes(meta.constants[("OrinqReceipts", name)], "little")
+                       for name in EMISSION_RESERVES)
+        if issuance + emission > backing:
+            findings.append(Finding("4 supply", f"Materios can issue {issuance + emission} (genesis "
+                                                f"{issuance} + runtime emission reserves {emission}) against "
+                                                f"{backing} locked on Cardano: the difference is reserve "
+                                                "counted both as cMATRA and as MATRA"))
     return findings
 
 
@@ -585,6 +615,30 @@ def launch_hashes(spec: Spec) -> dict[str, bytes]:
         "code_hash": blake2_256(spec.code),
         "chain_spec_hash": chain_spec_hash(spec.doc),
     }
+
+
+def check_observation(spec: Spec) -> list[Finding]:
+    """The partner-chain native-token observation marks itself initialized only
+    at its first non-zero transfer; until then every block asks for all
+    transfers since Cardano genesis. So a genesis that sets its scripts counts
+    every pre-launch lock, the genesis lock included, as a deposit."""
+    raw = spec.value("NativeTokenManagement", "MainChainScriptsConfiguration")
+    if raw is None:
+        return []
+    try:
+        asset_len, pos = read_compact(raw, POLICY_ID_LEN)
+        address_len, pos = read_compact(raw, pos + asset_len)
+    except IndexError as e:
+        raise InputError("NativeTokenManagement.MainChainScriptsConfiguration does not decode") from e
+    address = raw[pos:pos + address_len]
+    if len(address) != address_len:
+        raise InputError("NativeTokenManagement.MainChainScriptsConfiguration is truncated")
+    if not address:
+        return []
+    return [Finding("6 checkpoint", f"genesis turns on the Cardano deposit observation for "
+                                    f"{address.decode(errors='replace')}, and this runtime has no observation "
+                                    "checkpoint: its first observation counts every transfer to that address "
+                                    "since Cardano genesis, the genesis lock included")]
 
 
 def check_checkpoint(spec: Spec, signed: dict, manifest_key: bytes) -> list[Finding]:
@@ -628,21 +682,25 @@ def validate_launch(launch: dict) -> None:
     for i, node in enumerate(launch.get("nodes", [])):
         if not isinstance(node.get("name"), str) or not isinstance(node.get("host"), str):
             raise InputError(f"launch manifest nodes[{i}] needs a name and a host")
+        if not isinstance(node.get("addresses", []), list):
+            raise InputError(f"launch manifest nodes[{i}] addresses must be a list")
     for i, proxy in enumerate(launch.get("rpc_proxies", [])):
         if not all(isinstance(proxy.get(k), str) for k in ("name", "host", "config")):
             raise InputError(f"launch manifest rpc_proxies[{i}] needs a name, a host and a config path")
 
 
-def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_key: str) -> list[Finding]:
+def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_key: str,
+               extra_well_known: list[Path] = ()) -> list[Finding]:
     validate_launch(launch)
     key = pinned_key(manifest_key)
-    known, phrase_hash = load_well_known()
+    known, phrase_hash = load_well_known(extra_well_known)
     return (check_dev_keys(spec, meta, launch, key, known, phrase_hash)
             + check_rewards(spec, launch)
             + check_rpc(launch)
             + check_supply(spec, meta, launch)
             + check_pallets(meta)
-            + check_checkpoint(spec, signed, key))
+            + check_checkpoint(spec, signed, key)
+            + check_observation(spec))
 
 
 def read_json(path: str, what: str) -> dict:
@@ -656,7 +714,8 @@ def cmd_check(args) -> int:
     spec = load_spec(args.spec)
     meta = Metadata.from_v14(subwasm_metadata(spec.code, args.subwasm))
     findings = run_checks(spec, meta, read_json(args.launch, "launch manifest"),
-                          read_json(args.signed_manifest, "signed manifest"), args.manifest_key)
+                          read_json(args.signed_manifest, "signed manifest"), args.manifest_key,
+                          [Path(p) for p in args.extra_well_known])
     if findings:
         print(f"MAINNET LAUNCH PREFLIGHT: REFUSE ({len(findings)} reasons)")
         for finding in findings:
@@ -693,6 +752,8 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--signed-manifest", required=True)
     check.add_argument("--manifest-key", required=True, help="pinned ed25519 launch key, 0x-hex")
     check.add_argument("--subwasm", default="subwasm")
+    check.add_argument("--extra-well-known", action="append", default=[], metavar="TABLE",
+                       help="JSON key table of exposed keys kept out of the public table; repeatable")
     check.set_defaults(func=cmd_check)
     sign = sub.add_parser("sign", help="sign the launch hashes of a raw chain spec")
     sign.add_argument("--spec", required=True)

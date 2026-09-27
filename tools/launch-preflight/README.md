@@ -19,12 +19,12 @@ It reads:
 
 | Rule | Refuses when |
 |---|---|
-| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role, in an authority's launch command or environment (`--alice`, `--dev`, `//Bob`, the dev mnemonic), or as the manifest signing key. "Well-known" is every sp-keyring key (`//Alice` .. `//Ferdie`, their `//stash` accounts, `//One`, `//Two`) and the dev-phrase root under sr25519, ed25519 and ecdsa, plus retired keys whose secret was published. |
+| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role, in an authority's launch command or environment (`--alice`, `--dev`, `//Bob`, the dev mnemonic), or as the manifest signing key. "Well-known" is every sp-keyring key (`//Alice` .. `//Ferdie`, their `//stash` accounts, `//One`, `//Two`) and the dev-phrase root under sr25519, ed25519 and ecdsa, retired keys whose secret was published, keys whose seed a public repo commits, and every key in an `--extra-well-known` table. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values. |
 | 3 rpc | An authority serves unsafe RPC methods (`--rpc-methods unsafe`, or the default on a loopback listener) on an external listener or behind a proxy route. |
-| 4 supply | An attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, or genesis issuance plus runtime emission exceeds the cMATRA locked on Cardano to back it: the reserve would be counted both as cMATRA and as MATRA. |
+| 4 supply | An attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, or genesis issuance plus the runtime's emission reserves exceeds the cMATRA locked on Cardano to back it: the reserve would be counted both as cMATRA and as MATRA. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. |
 | 5 pallets | `PerpEngine` is in the runtime metadata. |
-| 6 checkpoint | The genesis hash, runtime code hash or chain-spec hash differs from the signed launch manifest, the signature does not verify under the pinned key, or the spec carries `codeSubstitutes`. |
+| 6 checkpoint | The genesis hash, runtime code hash or chain-spec hash differs from the signed launch manifest, the signature does not verify under the pinned key, or the spec carries `codeSubstitutes`. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts: that observation has no checkpoint, so its first run counts every transfer to the watched address since Cardano genesis, the genesis lock included. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal).
@@ -38,7 +38,8 @@ pip install -r requirements.txt
 python3 launch_preflight.py sign --spec mainnet-raw.json --key launch.key --out signed.json
 
 python3 launch_preflight.py check --spec mainnet-raw.json --launch launch.json \
-    --signed-manifest signed.json --manifest-key 0x<launch key> --subwasm ./subwasm
+    --signed-manifest signed.json --manifest-key 0x<launch key> --subwasm ./subwasm \
+    --extra-well-known ~/exposed-keys.json
 ```
 
 The genesis hash is computed here (Substrate trie root of the raw storage at the
@@ -63,11 +64,10 @@ JSON (sorted keys, no whitespace).
     "fee_buffer": 100000000
   },
   "supply": {
-    "cardano_backing": 975000000000,
-    "runtime_emission_cap": 0
+    "cardano_backing": 975000000000
   },
   "nodes": [
-    {"name": "val-1", "host": "val-1", "authority": true,
+    {"name": "val-1", "host": "val-1", "addresses": ["10.0.0.11"], "authority": true,
      "argv": "materios-node --validator --chain mainnet-raw.json --rpc-methods safe",
      "env": {}}
   ],
@@ -80,16 +80,26 @@ JSON (sorted keys, no whitespace).
 - `roles` maps any role name to public keys (SS58, or 0x-hex 32-byte accounts
   and 33-byte ECDSA keys). Never a secret URI. `attestors` are the accounts that
   bond at genesis and get the endowment floor check.
-- `supply.cardano_backing` is the cMATRA locked on Cardano for Materios issuance;
-  `supply.runtime_emission_cap` is what the runtime can mint after genesis.
+- `supply.cardano_backing` is the cMATRA locked on Cardano for Materios issuance.
 - A proxy route matches an authority when its `proxy_pass` target (or nginx
-  `upstream` server) is the authority's host and RPC port; a loopback target
-  means the proxy's own host.
+  `upstream` server) is the authority's RPC port on its `host` or on any of its
+  `addresses` (every name or IP a proxy can reach it by, such as a container
+  bridge gateway); a loopback target means the proxy's own host.
 
 ## Well-known keys
 
-`well_known_keys.json` holds public keys only. Regenerate it from a
-polkadot-sdk checkout, which supplies `DEV_PHRASE`:
+`well_known_keys.json` holds public keys only: the dev keys, retired keys whose
+secret was published, and keys whose seed a public repo commits as a test
+fixture. A key whose exposure is not yet public knowledge must not be named
+here; list it in an operator table kept outside the repo and pass it with
+`--extra-well-known` (repeatable). That table has the same shape:
+
+```json
+{"keys": [{"label": "exposed multisig member", "scheme": "sr25519", "public": "0x..."}]}
+```
+
+A 33-byte ECDSA key also matches the blake2-256 account it maps to. Regenerate
+the public table from a polkadot-sdk checkout, which supplies `DEV_PHRASE`:
 
 ```
 python3 gen_well_known_keys.py <polkadot-sdk> > well_known_keys.json

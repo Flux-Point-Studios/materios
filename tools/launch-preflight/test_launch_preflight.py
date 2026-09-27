@@ -145,6 +145,48 @@ def test_table_holds_retired_published_keys(known):
     assert {k.scheme for k in retired} == {"sr25519", "ed25519"}
 
 
+# orynq-sdk commits this observer's seed as a test fixture; its SS58 is published next to it.
+ORYNQ_TEST_OBSERVER = "5CfCr47V5Dte6bwxNBE8K9oNnQd9fiay6aDEEkgYtFv7w4Fq"
+
+
+def test_table_holds_keys_whose_seed_is_committed_to_a_public_repo(known):
+    keys, _ = known
+    committed = {k.scheme: k for k in keys if "orynq-sdk" in k.label}
+    assert set(committed) == {"sr25519", "ed25519", "ecdsa"}
+    assert committed["sr25519"].needle == lp.decode_public_key(ORYNQ_TEST_OBSERVER)
+
+
+def extra_table(tmp_path, entries) -> Path:
+    path = tmp_path / "exposed.json"
+    path.write_text(json.dumps({"keys": entries}))
+    return path
+
+
+def test_extra_well_known_keys_are_named_with_their_label(spec, meta, tmp_path):
+    exposed = fresh_account()
+    ecdsa_pub = bytes([2]) + fresh_account()
+    path = extra_table(tmp_path, [
+        {"label": "exposed multisig member", "scheme": "sr25519", "public": exposed.hex()},
+        {"label": "exposed cross-chain key", "scheme": "ecdsa", "public": ecdsa_pub.hex()},
+    ])
+    keys, phrase_hash = lp.load_well_known([path])
+    launch = {"roles": {"multisig_members": [ss58(exposed)],
+                        "committee": [ss58(hashlib.blake2b(ecdsa_pub, digest_size=32).digest())]}}
+    found = messages(lp.check_dev_keys(spec, meta, launch, pub(signing.SigningKey.generate()), keys, phrase_hash))
+    assert "[1 dev-keys] roles.multisig_members[0]: exposed multisig member (sr25519)" in found
+    assert "[1 dev-keys] roles.committee[0]: exposed cross-chain key (ecdsa)" in found
+
+
+@pytest.mark.parametrize("entries, error", [
+    ([{"label": "x", "scheme": "sr25519"}], "keys\\[0\\] needs"),
+    ([{"label": "x", "scheme": "sr25519", "public": "zz"}], "keys\\[0\\] public is not hex"),
+    ([{"label": "x", "scheme": "sr25519", "public": "00" * 31}], "keys\\[0\\] public is 31 bytes"),
+])
+def test_malformed_extra_table_is_an_input_error(tmp_path, entries, error):
+    with pytest.raises(lp.InputError, match=error):
+        lp.load_well_known([extra_table(tmp_path, entries)])
+
+
 # ---------------------------------------------------------------------------
 # Rule 6: checkpoint canary (genesis hash, code hash, chain-spec hash)
 # ---------------------------------------------------------------------------
@@ -199,6 +241,36 @@ def test_code_substitutes_are_refused(spec):
     spec.doc["codeSubstitutes"] = {"1": "0x00"}
     found = messages(lp.check_checkpoint(spec, signed, pub(key)))
     assert "[6 checkpoint] chain spec carries codeSubstitutes" in found
+
+
+def ntm_scripts(address: bytes) -> bytes:
+    return bytes(28) + lp.compact(0) + lp.compact(len(address)) + address
+
+
+def test_placeholder_observation_with_no_address_is_not_live(spec):
+    put(spec, "NativeTokenManagement", "MainChainScriptsConfiguration", ntm_scripts(b""))
+    assert lp.check_observation(spec) == []
+
+
+def test_preprod_genesis_does_not_turn_on_the_cardano_observation(spec):
+    assert lp.check_observation(spec) == []
+
+
+def test_genesis_that_turns_on_the_cardano_observation_is_refused(spec):
+    address = b"addr1wxlockscriptaddressfortheilliquidsupply"
+    put(spec, "NativeTokenManagement", "MainChainScriptsConfiguration", ntm_scripts(address))
+    assert messages(lp.check_observation(spec)) == [
+        "[6 checkpoint] genesis turns on the Cardano deposit observation for "
+        "addr1wxlockscriptaddressfortheilliquidsupply, and this runtime has no observation "
+        "checkpoint: its first observation counts every transfer to that address since "
+        "Cardano genesis, the genesis lock included"]
+
+
+def test_truncated_observation_config_is_an_input_error(spec):
+    truncated = bytes(28) + lp.compact(0) + lp.compact(9) + b"addr"
+    put(spec, "NativeTokenManagement", "MainChainScriptsConfiguration", truncated)
+    with pytest.raises(lp.InputError, match="MainChainScriptsConfiguration"):
+        lp.check_observation(spec)
 
 
 def test_malformed_manifest_is_refused(spec):
@@ -396,6 +468,13 @@ def test_proxy_to_another_host_or_port_does_not_implicate_the_authority(tmp_path
     assert rpc_findings(tmp_path, [authority("node --rpc-methods unsafe")], nginx, "edge") == []
 
 
+def test_proxy_to_another_address_of_the_authority_is_refused(tmp_path):
+    node = dict(authority("node --rpc-methods unsafe --rpc-port 9945"), addresses=["172.18.0.1", "val1.lan"])
+    nginx = "location /rpc { proxy_pass http://172.18.0.1:9945/; }"
+    assert rpc_findings(tmp_path, [node], nginx) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
 def test_non_authority_nodes_are_out_of_scope(tmp_path):
     node = {"name": "rpc", "host": "r", "authority": False, "argv": "node --rpc-methods unsafe --rpc-external"}
     assert rpc_findings(tmp_path, [node]) == []
@@ -418,8 +497,24 @@ def test_variable_proxy_target_cannot_be_checked(tmp_path):
 # A preprod cert-daemon account. Its chain-spec source endows BondRequirement +
 # 100 MATRA; the genesis preprod actually launched with gave it 100 MATRA.
 PREPROD_ATTESTOR = bytes.fromhex("44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9480a517a97f189964b")
-SUPPLY = {"cardano_backing": 10_100_000 * MATRA, "runtime_emission_cap": 0}
+SUPPLY = {"cardano_backing": 210_100_000 * MATRA}
 FLOOR = 1_000 * MATRA + 500 + 100 * MATRA
+RESERVES = {"ValidatorEmissionReserve": 150_000_000 * MATRA, "AttestationRewardReserve": 50_000_000 * MATRA}
+
+
+def with_reserves(metadata_v14: dict, reserves=RESERVES) -> dict:
+    """The fixture metadata plus the emission-reserve constants a runtime
+    that declares them exposes on OrinqReceipts."""
+    v14 = copy.deepcopy(metadata_v14)
+    pallet = next(p for p in v14["pallets"] if p["name"] == "OrinqReceipts")
+    pallet["constants"] = list(pallet.get("constants") or []) + [
+        {"name": name, "value": list(value.to_bytes(16, "little"))} for name, value in reserves.items()]
+    return v14
+
+
+@pytest.fixture
+def reserve_meta(metadata_v14) -> lp.Metadata:
+    return lp.Metadata.from_v14(with_reserves(metadata_v14))
 
 
 def supply_findings(spec, meta, attestors, fee_buffer, supply=SUPPLY):
@@ -427,58 +522,66 @@ def supply_findings(spec, meta, attestors, fee_buffer, supply=SUPPLY):
     return messages(lp.check_supply(spec, meta, launch))
 
 
-def test_attestor_endowed_at_bond_plus_ed_plus_buffer_passes(spec, meta):
+def test_attestor_endowed_at_bond_plus_ed_plus_buffer_passes(spec, reserve_meta):
     attestor = fresh_account()
     endow(spec, attestor, FLOOR)
-    assert supply_findings(spec, meta, [ss58(attestor)], 100 * MATRA) == []
+    assert supply_findings(spec, reserve_meta, [ss58(attestor)], 100 * MATRA) == []
 
 
-def test_attestor_endowed_one_unit_below_the_floor_is_refused(spec, meta):
+def test_attestor_endowed_one_unit_below_the_floor_is_refused(spec, reserve_meta):
     attestor = fresh_account()
     endow(spec, attestor, FLOOR - 1)
-    found = supply_findings(spec, meta, [ss58(attestor)], 100 * MATRA)
+    found = supply_findings(spec, reserve_meta, [ss58(attestor)], 100 * MATRA)
     assert found == [f"[4 supply] roles.attestors[0] is endowed {FLOOR - 1}, below "
                      f"bond + existential deposit + fee buffer = {FLOOR}"]
 
 
-def test_preprod_genesis_endowed_its_attestors_below_the_bond(spec, meta):
-    found = supply_findings(spec, meta, [ss58(PREPROD_ATTESTOR)], 0)
+def test_preprod_genesis_endowed_its_attestors_below_the_bond(spec, reserve_meta):
+    found = supply_findings(spec, reserve_meta, [ss58(PREPROD_ATTESTOR)], 0)
     assert found == ["[4 supply] roles.attestors[0] is endowed 100000000, below "
                      "bond + existential deposit + fee buffer = 1000000500"]
 
 
-def test_unendowed_attestor_is_refused(spec, meta):
-    found = supply_findings(spec, meta, [ss58(fresh_account())], 0)
+def test_unendowed_attestor_is_refused(spec, reserve_meta):
+    found = supply_findings(spec, reserve_meta, [ss58(fresh_account())], 0)
     assert len(found) == 1 and "is endowed 0" in found[0]
 
 
-def test_endowment_floor_needs_every_input(spec, meta):
-    found = supply_findings(spec, meta, [ss58(PREPROD_ATTESTOR)], None)
+def test_endowment_floor_needs_every_input(spec, reserve_meta):
+    found = supply_findings(spec, reserve_meta, [ss58(PREPROD_ATTESTOR)], None)
     assert found[0].startswith("[4 supply] cannot size attestor endowments")
 
 
-def test_runtime_emission_on_top_of_a_cardano_backed_genesis_is_refused(spec, meta):
-    supply = dict(SUPPLY, runtime_emission_cap=200_000_000 * MATRA)
+def test_runtime_emission_reserves_on_top_of_a_cardano_backed_genesis_are_refused(spec, reserve_meta):
     issuance = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
-    found = supply_findings(spec, meta, [], 0, supply)
+    backing = issuance
+    found = supply_findings(spec, reserve_meta, [], 0, {"cardano_backing": backing})
     assert found == [f"[4 supply] Materios can issue {issuance + 200_000_000 * MATRA} (genesis {issuance} "
-                     f"+ runtime emission {200_000_000 * MATRA}) against {10_100_000 * MATRA} locked on "
+                     f"+ runtime emission reserves {200_000_000 * MATRA}) against {backing} locked on "
                      "Cardano: the difference is reserve counted both as cMATRA and as MATRA"]
 
 
-def test_genesis_fully_backed_with_no_runtime_emission_passes(spec, meta):
-    assert supply_findings(spec, meta, [], 0) == []
+def test_genesis_and_emission_reserves_fully_backed_pass(spec, reserve_meta):
+    assert supply_findings(spec, reserve_meta, [], 0) == []
 
 
-def test_genesis_issuance_above_the_cardano_lock_is_refused(spec, meta):
-    found = supply_findings(spec, meta, [], 0, {"cardano_backing": 975_000 * MATRA, "runtime_emission_cap": 0})
+def test_genesis_issuance_above_the_cardano_lock_is_refused(spec, metadata_v14):
+    no_emission = {"ValidatorEmissionReserve": 0, "AttestationRewardReserve": 0}
+    meta = lp.Metadata.from_v14(with_reserves(metadata_v14, no_emission))
+    found = supply_findings(spec, meta, [], 0, {"cardano_backing": 975_000 * MATRA})
     assert len(found) == 1 and "counted both as cMATRA and as MATRA" in found[0]
 
 
-def test_undeclared_supply_is_refused(spec, meta):
-    found = supply_findings(spec, meta, [], 0, {})
-    assert found == ["[4 supply] supply.cardano_backing and supply.runtime_emission_cap "
-                     "must be declared as integers"]
+def test_runtime_that_hides_its_emission_reserves_is_refused(spec, meta):
+    found = supply_findings(spec, meta, [], 0)
+    assert found == ["[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve, "
+                     "OrinqReceipts.AttestationRewardReserve: what the runtime mints after genesis is unbounded "
+                     "here, so the supply cannot be checked against the Cardano lock"]
+
+
+def test_undeclared_backing_is_refused(spec, reserve_meta):
+    found = supply_findings(spec, reserve_meta, [], 0, {})
+    assert found == ["[4 supply] supply.cardano_backing must be declared as an integer"]
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +616,7 @@ def clean_launch(tmp_path, attestor: bytes) -> dict:
         "roles": {"anchor_signer": [ss58(fresh_account())], "attestors": [ss58(attestor)],
                   "multisig_members": [ss58(fresh_account()) for _ in range(3)]},
         "economics": dict(TUNED, fee_buffer=100 * MATRA),
-        "supply": {"cardano_backing": 2_000_000 * MATRA, "runtime_emission_cap": 0},
+        "supply": {"cardano_backing": 202_000_000 * MATRA},
         "nodes": [authority("materios-node --validator --rpc-methods safe")],
         "rpc_proxies": [{"name": "public-rpc", "host": "edge", "config": str(conf)}],
     }
@@ -536,7 +639,8 @@ def clean_spec(preprod_path, tmp_path, attestor: bytes) -> Path:
     return path
 
 
-def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, key=None, manifest_key=None) -> tuple[int, str]:
+def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, key=None, manifest_key=None,
+            extra=()) -> tuple[int, str]:
     key = key or signing.SigningKey.generate()
     seed = tmp_path / "launch.key"
     seed.write_text(key.encode().hex())
@@ -546,7 +650,7 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, key=None, manifest_
     capsys.readouterr()
     code = lp.main(["check", "--spec", str(spec_path), "--launch", str(launch_path),
                     "--signed-manifest", str(signed), "--manifest-key", "0x" + (manifest_key or pub(key)).hex(),
-                    "--subwasm", subwasm()])
+                    "--subwasm", subwasm(), *extra])
     return code, capsys.readouterr().out
 
 
@@ -560,14 +664,30 @@ def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path,
     assert "[1 dev-keys] System.Account: //Alice (sr25519) is in genesis" in out
     assert "[2 rewards] OrinqReceipts.AttestationRewardPerSigner stores 10000000, declared 1000000" in out
     assert "[4 supply] roles.attestors[0] is endowed 100000000" in out
+    assert "[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve" in out
 
 
-def test_cli_passes_a_clean_launch(preprod_path, tmp_path, capsys):
+def test_cli_passes_a_clean_launch(preprod_path, tmp_path, capsys, monkeypatch, metadata_v14):
+    """No built runtime passes yet (PerpEngine, undeclared emission reserves), so
+    the extractor returns the fixture metadata with the reserves declared."""
+    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_reserves(metadata_v14))
     attestor = fresh_account()
     code, out = run_cli(tmp_path, clean_spec(preprod_path, tmp_path, attestor),
                         clean_launch(tmp_path, attestor), capsys)
     assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
+
+
+def test_cli_names_keys_from_an_extra_table(preprod_path, tmp_path, capsys, monkeypatch, metadata_v14):
+    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_reserves(metadata_v14))
+    attestor, exposed = fresh_account(), fresh_account()
+    launch = clean_launch(tmp_path, attestor)
+    launch["roles"]["multisig_members"][0] = ss58(exposed)
+    extra = extra_table(tmp_path, [{"label": "exposed member", "scheme": "sr25519", "public": exposed.hex()}])
+    code, out = run_cli(tmp_path, clean_spec(preprod_path, tmp_path, attestor), launch, capsys,
+                        extra=["--extra-well-known", str(extra)])
+    assert code == 1
+    assert "[1 dev-keys] roles.multisig_members[0]: exposed member (sr25519)" in out
 
 
 def test_cli_refuses_a_manifest_pinned_to_another_key(preprod_path, tmp_path, capsys):
@@ -582,6 +702,8 @@ def test_cli_refuses_a_manifest_pinned_to_another_key(preprod_path, tmp_path, ca
     ({"roles": {"oracle": "5Grw"}}, "roles must map each role to a list"),
     ({"roles": {}, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),
     ({"roles": {}, "rpc_proxies": [{"name": "p", "host": "h"}]}, "rpc_proxies\\[0\\] needs"),
+    ({"roles": {}, "nodes": [{"name": "v1", "host": "h", "addresses": "10.0.0.1"}]},
+     "nodes\\[0\\] addresses must be a list"),
 ])
 def test_malformed_launch_manifest_is_an_input_error(spec, meta, launch, error):
     with pytest.raises(lp.InputError, match=error):

@@ -24,12 +24,19 @@ from substrateinterface import Keypair, KeypairType
 NAMES = ["Alice", "Bob", "Charlie", "Dave", "Eve", "Ferdie"]
 UNSTASHED = ["One", "Two"]
 
-# Retired keys whose secret was published. Only the public keys belong here.
+# Keys whose secret is public: retired keys whose secret was published, and keys
+# whose seed a public repo commits as a test fixture. Only the public keys belong
+# here; an exposure that is not yet public knowledge goes in an operator table
+# passed to the preflight with --extra-well-known.
+ORYNQ_OBSERVER = "orynq-sdk e2e test observer, seed committed to a public repo"
 COMPROMISED = [
     ("retired validator key, mnemonic published on-chain", "sr25519",
      "7e27bb13fd6fb62cc0e7c59916952c8c214960904208295a0d70c4c48e2a9a29"),
     ("retired validator key, mnemonic published on-chain", "ed25519",
      "6c484a9d5a8d0182e0f3bf9d8ffc4ca7070fd08da47329afca79f4b3df6aaa7e"),
+    (ORYNQ_OBSERVER, "sr25519", "1a4fee48c1ba1a48e8cd43782a8485d635aa91cfb82cbb477f0c1c576bc4031c"),
+    (ORYNQ_OBSERVER, "ed25519", "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"),
+    (ORYNQ_OBSERVER, "ecdsa", "024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766"),
 ]
 
 
@@ -81,7 +88,8 @@ def main():
     table = {
         "dev_phrase_blake2_256": blake2_256(" ".join(phrase.split()).encode()).hex(),
         "keys": list(entries(phrase)) + [
-            {"label": label, "scheme": scheme, "public": pub, "account": pub}
+            {"label": label, "scheme": scheme, "public": pub,
+             "account": blake2_256(bytes.fromhex(pub)).hex() if scheme == "ecdsa" else pub}
             for label, scheme, pub in COMPROMISED
         ],
     }

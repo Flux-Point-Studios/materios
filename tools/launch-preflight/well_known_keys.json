@@ -282,6 +282,24 @@
    "scheme": "ed25519",
    "public": "6c484a9d5a8d0182e0f3bf9d8ffc4ca7070fd08da47329afca79f4b3df6aaa7e",
    "account": "6c484a9d5a8d0182e0f3bf9d8ffc4ca7070fd08da47329afca79f4b3df6aaa7e"
+  },
+  {
+   "label": "orynq-sdk e2e test observer, seed committed to a public repo",
+   "scheme": "sr25519",
+   "public": "1a4fee48c1ba1a48e8cd43782a8485d635aa91cfb82cbb477f0c1c576bc4031c",
+   "account": "1a4fee48c1ba1a48e8cd43782a8485d635aa91cfb82cbb477f0c1c576bc4031c"
+  },
+  {
+   "label": "orynq-sdk e2e test observer, seed committed to a public repo",
+   "scheme": "ed25519",
+   "public": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+   "account": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394"
+  },
+  {
+   "label": "orynq-sdk e2e test observer, seed committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "024d4b6cd1361032ca9bd2aeb9d900aa4d45d9ead80ac9423374c451a7254d0766",
+   "account": "f162cf04851025a0bc90ad66b0986553c67c3518d3ca6898fb9aa118bb3f4b13"
   }
  ]
 }

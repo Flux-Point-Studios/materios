@@ -79,7 +79,7 @@
     {
       "id": "launch-preflight",
       "name": "Mainnet launch preflight",
-      "desc": "Fail-closed genesis and launch gate: reads the raw chain spec, the runtime metadata extracted from its code, the authority launch commands and RPC proxy configs, and refuses on a well-known key anywhere, attestor rewards that are undeclared or not what genesis stores, unsafe RPC on an authority, under-endowed attestors or issuance not backed by locked cMATRA, PerpEngine, or genesis, code and chain-spec hashes that differ from the signed launch manifest.",
+      "desc": "Fail-closed genesis and launch gate: reads the raw chain spec, the runtime metadata extracted from its code, the authority launch commands and RPC proxy configs, and refuses on a well-known key anywhere (dev keys, published secrets, and an operator table of exposed keys), attestor rewards that are undeclared or not what genesis stores, unsafe RPC on an authority, under-endowed attestors or genesis issuance plus the runtime's emission reserves not backed by locked cMATRA, PerpEngine, a genesis-enabled Cardano deposit observation with no checkpoint, or genesis, code and chain-spec hashes that differ from the signed launch manifest.",
       "kind": "engine",
       "paths": [
         "tools/launch-preflight"
