@@ -38,6 +38,7 @@ frame-system = { workspace = true }
 frame-executive = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
 frame-system-benchmarking = { workspace = true, optional = true }
+frame-try-runtime = { workspace = true, optional = true }
 
 # Pallets
 pallet-aura = { workspace = true }
@@ -71,6 +72,8 @@ pallet-tee-attestation = { workspace = true }
 # `DebitsEnabled` defaults `false` — purely additive call surface until
 # governance flips the kill-switch in Phase 2.B.
 pallet-billing = { workspace = true }
+# Holds non-exempt Root calls for a per-class delay with a guardian veto.
+pallet-root-timelock = { workspace = true }
 # MON Phase 1: decentralized price oracle (PRs #35, #36 on
 # materios-intent-settlement). M-of-N attestor sigs over the canonical PRIC
 # payload aggregate into `Prices[pair_id]`. Sudo-managed attestor registry
@@ -118,6 +121,7 @@ log = { workspace = true }
 sp-keyring = { workspace = true }
 sp-io = { workspace = true }
 hex-literal = { workspace = true }
+proptest = { workspace = true }
 
 [features]
 default = ["std"]
@@ -163,6 +167,8 @@ std = [
     "pallet-intent-settlement/std",
     "pallet-tee-attestation/std",
     "pallet-billing/std",
+    "pallet-root-timelock/std",
+    "frame-try-runtime?/std",
     "pallet-oracle/std",
     "pallet-perp-engine/std",
     "sp-arithmetic/std",
@@ -214,6 +220,7 @@ runtime-benchmarks = [
     # pallet-billing declares the runtime-benchmarks feature flag (PR #19)
     # with skeletal benchmarks; runtime compiles with the feature gated.
     "pallet-billing/runtime-benchmarks",
+    "pallet-root-timelock/runtime-benchmarks",
     # pallet-intent-settlement (Wave 2 W2.2 + task #43 / #177) — ships real
     # benchmarks for settle_batch_atomic + the other batch extrinsics.
     "pallet-intent-settlement/runtime-benchmarks",
@@ -249,6 +256,8 @@ try-runtime = [
     "pallet-intent-settlement/try-runtime",
     "pallet-tee-attestation/try-runtime",
     "pallet-billing/try-runtime",
+    "pallet-root-timelock/try-runtime",
+    "frame-try-runtime/try-runtime",
     "pallet-oracle/try-runtime",
     "pallet-perp-engine/try-runtime",
     "sp-runtime/try-runtime",

@@ -1,6 +1,6 @@
 //! Chain specification for Materios Preprod — clean genesis, no overrides.
 
-use materios_runtime::WASM_BINARY;
+use materios_runtime::{TESTNET_TIMELOCK_DELAYS, WASM_BINARY};
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
@@ -201,6 +201,11 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         },
         "sudo": {
             "key": multisig_sudo
+        },
+        // Short delays so ceremonies can be rehearsed. No guardian until one
+        // is appointed through a scheduled `set_guardian`.
+        "rootTimelock": {
+            "delays": TESTNET_TIMELOCK_DELAYS,
         },
         "aura": {
             "authorities": [macbook_aura, gemtek_aura, node2_aura, node3_aura],

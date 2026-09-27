@@ -13,6 +13,7 @@ mod seating_model_check;
 pub mod committee_liveness;
 pub mod input_sanity;
 pub mod migrations;
+pub mod root_gate;
 
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
@@ -199,7 +200,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 238,
+    spec_version: 239,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 4,
@@ -262,6 +263,7 @@ impl frame_system::Config for Runtime {
     type AccountId = AccountId;
     type AccountData = pallet_balances::AccountData<Balance>;
     type Version = Version;
+    type BaseCallFilter = root_gate::SudoRootGate;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +345,10 @@ parameter_types! {
     pub const SpendPeriod: BlockNumber = 100_800;
     pub const TreasuryBurn: Permill = Permill::from_percent(0);
     pub const MaxApprovals: u32 = 100;
-    /// Upper bound on a single `spend_local` approval. Even Root cannot
-    /// approve more than this in one call.
-    pub const MaxSpend: Balance = 1_000_000_000_000_000; // 1e15 base units (~1B MATRA @ 6 dec)
+    /// Upper bound on the treasury spends Root approves in one extrinsic:
+    /// 15,000 MATRA. Larger moves take several timelock tasks, each public
+    /// for the whole delay and each vetoable on its own.
+    pub const MaxSpend: Balance = 15_000 * 1_000_000;
     pub const PayoutPeriod: BlockNumber = 30 * DAYS;
 }
 
@@ -495,6 +498,39 @@ impl pallet_recovery::Config for Runtime {
     type MaxFriends = ConstU32<9>;
     type RecoveryDeposit = RecoveryDeposit;
     type WeightInfo = pallet_recovery::weights::SubstrateWeight<Runtime>;
+}
+
+// ---------------------------------------------------------------------------
+// Root timelock
+// ---------------------------------------------------------------------------
+//
+// The sudo key reaches Root at once only for `root_gate::SudoRootGate`'s
+// exempt calls. Every other Root call is scheduled here and waits its class's
+// delay, during which the guardian can veto it.
+
+parameter_types! {
+    /// Mainnet delays. Preprod and dev chains store `TESTNET_TIMELOCK_DELAYS`.
+    pub const RootTimelockDefaultDelays: pallet_root_timelock::DelayTable<BlockNumber> =
+        pallet_root_timelock::DelayTable { recovery: DAYS, standard: 7 * DAYS, long: 30 * DAYS };
+    pub const RootTimelockMaxDelay: BlockNumber = 90 * DAYS;
+    pub const RootTimelockEnactmentWindow: BlockNumber = 7 * DAYS;
+}
+
+/// Short delays for preprod and dev chains: 3 minutes, 30 minutes, 2 hours.
+pub const TESTNET_TIMELOCK_DELAYS: pallet_root_timelock::DelayTable<BlockNumber> =
+    pallet_root_timelock::DelayTable {
+        recovery: 30,
+        standard: 300,
+        long: 1_200,
+    };
+
+impl pallet_root_timelock::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type Classifier = root_gate::TimelockClassifier;
+    type DefaultDelays = RootTimelockDefaultDelays;
+    type MaxDelay = RootTimelockMaxDelay;
+    type EnactmentWindow = RootTimelockEnactmentWindow;
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,6 +1540,7 @@ construct_runtime! {
         PerpEngine: pallet_perp_engine = 23,
         // Second, independent path to Root (mainnet-resilience #492).
         Recovery: pallet_recovery = 24,
+        RootTimelock: pallet_root_timelock = 25,
     }
 }
 
@@ -1536,7 +1573,10 @@ pub type Executive = frame_executive::Executive<
     frame_system::ChainContext<Runtime>,
     Runtime,
     AllPalletsWithSystem,
-    migrations::SweepFeeRouterPotsIntoTreasury,
+    (
+        migrations::SweepFeeRouterPotsIntoTreasury,
+        migrations::InitRootTimelock,
+    ),
 >;
 
 // ---------------------------------------------------------------------------
@@ -1854,6 +1894,25 @@ impl_runtime_apis! {
             alloc::vec![sp_genesis_builder::PresetId::from(
                 sp_genesis_builder::DEV_RUNTIME_PRESET,
             )]
+        }
+    }
+
+    #[cfg(feature = "try-runtime")]
+    impl frame_try_runtime::TryRuntime<Block> for Runtime {
+        fn on_runtime_upgrade(checks: frame_try_runtime::UpgradeCheckSelect) -> (Weight, Weight) {
+            let weight = Executive::try_runtime_upgrade(checks)
+                .expect("runtime upgrade checks failed");
+            (weight, RuntimeBlockWeights::get().max_block)
+        }
+
+        fn execute_block(
+            block: Block,
+            state_root_check: bool,
+            signature_check: bool,
+            select: frame_try_runtime::TryStateSelect,
+        ) -> Weight {
+            Executive::try_execute_block(block, state_root_check, signature_check, select)
+                .expect("try_execute_block failed")
         }
     }
 

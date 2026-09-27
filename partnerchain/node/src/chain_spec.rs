@@ -1,4 +1,4 @@
-use materios_runtime::{AccountId, Balance, Signature, WASM_BINARY};
+use materios_runtime::{AccountId, Balance, Signature, TESTNET_TIMELOCK_DELAYS, WASM_BINARY};
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
@@ -165,6 +165,11 @@ fn testnet_genesis(
         },
         "sudo": {
             "key": Some(root_key),
+        },
+        // Root behind short delays, with Bob able to veto.
+        "rootTimelock": {
+            "delays": TESTNET_TIMELOCK_DELAYS,
+            "guardian": Some(get_account_id_from_seed::<sr25519::Public>("Bob")),
         },
         // -- IOG partner-chain pallets --
         // 1. Sidechain pallet: epoch/slot configuration.

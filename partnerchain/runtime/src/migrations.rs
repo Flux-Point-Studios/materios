@@ -1,20 +1,37 @@
-//! One-shot sweep of stranded balances from the legacy fee-router's
-//! PalletId-derived accounts (`mat/auth`, `mat/attr`) into the treasury.
+//! Runtime-upgrade migrations.
 //!
-//! The sweep MUST only run once — subsequent upgrades leave `mat/attr`
-//! alone so legitimate post-cutover slashing receipts aren't stolen by a
-//! future re-run. The gate is a plain storage entry rather than a pallet
-//! StorageVersion to avoid introducing a new pallet (pallet-index shift
-//! hazard).
+//! `SweepFeeRouterPotsIntoTreasury` is a one-shot sweep of stranded balances
+//! from the legacy fee-router's PalletId-derived accounts (`mat/auth`,
+//! `mat/attr`) into the treasury. The sweep MUST only run once — subsequent
+//! upgrades leave `mat/attr` alone so legitimate post-cutover slashing
+//! receipts aren't stolen by a future re-run. The gate is a plain storage
+//! entry rather than a pallet StorageVersion to avoid introducing a new
+//! pallet (pallet-index shift hazard).
+//!
+//! `InitRootTimelock` stores the root-timelock delays on a chain that was
+//! running before the pallet existed.
 
 use frame_support::{
     traits::{Get, OnRuntimeUpgrade},
     weights::Weight,
     PalletId,
 };
+use pallet_root_timelock::DelayTable;
+use sp_core::H256;
 use sp_runtime::traits::AccountIdConversion;
+#[cfg(feature = "try-runtime")]
+use {
+    crate::RootTimelockMaxDelay,
+    alloc::vec::Vec,
+    frame_support::ensure,
+    parity_scale_codec::{Decode, Encode},
+    sp_runtime::TryRuntimeError,
+};
 
-use crate::{AccountId, AttestorReservePalletId, Runtime, TreasuryPalletId};
+use crate::{
+    AccountId, AttestorReservePalletId, BlockNumber, RootTimelockDefaultDelays, Runtime,
+    TreasuryPalletId, TESTNET_TIMELOCK_DELAYS,
+};
 
 pub const SWEEP_MIGRATION_VERSION: u16 = 1;
 
@@ -121,5 +138,78 @@ impl OnRuntimeUpgrade for SweepFeeRouterPotsIntoTreasury {
         );
 
         <<Runtime as frame_system::Config>::DbWeight as Get<frame_support::weights::RuntimeDbWeight>>::get().reads_writes(reads, writes)
+    }
+}
+
+/// Genesis hash of the Materios preprod chain.
+pub const PREPROD_GENESIS_HASH: H256 = H256([
+    0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc, 0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
+    0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07, 0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
+]);
+
+/// Stores the root-timelock delays on a chain that was running before the
+/// pallet existed: the testnet delays on preprod, the mainnet defaults on any
+/// other chain. A chain whose genesis built the pallet already stores its
+/// delays and is left alone, so this is a no-op on every later upgrade.
+pub struct InitRootTimelock;
+
+impl InitRootTimelock {
+    fn delays_for_this_chain() -> DelayTable<BlockNumber> {
+        if frame_system::BlockHash::<Runtime>::get(0) == PREPROD_GENESIS_HASH {
+            TESTNET_TIMELOCK_DELAYS
+        } else {
+            RootTimelockDefaultDelays::get()
+        }
+    }
+}
+
+impl OnRuntimeUpgrade for InitRootTimelock {
+    fn on_runtime_upgrade() -> Weight {
+        let db: frame_support::weights::RuntimeDbWeight =
+            <Runtime as frame_system::Config>::DbWeight::get();
+        if pallet_root_timelock::Delays::<Runtime>::exists() {
+            return db.reads(1);
+        }
+        let delays = Self::delays_for_this_chain();
+        pallet_root_timelock::Delays::<Runtime>::put(delays);
+        log::info!("root-timelock: stored delays {:?}", delays);
+        db.reads_writes(2, 1)
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
+        Ok(pallet_root_timelock::Delays::<Runtime>::exists().encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
+        let existed =
+            bool::decode(&mut &state[..]).map_err(|_| "pre_upgrade state does not decode")?;
+        ensure!(
+            pallet_root_timelock::Delays::<Runtime>::exists(),
+            "delays are not stored"
+        );
+        let delays = pallet_root_timelock::Delays::<Runtime>::get();
+        ensure!(
+            delays.is_valid(RootTimelockMaxDelay::get()),
+            "stored delays are invalid"
+        );
+        if !existed {
+            ensure!(
+                delays == Self::delays_for_this_chain(),
+                "stored delays are not this chain's"
+            );
+            ensure!(
+                pallet_root_timelock::Tasks::<Runtime>::iter()
+                    .next()
+                    .is_none(),
+                "a task predates the pallet"
+            );
+            ensure!(
+                pallet_root_timelock::Guardian::<Runtime>::get().is_none(),
+                "a guardian predates the pallet"
+            );
+        }
+        Ok(())
     }
 }
