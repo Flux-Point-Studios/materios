@@ -156,9 +156,52 @@ ORYNQ_TEST_OBSERVER = "5CfCr47V5Dte6bwxNBE8K9oNnQd9fiay6aDEEkgYtFv7w4Fq"
 
 def test_table_holds_keys_whose_seed_is_committed_to_a_public_repo(known):
     keys, _ = known
-    committed = {k.scheme: k for k in keys if "orynq-sdk" in k.label}
-    assert set(committed) == {"sr25519", "ed25519", "ecdsa"}
-    assert committed["sr25519"].needle == lp.decode_public_key(ORYNQ_TEST_OBSERVER)
+    observer = [k for k in keys if k.needle == lp.decode_public_key(ORYNQ_TEST_OBSERVER)]
+    assert [str(k) for k in observer] == ["orynq-sdk test key, secret committed to a public repo (sr25519)"]
+
+
+# partner-chains commits its local environment's keystores. Substrate names each
+# keystore file for its key type and public key, and the file holds the phrase.
+PARTNER_CHAINS_KEYSTORE = {
+    "sr25519": "289c161586d774dda981fdb184d061a28e04bdf81322c545b9c37549e7412f2f",  # aura
+    "ed25519": "bfd485365f3765c31aa70502261868e79ca045d4d0f16db70865280e3a741f88",  # gran
+    "ecdsa": "0258dc1e341e42ba85b393804c1e8a531485ec3b73b2d5cd2b0bf56cbcaf102a7e",  # crch
+}
+
+
+def test_table_holds_keystore_keys_a_public_repo_commits(known):
+    keys, _ = known
+    table = {(k.scheme, k.needle.hex()): k.label for k in keys}
+    for scheme, public in PARTNER_CHAINS_KEYSTORE.items():
+        assert table[(scheme, public)] == "partner-chains test key, secret committed to a public repo"
+
+
+# Bare `//Name` URIs derive from the dev phrase; public repos commit these as test
+# signers. Pinned against @polkadot/keyring 13.5.9.
+PUBLIC_REPO_DERIVATIONS = {
+    ("//CertDaemon", "sr25519"): "ccc4bf1001496df6f9d4b94f23a3e1775da2f8430c53a257f06ca90589ad481e",
+    ("//aegis", "ed25519"): "a42ea701be5e5e6bf2c3af0b8ae5f82e0c138e6899b503d4331d70ba1fdf8a1f",
+    ("//Alice//aegis", "ecdsa"): "0241af9170a47690e78249e512d50c4b3aa85147165db20128f23dd268db665c23",
+}
+
+
+def test_table_holds_dev_phrase_derivations_that_public_repos_commit(known):
+    keys, _ = known
+    table = {(k.label, k.scheme, k.needle.hex()) for k in keys}
+    for (path, scheme), public in PUBLIC_REPO_DERIVATIONS.items():
+        assert (path, scheme, public) in table
+
+
+# Hardhat and Anvil's first test account (address 0xf39F...2266): its secret is in
+# their documentation and in orynq-sdk's tests.
+HARDHAT_ACCOUNT_0 = "038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed75"
+
+
+def test_table_holds_the_hardhat_test_account(known):
+    keys, _ = known
+    hits = [k for k in keys if k.needle.hex() == HARDHAT_ACCOUNT_0]
+    assert [k.scheme for k in hits] == ["ecdsa"]
+    assert "public repo" in hits[0].label
 
 
 def extra_table(tmp_path, entries) -> Path:
@@ -357,6 +400,19 @@ def test_dev_keyring_flags_and_dev_uris_in_node_launch_are_named(spec, meta, kno
     assert "[1 dev-keys] node v1: --alice loads the dev keyring" in found
     assert "[1 dev-keys] node v2: --dev loads the dev keyring" in found
     assert "[1 dev-keys] node cd: launch config names //Ferdie" in found
+
+
+def test_any_derivation_of_the_dev_phrase_in_a_launch_config_is_named(spec, meta, known):
+    launch = {"roles": {"oracle": ["//PriceFeed"]}, "nodes": [
+        {"name": "aw", "host": "h1", "argv": ["anchor-worker", "--suri", "//AnchorSigner"],
+         "env": {"ORACLE_URI": "//Oracle//hot/1", "RPC": "wss://rpc.example:443",
+                 "DATA": "/var/lib//materios", "CDN": "//cdn.example.org/x"}},
+    ]}
+    found = dev_key_findings(spec, meta, known, launch)
+    assert "[1 dev-keys] roles.oracle[0]: well-known secret URI //PriceFeed" in found
+    assert "[1 dev-keys] node aw: launch config names //AnchorSigner" in found
+    assert "[1 dev-keys] node aw: launch config names //Oracle//hot/1" in found
+    assert not any(word in m for m in found for word in ("rpc", "materios", "cdn"))
 
 
 def test_dev_mnemonic_in_a_launch_config_is_detected_by_hash(spec, meta):

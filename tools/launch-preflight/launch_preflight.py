@@ -76,6 +76,8 @@ REWARD_ITEMS = (
 )
 DEV_KEYRING_FLAGS = {"--alice", "--bob", "--charlie", "--dave", "--eve", "--ferdie",
                      "--one", "--two", "--dev"}
+# Not after a word, a scheme's colon or a path, and not a protocol-relative host.
+DEV_URI = re.compile(r"(?<![\w:/.])//[\w-]+(?:/{1,2}[\w-]+)*(?![\w./-])")
 RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
 
@@ -410,7 +412,9 @@ def decode_public_key(text: str) -> bytes:
 
 
 def dev_uri(text: str) -> str | None:
-    match = re.search(r"//(Alice|Bob|Charlie|Dave|Eve|Ferdie|One|Two)(//stash)?\b", text)
+    """A secret URI with no phrase, which Substrate derives from the dev phrase:
+    `//Alice`, but also any other path such as `//Oracle//hot`."""
+    match = DEV_URI.search(text)
     return match.group(0) if match else None
 
 

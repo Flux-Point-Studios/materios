@@ -19,12 +19,12 @@ It reads:
 
 | Rule | Refuses when |
 |---|---|
-| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role, in an authority's launch command or environment (`--alice`, `--dev`, `//Bob`, the dev mnemonic), or as the manifest signing key. "Well-known" is every sp-keyring key (`//Alice` .. `//Ferdie`, their `//stash` accounts, `//One`, `//Two`) and the dev-phrase root under sr25519, ed25519 and ecdsa, retired keys whose secret was published, keys whose seed a public repo commits, and every key in an `--extra-well-known` table. |
+| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role, in an authority's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, the dev mnemonic), or as the manifest signing key. "Well-known" is every sp-keyring key (`//Alice` .. `//Ferdie`, their `//stash` accounts, `//One`, `//Two`) and the dev-phrase root under sr25519, ed25519 and ecdsa, every key whose secret a public repo commits (including every `//Path` on the dev phrase those repos use), retired keys whose secret was published, and every key in an `--extra-well-known` table. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
 | 3 rpc | An authority serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route, or a node runs `--validator` without being declared an authority. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA locked on Cardano to back it: the reserve would be counted both as cMATRA and as MATRA. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. |
 | 5 pallets | `PerpEngine` is in the runtime metadata. |
-| 6 checkpoint | The genesis hash, runtime code hash or chain-spec hash differs from the signed launch manifest, the signature does not verify under the pinned key, or the spec carries `codeSubstitutes`. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts: that observation has no checkpoint, so its first run counts every transfer to the watched address since Cardano genesis, the genesis lock included. |
+| 6 checkpoint | The genesis hash, runtime code hash or chain-spec hash differs from the signed launch manifest, the signature does not verify under the pinned key, or the spec carries `codeSubstitutes`. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal).
@@ -91,25 +91,36 @@ JSON (sorted keys, no whitespace).
 
 ## Well-known keys
 
-`well_known_keys.json` holds public keys only: the dev keys, retired keys whose
-secret was published, and keys whose seed a public repo commits as a test
-fixture. A key whose exposure is not yet public knowledge must not be named
-here; list it in an operator table kept outside the repo and pass it with
-`--extra-well-known` (repeatable). That table has the same shape:
+`well_known_keys.json` holds public keys only: the dev keys, keys whose secret
+a public repo commits, and retired keys whose secret was published. A key whose
+exposure is not yet public knowledge must not be named here; list it in an
+operator table kept outside the repo and pass it with `--extra-well-known`
+(repeatable). That table has the same shape:
 
 ```json
 {"keys": [{"label": "exposed multisig member", "scheme": "sr25519", "public": "0x..."}]}
 ```
 
 A 33-byte ECDSA key also matches the blake2-256 account it maps to. Regenerate
-the public table from a polkadot-sdk checkout, which supplies `DEV_PHRASE`:
+the public table from a polkadot-sdk checkout, which supplies `DEV_PHRASE`, and a
+directory holding a clone of each repo in the generator's `PUBLIC_REPOS` (the
+public repos with Substrate key code or configuration):
 
 ```
-python3 gen_well_known_keys.py <polkadot-sdk> > well_known_keys.json
+pip install substrate-interface ecdsa mnemonic
+python3 gen_well_known_keys.py <polkadot-sdk> <clones> > well_known_keys.json
 ```
 
-The tests pin the table to sp-keyring's hard-coded sr25519 and ed25519 keys and
-to the published ECDSA `//Alice` key.
+The generator sweeps every commit of those repos for secrets committed as string
+literals (a BIP39 phrase with a valid checksum, a 0x-hex seed under a name that
+marks it secret, a bare `//Path` URI) and writes the public keys each derives
+under sr25519, ed25519 and ecdsa. A clone made with `--filter=blob:limit=1m` is
+enough: larger blobs are runtimes and chain specs.
+
+The tests pin the table to sp-keyring's hard-coded sr25519 and ed25519 keys, to
+the published ECDSA `//Alice` key, to keys a Substrate keystore committed to
+partner-chains names by public key, and to dev-phrase paths checked against
+@polkadot/keyring.
 
 ## Tests
 
