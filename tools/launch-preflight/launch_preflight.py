@@ -12,8 +12,9 @@ economics, the Cardano-side supply backing.
 Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code,
                  a role, a node launch command, or the manifest signing key
-  2 rewards      attestor reward and subsidy values not declared, or genesis
-                 does not store exactly the declared values
+  2 rewards      attestor reward and subsidy values or validator reward
+                 parameters not declared, or genesis and the runtime do not
+                 hold exactly the declared values
   3 rpc          an authority serves unsafe RPC methods on an external or
                  proxied listener
   4 supply       an attestor endowment below bond + existential deposit + fee
@@ -63,6 +64,11 @@ DOMAIN_32 = DOMAIN.ljust(32, b"\0")
 FORBIDDEN_PALLETS = ("PerpEngine",)
 EMISSION_RESERVES = ("ValidatorEmissionReserve", "AttestationRewardReserve")
 POLICY_ID_LEN = 28
+# Validator reward parameters are runtime constants: (economics field, OrinqReceipts constant).
+VALIDATOR_REWARD_CONSTANTS = (
+    ("validator_reward_per_era", "ValidatorRewardPerEra"),
+    ("treasury_emission_share_perbill", "TreasuryEmissionShare"),
+)
 REWARD_ITEMS = (
     ("attestation_reward_per_signer", "AttestationRewardPerSigner", 16),
     ("era_cap_base", "EraCapBase", 16),
@@ -463,9 +469,21 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, manifest_key: bytes
     return findings
 
 
-def check_rewards(spec: Spec, launch: dict) -> list[Finding]:
+def check_rewards(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     declared = launch.get("economics", {})
     findings = []
+    for field, constant in VALIDATOR_REWARD_CONSTANTS:
+        want = declared.get(field)
+        actual = meta.constants.get(("OrinqReceipts", constant))
+        if not isinstance(want, int) or isinstance(want, bool):
+            findings.append(Finding("2 rewards", f"economics.{field} is not declared as an integer; "
+                                                 "validator rewards must be explicit"))
+        elif actual is None:
+            findings.append(Finding("2 rewards", f"the runtime metadata does not declare OrinqReceipts.{constant}, "
+                                                 "so the validator reward cannot be checked"))
+        elif int.from_bytes(actual, "little") != want:
+            findings.append(Finding("2 rewards", f"OrinqReceipts.{constant} is {int.from_bytes(actual, 'little')} "
+                                                 f"in the runtime, declared {want}"))
     for field, item, width in REWARD_ITEMS:
         want = declared.get(field)
         if not isinstance(want, int) or isinstance(want, bool):
@@ -738,7 +756,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
     key = pinned_key(manifest_key)
     known, phrase_hash = load_well_known(extra_well_known)
     return (check_dev_keys(spec, meta, launch, key, known, phrase_hash)
-            + check_rewards(spec, launch)
+            + check_rewards(spec, meta, launch)
             + check_rpc(launch)
             + check_supply(spec, meta, launch)
             + check_pallets(meta)

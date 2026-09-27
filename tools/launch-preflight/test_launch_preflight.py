@@ -385,42 +385,64 @@ def test_dev_key_embedded_in_runtime_code_is_named(spec, meta, known):
 # Rule 2: explicit attestor rewards
 # ---------------------------------------------------------------------------
 
+VALIDATOR_REWARD_PER_ERA = 102_739_726
 TUNED = {"attestation_reward_per_signer": 1 * MATRA, "era_cap_base": 50_000 * MATRA,
-         "era_cap_baseline_attestor_count": 32}
+         "era_cap_baseline_attestor_count": 32, "validator_reward_per_era": VALIDATOR_REWARD_PER_ERA,
+         "treasury_emission_share_perbill": 150_000_000}
 
 
-def test_undeclared_rewards_are_refused(spec):
-    found = messages(lp.check_rewards(spec, {"economics": {}}))
-    assert len(found) == 3
+@pytest.fixture
+def runtime_meta(metadata_v14) -> lp.Metadata:
+    return lp.Metadata.from_v14(with_constants(metadata_v14))
+
+
+def test_undeclared_rewards_are_refused(spec, runtime_meta):
+    found = messages(lp.check_rewards(spec, runtime_meta, {"economics": {}}))
+    assert len(found) == 5
     assert all("is not declared as an integer" in m for m in found)
+    assert "[2 rewards] economics.validator_reward_per_era is not declared as an integer; " \
+           "validator rewards must be explicit" in found
 
 
-def test_genesis_that_dropped_the_tuned_rewards_is_refused(spec):
-    found = messages(lp.check_rewards(spec, {"economics": TUNED}))
+def test_genesis_that_dropped_the_tuned_rewards_is_refused(spec, runtime_meta):
+    found = messages(lp.check_rewards(spec, runtime_meta, {"economics": TUNED}))
     assert found == [
         "[2 rewards] OrinqReceipts.AttestationRewardPerSigner stores 10000000, declared 1000000",
         "[2 rewards] OrinqReceipts.EraCapBaselineAttestorCount stores 16, declared 32",
     ]
 
 
-def test_rewards_missing_from_genesis_are_refused(spec):
+def test_rewards_missing_from_genesis_are_refused(spec, runtime_meta):
     for _, item, _ in lp.REWARD_ITEMS:
         del spec.storage[lp.storage_key("OrinqReceipts", item)]
-    found = messages(lp.check_rewards(spec, {"economics": TUNED}))
+    found = messages(lp.check_rewards(spec, runtime_meta, {"economics": TUNED}))
     assert found == [f"[2 rewards] OrinqReceipts.{item} is not set in genesis (declared {TUNED[field]})"
                      for field, item, _ in lp.REWARD_ITEMS]
 
 
-def test_stored_rewards_equal_to_declared_pass(spec):
+def test_stored_rewards_equal_to_declared_pass(spec, runtime_meta):
     put(spec, "OrinqReceipts", "AttestationRewardPerSigner", (1 * MATRA).to_bytes(16, "little"))
     put(spec, "OrinqReceipts", "EraCapBaselineAttestorCount", (32).to_bytes(4, "little"))
-    assert lp.check_rewards(spec, {"economics": TUNED}) == []
+    assert lp.check_rewards(spec, runtime_meta, {"economics": TUNED}) == []
 
 
-def test_zero_baseline_is_refused(spec):
+def test_declared_validator_reward_that_differs_from_the_runtime_is_refused(spec, runtime_meta):
+    economics = dict(TUNED, validator_reward_per_era=50, treasury_emission_share_perbill=100_000_000)
+    found = messages(lp.check_rewards(spec, runtime_meta, {"economics": economics}))
+    assert "[2 rewards] OrinqReceipts.ValidatorRewardPerEra is 102739726 in the runtime, declared 50" in found
+    assert "[2 rewards] OrinqReceipts.TreasuryEmissionShare is 150000000 in the runtime, declared 100000000" in found
+
+
+def test_runtime_that_hides_its_validator_reward_is_refused(spec, meta):
+    found = messages(lp.check_rewards(spec, meta, {"economics": TUNED}))
+    assert "[2 rewards] the runtime metadata does not declare OrinqReceipts.ValidatorRewardPerEra, " \
+           "so the validator reward cannot be checked" in found
+
+
+def test_zero_baseline_is_refused(spec, runtime_meta):
     put(spec, "OrinqReceipts", "EraCapBaselineAttestorCount", bytes(4))
     economics = dict(TUNED, era_cap_baseline_attestor_count=0)
-    found = messages(lp.check_rewards(spec, {"economics": economics}))
+    found = messages(lp.check_rewards(spec, runtime_meta, {"economics": economics}))
     assert "[2 rewards] economics.era_cap_baseline_attestor_count is zero" in found
 
 
@@ -542,21 +564,18 @@ PREPROD_ATTESTOR = bytes.fromhex("44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9
 SUPPLY = {"cardano_backing": 210_100_000 * MATRA}
 FLOOR = 1_000 * MATRA + 500 + 100 * MATRA
 RESERVES = {"ValidatorEmissionReserve": 150_000_000 * MATRA, "AttestationRewardReserve": 50_000_000 * MATRA}
+RUNTIME_CONSTANTS = dict(RESERVES, ValidatorRewardPerEra=VALIDATOR_REWARD_PER_ERA)
 
 
-def with_reserves(metadata_v14: dict, reserves=RESERVES) -> dict:
-    """The fixture metadata plus the emission-reserve constants a runtime
-    that declares them exposes on OrinqReceipts."""
+def with_constants(metadata_v14: dict, constants=None) -> dict:
+    """The fixture metadata plus the u128 OrinqReceipts constants a runtime
+    that declares its emission reserves and validator reward exposes."""
     v14 = copy.deepcopy(metadata_v14)
     pallet = next(p for p in v14["pallets"] if p["name"] == "OrinqReceipts")
     pallet["constants"] = list(pallet.get("constants") or []) + [
-        {"name": name, "value": list(value.to_bytes(16, "little"))} for name, value in reserves.items()]
+        {"name": name, "value": list(value.to_bytes(16, "little"))}
+        for name, value in (RUNTIME_CONSTANTS if constants is None else constants).items()]
     return v14
-
-
-@pytest.fixture
-def reserve_meta(metadata_v14) -> lp.Metadata:
-    return lp.Metadata.from_v14(with_reserves(metadata_v14))
 
 
 def roster(spec) -> list[str]:
@@ -571,53 +590,53 @@ def supply_findings(spec, meta, attestors, fee_buffer, supply=SUPPLY):
     return messages(lp.check_supply(spec, meta, launch))
 
 
-def test_attestor_endowed_at_bond_plus_ed_plus_buffer_passes(spec, reserve_meta):
+def test_attestor_endowed_at_bond_plus_ed_plus_buffer_passes(spec, runtime_meta):
     attestor = fresh_account()
     endow(spec, attestor, FLOOR)
-    assert supply_findings(spec, reserve_meta, [ss58(attestor)], 100 * MATRA) == []
+    assert supply_findings(spec, runtime_meta, [ss58(attestor)], 100 * MATRA) == []
 
 
-def test_attestor_endowed_one_unit_below_the_floor_is_refused(spec, reserve_meta):
+def test_attestor_endowed_one_unit_below_the_floor_is_refused(spec, runtime_meta):
     attestor = fresh_account()
     endow(spec, attestor, FLOOR - 1)
-    found = supply_findings(spec, reserve_meta, [ss58(attestor)], 100 * MATRA)
+    found = supply_findings(spec, runtime_meta, [ss58(attestor)], 100 * MATRA)
     assert found == [f"[4 supply] roles.attestors[0] is endowed {FLOOR - 1}, below "
                      f"bond + existential deposit + fee buffer = {FLOOR}"]
 
 
-def test_preprod_genesis_endowed_its_attestors_below_the_bond(spec, reserve_meta):
-    found = supply_findings(spec, reserve_meta, [ss58(PREPROD_ATTESTOR)], 0)
+def test_preprod_genesis_endowed_its_attestors_below_the_bond(spec, runtime_meta):
+    found = supply_findings(spec, runtime_meta, [ss58(PREPROD_ATTESTOR)], 0)
     assert found == ["[4 supply] roles.attestors[0] is endowed 100000000, below "
                      "bond + existential deposit + fee buffer = 1000000500"]
 
 
-def test_unendowed_attestor_is_refused(spec, reserve_meta):
-    found = supply_findings(spec, reserve_meta, [ss58(fresh_account())], 0)
+def test_unendowed_attestor_is_refused(spec, runtime_meta):
+    found = supply_findings(spec, runtime_meta, [ss58(fresh_account())], 0)
     assert len(found) == 1 and "is endowed 0" in found[0]
 
 
-def test_endowment_floor_needs_every_input(spec, reserve_meta):
-    found = supply_findings(spec, reserve_meta, [ss58(PREPROD_ATTESTOR)], None)
+def test_endowment_floor_needs_every_input(spec, runtime_meta):
+    found = supply_findings(spec, runtime_meta, [ss58(PREPROD_ATTESTOR)], None)
     assert found[0].startswith("[4 supply] cannot size attestor endowments")
 
 
-def test_runtime_emission_reserves_on_top_of_a_cardano_backed_genesis_are_refused(spec, reserve_meta):
+def test_runtime_emission_reserves_on_top_of_a_cardano_backed_genesis_are_refused(spec, runtime_meta):
     attestors = roster(spec)
     issuance = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
     backing = issuance
-    found = supply_findings(spec, reserve_meta, attestors, 0, {"cardano_backing": backing})
+    found = supply_findings(spec, runtime_meta, attestors, 0, {"cardano_backing": backing})
     assert found == [f"[4 supply] Materios can issue {issuance + 200_000_000 * MATRA} (genesis {issuance} "
                      f"+ runtime emission reserves {200_000_000 * MATRA}) against {backing} locked on "
                      "Cardano: the difference is reserve counted both as cMATRA and as MATRA"]
 
 
-def test_genesis_and_emission_reserves_fully_backed_pass(spec, reserve_meta):
-    assert supply_findings(spec, reserve_meta, roster(spec), 0) == []
+def test_genesis_and_emission_reserves_fully_backed_pass(spec, runtime_meta):
+    assert supply_findings(spec, runtime_meta, roster(spec), 0) == []
 
 
 def test_genesis_issuance_above_the_cardano_lock_is_refused(spec, metadata_v14):
     no_emission = {"ValidatorEmissionReserve": 0, "AttestationRewardReserve": 0}
-    meta = lp.Metadata.from_v14(with_reserves(metadata_v14, no_emission))
+    meta = lp.Metadata.from_v14(with_constants(metadata_v14, no_emission))
     found = supply_findings(spec, meta, roster(spec), 0, {"cardano_backing": 975_000 * MATRA})
     assert len(found) == 1 and "counted both as cMATRA and as MATRA" in found[0]
 
@@ -629,36 +648,36 @@ def test_runtime_that_hides_its_emission_reserves_is_refused(spec, meta):
                      "here, so the supply cannot be checked against the Cardano lock"]
 
 
-def test_issuance_below_what_genesis_accounts_hold_is_refused(spec, reserve_meta):
+def test_issuance_below_what_genesis_accounts_hold_is_refused(spec, runtime_meta):
     held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
     put(spec, "Balances", "TotalIssuance", (1).to_bytes(16, "little"))
-    found = supply_findings(spec, reserve_meta, [], 0, {"cardano_backing": held + 200_000_000 * MATRA - 1})
+    found = supply_findings(spec, runtime_meta, [], 0, {"cardano_backing": held + 200_000_000 * MATRA - 1})
     assert f"[4 supply] Balances.TotalIssuance stores 1, but genesis accounts hold {held}" in found
     assert any(f"(genesis {held} + runtime emission reserves" in m for m in found)
 
 
-def test_missing_issuance_is_refused_and_accounts_still_count(spec, reserve_meta):
+def test_missing_issuance_is_refused_and_accounts_still_count(spec, runtime_meta):
     held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
     del spec.storage[lp.storage_key("Balances", "TotalIssuance")]
-    found = supply_findings(spec, reserve_meta, [], 0)
+    found = supply_findings(spec, runtime_meta, [], 0)
     assert f"[4 supply] Balances.TotalIssuance stores 0, but genesis accounts hold {held}" in found
 
 
-def test_reserved_balances_count_toward_issuance(spec, reserve_meta):
+def test_reserved_balances_count_toward_issuance(spec, runtime_meta):
     account = fresh_account()
     spec.storage[account_key(account)] = bytes(32) + (5 * MATRA).to_bytes(16, "little") + bytes(32)
     held = int.from_bytes(spec.value("Balances", "TotalIssuance"), "little") + 5 * MATRA
-    found = supply_findings(spec, reserve_meta, [], 0)
+    found = supply_findings(spec, runtime_meta, [], 0)
     assert f"[4 supply] Balances.TotalIssuance stores {held - 5 * MATRA}, but genesis accounts hold {held}" in found
 
 
-def test_empty_attestor_roster_is_refused(spec, reserve_meta):
-    found = supply_findings(spec, reserve_meta, [], 0)
+def test_empty_attestor_roster_is_refused(spec, runtime_meta):
+    found = supply_findings(spec, runtime_meta, [], 0)
     assert "[4 supply] roles.attestors names no account: the endowment floor has nothing to check" in found
 
 
-def test_undeclared_backing_is_refused(spec, reserve_meta):
-    found = supply_findings(spec, reserve_meta, roster(spec), 0, {})
+def test_undeclared_backing_is_refused(spec, runtime_meta):
+    found = supply_findings(spec, runtime_meta, roster(spec), 0, {})
     assert found == ["[4 supply] supply.cardano_backing must be declared as an integer"]
 
 
@@ -748,7 +767,7 @@ def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path,
 def test_cli_passes_a_clean_launch(preprod_path, tmp_path, capsys, monkeypatch, metadata_v14):
     """No built runtime passes yet (PerpEngine, undeclared emission reserves), so
     the extractor returns the fixture metadata with the reserves declared."""
-    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_reserves(metadata_v14))
+    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
     attestor = fresh_account()
     code, out = run_cli(tmp_path, clean_spec(preprod_path, tmp_path, attestor),
                         clean_launch(tmp_path, attestor), capsys)
@@ -757,7 +776,7 @@ def test_cli_passes_a_clean_launch(preprod_path, tmp_path, capsys, monkeypatch, 
 
 
 def test_cli_names_keys_from_an_extra_table(preprod_path, tmp_path, capsys, monkeypatch, metadata_v14):
-    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_reserves(metadata_v14))
+    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
     attestor, exposed = fresh_account(), fresh_account()
     launch = clean_launch(tmp_path, attestor)
     launch["roles"]["multisig_members"][0] = ss58(exposed)

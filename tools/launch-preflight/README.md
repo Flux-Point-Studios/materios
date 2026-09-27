@@ -20,7 +20,7 @@ It reads:
 | Rule | Refuses when |
 |---|---|
 | 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role, in an authority's launch command or environment (`--alice`, `--dev`, `//Bob`, the dev mnemonic), or as the manifest signing key. "Well-known" is every sp-keyring key (`//Alice` .. `//Ferdie`, their `//stash` accounts, `//One`, `//Two`) and the dev-phrase root under sr25519, ed25519 and ecdsa, retired keys whose secret was published, keys whose seed a public repo commits, and every key in an `--extra-well-known` table. |
-| 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values. |
+| 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
 | 3 rpc | An authority serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route, or a node runs `--validator` without being declared an authority. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA locked on Cardano to back it: the reserve would be counted both as cMATRA and as MATRA. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. |
 | 5 pallets | `PerpEngine` is in the runtime metadata. |
@@ -61,6 +61,8 @@ JSON (sorted keys, no whitespace).
     "attestation_reward_per_signer": 1000000,
     "era_cap_base": 50000000000,
     "era_cap_baseline_attestor_count": 32,
+    "validator_reward_per_era": 102739726,
+    "treasury_emission_share_perbill": 150000000,
     "fee_buffer": 100000000
   },
   "supply": {
