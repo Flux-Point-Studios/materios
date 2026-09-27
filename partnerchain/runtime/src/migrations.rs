@@ -14,7 +14,11 @@
 use alloc::vec::Vec;
 use frame_support::{
     storage::unhashed,
-    traits::{Currency, ExistenceRequirement, OnRuntimeUpgrade, ReservableCurrency},
+    traits::{
+        fungible::Inspect,
+        tokens::{Fortitude, Preservation},
+        Currency, ExistenceRequirement, OnRuntimeUpgrade, ReservableCurrency,
+    },
     weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight},
     Blake2_128Concat, PalletId,
 };
@@ -29,24 +33,27 @@ pub(crate) fn db_weight() -> RuntimeDbWeight {
     RocksDbWeight::get()
 }
 
-/// Moves `pot`'s whole free balance to the treasury, reaping `pot`, and
-/// returns the amount moved. AllowDeath because a PalletId account is a
-/// deterministic derivation that reappears on its next credit; KeepAlive would
-/// refuse to drain past the existential deposit. A failed transfer is logged
-/// and moves nothing. Costs at most `SWEEP_READS` and `SWEEP_WRITES`.
+/// Moves everything `pot` can transfer to the treasury and returns the amount
+/// moved. That excludes frozen funds: any account can lock part of a pot's
+/// balance (a vested transfer into it, say), and asking for the whole free
+/// balance would then fail the transfer and strand all of it. AllowDeath
+/// because a PalletId account is a deterministic derivation that reappears on
+/// its next credit; KeepAlive would refuse to drain past the existential
+/// deposit. A failed transfer is logged and moves nothing. Costs at most
+/// `SWEEP_READS` and `SWEEP_WRITES`.
 fn sweep_into_treasury(pot: &AccountId, name: &str) -> Balance {
-    let free = Balances::free_balance(pot);
-    if free == 0 {
+    let movable = sweepable(pot);
+    if movable == 0 {
         return 0;
     }
     let treasury: AccountId = TreasuryPalletId::get().into_account_truncating();
     match <Balances as Currency<AccountId>>::transfer(
         pot,
         &treasury,
-        free,
+        movable,
         ExistenceRequirement::AllowDeath,
     ) {
-        Ok(()) => free,
+        Ok(()) => movable,
         Err(e) => {
             log::error!(
                 "migration: {} pot transfer failed ({:?}); leaving funds in place",
@@ -56,6 +63,14 @@ fn sweep_into_treasury(pot: &AccountId, name: &str) -> Balance {
             0
         }
     }
+}
+
+fn sweepable(pot: &AccountId) -> Balance {
+    <Balances as Inspect<AccountId>>::reducible_balance(
+        pot,
+        Preservation::Expendable,
+        Fortitude::Polite,
+    )
 }
 
 /// The pot's balance read, then both accounts read and written, plus the
@@ -253,27 +268,33 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
             reserved_after.push((keeper, reserved - bond));
         }
 
-        let pot = Balances::free_balance(&PERP_ENGINE_POT_ID.into_account_truncating());
+        let pot: AccountId = PERP_ENGINE_POT_ID.into_account_truncating();
+        let movable = sweepable(&pot);
+        let pot_after = Balances::free_balance(&pot) - movable;
         let treasury_after =
             Balances::free_balance(&TreasuryPalletId::get().into_account_truncating())
-                .saturating_add(pot);
+                .saturating_add(movable);
 
         log::info!(
-            "RemovePerpEngine pre_upgrade: {} keys, {} bonded keepers, pot {}",
+            "RemovePerpEngine pre_upgrade: {} keys, {} bonded keepers, pot {} movable of {}",
             keys,
             reserved_after.len(),
-            pot,
+            movable,
+            movable + pot_after,
         );
-        Ok((reserved_after, treasury_after).encode())
+        Ok((reserved_after, pot_after, treasury_after).encode())
     }
 
     #[cfg(feature = "try-runtime")]
     fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
         use parity_scale_codec::Decode;
 
-        let (reserved_after, treasury_after): (Vec<(AccountId, Balance)>, Balance) =
-            Decode::decode(&mut &state[..])
-                .map_err(|_| "RemovePerpEngine pre_upgrade state does not decode")?;
+        let (reserved_after, pot_after, treasury_after): (
+            Vec<(AccountId, Balance)>,
+            Balance,
+            Balance,
+        ) = Decode::decode(&mut &state[..])
+            .map_err(|_| "RemovePerpEngine pre_upgrade state does not decode")?;
 
         frame_support::ensure!(
             !unhashed::contains_prefixed_key(&perp_engine_prefix()),
@@ -286,13 +307,13 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
             );
         }
         frame_support::ensure!(
-            Balances::free_balance(&PERP_ENGINE_POT_ID.into_account_truncating()) == 0,
+            Balances::free_balance(&PERP_ENGINE_POT_ID.into_account_truncating()) == pot_after,
             "the perp-engine margin pot was not swept",
         );
         frame_support::ensure!(
             Balances::free_balance(&TreasuryPalletId::get().into_account_truncating())
                 == treasury_after,
-            "the treasury did not receive exactly the margin pot",
+            "the treasury did not receive exactly what the margin pot could move",
         );
 
         log::info!(

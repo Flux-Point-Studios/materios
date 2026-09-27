@@ -240,6 +240,33 @@ fn the_runtime_upgrade_path_runs_the_removal() {
     });
 }
 
+/// Anyone can lock part of the pot's balance before the upgrade, for instance
+/// with a vested transfer into it. The margin must still reach the treasury,
+/// leaving behind only what the lock holds.
+#[test]
+fn a_lock_on_the_pot_does_not_strand_the_margin() {
+    let (mut ext, _) = new_seeded_ext();
+    ext.execute_with(|| {
+        let locked: Balance = 5_000_000;
+        Vesting::vested_transfer(
+            RuntimeOrigin::signed(acct(Bob)),
+            perp_pot().into(),
+            pallet_vesting::VestingInfo::new(locked, 1, 1_000_000),
+        )
+        .expect("any account may vest into the pot");
+        let treasury_before = Balances::free_balance(&treasury());
+
+        RemovePerpEngine::on_runtime_upgrade();
+
+        assert_eq!(
+            Balances::free_balance(&treasury()),
+            treasury_before + POT_BALANCE
+        );
+        assert_eq!(Balances::free_balance(&perp_pot()), locked);
+        assert_eq!(perp_engine_key_count(), 0);
+    });
+}
+
 #[test]
 fn removal_is_idempotent() {
     let (mut ext, _) = new_seeded_ext();
