@@ -199,10 +199,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 238,
+    spec_version: 239,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
-    transaction_version: 4,
+    transaction_version: 5,
     state_version: 1,
 };
 
@@ -1311,161 +1311,6 @@ impl pallet_oracle::Config for Runtime {
 }
 
 // ---------------------------------------------------------------------------
-// Perp Engine
-// ---------------------------------------------------------------------------
-//
-// Permissionless USD-quoted linear perpetual-futures primitive. Pull-based
-// mark prices from `pallet-oracle`, pull-based funding, bond-gated
-// permissionless liquidator pool with 100% slash on false trigger.
-
-parameter_types! {
-    /// PalletId for the perp-engine MOTRA margin-custody pot. Bytes
-    /// `b"perp/v0w"` are distinct from `mat/trsy` and `mat/attr`.
-    /// At activation the derived account MUST be pre-funded with
-    /// ≥ `ExistentialDeposit` so the FIRST `Currency::transfer` from a
-    /// fresh chain cannot stall on a non-existent destination.
-    pub const PerpEnginePalletId: PalletId = PalletId(*b"perp/v0w");
-
-    /// 32-byte materios chain identity (preprod v6 genesis hash). Same
-    /// bytes as `OracleMateriosChainId`.
-    pub const PerpEngineMateriosChainId: [u8; 32] = [
-        0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc,
-        0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
-        0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07,
-        0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
-    ];
-
-    /// Hard cap on leverage across all markets. 5_000 bps = 50×. Each
-    /// market's `MarketConfig.max_leverage_bps` MUST be ≤ this value;
-    /// `governance_set_market` enforces the bound at registration.
-    pub const PerpEngineMaxLeverageBps: u32 = 5_000;
-
-    /// 100 bps = 1×.
-    pub const PerpEngineMinLeverageBps: u32 = 100;
-
-    /// Cap on `Markets` cardinality. Bounds per-block work in
-    /// `on_initialize` so the hook weight is constant in market-set size.
-    pub const PerpEngineMaxMarkets: u32 = 32;
-
-    /// Bounded ring-buffer size for `PremiumIndexSamples[(market, epoch)]`.
-    /// 600 samples per epoch (= 1h @ 6s blocks) is exactly one sample
-    /// per block.
-    pub const PerpEngineMaxFundingSamplesPerEpoch: u32 = 600;
-
-    /// Keeper bond minimum, in MOTRA base units (8 decimals).
-    /// 100 MATRA × 10^8 = 10^10. Slashed 100% on false trigger.
-    pub const PerpEngineKeeperBondMinimum: Balance = 100u128 * 100_000_000u128;
-
-    /// Mark-price cache freshness threshold, in blocks. 3 blocks (≈18s)
-    /// of staleness suffices for the "opens + liquidations reject stale"
-    /// gate while not tripping on block-author skips.
-    pub const PerpEngineFreshnessLimitBlocks: u32 = 3;
-
-    /// Cap on the premium-index EMA basis added to the oracle price,
-    /// in basis points. 200 bps = 2%, clamped symmetrically so the
-    /// cached mark stays within ±2% of the oracle.
-    pub const PerpEngineMaxMarkBasisBps: u32 = 200;
-
-    /// Bad-debt circuit-breaker threshold, in 1e18-scaled pMATRA-USD.
-    /// $10_000 = 10_000 × 10^18; affected market auto-pauses when
-    /// rolling-window bad-debt exceeds it.
-    pub const PerpEngineBadDebtCircuitBreakerThresholdE18: u128 =
-        10_000u128 * 1_000_000_000_000_000_000u128;
-
-    /// Bad-debt rolling-window length, in blocks. 14_400 ≈ 24h @ 6s.
-    /// Matches `WithdrawDwellBlocks`.
-    pub const PerpEngineBadDebtWindowBlocks: u32 = 14_400;
-
-    /// Withdraw-dwell window, in blocks. 14_400 ≈ 24h @ 6s. A fresh
-    /// `deposit_margin` must dwell this long before the same account
-    /// can `withdraw_margin` — defends against bridge-deposit replay.
-    pub const PerpEngineWithdrawDwellBlocks: u32 = 14_400;
-
-    /// MATRA/USD oracle feed handle. Hashed by `PerpEngineOracleAdapter`
-    /// into the 32-byte `pallet_oracle::PairId`. Wrapped in a
-    /// `parameter_types!` accessor because `BoundedVec` has no const
-    /// constructor.
-    pub PerpEngineMatraUsdFeedId: pallet_perp_engine::OracleFeedId =
-        pallet_perp_engine::OracleFeedId::try_from(b"MATRA/USD".to_vec())
-            .expect("9 bytes < MAX_MARKET_ID_LEN = 16; static literal");
-}
-
-/// Adapter implementing `pallet_perp_engine::PriceOracle` on top of
-/// `pallet_oracle::Pallet<Runtime>`.
-///
-/// Type bridge: `pallet-perp-engine` types its feed handle as a bounded
-/// UTF-8 byte string; `pallet-oracle` keys its storage by the canonical
-/// 32-byte `PairId = sha256(handle_bytes)`. This adapter hashes the
-/// perp-engine handle, then forwards through `pallet_oracle::Pallet`.
-///
-/// Price-scale normalisation: `pallet-oracle` stores `(price: u64,
-/// decimals: u8)`; perp-engine consumes 1e18 scale. Decimals are bounded
-/// `[0, 18]` by the oracle pallet's `submit_price` validation so the
-/// shift is non-negative; `u128` headroom is `10^18 × 10^18 = 10^36`,
-/// well clear of overflow.
-///
-/// `is_fresh` is fail-CLOSED on a missing or paused feed.
-pub struct PerpEngineOracleAdapter;
-
-impl pallet_perp_engine::PriceOracle for PerpEngineOracleAdapter {
-    fn latest_price_e18(feed_id: &pallet_perp_engine::OracleFeedId) -> Option<u128> {
-        let pair_id: pallet_oracle::PairId =
-            sp_io::hashing::sha2_256(feed_id.as_slice());
-        let (price_u64, decimals, _slot) =
-            pallet_oracle::Pallet::<Runtime>::get_price(pair_id)?;
-        // Scale `(price, decimals)` up to 1e18. Decimals ≤ 18 (bounded
-        // by `submit_price` validation) so the exponent is non-negative.
-        let shift = 18u32.saturating_sub(decimals as u32);
-        let scale: u128 = 10u128.checked_pow(shift)?;
-        (price_u64 as u128).checked_mul(scale)
-    }
-
-    fn price_age_blocks(feed_id: &pallet_perp_engine::OracleFeedId) -> u32 {
-        let pair_id: pallet_oracle::PairId =
-            sp_io::hashing::sha2_256(feed_id.as_slice());
-        let feed = match pallet_oracle::Prices::<Runtime>::get(pair_id) {
-            Some(f) => f,
-            None => return u32::MAX,
-        };
-        let now: u32 = frame_system::Pallet::<Runtime>::block_number();
-        let last: u32 = feed.last_update_block;
-        now.saturating_sub(last)
-    }
-
-    fn is_fresh(feed_id: &pallet_perp_engine::OracleFeedId) -> bool {
-        let pair_id: pallet_oracle::PairId =
-            sp_io::hashing::sha2_256(feed_id.as_slice());
-        let now_block: u32 = frame_system::Pallet::<Runtime>::block_number();
-        let max_age: u64 = <Runtime as pallet_oracle::Config>::MaxStaleSlots::get();
-        pallet_oracle::Pallet::<Runtime>::is_price_fresh(
-            pair_id,
-            now_block as u64,
-            max_age,
-        )
-    }
-}
-
-impl pallet_perp_engine::Config for Runtime {
-    type RuntimeEvent = RuntimeEvent;
-    type Currency = Balances;
-    type PriceOracle = PerpEngineOracleAdapter;
-    type PalletId = PerpEnginePalletId;
-    type MateriosChainId = PerpEngineMateriosChainId;
-    type MaxLeverageBps = PerpEngineMaxLeverageBps;
-    type MinLeverageBps = PerpEngineMinLeverageBps;
-    type MaxMarkets = PerpEngineMaxMarkets;
-    type MaxFundingSamplesPerEpoch = PerpEngineMaxFundingSamplesPerEpoch;
-    type KeeperBondMinimum = PerpEngineKeeperBondMinimum;
-    type FreshnessLimitBlocks = PerpEngineFreshnessLimitBlocks;
-    type MaxMarkBasisBps = PerpEngineMaxMarkBasisBps;
-    type BadDebtCircuitBreakerThresholdE18 =
-        PerpEngineBadDebtCircuitBreakerThresholdE18;
-    type BadDebtWindowBlocks = PerpEngineBadDebtWindowBlocks;
-    type MatraUsdFeedId = PerpEngineMatraUsdFeedId;
-    type WithdrawDwellBlocks = PerpEngineWithdrawDwellBlocks;
-}
-
-// ---------------------------------------------------------------------------
 // Construct runtime
 // ---------------------------------------------------------------------------
 
@@ -1501,7 +1346,7 @@ construct_runtime! {
         TeeAttestation: pallet_tee_attestation = 20,
         Billing: pallet_billing = 21,
         Oracle: pallet_oracle = 22,
-        PerpEngine: pallet_perp_engine = 23,
+        // index 23 reserved (vacant)
         // Second, independent path to Root (mainnet-resilience #492).
         Recovery: pallet_recovery = 24,
     }
@@ -1536,7 +1381,10 @@ pub type Executive = frame_executive::Executive<
     frame_system::ChainContext<Runtime>,
     Runtime,
     AllPalletsWithSystem,
-    migrations::SweepFeeRouterPotsIntoTreasury,
+    (
+        migrations::SweepFeeRouterPotsIntoTreasury,
+        migrations::RemovePerpEngine,
+    ),
 >;
 
 // ---------------------------------------------------------------------------
@@ -1928,7 +1776,6 @@ frame_benchmarking::define_benchmarks!(
     [pallet_timestamp, Timestamp]
     [pallet_intent_settlement, IntentSettlement]
     [pallet_oracle, Oracle]
-    [pallet_perp_engine, PerpEngine]
 );
 
 
