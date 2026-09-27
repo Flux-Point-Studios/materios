@@ -485,6 +485,36 @@ def test_non_authority_nodes_are_out_of_scope(tmp_path):
     assert rpc_findings(tmp_path, [node]) == []
 
 
+@pytest.mark.parametrize("endpoint", [
+    "listen-addr=0.0.0.0:9944,methods=unsafe",
+    "listen-addr=[::]:9955,cors=all,methods=Unsafe",
+])
+def test_unsafe_experimental_endpoint_on_an_external_address_is_refused(tmp_path, endpoint):
+    argv = ["node", "--validator", "--rpc-methods", "safe", "--experimental-rpc-endpoint", endpoint]
+    assert rpc_findings(tmp_path, [authority(argv)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+def test_loopback_experimental_endpoint_behind_a_proxy_is_refused(tmp_path):
+    argv = ["node", "--rpc-methods", "safe", "--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9966"]
+    nginx = "location / { proxy_pass http://127.0.0.1:9966; }"
+    assert rpc_findings(tmp_path, [authority(argv)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+def test_safe_experimental_endpoint_passes(tmp_path):
+    argv = ["node", "--rpc-methods", "safe",
+            "--experimental-rpc-endpoint=listen-addr=0.0.0.0:9944,methods=safe"]
+    nginx = "location / { proxy_pass http://127.0.0.1:9944; }"
+    assert rpc_findings(tmp_path, [authority(argv)], nginx, "val1") == []
+
+
+def test_experimental_endpoint_without_listen_addr_is_an_input_error(tmp_path):
+    argv = ["node", "--experimental-rpc-endpoint", "methods=unsafe"]
+    with pytest.raises(lp.InputError, match="listen-addr"):
+        rpc_findings(tmp_path, [authority(argv)])
+
+
 def test_validator_not_declared_an_authority_is_refused(tmp_path):
     node = {"name": "v9", "host": "h9", "authority": False,
             "argv": "node --validator --rpc-methods unsafe --rpc-external"}

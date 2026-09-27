@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import re
 import shlex
@@ -69,7 +70,7 @@ REWARD_ITEMS = (
 )
 DEV_KEYRING_FLAGS = {"--alice", "--bob", "--charlie", "--dave", "--eve", "--ferdie",
                      "--one", "--two", "--dev"}
-LOOPBACK = {"127.0.0.1", "localhost", "::1", "[::1]"}
+RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
 
 
@@ -513,6 +514,16 @@ def proxy_upstreams(config: str) -> list[tuple[str, int]]:
     return targets
 
 
+def is_loopback(host: str) -> bool:
+    host = host.strip("[]")
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def check_rpc(launch: dict) -> list[Finding]:
     proxied = set()
     for proxy in launch.get("rpc_proxies", []):
@@ -521,7 +532,7 @@ def check_rpc(launch: dict) -> list[Finding]:
         except OSError as e:
             raise InputError(f"cannot read proxy config {proxy['config']}: {e}") from e
         for host, port in proxy_upstreams(config):
-            proxied.add((proxy["host"] if host in LOOPBACK else host, port, proxy["name"]))
+            proxied.add((proxy["host"] if is_loopback(host) else host, port, proxy["name"]))
     findings = []
     for node in launch.get("nodes", []):
         argv = node_argv(node)
@@ -530,24 +541,40 @@ def check_rpc(launch: dict) -> list[Finding]:
                 findings.append(Finding("3 rpc", f"node {node['name']} runs --validator but is not "
                                                  "declared an authority"))
             continue
-        methods = (_flag(argv, "--rpc-methods") or "auto").lower()
-        if methods not in ("auto", "safe", "unsafe"):
-            findings.append(Finding("3 rpc", f"node {node['name']}: unknown --rpc-methods {methods}"))
-            continue
-        external = "--rpc-external" in argv or "--unsafe-rpc-external" in argv
-        unsafe = methods == "unsafe" or (methods == "auto" and not external)
         port_flag = _flag(argv, "--rpc-port") or str(DEFAULT_RPC_PORT)
         if not port_flag.isdigit():
             raise InputError(f"node {node['name']}: --rpc-port {port_flag} is not a port")
-        port = int(port_flag)
+        # (port, external, methods) for the default listener and every experimental endpoint.
+        listeners = [(int(port_flag), "--rpc-external" in argv or "--unsafe-rpc-external" in argv,
+                      (_flag(argv, "--rpc-methods") or "auto").lower())]
+        for i, token in enumerate(argv):
+            if token == RPC_ENDPOINT_FLAG and i + 1 < len(argv):
+                endpoint = argv[i + 1]
+            elif token.startswith(RPC_ENDPOINT_FLAG + "="):
+                endpoint = token.split("=", 1)[1]
+            else:
+                continue
+            options = dict(opt.split("=", 1) if "=" in opt else (opt, "") for opt in endpoint.split(","))
+            address = options.get("listen-addr", "")
+            if not re.search(r":\d+$", address):
+                raise InputError(f"node {node['name']}: {RPC_ENDPOINT_FLAG} {endpoint} has no "
+                                 "listen-addr ip:port")
+            host, _, port = address.rpartition(":")
+            listeners.append((int(port), not is_loopback(host), options.get("methods", "auto").lower()))
         addresses = {node["host"], *node.get("addresses", [])}
-        via = sorted(name for host, p, name in proxied if host in addresses and p == port)
-        if unsafe and external:
-            findings.append(Finding("3 rpc", f"authority {node['name']} serves unsafe RPC methods "
-                                             "on an external listener"))
-        if unsafe and via:
-            findings.append(Finding("3 rpc", f"authority {node['name']} serves unsafe RPC methods "
-                                             f"behind proxy {', '.join(via)}"))
+        reasons = []
+        for port, external, methods in listeners:
+            if methods not in ("auto", "safe", "unsafe"):
+                reasons.append(f"node {node['name']}: unknown --rpc-methods {methods}")
+                continue
+            if methods == "safe" or (methods == "auto" and external):
+                continue
+            if external:
+                reasons.append(f"authority {node['name']} serves unsafe RPC methods on an external listener")
+            via = sorted(name for host, p, name in proxied if host in addresses and p == port)
+            if via:
+                reasons.append(f"authority {node['name']} serves unsafe RPC methods behind proxy {', '.join(via)}")
+        findings += [Finding("3 rpc", reason) for reason in dict.fromkeys(reasons)]
     return findings
 
 
