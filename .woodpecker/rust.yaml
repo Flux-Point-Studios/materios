@@ -36,3 +36,6 @@ steps:
       - apt-get install -y --no-install-recommends clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
       - cargo check --workspace --all-targets --locked
       - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing --no-fail-fast
+      # The runtime's unit tests run natively; the blob is already built by
+      # the check above.
+      - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast
