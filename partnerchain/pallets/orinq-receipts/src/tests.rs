@@ -106,7 +106,14 @@ parameter_types! {
     /// used by `era_emission_respects_configurable_treasury_share` to retune
     /// the split at test-time. Default matches the production 15%.
     pub static TreasuryEmissionShareValue: Perbill = Perbill::from_percent(15);
+    /// Mock emission reserves at the production values; `pub static` so the
+    /// `emission_reserves` tests can shrink them.
+    pub static ValidatorEmissionReserveValue: u128 = VALIDATOR_EMISSION_RESERVE;
+    pub static AttestationRewardReserveValue: u128 = ATTESTATION_REWARD_RESERVE;
 }
+
+const VALIDATOR_EMISSION_RESERVE: u128 = 150_000_000_000_000;
+const ATTESTATION_REWARD_RESERVE: u128 = 50_000_000_000_000;
 
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
@@ -121,6 +128,8 @@ impl pallet::Config for Test {
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
     type TreasuryEmissionShare = TreasuryEmissionShareValue;
+    type ValidatorEmissionReserve = ValidatorEmissionReserveValue;
+    type AttestationRewardReserve = AttestationRewardReserveValue;
 }
 
 /// Construct a deterministic AccountId32 from a single byte seed (for tests).
@@ -3320,5 +3329,90 @@ mod explicit_reward_genesis {
         let mut patch = explicit_rewards();
         patch["eraCapBaselineAttestorCount"] = 0u32.into();
         build_from_patch(patch);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Emission reserves are Config constants, so they show in runtime metadata
+// ---------------------------------------------------------------------------
+//
+// The era emission and the attestation rewards both mint. Their lifetime
+// ceilings are what a supply audit has to add to genesis issuance, so they are
+// read from `Config` rather than from constants inside the hooks.
+
+mod emission_reserves {
+    use super::*;
+    use frame_support::traits::Hooks;
+
+    #[test]
+    fn era_emission_mints_no_more_than_the_configured_reserve() {
+        ValidatorEmissionReserveValue::set(1_000);
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&acc(0xA1), 1_000);
+            Balances::make_free_balance_be(&treasury_account(), 1_000);
+            pallet::BlocksAuthored::<Test>::insert(&acc(0xA1), 14_400u32);
+            pallet::EraStartBlock::<Test>::put(1u32);
+            let before = Balances::total_issuance();
+
+            System::set_block_number(14_402);
+            let _ = <OrinqReceipts as Hooks<_>>::on_initialize(14_402);
+
+            assert_eq!(Balances::total_issuance() - before, 1_000);
+            assert_eq!(pallet::TotalRewardsDistributed::<Test>::get(), 1_000);
+        });
+        ValidatorEmissionReserveValue::set(VALIDATOR_EMISSION_RESERVE);
+    }
+
+    #[test]
+    fn attestation_rewards_stop_at_the_configured_reserve() {
+        AttestationRewardReserveValue::set(5_000_000);
+        new_test_ext().execute_with(|| {
+            seed_submitter_and_committee(10, &[1, 2, 3]);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                vec![acc(1), acc(2), acc(3)],
+                3
+            ));
+            pallet::TotalAttestationRewards::<Test>::put(5_000_000);
+
+            let rid = H256::from([0xE1; 32]);
+            assert_ok!(submit_c4(10, rid, H256::from([0xE2; 32])));
+            for s in 1u8..=3 {
+                assert_ok!(OrinqReceipts::attest_availability_cert(
+                    RuntimeOrigin::signed(acc(s)),
+                    rid,
+                    canonical_for(rid)
+                ));
+            }
+
+            assert_eq!(pallet::TotalAttestationRewards::<Test>::get(), 5_000_000);
+            assert_eq!(OrinqReceipts::attestation_rewards(acc(1)), 0);
+        });
+        AttestationRewardReserveValue::set(ATTESTATION_REWARD_RESERVE);
+    }
+
+    #[test]
+    fn attestation_rewards_are_paid_below_the_reserve() {
+        new_test_ext().execute_with(|| {
+            seed_submitter_and_committee(10, &[1, 2, 3]);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                vec![acc(1), acc(2), acc(3)],
+                3
+            ));
+
+            let rid = H256::from([0xE3; 32]);
+            assert_ok!(submit_c4(10, rid, H256::from([0xE4; 32])));
+            for s in 1u8..=3 {
+                assert_ok!(OrinqReceipts::attest_availability_cert(
+                    RuntimeOrigin::signed(acc(s)),
+                    rid,
+                    canonical_for(rid)
+                ));
+            }
+
+            assert_eq!(pallet::TotalAttestationRewards::<Test>::get(), 3 * 10_000_000);
+            assert_eq!(OrinqReceipts::attestation_rewards(acc(1)), 10_000_000);
+        });
     }
 }

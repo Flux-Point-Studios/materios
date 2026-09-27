@@ -13,7 +13,7 @@
 
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
-    traits::{ConstBool, ConstU32, ConstU64, Hooks},
+    traits::{ConstBool, ConstU128, ConstU32, ConstU64, Hooks},
 };
 use sp_core::{crypto::AccountId32, H256};
 use sp_runtime::{traits::IdentityLookup, BuildStorage, Perbill};
@@ -120,6 +120,8 @@ impl crate::pallet::Config for Test {
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
     type TreasuryEmissionShare = IntegrationTestTreasuryShare;
+    type ValidatorEmissionReserve = ConstU128<150_000_000_000_000>;
+    type AttestationRewardReserve = ConstU128<50_000_000_000_000>;
 }
 
 // ---------------------------------------------------------------------------

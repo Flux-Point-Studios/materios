@@ -93,6 +93,16 @@ pub mod pallet {
         /// residue is always routed to treasury.
         #[pallet::constant]
         type TreasuryEmissionShare: Get<Perbill>;
+
+        /// Lifetime ceiling on MATRA minted by the era emission (validators
+        /// and treasury together), in base units.
+        #[pallet::constant]
+        type ValidatorEmissionReserve: Get<u128>;
+
+        /// Lifetime ceiling on MATRA minted as attestation rewards, in base
+        /// units.
+        #[pallet::constant]
+        type AttestationRewardReserve: Get<u128>;
     }
 
     // ── Storage ──────────────────────────────────────────────────────────
@@ -784,12 +794,11 @@ pub mod pallet {
             }
 
             // ── Validator rewards: era distribution ──────────────────────
-            // Era length: 14400 blocks (~24h at 6s block time)
-            // Reward pool: 150,000,000 MATRA (6 decimals = 150_000_000_000_000 base units)
-            // Over ~4 years (1460 days) = ~102.74 MATRA/era at 14400 blocks/era
+            // Era length: 14400 blocks (~24h at 6s block time), minting until
+            // `T::ValidatorEmissionReserve` has been paid out in total.
             const ERA_LENGTH: u32 = 14400;
             const REWARD_PER_ERA: u128 = 102_739_726; // ~102.74 MATRA/era (6 decimals)
-            const VALIDATOR_RESERVE: u128 = 150_000_000_000_000; // 150M MATRA (6 decimals)
+            let validator_reserve = T::ValidatorEmissionReserve::get();
 
             let block_num: u32 = n.into();
             let era_start: u32 = EraStartBlock::<T>::get().into();
@@ -797,8 +806,8 @@ pub mod pallet {
             if block_num > 0 && block_num.saturating_sub(era_start) >= ERA_LENGTH {
                 // Distribute rewards for this era
                 let total_distributed = TotalRewardsDistributed::<T>::get();
-                if total_distributed < VALIDATOR_RESERVE {
-                    let remaining = VALIDATOR_RESERVE.saturating_sub(total_distributed);
+                if total_distributed < validator_reserve {
+                    let remaining = validator_reserve.saturating_sub(total_distributed);
                     let era_reward = core::cmp::min(REWARD_PER_ERA, remaining);
 
                     // Sum total blocks authored this era
@@ -830,7 +839,7 @@ pub mod pallet {
                         // and `ValidatorRewards` tracked the lifetime-paid validator figure only.
                         // With the split, BOTH go through the pool: validators track their share,
                         // treasury emission is accounted under `TotalRewardsDistributed` as well
-                        // so the VALIDATOR_RESERVE cap still gates the full emission envelope.
+                        // so `ValidatorEmissionReserve` still gates the full emission envelope.
                         let treasury_share: Perbill = T::TreasuryEmissionShare::get();
                         // Validator gets the complement of the treasury share, computed via
                         // `Perbill::saturating_sub` to stay in the Perbill domain. At
@@ -1605,25 +1614,20 @@ pub mod pallet {
                 // Pay attestation rewards BEFORE removing the attestation record.
                 // Each signer gets an equal share of the per-receipt reward.
                 //
-                // Attestation reward pool: 50M MATRA over ~4 years
-                // = ~34,246,575 base units per day = ~34.2 MATRA/day
-                // Per receipt: daily_pool / avg_receipts_per_day (dynamic)
-                //
-                // The per-signer reward and the per-era cap are now
+                // The per-signer reward and the per-era cap are
                 // governance-tunable via `set_attestation_reward_per_signer`
                 // and `set_era_cap_base` (see Component 5). The effective
                 // cap auto-scales linearly with active committee size via
-                // `effective_era_cap()`. ATTESTATION_RESERVE remains a
-                // constant — it is the 4-year pool ceiling, not a per-era
-                // knob, and resizing it is a conscious economic decision
-                // that belongs to a runtime upgrade.
-                const ATTESTATION_RESERVE: u128 = 50_000_000_000_000; // 50M MATRA (6 decimals)
+                // `effective_era_cap()`. `T::AttestationRewardReserve` is the
+                // lifetime pool ceiling, not a per-era knob: resizing it is
+                // an economic decision that belongs to a runtime upgrade.
+                let attestation_reserve = T::AttestationRewardReserve::get();
                 let reward_per_signer = AttestationRewardPerSigner::<T>::get();
                 let era_cap = Self::effective_era_cap();
 
                 let total_att_paid = TotalAttestationRewards::<T>::get();
                 let era_att_paid = AttestationRewardsPaidInEra::<T>::get();
-                if total_att_paid < ATTESTATION_RESERVE && era_att_paid < era_cap {
+                if total_att_paid < attestation_reserve && era_att_paid < era_cap {
                     // Get signers before we remove the attestation
                     if let Some((_, ref signers)) = Attestations::<T>::get(receipt_id) {
                         for signer in signers.iter() {
