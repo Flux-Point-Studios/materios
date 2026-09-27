@@ -1857,6 +1857,27 @@ impl_runtime_apis! {
         }
     }
 
+    // The API has no error channel: a failed check panics, which is how the
+    // try-runtime CLI learns the upgrade or block is broken.
+    #[cfg(feature = "try-runtime")]
+    impl frame_try_runtime::TryRuntime<Block> for Runtime {
+        fn on_runtime_upgrade(checks: frame_try_runtime::UpgradeCheckSelect) -> (Weight, Weight) {
+            let weight = Executive::try_runtime_upgrade(checks)
+                .unwrap_or_else(|e| panic!("runtime upgrade checks failed: {e:?}"));
+            (weight, RuntimeBlockWeights::get().max_block)
+        }
+
+        fn execute_block(
+            block: Block,
+            state_root_check: bool,
+            signature_check: bool,
+            select: frame_try_runtime::TryStateSelect,
+        ) -> Weight {
+            Executive::try_execute_block(block, state_root_check, signature_check, select)
+                .unwrap_or_else(|e| panic!("block execution checks failed: {e:?}"))
+        }
+    }
+
     #[cfg(feature = "runtime-benchmarks")]
     impl frame_benchmarking::Benchmark<Block> for Runtime {
         fn benchmark_metadata(extra: bool) -> (
