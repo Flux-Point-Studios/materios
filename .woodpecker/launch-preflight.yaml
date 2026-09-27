@@ -2,9 +2,9 @@ when:
   - event: [push, pull_request]
     branch: main
 
-# Same agent as the rust workflow.
+# Same agent as the rust workflow, selected by the same label.
 labels:
-  hostname: 307a575667df
+  arm64-emu: "true"
 
 steps:
   - name: test
