@@ -5,11 +5,7 @@
 use crate::migrations::{InitRootTimelock, PREPROD_GENESIS_HASH};
 use crate::root_gate::TimelockClassifier;
 use crate::*;
-use frame_support::{
-    assert_ok,
-    storage::unhashed,
-    traits::{OnRuntimeUpgrade, UnfilteredDispatchable},
-};
+use frame_support::{assert_ok, storage::unhashed, traits::OnRuntimeUpgrade};
 use pallet_root_timelock::{CallClass, ClassifyCall, DelayTable, Task, TaskId, Tasks};
 use proptest::prelude::*;
 use sidechain_domain::{AssetName, MainchainAddress, PolicyId};

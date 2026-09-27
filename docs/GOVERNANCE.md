@@ -196,7 +196,8 @@ the short ones on the upgrade that adds the pallet, and
    `Scheduled { id, call_hash, class, ready_at }` event is the public notice;
    publish the call itself alongside it.
 2. Until the call is enacted the guardian may `RootTimelock.cancel(id)`. The
-   one exception is a `set_guardian` task, which the guardian cannot veto.
+   one exception is a task whose call is `RootTimelock.set_guardian` itself,
+   which the guardian cannot veto.
 3. From `ready_at`, and for `EnactmentWindow` (7 days) after it, any signed
    account may submit `RootTimelock.enact(id, call)`. The call must hash to
    the scheduled hash and must not now classify into a longer class than the
