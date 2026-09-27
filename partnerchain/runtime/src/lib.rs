@@ -514,6 +514,7 @@ parameter_types! {
         pallet_root_timelock::DelayTable { recovery: DAYS, standard: 7 * DAYS, long: 30 * DAYS };
     pub const RootTimelockMaxDelay: BlockNumber = 90 * DAYS;
     pub const RootTimelockEnactmentWindow: BlockNumber = 7 * DAYS;
+    pub const RootTimelockMaxPendingTasks: u32 = 64;
 }
 
 /// Short delays for preprod and dev chains: 3 minutes, 30 minutes, 2 hours.
@@ -531,6 +532,7 @@ impl pallet_root_timelock::Config for Runtime {
     type DefaultDelays = RootTimelockDefaultDelays;
     type MaxDelay = RootTimelockMaxDelay;
     type EnactmentWindow = RootTimelockEnactmentWindow;
+    type MaxPendingTasks = RootTimelockMaxPendingTasks;
 }
 
 // ---------------------------------------------------------------------------

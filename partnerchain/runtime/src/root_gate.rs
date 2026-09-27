@@ -7,10 +7,19 @@
 //! own dispatches bypass the filter, which is how `RootTimelock::enact` runs a
 //! call once its delay has passed.
 
-use crate::{IntentSettlementDefaultMinSignerThreshold, Runtime, RuntimeCall};
+use crate::{BlockNumber, IntentSettlementDefaultMinSignerThreshold, Runtime, RuntimeCall};
 use core::slice;
 use frame_support::traits::Contains;
-use pallet_root_timelock::{CallClass, ClassifyCall, Delays};
+use pallet_root_timelock::{CallClass, ClassifyCall, Delays, Guardian};
+
+/// The longest `Grandpa.note_stalled` delay the sudo key may set without
+/// waiting. The forced change it asks for is applied that many blocks after
+/// the next session boundary, and GRANDPA refuses another forced change for
+/// twice as long. In a session at least twice this long neither outlasts the
+/// session, so the next rotation always goes through. A longer delay can hold
+/// a change pending across boundaries, and every rotation is refused while
+/// one is pending. The recorded recoveries used 30.
+pub const MAX_EXEMPT_STALL_DELAY: BlockNumber = 100;
 
 /// `frame_system::Config::BaseCallFilter`.
 pub struct SudoRootGate;
@@ -36,7 +45,9 @@ fn runs_at_once(call: &RuntimeCall) -> bool {
     match call {
         // Finality break-glass: forces the GRANDPA set the session already
         // selected at the next session boundary. It cannot choose that set.
-        RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { .. }) => true,
+        RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { delay, .. }) => {
+            *delay <= MAX_EXEMPT_STALL_DELAY
+        }
         // Kill-switches, in the stopping direction only.
         RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_disabled {
             disabled: true,
@@ -50,6 +61,11 @@ fn runs_at_once(call: &RuntimeCall) -> bool {
             | pallet_treasury::Call::void_spend { .. },
         ) => true,
         RuntimeCall::RootTimelock(pallet_root_timelock::Call::schedule { .. }) => true,
+        // With no guardian nothing can veto the sudo key's tasks, so its own
+        // veto gives it nothing new; it lets it withdraw an abandoned task.
+        RuntimeCall::RootTimelock(
+            pallet_root_timelock::Call::cancel { .. } | pallet_root_timelock::Call::cancel_all {},
+        ) => Guardian::<Runtime>::get().is_none(),
         // Raising a delay only slows Root down. Lowering one is scheduled.
         RuntimeCall::RootTimelock(pallet_root_timelock::Call::set_delay { class, blocks }) => {
             *blocks >= Delays::<Runtime>::get().of(*class)
@@ -118,22 +134,38 @@ impl ClassifyCall<RuntimeCall> for TimelockClassifier {
             };
         }
         match call {
-            // The committee and finality levers the chain is recovered with.
-            // They can change who holds authority, so they wait the recovery
-            // delay unless the guardian co-signs with `fast_track`.
-            RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { .. })
-            | RuntimeCall::OrinqReceipts(
-                pallet_orinq_receipts::Call::set_pinned_committee { .. }
-                | pallet_orinq_receipts::Call::clear_pinned_committee {}
+            // The committee and finality levers the chain is recovered with
+            // that cannot fix who holds authority: they change how the
+            // committee is drawn from the Cardano-registered candidates, or
+            // force the GRANDPA set the session chose within one session.
+            RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { delay, .. })
+                if *delay <= MAX_EXEMPT_STALL_DELAY =>
+            {
+                CallClass::Recovery
+            }
+            RuntimeCall::OrinqReceipts(
+                pallet_orinq_receipts::Call::clear_pinned_committee {}
                 | pallet_orinq_receipts::Call::set_break_glass_floor_enabled { .. }
-                | pallet_orinq_receipts::Call::set_break_glass_aura_keys { .. }
                 | pallet_orinq_receipts::Call::set_core_eviction_enabled { .. }
                 | pallet_orinq_receipts::Call::set_contribution_window_enabled { .. }
                 | pallet_orinq_receipts::Call::set_slack_invariant_enabled { .. }
                 | pallet_orinq_receipts::Call::reset_candidate_liveness { .. },
             ) => CallClass::Recovery,
+            // The levers that can: a pin is installed verbatim, bypassing the
+            // draw and every floor; the break-glass keys decide which draws
+            // the floor accepts; a longer stall can freeze GRANDPA rotation.
+            // Without a guardian co-sign they wait as long as a mint does.
+            RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { .. })
+            | RuntimeCall::OrinqReceipts(
+                pallet_orinq_receipts::Call::set_pinned_committee { .. }
+                | pallet_orinq_receipts::Call::set_break_glass_aura_keys { .. },
+            ) => CallClass::AuthorityRecovery,
             // The Cardano scripts observed for native-token transfers into
-            // this chain, and the signer floor for deposit attestations.
+            // this chain, and the signer floor for deposit attestations. The
+            // long class binds these levers only: `set_code`, `set_storage`,
+            // the attestation committee and the balance force calls reach
+            // the same ends and wait the standard delay, which with the
+            // guardian's veto is the bound against a stolen sudo key.
             RuntimeCall::NativeTokenManagement(
                 pallet_native_token_management::Call::set_main_chain_scripts { .. },
             ) => CallClass::Long,

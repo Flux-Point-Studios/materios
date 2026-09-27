@@ -3,12 +3,18 @@
 //! waits its class's delay in `RootTimelock`, where the guardian can veto it.
 
 use crate::migrations::{InitRootTimelock, PREPROD_GENESIS_HASH};
-use crate::root_gate::TimelockClassifier;
+use crate::root_gate::{TimelockClassifier, MAX_EXEMPT_STALL_DELAY};
 use crate::*;
-use frame_support::{assert_ok, storage::unhashed, traits::OnRuntimeUpgrade};
+use frame_support::{
+    assert_ok,
+    dispatch::{DispatchClass, GetDispatchInfo},
+    storage::unhashed,
+    traits::{Hooks, OnRuntimeUpgrade, OneSessionHandler},
+};
+use pallet_orinq_receipts::types::PinnedMember;
 use pallet_root_timelock::{CallClass, ClassifyCall, DelayTable, Task, TaskId, Tasks};
 use proptest::prelude::*;
-use sidechain_domain::{AssetName, MainchainAddress, PolicyId};
+use sidechain_domain::{AssetName, DParameter, EpochNonce, MainchainAddress, PolicyId};
 use sp_io::TestExternalities;
 use sp_keyring::Sr25519Keyring::{self as Keyring, Alice, Bob, Charlie, Dave};
 use sp_runtime::{
@@ -30,7 +36,7 @@ fn acct(k: Keyring) -> AccountId {
     k.to_account_id()
 }
 
-fn ext_with(sudo_key: AccountId, guardian: AccountId) -> TestExternalities {
+fn ext_with(sudo_key: AccountId, guardian: Option<AccountId>) -> TestExternalities {
     let mut storage = frame_system::GenesisConfig::<Runtime>::default()
         .build_storage()
         .expect("frame_system genesis builds");
@@ -52,7 +58,7 @@ fn ext_with(sudo_key: AccountId, guardian: AccountId) -> TestExternalities {
     .expect("sudo genesis builds");
     pallet_root_timelock::GenesisConfig::<Runtime> {
         delays: DELAYS,
-        guardian: Some(guardian),
+        guardian,
     }
     .assimilate_storage(&mut storage)
     .expect("root-timelock genesis builds");
@@ -62,7 +68,7 @@ fn ext_with(sudo_key: AccountId, guardian: AccountId) -> TestExternalities {
 }
 
 fn new_test_ext() -> TestExternalities {
-    ext_with(acct(SUDO), acct(GUARDIAN))
+    ext_with(acct(SUDO), Some(acct(GUARDIAN)))
 }
 
 fn signed(who: Keyring, call: RuntimeCall) -> Result<(), DispatchError> {
@@ -184,6 +190,35 @@ fn with_weight(call: RuntimeCall) -> RuntimeCall {
 
 fn remark() -> RuntimeCall {
     RuntimeCall::System(frame_system::Call::remark { remark: vec![] })
+}
+
+fn pinned_member(tag: u8) -> PinnedMember {
+    PinnedMember {
+        cross_chain: [2; 33],
+        aura: [tag; 32],
+        grandpa: [tag; 32],
+    }
+}
+
+fn pin(tag: u8) -> RuntimeCall {
+    orinq(pallet_orinq_receipts::pallet::Call::set_pinned_committee {
+        members: vec![pinned_member(tag)],
+        until_epoch: u64::MAX,
+    })
+}
+
+fn break_glass_keys(tag: u8) -> RuntimeCall {
+    orinq(
+        pallet_orinq_receipts::pallet::Call::set_break_glass_aura_keys {
+            keys: vec![[tag; 32]],
+        },
+    )
+}
+
+fn authorize_upgrade(tag: u8) -> RuntimeCall {
+    RuntimeCall::System(frame_system::Call::authorize_upgrade {
+        code_hash: Hash::repeat_byte(tag),
+    })
 }
 
 /// Reads a `StorageValue` its pallet keeps private, by its raw key.
@@ -351,6 +386,8 @@ fn every_root_gated_call_waits_unless_exempt() {
                 model: pallet_billing::types::PricingModel::FREE,
             }),
             set_delay(CallClass::Standard, DELAYS.standard - 1),
+            note_stalled(MAX_EXEMPT_STALL_DELAY + 1, 1),
+            note_stalled(1_000_000_000, 1),
         ];
         for call in root_calls {
             assert_eq!(
@@ -367,7 +404,7 @@ fn relayed_signed_paths_meet_the_same_gate() {
     let mut signatories = vec![acct(Alice), acct(Bob)];
     signatories.sort();
     let multisig = pallet_multisig::Pallet::<Runtime>::multi_account_id(&signatories, 1);
-    ext_with(multisig, acct(GUARDIAN)).execute_with(|| {
+    ext_with(multisig, Some(acct(GUARDIAN))).execute_with(|| {
         let res = signed(
             Alice,
             RuntimeCall::Multisig(pallet_multisig::Call::as_multi_threshold_1 {
@@ -474,7 +511,7 @@ fn a_multisig_guardian_cancels_through_the_filter() {
     let mut signatories = vec![acct(Charlie), acct(Dave)];
     signatories.sort();
     let guardian = pallet_multisig::Pallet::<Runtime>::multi_account_id(&signatories, 1);
-    ext_with(acct(SUDO), guardian).execute_with(|| {
+    ext_with(acct(SUDO), Some(guardian)).execute_with(|| {
         let id = schedule(force_set_balance(acct(Bob), 1));
         assert_ok!(signed(
             Charlie,
@@ -492,6 +529,8 @@ fn exempt_calls_work_immediately() {
     new_test_ext().execute_with(|| {
         assert_ok!(signed(SUDO, sudo(note_stalled(30, 7))));
         assert_eq!(Grandpa::stalled(), Some((30, 7)));
+        assert_ok!(signed(SUDO, sudo(note_stalled(MAX_EXEMPT_STALL_DELAY, 7))));
+        assert_eq!(Grandpa::stalled(), Some((MAX_EXEMPT_STALL_DELAY, 7)));
 
         // Kill-switches: the stopping direction is immediate, the other waits.
         assert_eq!(
@@ -708,16 +747,19 @@ fn calls_are_classified_by_what_they_can_change() {
     new_test_ext().execute_with(|| {
         use CallClass::*;
         pallet_intent_settlement::MinSignerThreshold::<Runtime>::put(3);
-        let pin = || {
-            orinq(pallet_orinq_receipts::pallet::Call::set_pinned_committee {
-                members: vec![],
-                until_epoch: 0,
-            })
-        };
         let mint = || force_set_balance(acct(Bob), 1);
         let cases = vec![
             (note_stalled(1, 1), Recovery),
-            (pin(), Recovery),
+            (note_stalled(MAX_EXEMPT_STALL_DELAY, 1), Recovery),
+            // A stall longer than the exempt bound can hold a GRANDPA change
+            // across a session boundary, freezing rotation.
+            (
+                note_stalled(MAX_EXEMPT_STALL_DELAY + 1, 1),
+                AuthorityRecovery,
+            ),
+            // Levers that name consensus keys.
+            (pin(1), AuthorityRecovery),
+            (break_glass_keys(1), AuthorityRecovery),
             (
                 orinq(pallet_orinq_receipts::pallet::Call::clear_pinned_committee {}),
                 Recovery,
@@ -727,12 +769,6 @@ fn calls_are_classified_by_what_they_can_change() {
                     pallet_orinq_receipts::pallet::Call::set_break_glass_floor_enabled {
                         enabled: false,
                     },
-                ),
-                Recovery,
-            ),
-            (
-                orinq(
-                    pallet_orinq_receipts::pallet::Call::set_break_glass_aura_keys { keys: vec![] },
                 ),
                 Recovery,
             ),
@@ -769,6 +805,34 @@ fn calls_are_classified_by_what_they_can_change() {
                 Recovery,
             ),
             (mint(), Standard),
+            // The attestation committee, which intent-settlement's deposit
+            // attestations count, and the emission rates wait the standard
+            // delay: `set_code` subsumes every lever, so the standard delay
+            // and the guardian's veto are the bound against a stolen key, and
+            // the long class binds only the dedicated levers.
+            (
+                orinq(pallet_orinq_receipts::pallet::Call::set_committee {
+                    members: vec![acct(Bob)],
+                    threshold: 1,
+                }),
+                Standard,
+            ),
+            (
+                orinq(pallet_orinq_receipts::pallet::Call::join_committee { member: acct(Bob) }),
+                Standard,
+            ),
+            (
+                orinq(
+                    pallet_orinq_receipts::pallet::Call::set_attestation_reward_per_signer {
+                        value: u128::MAX,
+                    },
+                ),
+                Standard,
+            ),
+            (
+                RuntimeCall::System(frame_system::Call::set_code { code: vec![] }),
+                Standard,
+            ),
             (
                 RuntimeCall::System(frame_system::Call::authorize_upgrade {
                     code_hash: Hash::zero(),
@@ -802,12 +866,13 @@ fn calls_are_classified_by_what_they_can_change() {
             ),
             (RuntimeCall::Sudo(pallet_sudo::Call::remove_key {}), Long),
             // Wrappers carry the longest class inside them.
-            (batch(vec![pin(), pin()]), Recovery),
-            (batch(vec![pin(), mint()]), Standard),
+            (batch(vec![pin(1), pin(1)]), AuthorityRecovery),
+            (batch(vec![note_stalled(1, 1), pin(1)]), AuthorityRecovery),
+            (batch(vec![pin(1), mint()]), Standard),
             (batch(vec![remark(), bridge_scripts(1)]), Long),
             (
                 RuntimeCall::Utility(pallet_utility::Call::force_batch {
-                    calls: vec![pin(), bridge_scripts(1)],
+                    calls: vec![pin(1), bridge_scripts(1)],
                 }),
                 Long,
             ),
@@ -815,11 +880,11 @@ fn calls_are_classified_by_what_they_can_change() {
             (with_weight(bridge_scripts(1)), Long),
             (dispatch_as_root(bridge_scripts(1)), Long),
             // A changed origin is never a recovery call.
-            (dispatch_as_root(pin()), Standard),
+            (dispatch_as_root(pin(1)), Standard),
             (
                 RuntimeCall::Sudo(pallet_sudo::Call::sudo_as {
                     who: acct(Bob).into(),
-                    call: Box::new(pin()),
+                    call: Box::new(pin(1)),
                 }),
                 Standard,
             ),
@@ -965,6 +1030,243 @@ fn a_fast_track_never_extends_or_revives_a_task() {
 }
 
 #[test]
+fn one_extrinsic_cannot_flood_the_guardian() {
+    new_test_ext().execute_with(|| {
+        let cap = RootTimelockMaxPendingTasks::get();
+        let mint = force_set_balance(acct(Bob), 1_000 * FUND);
+        let schedule_mint = timelock(pallet_root_timelock::Call::schedule {
+            call: Box::new(mint.clone()),
+        });
+        assert_ok!(signed(
+            SUDO,
+            sudo(batch(vec![schedule_mint; cap as usize + 10]))
+        ));
+        assert_eq!(Tasks::<Runtime>::count(), cap);
+        System::assert_has_event(
+            pallet_utility::Event::BatchInterrupted {
+                index: cap,
+                error: timelock_error(pallet_root_timelock::Error::TooManyTasks),
+            }
+            .into(),
+        );
+
+        let veto = timelock(pallet_root_timelock::Call::cancel_all {});
+        assert_eq!(veto.get_dispatch_info().class, DispatchClass::Operational);
+        assert_ok!(signed(GUARDIAN, veto));
+        assert_eq!(Tasks::<Runtime>::count(), 0);
+
+        System::set_block_number(1 + DELAYS.standard);
+        for id in 0..cap {
+            assert_eq!(
+                enact(id, mint.clone()),
+                Err(timelock_error(pallet_root_timelock::Error::UnknownTask))
+            );
+        }
+        assert_eq!(Balances::free_balance(acct(Bob)), FUND);
+    });
+}
+
+/// The session keys `select_authorities` would install for the next epoch.
+fn next_committee() -> Option<Vec<opaque::SessionKeys>> {
+    <Runtime as pallet_session_validator_management::Config>::select_authorities(
+        AuthoritySelectionInputs {
+            d_parameter: DParameter {
+                num_permissioned_candidates: 0,
+                num_registered_candidates: 0,
+            },
+            permissioned_candidates: vec![],
+            registered_candidates: vec![],
+            epoch_nonce: EpochNonce(vec![7; 32]),
+        },
+        ScEpochNumber(1),
+    )
+    .map(|committee| committee.into_iter().map(|(_, keys)| keys).collect())
+}
+
+fn pinned_keys(tag: u8) -> Vec<opaque::SessionKeys> {
+    vec![(
+        sp_core::sr25519::Public::from_raw([tag; 32]),
+        sp_core::ed25519::Public::from_raw([tag; 32]),
+    )
+        .into()]
+}
+
+#[test]
+fn a_pinned_committee_waits_the_standard_delay_unless_the_guardian_co_signs() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(next_committee(), None);
+        let installs = [pin(0xAA), break_glass_keys(0xAA)];
+        let alone: Vec<TaskId> = installs.iter().map(|call| schedule(call.clone())).collect();
+        for id in &alone {
+            assert_eq!(
+                (task(*id).class, task(*id).ready_at),
+                (CallClass::AuthorityRecovery, 1 + DELAYS.standard)
+            );
+        }
+
+        // The recovery delay alone no longer installs anyone.
+        System::set_block_number(1 + DELAYS.recovery);
+        for (id, call) in alone.iter().zip(&installs) {
+            assert_eq!(
+                enact(*id, call.clone()),
+                Err(timelock_error(pallet_root_timelock::Error::NotReady))
+            );
+        }
+        assert_eq!(next_committee(), None);
+
+        // A guardian co-signature installs at once.
+        let co_signed = schedule(pin(0xBB));
+        assert_ok!(signed(
+            GUARDIAN,
+            timelock(pallet_root_timelock::Call::fast_track { id: co_signed })
+        ));
+        assert_ok!(enact(co_signed, pin(0xBB)));
+        assert_eq!(next_committee(), Some(pinned_keys(0xBB)));
+
+        // Without one, the standard delay.
+        System::set_block_number(1 + DELAYS.standard);
+        for (id, call) in alone.iter().zip(&installs) {
+            assert_ok!(enact(*id, call.clone()));
+        }
+        assert_eq!(next_committee(), Some(pinned_keys(0xAA)));
+    });
+}
+
+#[test]
+fn without_a_guardian_the_sudo_key_withdraws_a_task() {
+    ext_with(acct(SUDO), None).execute_with(|| {
+        let abandoned = schedule(authorize_upgrade(0xA));
+        let superseded = schedule(authorize_upgrade(0xB));
+        assert_ok!(signed(
+            SUDO,
+            sudo(timelock(pallet_root_timelock::Call::cancel {
+                id: abandoned
+            }))
+        ));
+        assert_ok!(signed(
+            SUDO,
+            sudo(timelock(pallet_root_timelock::Call::cancel_all {}))
+        ));
+        System::set_block_number(1 + DELAYS.standard);
+        for (id, tag) in [(abandoned, 0xA), (superseded, 0xB)] {
+            assert_eq!(
+                enact(id, authorize_upgrade(tag)),
+                Err(timelock_error(pallet_root_timelock::Error::UnknownTask))
+            );
+        }
+        assert_eq!(
+            private_value::<(Hash, bool)>(b"System", b"AuthorizedUpgrade"),
+            None
+        );
+
+        // A guardian appointment cannot be withdrawn, and once it lands the
+        // sudo key's veto ends.
+        let appoint = timelock(pallet_root_timelock::Call::set_guardian {
+            guardian: Some(acct(GUARDIAN)),
+        });
+        let id = schedule(appoint.clone());
+        assert_ok!(signed(
+            SUDO,
+            sudo(timelock(pallet_root_timelock::Call::cancel { id }))
+        ));
+        assert_eq!(
+            last_sudo_result(),
+            Err(timelock_error(pallet_root_timelock::Error::NotVetoable))
+        );
+        System::set_block_number(task(id).ready_at);
+        assert_ok!(enact(id, appoint));
+        let later = schedule(authorize_upgrade(0xC));
+        assert_eq!(
+            signed(
+                SUDO,
+                sudo(timelock(pallet_root_timelock::Call::cancel { id: later }))
+            ),
+            Err(call_filtered())
+        );
+        assert_eq!(
+            signed(
+                SUDO,
+                sudo(timelock(pallet_root_timelock::Call::cancel_all {}))
+            ),
+            Err(call_filtered())
+        );
+    });
+}
+
+/// Hands GRANDPA a new validator set at `block`, as a session change does.
+fn grandpa_session(block: BlockNumber, seed: u8) {
+    System::set_block_number(block);
+    let validators: Vec<(AccountId, pallet_grandpa::AuthorityId)> = (0..3u8)
+        .map(|i| {
+            let byte = seed.wrapping_add(i);
+            (
+                AccountId::from([byte; 32]),
+                sp_core::ed25519::Public::from_raw([byte; 32]).into(),
+            )
+        })
+        .collect();
+    let keys = || validators.iter().map(|(who, key)| (who, key.clone()));
+    <Grandpa as OneSessionHandler<AccountId>>::on_new_session(true, keys(), keys());
+    <Grandpa as Hooks<BlockNumber>>::on_finalize(block);
+}
+
+fn finalize_blocks(from: BlockNumber, to: BlockNumber) {
+    for block in from..=to {
+        System::set_block_number(block);
+        <Grandpa as Hooks<BlockNumber>>::on_finalize(block);
+    }
+}
+
+#[test]
+fn an_exempt_stall_never_freezes_grandpa_rotation() {
+    new_test_ext().execute_with(|| {
+        // The shortest session the exempt bound is sized for.
+        let session = 2 * MAX_EXEMPT_STALL_DELAY;
+        let mut block = 10;
+        for seed in [10u8, 40, 70] {
+            // The longest exempt stall, fired before every boundary.
+            assert_ok!(signed(
+                SUDO,
+                sudo(note_stalled(MAX_EXEMPT_STALL_DELAY, block - 1))
+            ));
+            let set_id = Grandpa::current_set_id();
+            grandpa_session(block, seed);
+            assert_eq!(Grandpa::current_set_id(), set_id + 1);
+            finalize_blocks(block + 1, block + session - 1);
+            assert_eq!(Grandpa::pending_change().map(|change| change.delay), None);
+            block += session;
+        }
+        let set_id = Grandpa::current_set_id();
+        grandpa_session(block, 100);
+        assert_eq!(Grandpa::current_set_id(), set_id + 1);
+    });
+}
+
+#[test]
+fn a_stall_beyond_the_exempt_bound_waits_like_a_key_change() {
+    new_test_ext().execute_with(|| {
+        for delay in [MAX_EXEMPT_STALL_DELAY + 1, 1_000_000_000] {
+            assert_eq!(
+                signed(SUDO, sudo(note_stalled(delay, 1))),
+                Err(call_filtered())
+            );
+        }
+        assert_eq!(Grandpa::stalled(), None);
+        let long_stall = note_stalled(1_000, 1);
+        let id = schedule(long_stall.clone());
+        assert_eq!(
+            (task(id).class, task(id).ready_at),
+            (CallClass::AuthorityRecovery, 1 + DELAYS.standard)
+        );
+        System::set_block_number(1 + DELAYS.recovery);
+        assert_eq!(
+            enact(id, long_stall),
+            Err(timelock_error(pallet_root_timelock::Error::NotReady))
+        );
+    });
+}
+
+#[test]
 fn recovery_admin_calls_are_behind_the_delay() {
     new_test_ext().execute_with(|| {
         let hand_over = RuntimeCall::Recovery(pallet_recovery::Call::set_recovered {
@@ -1043,6 +1345,8 @@ fn mainnet_defaults() {
     );
     assert_eq!(RootTimelockMaxDelay::get(), 90 * DAYS);
     assert_eq!(RootTimelockEnactmentWindow::get(), 7 * DAYS);
+    assert_eq!(RootTimelockMaxPendingTasks::get(), 64);
+    assert_eq!(MAX_EXEMPT_STALL_DELAY, 100);
     assert!(TESTNET_TIMELOCK_DELAYS.is_valid(RootTimelockMaxDelay::get()));
 }
 
@@ -1091,10 +1395,10 @@ fn stored_delays_are_never_overwritten() {
 
 // ---------------------------------------------------------------------------
 // Property: over random mixes of direct sudo attempts, scheduling, enacting,
-// vetoes, fast-tracks and time, the runtime agrees with a model that lets a
-// non-exempt call take effect only through an enactment at or after
-// `scheduled_at + delay(class)`. The model states the policy independently of
-// the runtime's gate and classifier.
+// vetoes (one task or all), fast-tracks, pruning and time, the runtime agrees
+// with a model that lets a non-exempt call take effect only through an
+// enactment at or after `scheduled_at + delay(class)`. The model states the
+// policy independently of the runtime's gate and classifier.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -1105,6 +1409,7 @@ enum Target {
     Bridge { tag: u8 },
     TeeDisabled { disabled: bool },
     Stall { value: u8 },
+    Pin { tag: u8 },
     SetDelay { class: u8, blocks: BlockNumber },
 }
 
@@ -1146,6 +1451,10 @@ enum Action {
     FastTrack {
         pick: u8,
     },
+    CancelAll,
+    Prune {
+        pick: u8,
+    },
     Advance {
         blocks: BlockNumber,
     },
@@ -1183,6 +1492,7 @@ fn target_call(t: Target) -> RuntimeCall {
         Target::Stall { value } => {
             note_stalled(BlockNumber::from(value) + 1, BlockNumber::from(value))
         }
+        Target::Pin { tag } => pin(tag),
         Target::SetDelay { class, blocks } => set_delay(class_index(class), blocks),
     }
 }
@@ -1234,6 +1544,7 @@ struct Model {
     bridge: Option<u8>,
     tee_disabled: bool,
     stalled: Option<(BlockNumber, BlockNumber)>,
+    pin: Option<u8>,
 }
 
 impl Model {
@@ -1250,6 +1561,7 @@ impl Model {
             bridge: None,
             tee_disabled: true,
             stalled: None,
+            pin: None,
         }
     }
 
@@ -1257,7 +1569,7 @@ impl Model {
     fn exempt(&self, t: Target) -> bool {
         match t {
             Target::TeeDisabled { disabled } => disabled,
-            Target::Stall { .. } => true,
+            Target::Stall { value } => BlockNumber::from(value) < MAX_EXEMPT_STALL_DELAY,
             Target::SetDelay { class, blocks } => blocks >= self.delays.of(class_index(class)),
             _ => false,
         }
@@ -1269,7 +1581,11 @@ impl Model {
             Target::Store { .. } | Target::Mint { .. } | Target::TeeDisabled { .. } => {
                 CallClass::Standard
             }
-            Target::Lever { .. } | Target::Stall { .. } => CallClass::Recovery,
+            Target::Lever { .. } => CallClass::Recovery,
+            Target::Stall { value } if BlockNumber::from(value) < MAX_EXEMPT_STALL_DELAY => {
+                CallClass::Recovery
+            }
+            Target::Stall { .. } | Target::Pin { .. } => CallClass::AuthorityRecovery,
             Target::Bridge { .. } => CallClass::Long,
             Target::SetDelay { class, .. } if class_index(class) == CallClass::Long => {
                 CallClass::Long
@@ -1293,11 +1609,15 @@ impl Model {
             Target::Stall { value } => {
                 self.stalled = Some((BlockNumber::from(value) + 1, BlockNumber::from(value)))
             }
+            Target::Pin { tag } => self.pin = Some(tag),
             Target::SetDelay { class, blocks } => {
-                let delays = self.delays.with(class_index(class), blocks);
-                if !delays.is_valid(RootTimelockMaxDelay::get()) {
+                let Some(delays) = self
+                    .delays
+                    .with(class_index(class), blocks)
+                    .filter(|delays| delays.is_valid(RootTimelockMaxDelay::get()))
+                else {
                     return false;
-                }
+                };
                 self.delays = delays;
             }
         }
@@ -1404,7 +1724,12 @@ impl Model {
                     timelock(pallet_root_timelock::Call::fast_track { id }),
                 );
                 match self.tasks.get_mut(&id) {
-                    Some(pending) if pending.class != CallClass::Recovery => {
+                    Some(pending)
+                        if !matches!(
+                            pending.class,
+                            CallClass::Recovery | CallClass::AuthorityRecovery
+                        ) =>
+                    {
                         assert_eq!(result, Err(timelock_error(E::NotFastTrackable)))
                     }
                     Some(pending) if self.now >= pending.ready_at => {
@@ -1415,6 +1740,27 @@ impl Model {
                         pending.ready_at = self.now;
                     }
                     None => assert_eq!(result, Err(timelock_error(E::UnknownTask))),
+                }
+            }
+            Action::CancelAll => {
+                assert_ok!(signed(
+                    GUARDIAN,
+                    timelock(pallet_root_timelock::Call::cancel_all {})
+                ));
+                self.tasks.clear();
+            }
+            Action::Prune { pick } => {
+                let Some(id) = self.pick(pick) else { return };
+                let result = signed(ENACTOR, timelock(pallet_root_timelock::Call::prune { id }));
+                match self.tasks.get(&id) {
+                    None => assert_eq!(result, Err(timelock_error(E::UnknownTask))),
+                    Some(pending)
+                        if self.now > pending.ready_at + RootTimelockEnactmentWindow::get() =>
+                    {
+                        assert_ok!(result);
+                        self.tasks.remove(&id);
+                    }
+                    Some(_) => assert_eq!(result, Err(timelock_error(E::NotExpired))),
                 }
             }
             Action::Advance { blocks } => {
@@ -1457,6 +1803,11 @@ impl Model {
             self.tee_disabled
         );
         assert_eq!(Grandpa::stalled(), self.stalled);
+        assert_eq!(
+            pallet_orinq_receipts::PinnedCommittee::<Runtime>::get()
+                .map(|(members, _)| members[0].aura[0]),
+            self.pin
+        );
         assert_eq!(pallet_root_timelock::Delays::<Runtime>::get(), self.delays);
         let pending: Vec<(TaskId, BlockNumber)> =
             self.tasks.iter().map(|(id, t)| (*id, t.ready_at)).collect();
@@ -1476,6 +1827,7 @@ fn target_strategy() -> impl Strategy<Value = Target> {
         any::<u8>().prop_map(|tag| Target::Bridge { tag }),
         any::<bool>().prop_map(|disabled| Target::TeeDisabled { disabled }),
         any::<u8>().prop_map(|value| Target::Stall { value }),
+        any::<u8>().prop_map(|tag| Target::Pin { tag }),
         (
             0u8..3,
             prop_oneof![
@@ -1513,6 +1865,8 @@ fn action_strategy() -> impl Strategy<Value = Action> {
         3 => any::<u8>().prop_map(|pick| Action::Enact { pick }),
         1 => any::<u8>().prop_map(|pick| Action::Cancel { pick }),
         1 => any::<u8>().prop_map(|pick| Action::FastTrack { pick }),
+        1 => Just(Action::CancelAll),
+        1 => any::<u8>().prop_map(|pick| Action::Prune { pick }),
         3 => prop_oneof![
             8 => 0..=60u32,
             1 => Just(RootTimelockEnactmentWindow::get()),

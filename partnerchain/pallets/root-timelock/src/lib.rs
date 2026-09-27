@@ -4,13 +4,19 @@
 //! which it may run; the call itself is public in the scheduling extrinsic.
 //! After the delay of the call's class, anyone may `enact` it by resubmitting
 //! the same call, which then dispatches as Root. Until then the guardian may
-//! `cancel` it, and may `fast_track` a `Recovery`-class call.
+//! `cancel` it, and may `fast_track` a recovery or authority-recovery call.
 //!
-//! Root cannot cancel. A compromised sudo key holds Root, and a Root veto
-//! would let it cancel every attempt to replace it. For the same reason the
+//! Root cannot cancel while a guardian is set. A compromised sudo key holds
+//! Root, and a Root veto would let it cancel every attempt to replace it.
+//! With no guardian nothing can veto the sudo key's own tasks, so Root may
+//! cancel then, which lets an operator withdraw a task it abandoned. The
 //! guardian cannot veto a scheduled `set_guardian`, which waits the long delay
 //! instead, so a compromised guardian can be replaced but not faster than
 //! the public can see it coming.
+//!
+//! At most `MaxPendingTasks` tasks are stored, so no burst of scheduling can
+//! outrun the veto: `cancel_all` clears every vetoable task in one call, and
+//! anyone may `prune` a task whose enactment window has closed.
 //!
 //! The pallet does not stop Root from being used directly. The runtime's call
 //! filter must admit the sudo key's Root only for its exempt calls and for
@@ -21,7 +27,7 @@
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 
 #[cfg(test)]
 mod mock;
@@ -49,13 +55,19 @@ pub use pallet::*;
     MaxEncodedLen,
 )]
 pub enum CallClass {
-    /// A finality or committee recovery call that can change who holds
-    /// authority. The guardian may fast-track it.
+    /// A recovery lever that cannot fix who holds authority: it changes how
+    /// the committee is drawn, or forces the finality set the session already
+    /// chose. Waits the recovery delay; the guardian may fast-track it.
     Recovery,
+    /// A recovery lever that can fix who holds authority, such as a pinned
+    /// committee of named consensus keys. Waits the standard delay unless the
+    /// guardian fast-tracks it, so the sudo key alone installs authors no
+    /// sooner than it could do anything else.
+    AuthorityRecovery,
     /// Everything not classified otherwise.
     Standard,
-    /// Loosening a bridge or supply-valve parameter, changing the guardian,
-    /// or lowering the long delay itself.
+    /// Loosening a parameter the runtime commits to changing slowly, changing
+    /// the guardian, or lowering the long delay itself.
     Long,
 }
 
@@ -83,18 +95,21 @@ impl<BlockNumber: Copy + Ord + Default> DelayTable<BlockNumber> {
     pub fn of(&self, class: CallClass) -> BlockNumber {
         match class {
             CallClass::Recovery => self.recovery,
-            CallClass::Standard => self.standard,
+            CallClass::AuthorityRecovery | CallClass::Standard => self.standard,
             CallClass::Long => self.long,
         }
     }
 
-    pub fn with(mut self, class: CallClass, blocks: BlockNumber) -> Self {
+    /// The table with `class`'s delay set to `blocks`, or `None` for a class
+    /// that waits another class's delay.
+    pub fn with(mut self, class: CallClass, blocks: BlockNumber) -> Option<Self> {
         match class {
             CallClass::Recovery => self.recovery = blocks,
+            CallClass::AuthorityRecovery => return None,
             CallClass::Standard => self.standard = blocks,
             CallClass::Long => self.long = blocks,
         }
-        self
+        Some(self)
     }
 
     /// Non-zero, `recovery <= standard <= long <= max`. The ceiling bounds how
@@ -181,6 +196,11 @@ pub mod pallet {
         /// Blocks after `ready_at` during which a call may still be enacted.
         /// A task left unenacted longer than this can no longer run.
         type EnactmentWindow: Get<BlockNumberFor<Self>>;
+
+        /// Tasks that may be stored at once, expired ones included until
+        /// pruned. It bounds what the guardian must veto: `cancel_all` clears
+        /// the whole queue in one call.
+        type MaxPendingTasks: Get<u32>;
     }
 
     #[pallet::storage]
@@ -195,7 +215,7 @@ pub mod pallet {
 
     #[pallet::storage]
     pub type Tasks<T: Config> =
-        StorageMap<_, Twox64Concat, TaskId, Task<T::Hash, BlockNumberFor<T>>, OptionQuery>;
+        CountedStorageMap<_, Twox64Concat, TaskId, Task<T::Hash, BlockNumberFor<T>>, OptionQuery>;
 
     #[pallet::genesis_config]
     pub struct GenesisConfig<T: Config> {
@@ -251,6 +271,10 @@ pub mod pallet {
         GuardianSet {
             guardian: Option<T::AccountId>,
         },
+        /// An expired task was removed.
+        Pruned {
+            id: TaskId,
+        },
     }
 
     #[pallet::error]
@@ -270,6 +294,11 @@ pub mod pallet {
         /// The task is already ready or has expired. A fast-track only brings
         /// a pending task forward; it never extends or revives one.
         AlreadyReady,
+        /// `MaxPendingTasks` tasks are stored. Prune expired ones, or wait
+        /// for tasks to be enacted or cancelled.
+        TooManyTasks,
+        /// The task can still be enacted.
+        NotExpired,
     }
 
     #[pallet::hooks]
@@ -283,6 +312,10 @@ pub mod pallet {
                 T::EnactmentWindow::get() > BlockNumberFor::<T>::default(),
                 "EnactmentWindow must be non-zero"
             );
+            assert!(
+                T::MaxPendingTasks::get() > 0,
+                "MaxPendingTasks must be non-zero"
+            );
         }
 
         #[cfg(feature = "try-runtime")]
@@ -290,6 +323,10 @@ pub mod pallet {
             ensure!(
                 Delays::<T>::get().is_valid(T::MaxDelay::get()),
                 "stored delays are zero, out of order or above MaxDelay"
+            );
+            ensure!(
+                Tasks::<T>::count() <= T::MaxPendingTasks::get(),
+                "more tasks stored than MaxPendingTasks"
             );
             Ok(())
         }
@@ -300,7 +337,7 @@ pub mod pallet {
         /// Record `call` to run as Root once its class's delay has passed.
         #[pallet::call_index(0)]
         #[pallet::weight(
-            T::DbWeight::get().reads_writes(3, 2).saturating_add(call_hash_weight(call.as_ref()))
+            T::DbWeight::get().reads_writes(4, 3).saturating_add(call_hash_weight(call.as_ref()))
         )]
         pub fn schedule(
             origin: OriginFor<T>,
@@ -310,6 +347,10 @@ pub mod pallet {
             ensure!(
                 !T::Classifier::wraps_guardian_change(&call),
                 Error::<T>::GuardianChangeNotAlone
+            );
+            ensure!(
+                Tasks::<T>::count() < T::MaxPendingTasks::get(),
+                Error::<T>::TooManyTasks
             );
             let class = T::Classifier::class_of(&call);
             let vetoable = !matches!(call.is_sub_type(), Some(Call::set_guardian { .. }));
@@ -339,11 +380,11 @@ pub mod pallet {
         /// The guardian's veto. Operational so a full block cannot keep it out.
         #[pallet::call_index(1)]
         #[pallet::weight((
-            T::DbWeight::get().reads_writes(2, 1).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
+            T::DbWeight::get().reads_writes(3, 2).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
             DispatchClass::Operational,
         ))]
         pub fn cancel(origin: OriginFor<T>, id: TaskId) -> DispatchResult {
-            Self::ensure_guardian(origin)?;
+            Self::ensure_canceller(origin)?;
             let task = Tasks::<T>::get(id).ok_or(Error::<T>::UnknownTask)?;
             ensure!(task.vetoable, Error::<T>::NotVetoable);
             Tasks::<T>::remove(id);
@@ -351,8 +392,8 @@ pub mod pallet {
             Ok(())
         }
 
-        /// The guardian's co-signature: a pending `Recovery` task becomes
-        /// ready now.
+        /// The guardian's co-signature: a pending recovery or
+        /// authority-recovery task becomes ready now.
         #[pallet::call_index(2)]
         #[pallet::weight((
             T::DbWeight::get().reads_writes(2, 1).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
@@ -363,7 +404,10 @@ pub mod pallet {
             Tasks::<T>::try_mutate(id, |task| {
                 let task = task.as_mut().ok_or(Error::<T>::UnknownTask)?;
                 ensure!(
-                    task.class == CallClass::Recovery,
+                    matches!(
+                        task.class,
+                        CallClass::Recovery | CallClass::AuthorityRecovery
+                    ),
                     Error::<T>::NotFastTrackable
                 );
                 let now = frame_system::Pallet::<T>::block_number();
@@ -398,10 +442,7 @@ pub mod pallet {
             );
             let now = frame_system::Pallet::<T>::block_number();
             ensure!(now >= task.ready_at, Error::<T>::NotReady);
-            ensure!(
-                now <= task.ready_at.saturating_add(T::EnactmentWindow::get()),
-                Error::<T>::Expired
-            );
+            ensure!(now <= Self::enactable_until(&task), Error::<T>::Expired);
             ensure!(
                 T::Classifier::class_of(&call) <= task.class,
                 Error::<T>::ClassRaised
@@ -431,11 +472,10 @@ pub mod pallet {
             blocks: BlockNumberFor<T>,
         ) -> DispatchResult {
             ensure_root(origin)?;
-            let delays = Delays::<T>::get().with(class, blocks);
-            ensure!(
-                delays.is_valid(T::MaxDelay::get()),
-                Error::<T>::InvalidDelays
-            );
+            let delays = Delays::<T>::get()
+                .with(class, blocks)
+                .filter(|delays| delays.is_valid(T::MaxDelay::get()))
+                .ok_or(Error::<T>::InvalidDelays)?;
             Delays::<T>::put(delays);
             Self::deposit_event(Event::DelaySet { class, blocks });
             Ok(())
@@ -452,6 +492,50 @@ pub mod pallet {
             Self::deposit_event(Event::GuardianSet { guardian });
             Ok(())
         }
+
+        /// The guardian's veto over every task it may veto, in one call.
+        #[pallet::call_index(6)]
+        #[pallet::weight({
+            let tasks = u64::from(T::MaxPendingTasks::get());
+            (
+                T::DbWeight::get()
+                    .reads_writes(tasks.saturating_add(2), tasks.saturating_add(1))
+                    .saturating_add(Weight::from_parts(
+                        BASE_REF_TIME.saturating_mul(tasks.saturating_add(1)),
+                        0,
+                    )),
+                DispatchClass::Operational,
+            )
+        })]
+        pub fn cancel_all(origin: OriginFor<T>) -> DispatchResult {
+            Self::ensure_canceller(origin)?;
+            let vetoable: Vec<TaskId> = Tasks::<T>::iter()
+                .filter_map(|(id, task)| task.vetoable.then_some(id))
+                .collect();
+            for id in vetoable {
+                Tasks::<T>::remove(id);
+                Self::deposit_event(Event::Cancelled { id });
+            }
+            Ok(())
+        }
+
+        /// Remove a task whose enactment window has closed, freeing its place
+        /// in the queue. Anyone may submit it: an expired task can never run.
+        #[pallet::call_index(7)]
+        #[pallet::weight(
+            T::DbWeight::get().reads_writes(2, 2).saturating_add(Weight::from_parts(BASE_REF_TIME, 0))
+        )]
+        pub fn prune(origin: OriginFor<T>, id: TaskId) -> DispatchResult {
+            ensure_signed(origin)?;
+            let task = Tasks::<T>::get(id).ok_or(Error::<T>::UnknownTask)?;
+            ensure!(
+                frame_system::Pallet::<T>::block_number() > Self::enactable_until(&task),
+                Error::<T>::NotExpired
+            );
+            Tasks::<T>::remove(id);
+            Self::deposit_event(Event::Pruned { id });
+            Ok(())
+        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -462,6 +546,18 @@ pub mod pallet {
                 DispatchError::BadOrigin
             );
             Ok(())
+        }
+
+        /// The guardian, or Root while no guardian is set.
+        fn ensure_canceller(origin: OriginFor<T>) -> DispatchResult {
+            match Guardian::<T>::get() {
+                Some(_) => Self::ensure_guardian(origin),
+                None => ensure_root(origin).map_err(Into::into),
+            }
+        }
+
+        fn enactable_until(task: &Task<T::Hash, BlockNumberFor<T>>) -> BlockNumberFor<T> {
+            task.ready_at.saturating_add(T::EnactmentWindow::get())
         }
     }
 
@@ -484,7 +580,7 @@ pub mod pallet {
     /// The task read and removal, the classifier's reads, and hashing.
     fn enact_overhead<T: Config>(call: &<T as Config>::RuntimeCall) -> Weight {
         T::DbWeight::get()
-            .reads_writes(3, 1)
+            .reads_writes(4, 2)
             .saturating_add(call_hash_weight(call))
     }
 }

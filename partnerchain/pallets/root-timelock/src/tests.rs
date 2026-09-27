@@ -202,18 +202,137 @@ fn only_the_guardian_can_cancel() {
 }
 
 #[test]
-fn without_a_guardian_nobody_cancels() {
+fn without_a_guardian_root_withdraws_a_task() {
     new_test_ext().execute_with(|| {
         Guardian::<Test>::kill();
-        let id = schedule(set_storage_call(b"a"));
+        let abandoned = schedule(set_storage_call(b"a"));
+        let others = [schedule(set_storage_call(b"b")), schedule(long_call())];
+        let replacement = schedule(guardian_change(Some(GUARDIAN)));
         assert_noop!(
-            RootTimelock::cancel(RuntimeOrigin::signed(GUARDIAN), id),
+            RootTimelock::cancel(RuntimeOrigin::signed(GUARDIAN), abandoned),
             DispatchError::BadOrigin
         );
         assert_noop!(
-            RootTimelock::cancel(RuntimeOrigin::root(), id),
+            RootTimelock::cancel_all(RuntimeOrigin::signed(GUARDIAN)),
             DispatchError::BadOrigin
         );
+
+        assert_ok!(RootTimelock::cancel(RuntimeOrigin::root(), abandoned));
+        System::assert_last_event(Event::Cancelled { id: abandoned }.into());
+        assert_noop!(
+            RootTimelock::cancel(RuntimeOrigin::root(), replacement),
+            Error::<Test>::NotVetoable
+        );
+        assert_ok!(RootTimelock::cancel_all(RuntimeOrigin::root()));
+        for id in others {
+            assert!(Tasks::<Test>::get(id).is_none());
+        }
+        assert!(Tasks::<Test>::get(replacement).is_some());
+
+        System::set_block_number(31);
+        assert_ok!(enact(replacement, guardian_change(Some(GUARDIAN))));
+        let after = schedule(set_storage_call(b"c"));
+        assert_noop!(
+            RootTimelock::cancel(RuntimeOrigin::root(), after),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            RootTimelock::cancel_all(RuntimeOrigin::root()),
+            DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn cancel_all_vetoes_every_vetoable_task_in_one_call() {
+    new_test_ext().execute_with(|| {
+        let vetoable = [
+            schedule(set_storage_call(b"a")),
+            schedule(recovery_call()),
+            schedule(long_call()),
+        ];
+        let replacement = schedule(guardian_change(Some(ANYONE)));
+        assert_noop!(
+            RootTimelock::cancel_all(RuntimeOrigin::signed(ANYONE)),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            RootTimelock::cancel_all(RuntimeOrigin::root()),
+            DispatchError::BadOrigin
+        );
+
+        assert_ok!(RootTimelock::cancel_all(RuntimeOrigin::signed(GUARDIAN)));
+        for id in vetoable {
+            assert!(Tasks::<Test>::get(id).is_none());
+            System::assert_has_event(Event::Cancelled { id }.into());
+        }
+        assert_eq!(Tasks::<Test>::count(), 1);
+        assert!(Tasks::<Test>::get(replacement).is_some());
+    });
+}
+
+#[test]
+fn the_queue_is_bounded_and_pruning_frees_a_place() {
+    new_test_ext().execute_with(|| {
+        let first = schedule(set_storage_call(b"a"));
+        for _ in 1..MAX_PENDING {
+            schedule(set_storage_call(b"a"));
+        }
+        assert_noop!(
+            RootTimelock::schedule(RuntimeOrigin::root(), Box::new(set_storage_call(b"a"))),
+            Error::<Test>::TooManyTasks
+        );
+
+        // Ready at 11, enactable through 16: pruning waits for expiry.
+        System::set_block_number(16);
+        assert_noop!(
+            RootTimelock::prune(RuntimeOrigin::signed(ANYONE), first),
+            Error::<Test>::NotExpired
+        );
+        assert_noop!(
+            RootTimelock::prune(RuntimeOrigin::root(), first),
+            DispatchError::BadOrigin
+        );
+        System::set_block_number(17);
+        assert_ok!(RootTimelock::prune(RuntimeOrigin::signed(ANYONE), first));
+        System::assert_last_event(Event::Pruned { id: first }.into());
+        assert!(Tasks::<Test>::get(first).is_none());
+        assert_noop!(
+            RootTimelock::prune(RuntimeOrigin::signed(ANYONE), first),
+            Error::<Test>::UnknownTask
+        );
+
+        schedule(set_storage_call(b"a"));
+        assert_eq!(Tasks::<Test>::count(), MAX_PENDING);
+        assert_ok!(RootTimelock::cancel_all(RuntimeOrigin::signed(GUARDIAN)));
+        assert_eq!(Tasks::<Test>::count(), 0);
+        schedule(set_storage_call(b"a"));
+    });
+}
+
+#[test]
+fn an_authority_recovery_call_waits_the_standard_delay_unless_co_signed() {
+    new_test_ext().execute_with(|| {
+        let install = || RuntimeCall::System(frame_system::Call::set_heap_pages { pages: 1 });
+        let alone = schedule(install());
+        let co_signed = schedule(install());
+        assert_eq!(
+            Tasks::<Test>::get(alone).map(|t| (t.class, t.ready_at)),
+            Some((CallClass::AuthorityRecovery, 11))
+        );
+
+        System::set_block_number(3);
+        assert_noop!(enact(alone, install()), Error::<Test>::NotReady);
+        assert_ok!(RootTimelock::fast_track(
+            RuntimeOrigin::signed(GUARDIAN),
+            co_signed
+        ));
+        assert_ok!(enact(co_signed, install()));
+
+        System::set_block_number(10);
+        assert_noop!(enact(alone, install()), Error::<Test>::NotReady);
+        System::set_block_number(11);
+        assert_ok!(enact(alone, install()));
     });
 }
 
@@ -324,6 +443,11 @@ fn set_delay_keeps_the_table_valid() {
         );
         assert_noop!(
             RootTimelock::set_delay(RuntimeOrigin::root(), CallClass::Long, MAX_DELAY + 1),
+            Error::<Test>::InvalidDelays
+        );
+        // It waits the standard delay and has none of its own to set.
+        assert_noop!(
+            RootTimelock::set_delay(RuntimeOrigin::root(), CallClass::AuthorityRecovery, 20),
             Error::<Test>::InvalidDelays
         );
 
@@ -475,6 +599,27 @@ fn genesis_rejects_a_delay_above_the_maximum() {
         standard: 10,
         long: MAX_DELAY + 1,
     });
+}
+
+#[test]
+fn authority_recovery_waits_the_standard_delay() {
+    let table = DelayTable {
+        recovery: 1u32,
+        standard: 2,
+        long: 3,
+    };
+    assert_eq!(table.of(CallClass::AuthorityRecovery), 2);
+    assert_eq!(table.with(CallClass::AuthorityRecovery, 5), None);
+    assert_eq!(
+        table.with(CallClass::Standard, 3),
+        Some(DelayTable {
+            recovery: 1,
+            standard: 3,
+            long: 3
+        })
+    );
+    assert!(CallClass::Recovery < CallClass::AuthorityRecovery);
+    assert!(CallClass::AuthorityRecovery < CallClass::Standard);
 }
 
 #[test]
