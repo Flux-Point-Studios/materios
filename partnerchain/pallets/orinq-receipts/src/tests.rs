@@ -3324,6 +3324,22 @@ mod explicit_reward_genesis {
     }
 
     #[test]
+    #[should_panic(expected = "attestation reward, era cap base and era cap baseline must be set together")]
+    fn reward_and_cap_without_a_baseline_refuse_genesis() {
+        let mut patch = explicit_rewards();
+        patch.as_object_mut().unwrap().remove("eraCapBaselineAttestorCount");
+        build_from_patch(patch);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestation reward, era cap base and era cap baseline must be set together")]
+    fn cap_and_baseline_without_a_reward_refuse_genesis() {
+        let mut patch = explicit_rewards();
+        patch.as_object_mut().unwrap().remove("attestationRewardPerSigner");
+        build_from_patch(patch);
+    }
+
+    #[test]
     #[should_panic(expected = "era_cap_baseline_attestor_count must be non-zero")]
     fn zero_baseline_refuses_genesis() {
         let mut patch = explicit_rewards();

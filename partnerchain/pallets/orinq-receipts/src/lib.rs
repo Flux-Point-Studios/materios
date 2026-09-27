@@ -709,18 +709,26 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            // Reward and subsidy values have no default. One the spec leaves
-            // out stays unset, which pays nothing; the mainnet launch
-            // preflight refuses a genesis that does not store all three.
-            if let Some(reward) = self.attestation_reward_per_signer {
-                AttestationRewardPerSigner::<T>::put(reward);
-            }
-            if let Some(cap) = self.era_cap_base {
-                EraCapBase::<T>::put(cap);
-            }
-            if let Some(baseline) = self.era_cap_baseline_attestor_count {
-                assert!(baseline > 0, "era_cap_baseline_attestor_count must be non-zero");
-                EraCapBaselineAttestorCount::<T>::put(baseline);
+            // Reward and subsidy values have no default. A spec sets all three
+            // or none: none stays unset and pays nothing, while a partial set
+            // would pay without the committee-size scaling (an unset baseline
+            // makes `effective_era_cap` return the whole base). The mainnet
+            // launch preflight refuses a genesis that does not store all three.
+            match (
+                self.attestation_reward_per_signer,
+                self.era_cap_base,
+                self.era_cap_baseline_attestor_count,
+            ) {
+                (Some(reward), Some(cap), Some(baseline)) => {
+                    assert!(baseline > 0, "era_cap_baseline_attestor_count must be non-zero");
+                    AttestationRewardPerSigner::<T>::put(reward);
+                    EraCapBase::<T>::put(cap);
+                    EraCapBaselineAttestorCount::<T>::put(baseline);
+                }
+                (None, None, None) => {}
+                _ => panic!(
+                    "attestation reward, era cap base and era cap baseline must be set together"
+                ),
             }
             let bond_req = if self.bond_requirement == 0 {
                 1_000_000_000u128 // 1K MATRA (6 decimals)
