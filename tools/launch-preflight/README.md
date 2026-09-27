@@ -121,8 +121,9 @@ more than 300 slots behind its node.
   route matches an authority when it reaches the authority's RPC port on its
   `host` or any of its `addresses`; a loopback or unspecified target, in any
   spelling (`LOCALHOST`, `127.1`, `::ffff:127.0.0.1`, `0.0.0.0`), means the
-  proxy's own host. A unix socket, a variable target, cloudflared bastion mode
-  or warp-routing, or a config with no route refuses as unreadable.
+  proxy's own host. A unix socket, a variable target, a cloudflared bastion
+  mode, SOCKS origin or warp-routing, or a config with no route refuses as
+  unreadable.
 
 ## Test networks
 

@@ -941,6 +941,7 @@ def test_cloudflared_single_origin_url_is_a_route(tmp_path):
     (CLOUDFLARED.format(service="tcp://val1"), "names no port"),
     (CLOUDFLARED.format(service="http://val1:9945") + "warp-routing:\n  enabled: true\n", "warp-routing"),
     (CLOUDFLARED.format(service="http://val1:9945") + "originRequest:\n  bastionMode: true\n", "bastion"),
+    (CLOUDFLARED.format(service="tcp://val1:9945") + "originRequest:\n  proxyType: socks\n", "SOCKS"),
     ("tunnel: t\ningress:\n  - service: http_status:404\n", "has no forwarding route"),
     ("ingress: [unclosed", "not YAML"),
 ])
@@ -1292,6 +1293,36 @@ def test_kupo_behind_its_node_is_an_input_error(spec, kupo):
                               "most_recent_node_tip": 5000}
     with pytest.raises(lp.InputError, match="Kupo is 4000 slots behind its node"):
         lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+def test_an_output_kupo_lists_as_spent_is_not_the_lock(spec, kupo):
+    spent = dict(kupo_output(assets={lp.CMATRA_UNIT: 7}), spent_at={"slot_no": 2, "header_hash": "11" * 32})
+    kupo.serve(spec, spent, genesis_candidates_datum(spec))
+    assert lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}}).lock is None
+
+
+def test_a_spent_candidates_output_is_not_the_committee(spec, kupo):
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    route = f"/matches/{lp.permissioned_candidates_policy(spec).hex()}.*?unspent"
+    kupo.routes[route] = [dict(kupo.routes[route][0], spent_at={"slot_no": 2, "header_hash": "11" * 32})]
+    with pytest.raises(lp.InputError, match="no unspent output holding the permissioned candidates token"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+def test_lock_with_a_non_integer_amount_is_an_input_error(spec, kupo):
+    kupo.serve(spec, kupo_output(assets={lp.CMATRA_UNIT: "7"}), genesis_candidates_datum(spec))
+    with pytest.raises(lp.InputError, match="genesis lock without an address and integer assets"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+@pytest.mark.parametrize("pallet, item, read", [
+    ("SessionCommitteeManagement", "MainChainScriptsConfiguration", lp.permissioned_candidates_policy),
+    ("Aura", "Authorities", lambda spec: lp.authorities(spec, NO_CARDANO)),
+])
+def test_empty_committee_storage_is_an_input_error(spec, pallet, item, read):
+    put(spec, pallet, item, b"")
+    with pytest.raises(lp.InputError, match="does not decode"):
+        read(spec)
 
 
 def test_unreachable_kupo_is_an_input_error(spec):

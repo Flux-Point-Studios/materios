@@ -562,6 +562,13 @@ def kupo_get(base: str, path: str):
         raise InputError(f"Kupo response to {path} is not JSON: {e}") from e
 
 
+def unspent(matches, what: str) -> list[dict]:
+    """The outputs of a Kupo /matches answer that are still unspent."""
+    if not isinstance(matches, list) or not all(isinstance(m, dict) for m in matches):
+        raise InputError(f"Kupo did not return a list of outputs for {what}")
+    return [m for m in matches if m.get("spent_at") is None]
+
+
 def permissioned_candidates_policy(spec: Spec) -> bytes:
     """The Cardano policy whose token marks the permissioned candidates datum,
     from genesis: committee candidate address, D-parameter policy, then this."""
@@ -569,7 +576,10 @@ def permissioned_candidates_policy(spec: Spec) -> bytes:
     if raw is None:
         raise InputError("genesis sets no SessionCommitteeManagement.MainChainScriptsConfiguration: "
                          "where the committee comes from on Cardano is unknown")
-    address_len, pos = read_compact(raw, 0)
+    try:
+        address_len, pos = read_compact(raw, 0)
+    except IndexError as e:
+        raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration does not decode") from e
     start = pos + address_len + POLICY_ID_LEN
     policy = raw[start:start + POLICY_ID_LEN]
     if len(policy) != POLICY_ID_LEN:
@@ -627,16 +637,15 @@ def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
         raise InputError(f"Kupo is {tip - checkpoint} slots behind its node: an output it lists "
                          "as unspent may already be spent")
     tx, _, index = launch["supply"]["genesis_lock"]["utxo"].partition("#")
-    matches = kupo_get(kupo, f"/matches/{int(index)}@{tx}?unspent")
-    if not isinstance(matches, list):
-        raise InputError("Kupo /matches did not return a list")
+    matches = unspent(kupo_get(kupo, f"/matches/{int(index)}@{tx}?unspent"), "the genesis lock")
     lock = matches[0] if matches else None
-    if lock is not None and not (isinstance(lock, dict) and isinstance(lock.get("address"), str)
-                                 and isinstance((lock.get("value") or {}).get("assets"), dict)):
-        raise InputError("Kupo returned the genesis lock without an address and assets")
+    assets = (lock.get("value") or {}).get("assets") if lock is not None else {}
+    if lock is not None and not (isinstance(lock.get("address"), str) and isinstance(assets, dict)
+                                 and all(isinstance(v, int) for v in assets.values())):
+        raise InputError("Kupo returned the genesis lock without an address and integer assets")
     policy = permissioned_candidates_policy(spec).hex()
-    outputs = kupo_get(kupo, f"/matches/{policy}.*?unspent")
-    if not outputs or not isinstance(outputs, list):
+    outputs = unspent(kupo_get(kupo, f"/matches/{policy}.*?unspent"), "the permissioned candidates token")
+    if not outputs:
         raise InputError(f"Kupo has no unspent output holding the permissioned candidates token {policy}: "
                          "the committee after the first rotation cannot be checked")
     candidates = []
@@ -935,9 +944,12 @@ def cloudflared_routes(text: str) -> list[tuple[str, int]]:
     if isinstance(warp, dict) and warp.get("enabled"):
         raise InputError("cloudflared warp-routing is enabled: it forwards clients to any private address, "
                          "so no listener on the network is bounded")
-    origins = [doc.get("originRequest"), *(rule.get("originRequest") for rule in rules)]
-    if any(isinstance(origin, dict) and origin.get("bastionMode") for origin in origins):
+    origins = [origin for origin in (doc.get("originRequest"), *(rule.get("originRequest") for rule in rules))
+               if isinstance(origin, dict)]
+    if any(origin.get("bastionMode") for origin in origins):
         raise InputError("cloudflared bastion mode forwards clients to any address they name")
+    if any(origin.get("proxyType") == "socks" for origin in origins):
+        raise InputError("a cloudflared SOCKS origin forwards clients to any address they name")
     services = ([doc["url"]] if "url" in doc else []) + [rule.get("service") for rule in rules]
     routes = []
     for service in services:
@@ -969,7 +981,10 @@ def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
     raw = spec.value("Aura", "Authorities")
     if raw is None:
         raise InputError("genesis sets no Aura.Authorities")
-    count, pos = read_compact(raw, 0)
+    try:
+        count, pos = read_compact(raw, 0)
+    except IndexError as e:
+        raise InputError("Aura.Authorities does not decode") from e
     if len(raw) != pos + 32 * count:
         raise InputError("Aura.Authorities does not decode as a list of 32-byte keys")
     listed = [(f"genesis Aura.Authorities[{i}]", raw[pos + 32 * i:pos + 32 * i + 32]) for i in range(count)]
