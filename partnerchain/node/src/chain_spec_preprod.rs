@@ -221,29 +221,24 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "lengthFeePerByte": 1_000_000u128,
             "congestionSmoothingPpm": 100_000_000
         },
-        // OrinqReceipts: every value baked in here is a governance-tuned
-        // constant that compile-time defaults would otherwise override at
-        // chain reset. INNER fields use snake_case (the pallet's GenesisConfig
-        // has plain serde derive with no rename_all); the OUTER pallet key
-        // is camelCase per the runtime aggregate GenesisConfig's
-        // rename_all="camelCase".
+        // OrinqReceipts: governance-tuned values. A FRAME pallet's genesis
+        // config is camelCase with deny_unknown_fields, so a snake_case key
+        // makes the whole genesis fail to build.
         //
         // NOT YET EXPOSED at genesis: attestation_threshold + initial
         // committee members — restore via post-genesis multisig sudo.
         "orinqReceipts": {
-            // 1 MATRA per signer (default 10 would 99.3% over-pay).
-            "attestation_reward_per_signer": 1_000_000u128,
+            // 1 MATRA per signer.
+            "attestationRewardPerSigner": 1_000_000u128,
             // 50K MATRA cap per era.
-            "era_cap_base": 50_000_000_000u128,
-            // Matches the 64-cap committee size (default 16 under-allocates).
-            "era_cap_baseline_attestor_count": 32u32,
-            // Pinned explicit so a future chain-spec change can't silently
-            // drop it to 0 and open a committee-dilution attack.
-            "bond_requirement": 1_000_000_000u128,
-            "receipt_submission_fee": 1_000_000u128,
-            "receipt_submission_fee_floor": 100_000u128,
+            "eraCapBase": 50_000_000_000u128,
+            // Matches the 64-cap committee size.
+            "eraCapBaselineAttestorCount": 32u32,
+            "bondRequirement": 1_000_000_000u128,
+            "receiptSubmissionFee": 1_000_000u128,
+            "receiptSubmissionFeeFloor": 100_000u128,
             // ~24h at 6s blocks.
-            "receipt_expiry_blocks": 14_400u32
+            "receiptExpiryBlocks": 14_400u32
         },
         // IOG partner-chain pallets (permissioned-only mode, D=1.0).
         //
@@ -285,4 +280,16 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         // illiquid_supply_validator_address.
     }))
     .build())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::chain_spec::tests::stored_attestor_rewards;
+    use sp_runtime::BuildStorage;
+
+    #[test]
+    fn preprod_genesis_stores_its_tuned_attestor_rewards() {
+        let storage = super::preprod_config().unwrap().build_storage().unwrap();
+        assert_eq!(stored_attestor_rewards(storage), (1_000_000, 50_000_000_000, 32));
+    }
 }

@@ -198,6 +198,41 @@ fn testnet_genesis(
                 "illiquidSupplyAddress": "",
             },
         },
+        // The attestor reward and era cap have no runtime default.
+        "orinqReceipts": {
+            "attestationRewardPerSigner": 1_000_000u128,
+            "eraCapBase": 50_000_000_000u128,
+            "eraCapBaselineAttestorCount": 32u32,
+        },
         // Note: BlockRewards has no genesis config.
     })
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use sp_runtime::{BuildStorage, Storage};
+
+    /// (reward per signer, era cap base, era cap baseline) as genesis stored
+    /// them, read back through the runtime's own getters.
+    pub(crate) fn stored_attestor_rewards(storage: Storage) -> (u128, u128, u32) {
+        sp_io::TestExternalities::new(storage).execute_with(|| {
+            (
+                materios_runtime::OrinqReceipts::attestation_reward_per_signer(),
+                materios_runtime::OrinqReceipts::era_cap_base(),
+                materios_runtime::OrinqReceipts::era_cap_baseline_attestor_count(),
+            )
+        })
+    }
+
+    #[test]
+    fn development_genesis_sets_attestor_rewards_explicitly() {
+        let storage = super::development_config().unwrap().build_storage().unwrap();
+        assert_eq!(stored_attestor_rewards(storage), (1_000_000, 50_000_000_000, 32));
+    }
+
+    #[test]
+    fn local_testnet_genesis_sets_attestor_rewards_explicitly() {
+        let storage = super::local_testnet_config().unwrap().build_storage().unwrap();
+        assert_eq!(stored_attestor_rewards(storage), (1_000_000, 50_000_000_000, 32));
+    }
 }

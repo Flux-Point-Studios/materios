@@ -133,14 +133,12 @@ fn new_test_ext() -> sp_io::TestExternalities {
     let mut t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap();
-    // Seed Component-5 storage from genesis (defaults match the previous
-    // const values: 10 MATRA/signer, 50K MATRA/era base, baseline 16).
-    // Component 4: seed the per-receipt fee, floor, and expiry deadline at
-    // the documented defaults.
+    // The reward and cap figures the existing tests were written against:
+    // 10 MATRA/signer, 50K MATRA/era base, baseline 16.
     pallet_orinq_receipts::GenesisConfig::<Test> {
-        attestation_reward_per_signer: 10_000_000,
-        era_cap_base: 50_000_000_000,
-        era_cap_baseline_attestor_count: 16,
+        attestation_reward_per_signer: Some(10_000_000),
+        era_cap_base: Some(50_000_000_000),
+        era_cap_baseline_attestor_count: Some(16),
         bond_requirement: 1_000_000_000,
         receipt_submission_fee: 1_000_000,
         receipt_submission_fee_floor: 100_000,
@@ -3230,4 +3228,97 @@ fn six_attests_pay_the_certification_exactly_once() {
         }
         assert!(pallet::Attestations::<Test>::get(rid).is_none());
     });
+}
+
+// ---------------------------------------------------------------------------
+// Genesis: attestor reward and subsidy parameters have no default
+// ---------------------------------------------------------------------------
+//
+// A chain spec's genesis patch is merged over the runtime's serialized default
+// config before it is deserialized, so these tests build genesis the same way.
+// A reward field the spec leaves out must stay unset: it once fell back to
+// 10 MATRA per signer.
+
+mod explicit_reward_genesis {
+    use super::*;
+    use sp_runtime::BuildStorage;
+
+    fn build_from_patch(patch: serde_json::Value) -> sp_io::TestExternalities {
+        let mut config =
+            serde_json::to_value(pallet_orinq_receipts::GenesisConfig::<Test>::default()).unwrap();
+        for (key, value) in patch.as_object().unwrap() {
+            config[key] = value.clone();
+        }
+        let config: pallet_orinq_receipts::GenesisConfig<Test> =
+            serde_json::from_value(config).expect("genesis JSON deserializes");
+        sp_io::TestExternalities::new(config.build_storage().unwrap())
+    }
+
+    fn explicit_rewards() -> serde_json::Value {
+        serde_json::json!({
+            "attestationRewardPerSigner": 1_000_000u64,
+            "eraCapBase": 50_000_000_000u64,
+            "eraCapBaselineAttestorCount": 32u32,
+        })
+    }
+
+    fn assert_rewards_unset() {
+        assert!(!pallet::AttestationRewardPerSigner::<Test>::exists());
+        assert!(!pallet::EraCapBase::<Test>::exists());
+        assert!(!pallet::EraCapBaselineAttestorCount::<Test>::exists());
+        assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 0);
+    }
+
+    #[test]
+    fn omitted_reward_fields_stay_unset() {
+        build_from_patch(serde_json::json!({ "bondRequirement": 1_000_000_000u64 }))
+            .execute_with(assert_rewards_unset);
+    }
+
+    #[test]
+    fn default_genesis_builds_without_attestor_rewards() {
+        let storage = pallet_orinq_receipts::GenesisConfig::<Test>::default()
+            .build_storage()
+            .unwrap();
+        sp_io::TestExternalities::new(storage).execute_with(assert_rewards_unset);
+    }
+
+    #[test]
+    fn explicit_values_land_in_storage() {
+        build_from_patch(explicit_rewards()).execute_with(|| {
+            assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 1_000_000);
+            assert_eq!(OrinqReceipts::era_cap_base(), 50_000_000_000);
+            assert_eq!(OrinqReceipts::era_cap_baseline_attestor_count(), 32);
+        });
+    }
+
+    #[test]
+    fn explicit_zero_reward_and_cap_are_stored_as_zero() {
+        let mut patch = explicit_rewards();
+        patch["attestationRewardPerSigner"] = 0u64.into();
+        patch["eraCapBase"] = 0u64.into();
+        build_from_patch(patch).execute_with(|| {
+            assert!(pallet::AttestationRewardPerSigner::<Test>::exists());
+            assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 0);
+            assert!(pallet::EraCapBase::<Test>::exists());
+            assert_eq!(OrinqReceipts::era_cap_base(), 0);
+        });
+    }
+
+    #[test]
+    fn runtime_upgrade_leaves_unset_rewards_unset() {
+        use frame_support::traits::Hooks;
+        build_from_patch(serde_json::json!({})).execute_with(|| {
+            let _ = <OrinqReceipts as Hooks<_>>::on_runtime_upgrade();
+            assert_rewards_unset();
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "era_cap_baseline_attestor_count must be non-zero")]
+    fn zero_baseline_refuses_genesis() {
+        let mut patch = explicit_rewards();
+        patch["eraCapBaselineAttestorCount"] = 0u32.into();
+        build_from_patch(patch);
+    }
 }

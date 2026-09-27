@@ -216,7 +216,7 @@ pub mod pallet {
     // linearly with `CommitteeMembers::len() / EraCapBaselineAttestorCount`.
 
     /// Reward paid to each signer per certified receipt, in MATRA base units
-    /// (6 decimals). Default: 10 MATRA per signer per cert.
+    /// (6 decimals). Set at genesis; governance-tunable after.
     #[pallet::storage]
     #[pallet::getter(fn attestation_reward_per_signer)]
     pub type AttestationRewardPerSigner<T: Config> = StorageValue<_, u128, ValueQuery>;
@@ -224,15 +224,14 @@ pub mod pallet {
     /// Base cap on total attestation rewards paid out per era, in MATRA base
     /// units (6 decimals). The effective cap scales linearly with the number
     /// of active attestors relative to `EraCapBaselineAttestorCount`.
-    /// Default: 50,000 MATRA (=50_000_000_000 base units).
     #[pallet::storage]
     #[pallet::getter(fn era_cap_base)]
     pub type EraCapBase<T: Config> = StorageValue<_, u128, ValueQuery>;
 
     /// The attestor-count at which `effective_era_cap()` equals `era_cap_base`.
-    /// Defaults to 16 (the original `MaxCommitteeSize`). Raising this widens
-    /// the committee without increasing total per-era reward emission; at
-    /// `active_count == baseline`, the effective cap equals the base.
+    /// Raising this widens the committee without increasing total per-era
+    /// reward emission; at `active_count == baseline`, the effective cap
+    /// equals the base.
     #[pallet::storage]
     #[pallet::getter(fn era_cap_baseline_attestor_count)]
     pub type EraCapBaselineAttestorCount<T: Config> = StorageValue<_, u32, ValueQuery>;
@@ -670,19 +669,17 @@ pub mod pallet {
 
     // ── Genesis ──────────────────────────────────────────────────────────
     //
-    // Genesis config exists to seed the Component-5 dynamic storage on
-    // *new* chains. On existing chains (v3/v4/v5 preprod), the values
-    // come from the runtime-upgrade migration (see `on_runtime_upgrade`).
+    // Genesis config seeds the Component-5 dynamic storage on new chains.
 
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
         /// Initial reward per signer, in MATRA base units (6 decimals).
-        pub attestation_reward_per_signer: u128,
+        pub attestation_reward_per_signer: Option<u128>,
         /// Initial base cap on attestation rewards per era.
-        pub era_cap_base: u128,
-        /// Initial baseline attestor count for cap auto-scaling.
-        pub era_cap_baseline_attestor_count: u32,
+        pub era_cap_base: Option<u128>,
+        /// Initial baseline attestor count for cap auto-scaling; non-zero.
+        pub era_cap_baseline_attestor_count: Option<u32>,
         /// Initial bond requirement for joining the committee
         /// (Component 8). Defaults to 1K MATRA.
         pub bond_requirement: u128,
@@ -702,23 +699,19 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            // Respect explicit genesis values; otherwise fall back to the
-            // documented defaults that match the prior const values.
-            let reward = if self.attestation_reward_per_signer == 0 {
-                10_000_000u128 // 10 MATRA
-            } else {
-                self.attestation_reward_per_signer
-            };
-            let cap = if self.era_cap_base == 0 {
-                50_000_000_000u128 // 50K MATRA
-            } else {
-                self.era_cap_base
-            };
-            let baseline = if self.era_cap_baseline_attestor_count == 0 {
-                16u32
-            } else {
-                self.era_cap_baseline_attestor_count
-            };
+            // Reward and subsidy values have no default. One the spec leaves
+            // out stays unset, which pays nothing; the mainnet launch
+            // preflight refuses a genesis that does not store all three.
+            if let Some(reward) = self.attestation_reward_per_signer {
+                AttestationRewardPerSigner::<T>::put(reward);
+            }
+            if let Some(cap) = self.era_cap_base {
+                EraCapBase::<T>::put(cap);
+            }
+            if let Some(baseline) = self.era_cap_baseline_attestor_count {
+                assert!(baseline > 0, "era_cap_baseline_attestor_count must be non-zero");
+                EraCapBaselineAttestorCount::<T>::put(baseline);
+            }
             let bond_req = if self.bond_requirement == 0 {
                 1_000_000_000u128 // 1K MATRA (6 decimals)
             } else {
@@ -739,9 +732,6 @@ pub mod pallet {
             } else {
                 self.receipt_expiry_blocks
             };
-            AttestationRewardPerSigner::<T>::put(reward);
-            EraCapBase::<T>::put(cap);
-            EraCapBaselineAttestorCount::<T>::put(baseline);
             BondRequirement::<T>::put(bond_req);
             ReceiptSubmissionFee::<T>::put(fee);
             ReceiptSubmissionFeeFloor::<T>::put(floor);
@@ -931,29 +921,15 @@ pub mod pallet {
             weight.saturating_add(Weight::from_parts(10_000_000, 0))
         }
 
-        /// Populate Component-5 storage values on existing chains that did
-        /// not run `build_genesis` (everything >= preprod v3). Idempotent:
-        /// only writes when a key is missing so a re-run is a no-op.
-        ///
-        /// Safe to leave in place across future upgrades — after the first
-        /// upgrade the three storage values are all populated and the
-        /// migration short-circuits with three reads.
+        /// Seed the bond, fee and expiry values on chains that predate their
+        /// genesis fields. Idempotent: only writes when a key is missing, so
+        /// a re-run is a no-op. The attestation reward and era cap are never
+        /// seeded here: they have no default, and an upgrade must not invent
+        /// one for a genesis that left them unset.
         fn on_runtime_upgrade() -> Weight {
             let mut writes = 0u64;
-            let reads = 8u64;
+            let reads = 5u64;
 
-            if !AttestationRewardPerSigner::<T>::exists() {
-                AttestationRewardPerSigner::<T>::put(10_000_000u128);
-                writes += 1;
-            }
-            if !EraCapBase::<T>::exists() {
-                EraCapBase::<T>::put(50_000_000_000u128);
-                writes += 1;
-            }
-            if !EraCapBaselineAttestorCount::<T>::exists() {
-                EraCapBaselineAttestorCount::<T>::put(16u32);
-                writes += 1;
-            }
             // Component 8: seed the default bond requirement. 1K MATRA at
             // 6 decimals = 1_000_000_000 base units. Preprod can override
             // via `set_bond_requirement` after the upgrade lands.
