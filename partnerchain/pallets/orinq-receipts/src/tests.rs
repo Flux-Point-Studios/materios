@@ -106,12 +106,14 @@ parameter_types! {
     /// used by `era_emission_respects_configurable_treasury_share` to retune
     /// the split at test-time. Default matches the production 15%.
     pub static TreasuryEmissionShareValue: Perbill = Perbill::from_percent(15);
-    /// Mock emission reserves at the production values; `pub static` so the
-    /// `emission_reserves` tests can shrink them.
+    /// Mock era reward and emission reserves at the production values;
+    /// `pub static` so the `emission_reserves` tests can change them.
+    pub static ValidatorRewardPerEraValue: u128 = VALIDATOR_REWARD_PER_ERA;
     pub static ValidatorEmissionReserveValue: u128 = VALIDATOR_EMISSION_RESERVE;
     pub static AttestationRewardReserveValue: u128 = ATTESTATION_REWARD_RESERVE;
 }
 
+const VALIDATOR_REWARD_PER_ERA: u128 = 102_739_726;
 const VALIDATOR_EMISSION_RESERVE: u128 = 150_000_000_000_000;
 const ATTESTATION_REWARD_RESERVE: u128 = 50_000_000_000_000;
 
@@ -128,6 +130,7 @@ impl pallet::Config for Test {
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
     type TreasuryEmissionShare = TreasuryEmissionShareValue;
+    type ValidatorRewardPerEra = ValidatorRewardPerEraValue;
     type ValidatorEmissionReserve = ValidatorEmissionReserveValue;
     type AttestationRewardReserve = AttestationRewardReserveValue;
 }
@@ -3377,6 +3380,24 @@ mod emission_reserves {
             assert_eq!(pallet::TotalRewardsDistributed::<Test>::get(), 1_000);
         });
         ValidatorEmissionReserveValue::set(VALIDATOR_EMISSION_RESERVE);
+    }
+
+    #[test]
+    fn era_emission_mints_the_configured_reward_per_era() {
+        ValidatorRewardPerEraValue::set(4_000_000);
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&acc(0xA1), 1_000);
+            Balances::make_free_balance_be(&treasury_account(), 1_000);
+            pallet::BlocksAuthored::<Test>::insert(&acc(0xA1), 14_400u32);
+            pallet::EraStartBlock::<Test>::put(1u32);
+            let before = Balances::total_issuance();
+
+            System::set_block_number(14_402);
+            let _ = <OrinqReceipts as Hooks<_>>::on_initialize(14_402);
+
+            assert_eq!(Balances::total_issuance() - before, 4_000_000);
+        });
+        ValidatorRewardPerEraValue::set(VALIDATOR_REWARD_PER_ERA);
     }
 
     #[test]

@@ -88,11 +88,16 @@ pub mod pallet {
         #[pallet::constant]
         type TreasuryPotId: Get<PalletId>;
 
-        /// Fraction of each era's `REWARD_PER_ERA` routed to the treasury;
+        /// Fraction of each era's `ValidatorRewardPerEra` routed to the treasury;
         /// complement goes to block-authoring validators pro-rata. Rounding
         /// residue is always routed to treasury.
         #[pallet::constant]
         type TreasuryEmissionShare: Get<Perbill>;
+
+        /// MATRA minted per era (14400 blocks) and split between the
+        /// block-authoring validators and the treasury, in base units.
+        #[pallet::constant]
+        type ValidatorRewardPerEra: Get<u128>;
 
         /// Lifetime ceiling on MATRA minted by the era emission (validators
         /// and treasury together), in base units.
@@ -805,7 +810,6 @@ pub mod pallet {
             // Era length: 14400 blocks (~24h at 6s block time), minting until
             // `T::ValidatorEmissionReserve` has been paid out in total.
             const ERA_LENGTH: u32 = 14400;
-            const REWARD_PER_ERA: u128 = 102_739_726; // ~102.74 MATRA/era (6 decimals)
             let validator_reserve = T::ValidatorEmissionReserve::get();
 
             let block_num: u32 = n.into();
@@ -816,7 +820,7 @@ pub mod pallet {
                 let total_distributed = TotalRewardsDistributed::<T>::get();
                 if total_distributed < validator_reserve {
                     let remaining = validator_reserve.saturating_sub(total_distributed);
-                    let era_reward = core::cmp::min(REWARD_PER_ERA, remaining);
+                    let era_reward = core::cmp::min(T::ValidatorRewardPerEra::get(), remaining);
 
                     // Sum total blocks authored this era
                     let mut authored: Vec<(T::AccountId, u32)> = Vec::new();

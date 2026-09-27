@@ -120,6 +120,7 @@ impl crate::pallet::Config for Test {
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
     type TreasuryEmissionShare = IntegrationTestTreasuryShare;
+    type ValidatorRewardPerEra = ConstU128<102_739_726>;
     type ValidatorEmissionReserve = ConstU128<150_000_000_000_000>;
     type AttestationRewardReserve = ConstU128<50_000_000_000_000>;
 }
