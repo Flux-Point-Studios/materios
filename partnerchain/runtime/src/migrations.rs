@@ -33,7 +33,7 @@ pub(crate) fn db_weight() -> RuntimeDbWeight {
 /// returns the amount moved. AllowDeath because a PalletId account is a
 /// deterministic derivation that reappears on its next credit; KeepAlive would
 /// refuse to drain past the existential deposit. A failed transfer is logged
-/// and moves nothing. Costs at most three reads and two writes.
+/// and moves nothing. Costs at most `SWEEP_READS` and `SWEEP_WRITES`.
 fn sweep_into_treasury(pot: &AccountId, name: &str) -> Balance {
     let free = Balances::free_balance(pot);
     if free == 0 {
@@ -57,6 +57,11 @@ fn sweep_into_treasury(pot: &AccountId, name: &str) -> Balance {
         }
     }
 }
+
+/// The pot's balance read, then both accounts read and written, plus the
+/// transfer, reap and endowment events.
+const SWEEP_READS: u64 = 3;
+const SWEEP_WRITES: u64 = 5;
 
 pub const SWEEP_MIGRATION_VERSION: u16 = 1;
 
@@ -104,14 +109,15 @@ impl OnRuntimeUpgrade for SweepFeeRouterPotsIntoTreasury {
             attestor,
         );
 
-        db_weight().reads_writes(1 + 2 * 3, 2 * 2 + 1)
+        db_weight().reads_writes(1 + 2 * SWEEP_READS, 2 * SWEEP_WRITES + 1)
     }
 }
 
-/// Upper bound on the perp-engine keys `RemovePerpEngine` deletes in one
-/// upgrade, which keeps the upgrade block's weight bounded whatever the state
-/// holds. Keys past it are deleted by the next upgrade that carries the
-/// migration.
+/// Upper bound on the perp-engine keys `RemovePerpEngine` visits in one
+/// upgrade: the bond entries it releases plus the keys its prefix clear scans,
+/// which include those released entries again. It keeps the upgrade block's
+/// weight bounded whatever the state holds; keys past it are deleted by the
+/// next upgrade that carries the migration.
 pub const PERP_ENGINE_KEYS_PER_UPGRADE: u32 = 1_000;
 
 const PERP_ENGINE_POT_ID: PalletId = PalletId(*b"perp/v0w");
@@ -153,8 +159,10 @@ pub(crate) fn perp_engine_key_count() -> u32 {
 /// keeper, the margin pot goes to the treasury, and every key under the
 /// pallet prefix is removed. Margin accounts are USD-denominated claims on
 /// the pot and are dropped with it. Each bond entry is deleted as it is
-/// released, so a run cut short by the bound never releases a bond twice.
-/// Once the prefix is empty the migration costs one read.
+/// released, and the rest of the prefix is cleared only once no bond entry
+/// is left, so a run cut short by the bound neither releases a bond twice nor
+/// deletes one unreleased. Once the prefix is empty the migration costs one
+/// read.
 pub struct RemovePerpEngine;
 
 impl OnRuntimeUpgrade for RemovePerpEngine {
@@ -164,15 +172,12 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
             return db_weight().reads(1);
         }
 
-        let mut reads: u64 = 1;
-        let mut writes: u64 = 0;
-
         let mut released: Balance = 0;
+        let mut bonds: u32 = 0;
         for (_market, keeper, bond) in
             ReservedKeeperBonds::drain().take(PERP_ENGINE_KEYS_PER_UPGRADE as usize)
         {
-            reads += 2;
-            writes += 2;
+            bonds += 1;
             let short = Balances::unreserve(&keeper, bond);
             if short > 0 {
                 log::error!(
@@ -188,25 +193,37 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
             &PERP_ENGINE_POT_ID.into_account_truncating(),
             "perp-engine margin",
         );
-        reads += 3;
-        writes += 2;
 
-        let cleared = unhashed::clear_prefix(&prefix, Some(PERP_ENGINE_KEYS_PER_UPGRADE), None);
-        reads += u64::from(cleared.loops);
-        writes += u64::from(cleared.unique);
-        if cleared.maybe_cursor.is_some() {
+        // The prefix clear runs only when the drain stopped short of the bound,
+        // so no bond entry is left for it to delete unreleased, and its scan
+        // spends what the drain left of the bound.
+        let budget = PERP_ENGINE_KEYS_PER_UPGRADE - bonds;
+        let (scanned, deleted) = if budget > 0 {
+            let cleared = unhashed::clear_prefix(&prefix, Some(budget), None);
+            (cleared.loops, cleared.unique)
+        } else {
+            (0, 0)
+        };
+        if unhashed::contains_prefixed_key(&prefix) {
             log::error!(
-                "migration: perp-engine keys remain past the per-upgrade bound of {}",
+                "migration: perp-engine keys remain past the per-upgrade bound of {}; the next upgrade carrying RemovePerpEngine deletes them",
                 PERP_ENGINE_KEYS_PER_UPGRADE,
             );
         }
 
         log::info!(
-            "migration: removed the perp engine (released {} in keeper bonds, swept {} to the treasury, deleted {} keys)",
-            released, swept, cleared.unique,
+            "migration: removed the perp engine (released {} from {} keeper bonds, swept {} to the treasury, deleted {} further keys)",
+            released, bonds, swept, deleted,
         );
 
-        db_weight().reads_writes(reads, writes)
+        // Per bond: key lookup, value read and account read; value kill,
+        // account write and the Unreserved event. Three further reads: the
+        // prefix check, the drain's final lookup and the leftover check.
+        let bonds = u64::from(bonds);
+        db_weight().reads_writes(
+            3 + 3 * bonds + SWEEP_READS + u64::from(scanned),
+            3 * bonds + SWEEP_WRITES + u64::from(deleted),
+        )
     }
 
     #[cfg(feature = "try-runtime")]
@@ -214,17 +231,18 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
         use alloc::collections::btree_map::BTreeMap;
         use parity_scale_codec::Encode;
 
-        let keys = perp_engine_key_count();
-        frame_support::ensure!(
-            keys <= PERP_ENGINE_KEYS_PER_UPGRADE,
-            "perp-engine state exceeds what one upgrade deletes",
-        );
-
+        let mut bond_entries: u32 = 0;
         let mut bonds: BTreeMap<AccountId, Balance> = BTreeMap::new();
         for (_market, keeper, bond) in ReservedKeeperBonds::iter() {
+            bond_entries += 1;
             let total = bonds.entry(keeper).or_default();
             *total = total.saturating_add(bond);
         }
+        let keys = perp_engine_key_count();
+        frame_support::ensure!(
+            keys + bond_entries <= PERP_ENGINE_KEYS_PER_UPGRADE,
+            "perp-engine state exceeds what one upgrade deletes",
+        );
         let mut reserved_after: Vec<(AccountId, Balance)> = Vec::with_capacity(bonds.len());
         for (keeper, bond) in bonds {
             let reserved = Balances::reserved_balance(&keeper);

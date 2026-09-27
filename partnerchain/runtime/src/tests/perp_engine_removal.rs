@@ -8,7 +8,7 @@
 
 use crate::*;
 
-use frame_support::traits::{OnRuntimeUpgrade, ReservableCurrency};
+use frame_support::traits::{Currency, OnRuntimeUpgrade, ReservableCurrency};
 use parity_scale_codec::Encode;
 use sp_io::{
     hashing::{blake2_128, twox_128},
@@ -278,6 +278,68 @@ fn removal_deletes_at_most_the_bound_per_upgrade_and_finishes_on_the_next() {
     ext.execute_with(|| {
         RemovePerpEngine::on_runtime_upgrade();
         assert_eq!(perp_engine_key_count(), 0);
+    });
+}
+
+/// More bonds than one upgrade may visit: the first upgrade releases as many as
+/// the bound allows, deletes no more keys than the bound, and leaves every
+/// other bond entry, with its reserve, for the next upgrade.
+#[test]
+fn bonds_past_the_bound_wait_for_the_next_upgrade_and_are_never_cleared_unreleased() {
+    let overflow = 5u32;
+    let keepers: Vec<AccountId> = (0..PERP_ENGINE_KEYS_PER_UPGRADE + overflow)
+        .map(|i| {
+            let mut raw = [0xabu8; 32];
+            raw[..4].copy_from_slice(&i.to_le_bytes());
+            AccountId::from(raw)
+        })
+        .collect();
+    let margin_keys = 3u32;
+    let mut ext = new_test_ext();
+    ext.execute_with(|| {
+        for keeper in &keepers {
+            Balances::make_free_balance_be(keeper, FUND);
+            Balances::reserve(keeper, BOND).expect("keeper can reserve its bond");
+            sp_io::storage::set(&keeper_bond_key(keeper), &BOND.encode());
+        }
+        for i in 0..margin_keys {
+            sp_io::storage::set(&item_key(b"MarginAccounts", &i.encode()), &[0u8; 8]);
+        }
+    });
+    ext.commit_all().expect("seed reaches the backend");
+    let seeded = PERP_ENGINE_KEYS_PER_UPGRADE + overflow + margin_keys;
+
+    ext.execute_with(|| {
+        RemovePerpEngine::on_runtime_upgrade();
+
+        let mut waiting = 0u32;
+        for keeper in &keepers {
+            let entry_left = sp_io::storage::exists(&keeper_bond_key(keeper));
+            let reserved = Balances::reserved_balance(keeper);
+            if entry_left {
+                waiting += 1;
+                assert_eq!(reserved, BOND, "a waiting bond lost its reserve");
+            } else {
+                assert_eq!(reserved, 0, "a bond entry was deleted without its release");
+            }
+        }
+        assert_eq!(waiting, overflow);
+        assert!(
+            seeded - perp_engine_key_count() <= PERP_ENGINE_KEYS_PER_UPGRADE,
+            "one upgrade deleted {} keys, past the bound of {}",
+            seeded - perp_engine_key_count(),
+            PERP_ENGINE_KEYS_PER_UPGRADE,
+        );
+    });
+    ext.commit_all().expect("first run reaches the backend");
+
+    ext.execute_with(|| {
+        RemovePerpEngine::on_runtime_upgrade();
+        assert_eq!(perp_engine_key_count(), 0);
+        for keeper in &keepers {
+            assert_eq!(Balances::reserved_balance(keeper), 0);
+            assert_eq!(Balances::free_balance(keeper), FUND);
+        }
     });
 }
 
