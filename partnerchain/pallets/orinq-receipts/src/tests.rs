@@ -3327,18 +3327,28 @@ mod explicit_reward_genesis {
     }
 
     #[test]
-    #[should_panic(expected = "attestation reward, era cap base and era cap baseline must be set together")]
+    #[should_panic(
+        expected = "attestation reward, era cap base and era cap baseline must be set together"
+    )]
     fn reward_and_cap_without_a_baseline_refuse_genesis() {
         let mut patch = explicit_rewards();
-        patch.as_object_mut().unwrap().remove("eraCapBaselineAttestorCount");
+        patch
+            .as_object_mut()
+            .unwrap()
+            .remove("eraCapBaselineAttestorCount");
         build_from_patch(patch);
     }
 
     #[test]
-    #[should_panic(expected = "attestation reward, era cap base and era cap baseline must be set together")]
+    #[should_panic(
+        expected = "attestation reward, era cap base and era cap baseline must be set together"
+    )]
     fn cap_and_baseline_without_a_reward_refuse_genesis() {
         let mut patch = explicit_rewards();
-        patch.as_object_mut().unwrap().remove("attestationRewardPerSigner");
+        patch
+            .as_object_mut()
+            .unwrap()
+            .remove("attestationRewardPerSigner");
         build_from_patch(patch);
     }
 
@@ -3448,7 +3458,10 @@ mod emission_reserves {
                 ));
             }
 
-            assert_eq!(pallet::TotalAttestationRewards::<Test>::get(), 3 * 10_000_000);
+            assert_eq!(
+                pallet::TotalAttestationRewards::<Test>::get(),
+                3 * 10_000_000
+            );
             assert_eq!(OrinqReceipts::attestation_rewards(acc(1)), 10_000_000);
         });
     }

@@ -226,13 +226,25 @@ pub(crate) mod tests {
 
     #[test]
     fn development_genesis_sets_attestor_rewards_explicitly() {
-        let storage = super::development_config().unwrap().build_storage().unwrap();
-        assert_eq!(stored_attestor_rewards(storage), (1_000_000, 50_000_000_000, 32));
+        let storage = super::development_config()
+            .unwrap()
+            .build_storage()
+            .unwrap();
+        assert_eq!(
+            stored_attestor_rewards(storage),
+            (1_000_000, 50_000_000_000, 32)
+        );
     }
 
     #[test]
     fn local_testnet_genesis_sets_attestor_rewards_explicitly() {
-        let storage = super::local_testnet_config().unwrap().build_storage().unwrap();
-        assert_eq!(stored_attestor_rewards(storage), (1_000_000, 50_000_000_000, 32));
+        let storage = super::local_testnet_config()
+            .unwrap()
+            .build_storage()
+            .unwrap();
+        assert_eq!(
+            stored_attestor_rewards(storage),
+            (1_000_000, 50_000_000_000, 32)
+        );
     }
 }

@@ -290,6 +290,9 @@ mod tests {
     #[test]
     fn preprod_genesis_stores_its_tuned_attestor_rewards() {
         let storage = super::preprod_config().unwrap().build_storage().unwrap();
-        assert_eq!(stored_attestor_rewards(storage), (1_000_000, 50_000_000_000, 32));
+        assert_eq!(
+            stored_attestor_rewards(storage),
+            (1_000_000, 50_000_000_000, 32)
+        );
     }
 }

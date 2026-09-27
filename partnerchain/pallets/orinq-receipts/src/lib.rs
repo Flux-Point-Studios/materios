@@ -725,7 +725,10 @@ pub mod pallet {
                 self.era_cap_baseline_attestor_count,
             ) {
                 (Some(reward), Some(cap), Some(baseline)) => {
-                    assert!(baseline > 0, "era_cap_baseline_attestor_count must be non-zero");
+                    assert!(
+                        baseline > 0,
+                        "era_cap_baseline_attestor_count must be non-zero"
+                    );
                     AttestationRewardPerSigner::<T>::put(reward);
                     EraCapBase::<T>::put(cap);
                     EraCapBaselineAttestorCount::<T>::put(baseline);
