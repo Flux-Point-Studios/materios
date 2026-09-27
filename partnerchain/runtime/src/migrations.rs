@@ -212,8 +212,8 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
         }
 
         log::info!(
-            "migration: removed the perp engine (released {} from {} keeper bonds, swept {} to the treasury, deleted {} further keys)",
-            released, bonds, swept, deleted,
+            "migration: removed the perp engine (released {} from {} keeper bonds, swept {} to the treasury, prefix clear scanned {} keys)",
+            released, bonds, swept, scanned,
         );
 
         // Per bond: key lookup, value read and account read; value kill,
