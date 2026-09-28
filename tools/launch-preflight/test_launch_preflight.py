@@ -201,6 +201,17 @@ def test_table_holds_keystore_keys_a_public_repo_commits(known):
         assert table[(scheme, public)] == "partner-chains test key, secret committed to a public repo"
 
 
+# partner-chains commits its local environment's Cardano keys; this is the
+# verification key committed next to its funded address's signing key.
+PARTNER_CHAINS_CARDANO_KEY = "fc014cb5f071f5d6a36cb5a7e5f168c86555989445a23d4abec33d280f71aca4"
+
+
+def test_table_holds_cardano_signing_keys_a_public_repo_commits(known):
+    table = {(k.scheme, k.needle.hex()): k.label for k in known.keys}
+    assert table[("ed25519", PARTNER_CHAINS_CARDANO_KEY)] == \
+        "partner-chains test key, secret committed to a public repo"
+
+
 # Bare `//Name` URIs derive from the dev phrase; public repos commit these as test
 # signers. Pinned against @polkadot/keyring 13.5.9.
 PUBLIC_REPO_DERIVATIONS = {
@@ -1214,12 +1225,38 @@ PREPROD_ATTESTOR = bytes.fromhex("44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9
 FLOOR = 1_000 * MATRA + 500 + 100 * MATRA
 RESERVES = {"ValidatorEmissionReserve": 150_000_000 * MATRA, "AttestationRewardReserve": 50_000_000 * MATRA}
 RUNTIME_CONSTANTS = dict(RESERVES, ValidatorRewardPerEra=VALIDATOR_REWARD_PER_ERA)
-# Bech32 mainnet enterprise addresses for the payment credential 0x5c * 28: one a script, one a key.
-SCRIPT_ADDRESS = "addr1w9w9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqelrggd"
+# Native scripts over the key hashes 01.., 02.., 03.. and their mainnet enterprise
+# addresses, as pycardano encodes and hashes them: atLeast 2 of the three keys; the
+# same after slot 100; one key's signature.
+LOCK_SCRIPT = ("830302838200581c" + "01" * 28 + "8200581c" + "02" * 28 + "8200581c" + "03" * 28)
+SCRIPT_ADDRESS = "addr1w99zyl0mtukm2xlax6d087y52x2pjrs0wsaumrzh84gakhqnqy0wu"
+TIMED_LOCK_SCRIPT = "82018282041864" + LOCK_SCRIPT
+TIMED_SCRIPT_ADDRESS = "addr1w8thxxkxkj9q7vuf9z3s276u5dzvgxgt9r86txvzygx7u9crpmwwj"
+ONE_KEY_SCRIPT = "8200581c" + "01" * 28
+ONE_KEY_SCRIPT_ADDRESS = "addr1wx9xkldmpy849sj5y7ezg2w98gm3y0qd2pq2f8l2hxf2u7c4xydnh"
+# Bech32 enterprise addresses for the payment credential 0x5c * 28: a mainnet key, a testnet script.
 KEY_ADDRESS = "addr1v9w9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqshlgld"
 TEST_SCRIPT_ADDRESS = "addr_test1wpw9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqzhh58g"
 LOCK_TX = "5a" * 32
-LOCK = {"utxo": f"{LOCK_TX}#1", "address": SCRIPT_ADDRESS}
+LOCK = {"utxo": f"{LOCK_TX}#1", "address": SCRIPT_ADDRESS, "native_script": LOCK_SCRIPT}
+
+
+def script_address(script) -> str:
+    """The mainnet enterprise address of a native script, given as CBOR hex or as its decoded form."""
+    raw = bytes.fromhex(script) if isinstance(script, str) else cbor2.dumps(script)
+    data = bytes([0x71]) + hashlib.blake2b(b"\0" + raw, digest_size=28).digest()
+    values, acc, bits = [], 0, 0
+    for byte in data:
+        acc, bits = (acc << 8) | byte, bits + 8
+        while bits >= 5:
+            bits -= 5
+            values.append((acc >> bits) & 31)
+    if bits:
+        values.append((acc << (5 - bits)) & 31)
+    hrp = [ord(c) >> 5 for c in "addr"] + [0] + [ord(c) & 31 for c in "addr"]
+    checksum = lp.bech32_polymod(hrp + values + [0] * 6) ^ 1
+    values += [(checksum >> 5 * (5 - i)) & 31 for i in range(6)]
+    return "addr1" + "".join(lp.BECH32_CHARSET[v] for v in values)
 
 
 def kupo_output(address=SCRIPT_ADDRESS, assets=None, tx=LOCK_TX, index=1, datum_hash=None) -> dict:
@@ -1329,29 +1366,112 @@ def test_the_backing_is_what_cardano_holds_not_a_declared_number(spec, runtime_m
     assert any(f"against {975_000 * MATRA} cMATRA locked on Cardano" in m for m in found)
 
 
-def test_lock_that_is_spent_or_unindexed_is_refused(spec, runtime_meta):
-    found = supply_findings(spec, runtime_meta, roster(spec), 0, lp.CardanoView(lock=None, candidates=[]))
-    assert found == [f"[4 supply] the genesis lock {LOCK_TX}#1 is not an unspent output the Kupo index "
-                     "holds: nothing backs genesis issuance"]
+GENESIS_DATUM = object()
 
 
-def test_lock_at_a_key_address_is_refused(spec, runtime_meta):
+def lock_findings(spec, lock=LOCK, output=None, datum=GENESIS_DATUM):
+    """The genesis lock rule. By default the lock output sits at the declared
+    address with an inline datum that is this genesis hash."""
+    output = kupo_output(lock["address"], {lp.CMATRA_UNIT: 1}) if output is None else output
+    datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if datum is GENESIS_DATUM else datum
+    cardano = lp.CardanoView(lock=output or None, candidates=[], lock_datum=datum)
+    return messages(lp.check_genesis_lock(spec, {"supply": {"genesis_lock": lock}}, cardano, lp.load_well_known()))
+
+
+def test_the_test_address_encoder_matches_pycardano():
+    assert script_address(LOCK_SCRIPT) == SCRIPT_ADDRESS
+    assert script_address(TIMED_LOCK_SCRIPT) == TIMED_SCRIPT_ADDRESS
+    assert script_address(ONE_KEY_SCRIPT) == ONE_KEY_SCRIPT_ADDRESS
+
+
+@pytest.mark.parametrize("script, address", [(LOCK_SCRIPT, SCRIPT_ADDRESS), (TIMED_LOCK_SCRIPT, TIMED_SCRIPT_ADDRESS)])
+def test_a_lock_two_key_holders_must_sign_for_with_this_genesis_datum_passes(spec, script, address):
+    assert lock_findings(spec, {"utxo": f"{LOCK_TX}#1", "address": address, "native_script": script}) == []
+
+
+ALICE_CARDANO_KEY = hashlib.blake2b(bytes.fromhex(SP_KEYRING["ed25519"]["//Alice"]), digest_size=28).digest()
+K1, K2, K3 = (bytes([i]) * 28 for i in (1, 2, 3))
+
+
+@pytest.mark.parametrize("script, holders", [
+    ([0, K1], 1),
+    ([3, 2, [[0, K1], [0, K1]]], 1),
+    ([3, 2, [[0, K1], [0, ALICE_CARDANO_KEY], [0, K2]]], 1),
+    ([3, 2, [[0, K1], [0, hashlib.blake2b(bytes.fromhex(PARTNER_CHAINS_CARDANO_KEY), digest_size=28).digest()]]], 1),
+    ([2, [[0, K1], [3, 2, [[0, K1], [0, K2], [0, K3]]]]], 1),
+    ([1, []], 0),
+    ([4, 100], 0),
+    ([3, 0, [[0, K1], [0, K2]]], 0),
+])
+def test_a_lock_fewer_than_two_key_holders_can_spend_is_refused(spec, script, holders):
+    lock = {"utxo": f"{LOCK_TX}#1", "address": script_address(script), "native_script": cbor2.dumps(script).hex()}
+    assert lock_findings(spec, lock) == [
+        f"[4 supply] the genesis lock's native script can be spent by {holders} key holder"
+        f"{'' if holders == 1 else 's'} (a well-known key counts as anyone's): fewer than two can move the backing"]
+
+
+def test_a_lock_no_signature_can_satisfy_passes_the_signer_count(spec):
+    script = [2, []]
+    lock = {"utxo": f"{LOCK_TX}#1", "address": script_address(script), "native_script": cbor2.dumps(script).hex()}
+    assert lock_findings(spec, lock) == []
+
+
+def test_a_lock_at_another_script_than_declared_is_refused(spec):
+    lock = dict(LOCK, native_script=ONE_KEY_SCRIPT)
+    assert lock_findings(spec, lock) == [
+        f"[4 supply] the genesis lock address {SCRIPT_ADDRESS} pays to script "
+        f"{hashlib.blake2b(bytes.fromhex('00' + LOCK_SCRIPT), digest_size=28).hexdigest()}, not the declared "
+        f"native script {hashlib.blake2b(bytes.fromhex('00' + ONE_KEY_SCRIPT), digest_size=28).hexdigest()}; "
+        "a lock the preflight cannot read as a native script is refused"]
+
+
+def test_lock_that_is_spent_or_unindexed_is_refused(spec):
+    assert lock_findings(spec, output={}) == [
+        f"[4 supply] the genesis lock {LOCK_TX}#1 is not an unspent output the Kupo index holds: "
+        "nothing backs genesis issuance"]
+
+
+def test_lock_at_a_key_address_is_refused(spec):
     lock = dict(LOCK, address=KEY_ADDRESS)
-    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(10**18, KEY_ADDRESS), lock)
-    assert found == [f"[4 supply] the genesis lock {LOCK_TX}#1 sits at {KEY_ADDRESS}, whose payment "
-                     "credential is a key: its holder can spend the backing"]
+    assert lock_findings(spec, lock) == [
+        f"[4 supply] the genesis lock address {KEY_ADDRESS} pays to a key: its holder can spend the backing"]
 
 
-def test_lock_somewhere_other_than_declared_is_refused(spec, runtime_meta):
-    other = "addr1wxw9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqp5f7c3"
-    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(10**18, other))
-    assert f"[4 supply] the genesis lock {LOCK_TX}#1 sits at {other}, not the declared {SCRIPT_ADDRESS}" in found
+def test_lock_somewhere_other_than_declared_is_refused(spec):
+    other = kupo_output(TIMED_SCRIPT_ADDRESS, {lp.CMATRA_UNIT: 1})
+    assert f"[4 supply] the genesis lock {LOCK_TX}#1 sits at {TIMED_SCRIPT_ADDRESS}, not the declared " \
+           f"{SCRIPT_ADDRESS}" in lock_findings(spec, output=other)
 
 
-def test_lock_on_a_test_network_is_refused(spec, runtime_meta):
-    lock = dict(LOCK, address=TEST_SCRIPT_ADDRESS)
-    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(10**18, TEST_SCRIPT_ADDRESS), lock)
-    assert f"[4 supply] the genesis lock address {TEST_SCRIPT_ADDRESS} is not a Cardano mainnet address" in found
+@pytest.mark.parametrize("address, reason", [
+    (TEST_SCRIPT_ADDRESS, "is not a Cardano mainnet address"),
+    (SCRIPT_ADDRESS[:-1] + ("q" if SCRIPT_ADDRESS[-1] != "q" else "p"), "is not a valid bech32 address"),
+    ("addr1" + SCRIPT_ADDRESS[5:].upper(), "is not a valid bech32 address"),
+])
+def test_a_lock_address_that_is_not_a_mainnet_address_is_refused(spec, address, reason):
+    assert f"[4 supply] the genesis lock address {address} {reason}" in lock_findings(spec, dict(LOCK, address=address))
+
+
+@pytest.mark.parametrize("raw", ["ff", cbor2.dumps([0, b"short"]).hex(), cbor2.dumps([9, 1]).hex(),
+                                 cbor2.dumps([3, True, []]).hex(), cbor2.dumps({"k": 1}).hex()])
+def test_an_undecodable_lock_script_is_an_input_error(spec, raw):
+    lock = dict(LOCK, address=script_address(raw), native_script=raw)
+    with pytest.raises(lp.InputError, match="the genesis lock native script does not decode"):
+        lock_findings(spec, lock)
+
+
+def test_a_lock_with_no_inline_datum_is_refused(spec):
+    assert lock_findings(spec, datum=None) == [
+        f"[4 supply] the genesis lock {LOCK_TX}#1 carries no inline datum: nothing binds it to this genesis, "
+        "so one lock could back two chains"]
+
+
+def test_a_lock_made_for_another_genesis_is_refused(spec):
+    genesis = lp.spec_genesis_hash(spec).hex()
+    for datum in (cbor2.dumps(bytes(32)), cbor2.dumps([bytes.fromhex(genesis), bytes(32)]), b"\xff"):
+        assert lock_findings(spec, datum=datum) == [
+            f"[4 supply] the genesis lock {LOCK_TX}#1 carries a datum that is not this genesis hash 0x{genesis}: "
+            "it was not made for this chain"]
 
 
 def test_lock_holding_another_token_backs_nothing(spec, runtime_meta):
@@ -1467,8 +1587,12 @@ class Kupo:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
-    def serve(self, spec: lp.Spec, lock_output: dict | None, candidates_datum: bytes, lock=LOCK):
+    def serve(self, spec: lp.Spec, lock_output: dict | None, candidates_datum: bytes, lock=LOCK, lock_datum=b""):
         tx, _, index = lock["utxo"].partition("#")
+        if lock_output and lock_datum:
+            lock_hash = hashlib.blake2b(lock_datum, digest_size=32).hexdigest()
+            lock_output = dict(lock_output, datum_hash=lock_hash, datum_type="inline")
+            self.routes[f"/datums/{lock_hash}"] = {"datum": lock_datum.hex()}
         self.routes[f"/matches/{index}@{tx}?unspent"] = [lock_output] if lock_output else []
         policy = lp.permissioned_candidates_policy(spec).hex()
         datum_hash = hashlib.blake2b(candidates_datum, digest_size=32).hexdigest()
@@ -1493,11 +1617,21 @@ def genesis_candidates_datum(spec) -> bytes:
 
 def test_cardano_view_reads_the_lock_and_the_candidates_from_kupo(spec, kupo):
     output = kupo_output(assets={lp.CMATRA_UNIT: 7})
-    kupo.serve(spec, output, genesis_candidates_datum(spec))
+    datum = cbor2.dumps(bytes(32))
+    kupo.serve(spec, output, genesis_candidates_datum(spec), lock_datum=datum)
     view = lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
-    assert view.lock == output
+    assert view.lock["value"] == output["value"] and view.lock["datum_type"] == "inline"
+    assert view.lock_datum == datum
     assert [c.keys["aura"] for c in view.candidates] == aura_keys(spec)
     assert set(kupo.accept) == {"application/json"}
+
+
+def test_a_lock_datum_kupo_serves_under_another_hash_is_an_input_error(spec, kupo):
+    kupo.serve(spec, kupo_output(assets={lp.CMATRA_UNIT: 7}), genesis_candidates_datum(spec), lock_datum=b"\x40")
+    route = next(r for r in kupo.routes if r.startswith("/datums/") and kupo.routes[r] == {"datum": "40"})
+    kupo.routes[route] = {"datum": "41"}
+    with pytest.raises(lp.InputError, match="does not hash to"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
 
 
 def test_kupo_with_no_candidates_datum_is_an_input_error(spec, kupo):
@@ -1631,6 +1765,8 @@ class Launch:
                              "other_targets": ["rpc-node:9944"]}],
         }
         self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
+        # None serves this genesis hash as the lock's inline datum.
+        self.lock_datum = None
         self.candidates = genesis_candidates_datum(spec)
 
     def spec_path(self) -> Path:
@@ -1641,8 +1777,9 @@ class Launch:
 
     def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
         spec_path = self.spec_path()
-        self.kupo.serve(lp.load_spec(str(spec_path)), self.lock_output, self.candidates,
-                        self.launch["supply"]["genesis_lock"])
+        spec = lp.load_spec(str(spec_path))
+        datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
+        self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum)
         return run_cli(self.tmp_path, spec_path, self.launch, capsys, self.kupo.url, key, manifest_key, extra,
                        signed_launch)
 
@@ -1783,6 +1920,28 @@ def test_cli_refuses_the_bootstrap_unit_shape(clean, capsys):
     assert "[3 rpc] authority val0 serves unsafe RPC methods on an external listener" in out
 
 
+def test_cli_refuses_a_lock_one_key_holder_can_spend(clean, capsys):
+    clean.launch["supply"]["genesis_lock"] = dict(LOCK, address=ONE_KEY_SCRIPT_ADDRESS, native_script=ONE_KEY_SCRIPT)
+    clean.lock_output = dict(clean.lock_output, address=ONE_KEY_SCRIPT_ADDRESS)
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[4 supply] the genesis lock's native script can be spent by 1 key holder" in out
+
+
+def test_cli_refuses_a_lock_made_for_another_genesis(clean, capsys):
+    clean.lock_datum = cbor2.dumps(bytes(32))
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[4 supply] the genesis lock {LOCK_TX}#1 carries a datum that is not this genesis hash" in out
+
+
+def test_cli_refuses_a_lock_with_no_datum(clean, capsys):
+    clean.lock_datum = b""
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[4 supply] the genesis lock {LOCK_TX}#1 carries no inline datum" in out
+
+
 def test_cli_refuses_a_lock_smaller_than_what_materios_can_issue(clean, capsys):
     clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 975_000 * MATRA})
     code, out = clean.run(capsys)
@@ -1898,8 +2057,13 @@ VALID_LOCK = {"genesis_lock": LOCK}
     ({"roles": {}}, "supply.genesis_lock is required"),
     ({"roles": {}, "supply": []}, "supply must be an object"),
     ({"roles": {}, "supply": {"cardano_backing": 1, **VALID_LOCK}}, "unknown supply field cardano_backing"),
-    ({"roles": {}, "supply": {"genesis_lock": {"utxo": "zz#0", "address": SCRIPT_ADDRESS}}},
+    ({"roles": {}, "supply": {"genesis_lock": dict(LOCK, utxo="zz#0")}},
      "supply.genesis_lock.utxo must be <64 hex>#<index>"),
+    ({"roles": {}, "supply": {"genesis_lock": {"utxo": LOCK["utxo"], "address": SCRIPT_ADDRESS}}},
+     "supply.genesis_lock is required"),
+    ({"roles": {}, "supply": {"genesis_lock": dict(LOCK, native_script="zz")}},
+     "supply.genesis_lock.native_script must be the script's CBOR in hex"),
+    ({"roles": {}, "supply": {"genesis_lock": dict(LOCK, datum="00")}}, "unknown supply.genesis_lock field datum"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": {"a": 1}}, "nodes must be a list"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),
     ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": [{"name": "p", "node": "h", "config": "c"}]},

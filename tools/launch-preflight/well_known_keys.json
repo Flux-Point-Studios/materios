@@ -1985,6 +1985,60 @@
   {
    "label": "partner-chains test key, secret committed to a public repo",
    "scheme": "sr25519",
+   "public": "10097b5877bb8560a1945d411a5cd526df7265ed7dbc52f11ebba6c251222834",
+   "account": "10097b5877bb8560a1945d411a5cd526df7265ed7dbc52f11ebba6c251222834"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "2bebcb7fbc74a6e0fd6e00a311698b047b7b659f0e047ff5349dbd984aefc52c",
+   "account": "2bebcb7fbc74a6e0fd6e00a311698b047b7b659f0e047ff5349dbd984aefc52c"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "034f12671076e91f9984e357720d80fa5a7f4426df2573ca5fdb0fe4c99fc26764",
+   "account": "d3eb39dcaa3caf5f0a4887b8627562cc46e2c69d70d0d10be262b2191cabca74"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "1a07aba5a341cb77d23d76b117e8d1666513f42233cc520bf92fd3efca4c3e4a",
+   "account": "1a07aba5a341cb77d23d76b117e8d1666513f42233cc520bf92fd3efca4c3e4a"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "c0d043c1e404f560ad53641d0cd13f8ce5e1c81b35f9b70a1d06d13794cb653c",
+   "account": "c0d043c1e404f560ad53641d0cd13f8ce5e1c81b35f9b70a1d06d13794cb653c"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "0315995b9c89c1b406d0c4726e04cbdbedd746f9d9b8f48ad5c8879c6ea1b7fe83",
+   "account": "3a39bae332c730d4422e54fc33ca6c2a08ccd00363a87a7acb0618bfb70f54f8"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "3a3d45dc55b57bf542f4c6ff41af080ec675317f4ed50ae1d2713bf9f892692d",
+   "account": "3a3d45dc55b57bf542f4c6ff41af080ec675317f4ed50ae1d2713bf9f892692d"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29",
+   "account": "4cb5abf6ad79fbf5abbccafcc269d85cd2651ed4b885b5869f241aedf0a5ba29"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+   "account": "2975f1d28b92b6e84499b83b0797ef5235553eeb7edaa0cea243c1128c2fe737"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
    "public": "149d60d25cef9132244040dd11ed14a45136835b84ebf294ab380cd4aff1aa04",
    "account": "149d60d25cef9132244040dd11ed14a45136835b84ebf294ab380cd4aff1aa04"
   },
@@ -1999,6 +2053,24 @@
    "scheme": "ecdsa",
    "public": "031a64986d7c9db33e1bf1cad218f9229b9cb947c0f6b043ef1c79e160779049ab",
    "account": "3c4f59b8b297757375b3fc076408e47e25eb4a45c037fa8b66fa0dc8e01c1928"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "d2f605e9f83488f2799092ee2f1c6a20fa4321db560090bbb54b419951eb6159",
+   "account": "d2f605e9f83488f2799092ee2f1c6a20fa4321db560090bbb54b419951eb6159"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "fc014cb5f071f5d6a36cb5a7e5f168c86555989445a23d4abec33d280f71aca4",
+   "account": "fc014cb5f071f5d6a36cb5a7e5f168c86555989445a23d4abec33d280f71aca4"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "023649a12c80ef2122c16f40c3e936323f64ea1a2e50e18aa70a323e812423780d",
+   "account": "40ac1fa6b51cf6fd224b42f27b6326d73dd889e60819cd4812bf02d103780fc7"
   },
   {
    "label": "partner-chains test key, secret committed to a public repo",
@@ -2057,6 +2129,42 @@
   {
    "label": "partner-chains test key, secret committed to a public repo",
    "scheme": "sr25519",
+   "public": "3a1735aca53ccc80017f55addd27eec38d0c86b7b3b6226965163d9e9710d25b",
+   "account": "3a1735aca53ccc80017f55addd27eec38d0c86b7b3b6226965163d9e9710d25b"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "cef2d1630c034d3b9034eb7903d61f419a3074a1ad01d4550cc72f2b733de6e7",
+   "account": "cef2d1630c034d3b9034eb7903d61f419a3074a1ad01d4550cc72f2b733de6e7"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "027401c0ed36f99b9521719db292421da9db01434c29622502086831dc95084796",
+   "account": "6b879514c72f2feb6436f4cf345df14512cc1f1f7e1900ef6fa99a534ad6b350"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "28f60468de46a20ff850a430d0a69be487e8b5d22bf62462e626e52c83904246",
+   "account": "28f60468de46a20ff850a430d0a69be487e8b5d22bf62462e626e52c83904246"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "08accadc8b60a5f519ee74ab144ada6993709f5479152f9217688889d8a2db2e",
+   "account": "08accadc8b60a5f519ee74ab144ada6993709f5479152f9217688889d8a2db2e"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "0221f617989ad9cf678b5a4c2ecca6f523d7a8c072b7a46323b276b65b1c8cea7a",
+   "account": "291f661df641cf965ec54849013a65e0dbf67da67541d1941a6193684c0edf8d"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
    "public": "bca66938787eee7d075de57117b1e7917ddb05389533295eee3f50c8b7283151",
    "account": "bca66938787eee7d075de57117b1e7917ddb05389533295eee3f50c8b7283151"
   },
@@ -2089,6 +2197,24 @@
    "scheme": "ecdsa",
    "public": "038317a1f89f817a70f2c6a96b52a78b37527a3be2cce3137471f6a51a8c5dc1a3",
    "account": "962616e6d230b910e3db88485f50b4e19bada9b44313ddff33de2421734537c6"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "6e2ca85124098d8d2b0bf1868541bdc3a4774e7b25bd8d252d7d76f33dcb3124",
+   "account": "6e2ca85124098d8d2b0bf1868541bdc3a4774e7b25bd8d252d7d76f33dcb3124"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "b3da57d4e21d5052b54693a935e9d40db7a6dc1ada57ec24dfd37a1669cda325",
+   "account": "b3da57d4e21d5052b54693a935e9d40db7a6dc1ada57ec24dfd37a1669cda325"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "022396368a2837d6b95e375e0537d23e0b6c580de066ad330461e20852c29f74a6",
+   "account": "b1d672bf653798416ee4d5cd0d8f1a9528eef7d81d79da5da4882bce3f1fa4e6"
   },
   {
    "label": "partner-chains test key, secret committed to a public repo",
@@ -2129,6 +2255,42 @@
   {
    "label": "partner-chains test key, secret committed to a public repo",
    "scheme": "sr25519",
+   "public": "c0bc1964a656bed20e0daac057d9fa25f45e0d741a47cf1f2352b7bb4c254252",
+   "account": "c0bc1964a656bed20e0daac057d9fa25f45e0d741a47cf1f2352b7bb4c254252"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "1790608c384b9ca9f9e178b95ec7492edb70b8824beb7de138be6c450e7f1ed3",
+   "account": "1790608c384b9ca9f9e178b95ec7492edb70b8824beb7de138be6c450e7f1ed3"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "0319bf0ebbe8111f25463e58f9996301836521d32d0ce7190b139e9e9eec01b8da",
+   "account": "0db2820d57c0f4072dac9e1373d149c623754cca3749987c85603a33a4bf23ad"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "ae0e51c9e0c01551dc259f27072e36c0c82a84b03d50a15494e1974aece57423",
+   "account": "ae0e51c9e0c01551dc259f27072e36c0c82a84b03d50a15494e1974aece57423"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "b0a6336a046368ced3e4a883eb76893a34d860e7084fafd36c0da1b2d3aa8e80",
+   "account": "b0a6336a046368ced3e4a883eb76893a34d860e7084fafd36c0da1b2d3aa8e80"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "02579b9d9a648bbf67a6729bd22c870590458934358be2d4fecc1b078481734fd6",
+   "account": "221561c1cd53490181a4b68deaddd29f898a046ae4cee7a79e800674afa70433"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
    "public": "588c84949c703058577df51caaf82ca81cb1df43928600763a0050d16d2c210f",
    "account": "588c84949c703058577df51caaf82ca81cb1df43928600763a0050d16d2c210f"
   },
@@ -2143,6 +2305,24 @@
    "scheme": "ecdsa",
    "public": "0389b20df4cfeefc72e91f6ce55ed434fadc7a0aebd69ce4c7057f3848307eab88",
    "account": "5d523fe2d7576e5f5119c22cb978bd9d372317dd4904aa6f2a409ad31375168a"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "5eb9d9db7b7fa1da0fe2815564b841fd73cdb292a39f354a360db4af3c0fb669",
+   "account": "5eb9d9db7b7fa1da0fe2815564b841fd73cdb292a39f354a360db4af3c0fb669"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "a5ab6e82531cac3480cf7ff360f38a0beeea93cabfdd1ed0495e0423f7875c57",
+   "account": "a5ab6e82531cac3480cf7ff360f38a0beeea93cabfdd1ed0495e0423f7875c57"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "03a0078570c006647e62b11d4107c188a754e88902e22d2a3b5949c797039eb42d",
+   "account": "abee63f2ede5ce713e75eb2be671f09f1345b57c6fd11864c8fdd4cf88a24583"
   },
   {
    "label": "partner-chains test key, secret committed to a public repo",
@@ -2309,6 +2489,42 @@
   {
    "label": "partner-chains test key, secret committed to a public repo",
    "scheme": "sr25519",
+   "public": "32384e16d96dffb9c34dd7caa56fe5492bb52ce9d1d2bba8caa08823446bef28",
+   "account": "32384e16d96dffb9c34dd7caa56fe5492bb52ce9d1d2bba8caa08823446bef28"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "9ece7413050c15e677b9cf066d0e1efe083036b4f3b3f636947b6b2b7d9411e8",
+   "account": "9ece7413050c15e677b9cf066d0e1efe083036b4f3b3f636947b6b2b7d9411e8"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "0398ffe3ae266f6562a4d7d4f9ee793911fc8b1a31378a7b14b16c14e86eb2d115",
+   "account": "cd5b650525f91162bc6983915c6630ae4720d3895ca40331c07c36078d86621a"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "b8e48c8571e16a5043d688ab1583af661df049591cd9b79f1f1d90fdd8f9a74f",
+   "account": "b8e48c8571e16a5043d688ab1583af661df049591cd9b79f1f1d90fdd8f9a74f"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "e6ceac21f27c463f9065fafdc62883d7e52f6a376b498b8838ba513e44c74eca",
+   "account": "e6ceac21f27c463f9065fafdc62883d7e52f6a376b498b8838ba513e44c74eca"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "036a7c77d5cf3cdbf1c04cd0045a05ac7ef344c42e1bd72c1d24afd408a1d4b85b",
+   "account": "648f394d68e903e345b907e996be415aadeeac9679e14a565e86e7a29fa303d4"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
    "public": "4a9dcfa6f19d8543cbb93945575a5ffae40357805d993252b8f64ea7b124e56e",
    "account": "4a9dcfa6f19d8543cbb93945575a5ffae40357805d993252b8f64ea7b124e56e"
   },
@@ -2381,6 +2597,60 @@
   {
    "label": "partner-chains test key, secret committed to a public repo",
    "scheme": "sr25519",
+   "public": "40f4fb97531d731a21a6881580d11b2abff912a149bfdb7ad9bb1ebf8a978d5a",
+   "account": "40f4fb97531d731a21a6881580d11b2abff912a149bfdb7ad9bb1ebf8a978d5a"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "7521303029fc73ea2dd6a410c4c3cf570bf294a7e02942e049d50ba117acec22",
+   "account": "7521303029fc73ea2dd6a410c4c3cf570bf294a7e02942e049d50ba117acec22"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "0323d8768ef1188aca9161bd27f0a35ab20e8706330b751ce006a53a0287c20c3d",
+   "account": "30971e8a93de9222854671257de08a3d5369ea9fced70441e6cbec485273bec1"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "8647be78dd7b55b715178ab00c52df96967d02601bdb078c257f474f726e5874",
+   "account": "8647be78dd7b55b715178ab00c52df96967d02601bdb078c257f474f726e5874"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "d5f64925e8722583ab9f8bb633a6938780873cf59504b3d12527719d3310b0ff",
+   "account": "d5f64925e8722583ab9f8bb633a6938780873cf59504b3d12527719d3310b0ff"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "02c41eebaf6d5b28f2b7275fd91d11fe8051f898491ecfa7b06ef8670923a99266",
+   "account": "27c4858267c925de53f53c1ca5214979fcb51ed04510bbe09dc39bffa1318c77"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "da11506421512df83bfb5d1f4c13ee1a227ab57da749b401d8c36ab3bd33ba6c",
+   "account": "da11506421512df83bfb5d1f4c13ee1a227ab57da749b401d8c36ab3bd33ba6c"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "7c0298ad84878a4edaaebbf88abe996983f6caac119d3e005e5a0444c6c736b7",
+   "account": "7c0298ad84878a4edaaebbf88abe996983f6caac119d3e005e5a0444c6c736b7"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "03da9f060dcde0a45566a59ef5a8c39f2885a05ede9e5a3cc15cc1ed4e548f3ebb",
+   "account": "4407c1346da2a53bc42e767ead8e6a3e20a4aaf7cd79dce97f66960c8979afcd"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
    "public": "a20b3d7439cd6d39313cd364ba7e5f03b50bc5c4b46730413fbfc8fc61d71860",
    "account": "a20b3d7439cd6d39313cd364ba7e5f03b50bc5c4b46730413fbfc8fc61d71860"
   },
@@ -2395,6 +2665,42 @@
    "scheme": "ecdsa",
    "public": "0350f7f2d7cc38da35409ac666682a33866b858e9cb065ec69339176601b8ace21",
    "account": "52601383b65b16f5ec45543cfd9fa8099175da2a56cce957595419077ffedcc7"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "1eff8754abd25e49672bb7670c5731541973264b1bc9bdd6ad015591f01fdb2c",
+   "account": "1eff8754abd25e49672bb7670c5731541973264b1bc9bdd6ad015591f01fdb2c"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "0aea6851633551085417261a4d0f35af53b24e472c8d094e99e8b3d9289cd5d8",
+   "account": "0aea6851633551085417261a4d0f35af53b24e472c8d094e99e8b3d9289cd5d8"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "020f3b2555cac818d817e9bbc37a39bc6c6976a4791ab14f1c914dd8be0596d741",
+   "account": "004f9b227d24a93ee46d118542a76aebdc1ff16fe95be22d62f85104a956985d"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "b60bff8d55af51199f331851b338da6a594f7d72761423a2bcd2ea9814216147",
+   "account": "b60bff8d55af51199f331851b338da6a594f7d72761423a2bcd2ea9814216147"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "9e4a2c30e8e8bed26ca0deec7710a1ab6f5c3e7933cf0c2b59c394aa104ef72c",
+   "account": "9e4a2c30e8e8bed26ca0deec7710a1ab6f5c3e7933cf0c2b59c394aa104ef72c"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "030fbbef66f07ecb1ec5504c9e65041c8f0ac5342bcd1c8eeb53322773c713c678",
+   "account": "36a4cb0d1970cdef2cfa93bdc1ccdc7b055e065032a58ee7679778155e4c4948"
   },
   {
    "label": "partner-chains test key, secret committed to a public repo",
@@ -2471,6 +2777,24 @@
   {
    "label": "partner-chains test key, secret committed to a public repo",
    "scheme": "sr25519",
+   "public": "7eb05b26b6401a6addd18f0bb26f3cde16a57385ce4746466802add0ed04cf41",
+   "account": "7eb05b26b6401a6addd18f0bb26f3cde16a57385ce4746466802add0ed04cf41"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "8ec41666088a839fafa5b9ca8b801690f9259b5b7928a249a0507b03feb43a9c",
+   "account": "8ec41666088a839fafa5b9ca8b801690f9259b5b7928a249a0507b03feb43a9c"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "029fcab8e75eb3060b9ad07690e569abffd81a31dc6d81ebf1efbf6909cdf877be",
+   "account": "c70a892ab6efc3f78772b6ce9757f139902d5f5101288e0eb51c847110de6863"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
    "public": "0e1aea53d513c3785ec8d02c2fb43eb98b14169f56194690cf1c8cb2d1639f3a",
    "account": "0e1aea53d513c3785ec8d02c2fb43eb98b14169f56194690cf1c8cb2d1639f3a"
   },
@@ -2485,6 +2809,60 @@
    "scheme": "ecdsa",
    "public": "036a6f7d86c2043890eeb69ed74619b8beaa608334908b7f1829e2ee77ce0fb3bf",
    "account": "e075de8fe62acea38b367332e534a4f1d071110f80178b25d29d49914890e7b2"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "00a94f8f47d61a360c413e3671d88c96753651c535083a1c840bab7d29b75476",
+   "account": "00a94f8f47d61a360c413e3671d88c96753651c535083a1c840bab7d29b75476"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "816d4845ae6f1c1fd88911e069ad528195ee559cb24009a807bee1826a6f91ef",
+   "account": "816d4845ae6f1c1fd88911e069ad528195ee559cb24009a807bee1826a6f91ef"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "039ca1fe2b41c5fd664c1feeb2f81b8bf2b1efe1e31ba76e6144466c72e11aa9cc",
+   "account": "3b636af9ea193762e57c571edd93950cc250719b2ea81f618c0dd451b5996291"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "88e5fe5fee90f1a133a25858432df424c4d54d6a9ed9bad684c1ee1fe17e9721",
+   "account": "88e5fe5fee90f1a133a25858432df424c4d54d6a9ed9bad684c1ee1fe17e9721"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "3174e3fc556e89d039613b8fcf8e2203f93cf173697802ca0bc2a8a8f4717c0c",
+   "account": "3174e3fc556e89d039613b8fcf8e2203f93cf173697802ca0bc2a8a8f4717c0c"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "03cfb0b4757f639074aba10822801c9887a6c6f83c0319b1071d14f6c9fba6b699",
+   "account": "ccb83b16ed7c127101cc0082e63b6fe9a1ca879c879f9797a1ca8cfd85c76081"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "sr25519",
+   "public": "d2c1f8625445c90cc771b7ba639c9447a714c6d2c897c7d28e9a3ccabb895d5e",
+   "account": "d2c1f8625445c90cc771b7ba639c9447a714c6d2c897c7d28e9a3ccabb895d5e"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ed25519",
+   "public": "669c66b7cd9ebbdb68e89599e1335b1b54c5c0a41eb331eaa052b2408526ac20",
+   "account": "669c66b7cd9ebbdb68e89599e1335b1b54c5c0a41eb331eaa052b2408526ac20"
+  },
+  {
+   "label": "partner-chains test key, secret committed to a public repo",
+   "scheme": "ecdsa",
+   "public": "03b473a8ff8b4d368ba8672483d5cf62caad2b47342fa6040a79aacabc9ac82ddd",
+   "account": "f2cd492f7b685ee8366c34eed9852dd2f668e251625709eb87b6fb52a0b50b28"
   },
   {
    "label": "partner-chains test key, secret committed to a public repo",

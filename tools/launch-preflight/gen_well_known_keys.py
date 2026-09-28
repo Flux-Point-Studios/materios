@@ -12,9 +12,10 @@ derivation (the "<Scheme>HDKD" blake2 junction for ed25519 and ecdsa).
 
 Every commit of each repo in PUBLIC_REPOS (cloned under the second argument) is
 swept for secrets committed as string literals: a BIP39 phrase with a valid
-checksum, a 0x-hex 32-byte seed under a name that marks it secret, and a bare
-`//Path` URI, which derives from the dev phrase. Each is derived under all three
-schemes; only the public keys are written.
+checksum, a 0x-hex 32-byte seed under a name that marks it secret, a bare
+`//Path` URI, which derives from the dev phrase, and the seed in a cardano-cli
+ed25519 signing key file (whose ed25519 key is its Cardano verification key).
+Each is derived under all three schemes; only the public keys are written.
 """
 import json
 import re
@@ -53,6 +54,8 @@ HARD_PATH = r"(?://[\w-]+)*"
 PHRASE_URI = re.compile(rf"\s*([a-z]+(?: +[a-z]+){{11,23}})\s*({HARD_PATH})\s*")
 SEED = re.compile(rf"0x([0-9a-fA-F]{{64}})({HARD_PATH})")
 DEV_URI = re.compile(r"(?://[\w-]+)+")
+# A cardano-cli ed25519 signing key file: its cborHex is 5820 and the 32-byte seed.
+CARDANO_SKEY = re.compile(r'"type"\s*:\s*"\w*SigningKey\w*_ed25519"[^{}]*?"cborHex"\s*:\s*"5820([0-9a-fA-F]{64})"')
 SECRET_NAME = re.compile(r"seed|secret|suri|private|mini|skey|signing", re.I)
 CHECKSUM = Mnemonic("english")
 # What Rust's u64::from_str accepts.
@@ -136,7 +139,10 @@ def committed_blobs(repo: Path):
 
 
 def committed_secrets(text: str):
-    """(secret, path) pairs and bare dev-phrase paths in string literals."""
+    """(secret, path) pairs and bare dev-phrase paths in string literals, and
+    the seeds of committed Cardano signing key files."""
+    for seed in CARDANO_SKEY.finditer(text):
+        yield "0x" + seed.group(1).lower(), ""
     for literal in STRING.finditer(text):
         body = literal.group(2)
         phrase = PHRASE_URI.fullmatch(body)

@@ -49,6 +49,7 @@ import glob
 import hashlib
 import http.client
 import ipaddress
+import itertools
 import json
 import re
 import shlex
@@ -154,8 +155,16 @@ NGINX_INCLUDE_DEPTH = 8
 HOST_PORT = re.compile(r"\[([0-9A-Fa-f:.]+)\](?::(\d+))?|([^\s:\[\]/]+)(?::(\d+))?")
 # cMATRA (v2) on Cardano mainnet: policy id and asset name, as Kupo keys assets.
 CMATRA_UNIT = "7ff33a5565393dc47b48ac47becc12d92c9952e724e8446dfb6adc66.634d41545241"
-MAINNET_ADDRESS_PREFIX = "addr1"
 BECH32_CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+BECH32_GENERATOR = (0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3)
+# Shelley address header types whose payment credential is a script, and the mainnet network id.
+SCRIPT_PAYMENT_TYPES = (1, 3, 5, 7)
+CARDANO_MAINNET = 1
+# A native script's hash is blake2b-224 over this tag and its CBOR.
+NATIVE_SCRIPT_TAG = b"\x00"
+NATIVE_SCRIPT_DEPTH = 16
+NATIVE_SCRIPT_KEYS = 16
+GENESIS_LOCK_FIELDS = {"utxo", "address", "native_script"}
 UTXO = re.compile(r"[0-9a-f]{64}#\d+")
 KUPO_TIMEOUT = 30
 KUPO_LIMIT = 16 * 1024 * 1024
@@ -609,6 +618,7 @@ class Candidate:
 class CardanoView:
     lock: dict | None
     candidates: list[Candidate]
+    lock_datum: bytes | None = None
 
 
 def kupo_get(base: str, path: str):
@@ -709,6 +719,9 @@ def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
     if lock is not None and not (isinstance(lock.get("address"), str) and isinstance(assets, dict)
                                  and all(isinstance(v, int) for v in assets.values())):
         raise InputError("Kupo returned the genesis lock without an address and integer assets")
+    lock_datum = None
+    if lock is not None and lock.get("datum_type") == "inline":
+        lock_datum = kupo_datum(kupo, lock.get("datum_hash"), "the genesis lock")
     policy = permissioned_candidates_policy(spec).hex()
     outputs = unspent(kupo_get(kupo, f"/matches/{policy}.*?unspent"), "the permissioned candidates token")
     if not outputs:
@@ -716,28 +729,133 @@ def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
                          "the committee after the first rotation cannot be checked")
     candidates = []
     for output in outputs:
-        where = f"{output.get('transaction_id')}#{output.get('output_index')}"
-        datum_hash = output.get("datum_hash")
-        datum = kupo_get(kupo, f"/datums/{datum_hash}") if isinstance(datum_hash, str) else None
-        if not isinstance(datum, dict) or not isinstance(datum.get("datum"), str):
-            raise InputError(f"the permissioned candidates output {where} has no datum Kupo can serve")
-        try:
-            raw = bytes.fromhex(datum["datum"])
-        except ValueError as e:
-            raise InputError(f"the permissioned candidates datum at {where} is not hex") from e
-        candidates += decode_candidates(raw)
-    return CardanoView(lock, candidates)
+        where = f"the permissioned candidates output {output.get('transaction_id')}#{output.get('output_index')}"
+        candidates += decode_candidates(kupo_datum(kupo, output.get("datum_hash"), where))
+    return CardanoView(lock, candidates, lock_datum)
 
 
-def is_script_address(address: str) -> bool:
-    """Whether a Shelley address's payment credential is a script. The first
-    bech32 character after the separator carries the header's top five bits, so
-    the address type is that character's value shifted right once; types 1, 3,
-    5 and 7 pay to a script."""
-    _, separator, data = address.rpartition("1")
-    if not separator or not data or data[0] not in BECH32_CHARSET:
-        return False
-    return (BECH32_CHARSET.index(data[0]) >> 1) in (1, 3, 5, 7)
+def kupo_datum(kupo: str, datum_hash, what: str) -> bytes:
+    """The datum Kupo holds for a datum hash, checked against that hash."""
+    if not (isinstance(datum_hash, str) and re.fullmatch(r"[0-9a-f]{64}", datum_hash)):
+        raise InputError(f"{what} has no datum hash Kupo can serve a datum for")
+    datum = kupo_get(kupo, f"/datums/{datum_hash}")
+    if not isinstance(datum, dict) or not isinstance(datum.get("datum"), str):
+        raise InputError(f"{what} has no datum Kupo can serve")
+    try:
+        raw = bytes.fromhex(datum["datum"])
+    except ValueError as e:
+        raise InputError(f"the datum of {what} is not hex") from e
+    if hashlib.blake2b(raw, digest_size=32).hexdigest() != datum_hash:
+        raise InputError(f"Kupo served a datum for {what} that does not hash to {datum_hash}")
+    return raw
+
+
+def bech32_polymod(values: list[int]) -> int:
+    checksum = 1
+    for value in values:
+        top = checksum >> 25
+        checksum = (checksum & 0x1FFFFFF) << 5 ^ value
+        for i, generator in enumerate(BECH32_GENERATOR):
+            checksum ^= generator if (top >> i) & 1 else 0
+    return checksum
+
+
+def bech32_decode(text: str) -> tuple[str, bytes]:
+    """The human-readable part and data of a bech32 string. Cardano addresses
+    run past BIP-173's 90 characters, so there is no length limit."""
+    hrp, separator, data = text.rpartition("1")
+    if text != text.lower() or not hrp or not separator or len(data) < 6 or any(c not in BECH32_CHARSET for c in data):
+        raise ValueError("is not a valid bech32 address")
+    values = [BECH32_CHARSET.index(c) for c in data]
+    if bech32_polymod([ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp] + values) != 1:
+        raise ValueError("is not a valid bech32 address")
+    acc = bits = 0
+    out = bytearray()
+    for value in values[:-6]:
+        acc, bits = (acc << 5) | value, bits + 5
+        if bits >= 8:
+            bits -= 8
+            out.append((acc >> bits) & 0xFF)
+    if bits >= 5 or acc & ((1 << bits) - 1):
+        raise ValueError("is not a valid bech32 address")
+    return hrp, bytes(out)
+
+
+def lock_script_hash(address: str) -> bytes:
+    """The script hash a mainnet Shelley address pays to. Raises ValueError
+    with the reason when the address is not one."""
+    hrp, data = bech32_decode(address)
+    if hrp != "addr" or not data or data[0] & 0x0F != CARDANO_MAINNET:
+        raise ValueError("is not a Cardano mainnet address")
+    if data[0] >> 4 not in SCRIPT_PAYMENT_TYPES:
+        raise ValueError("pays to a key: its holder can spend the backing")
+    if len(data) < 29:
+        raise ValueError("is not a valid bech32 address")
+    return data[1:29]
+
+
+def native_script(raw: bytes):
+    """A Cardano native script decoded from its CBOR, its shape checked."""
+    try:
+        script = cbor2.loads(raw)
+    except (ValueError, RecursionError) as e:
+        raise InputError("the genesis lock native script does not decode") from e
+    _check_native_script(script, 0)
+    return script
+
+
+def _check_native_script(script, depth: int) -> None:
+    kind = script[0] if isinstance(script, list) and script and type(script[0]) is int else None
+    if kind == 0:
+        ok = len(script) == 2 and isinstance(script[1], bytes) and len(script[1]) == 28
+    elif kind in (1, 2):
+        ok = len(script) == 2 and isinstance(script[1], list)
+    elif kind == 3:
+        ok = len(script) == 3 and type(script[1]) is int and isinstance(script[2], list)
+    elif kind in (4, 5):
+        ok = len(script) == 2 and type(script[1]) is int
+    else:
+        ok = False
+    if not ok or depth == NATIVE_SCRIPT_DEPTH:
+        raise InputError("the genesis lock native script does not decode")
+    for sub in _native_children(script):
+        _check_native_script(sub, depth + 1)
+
+
+def _native_children(script) -> list:
+    return script[1] if script[0] in (1, 2) else script[2] if script[0] == 3 else []
+
+
+def _native_keys(script) -> set[bytes]:
+    return {script[1]} if script[0] == 0 else {k for sub in _native_children(script) for k in _native_keys(sub)}
+
+
+def _native_satisfied(script, signed: set[bytes]) -> bool:
+    """Whether these key signatures satisfy a native script. A time bound counts
+    as met: whoever holds the keys can wait for, or act before, the slot."""
+    kind = script[0]
+    if kind == 0:
+        return script[1] in signed
+    results = [_native_satisfied(sub, signed) for sub in _native_children(script)]
+    if kind == 1:
+        return all(results)
+    if kind == 2:
+        return any(results)
+    if kind == 3:
+        return sum(results) >= script[1]
+    return True
+
+
+def native_script_holders(script, anyone: set[bytes]) -> int | None:
+    """The fewest key holders whose signatures, with those of the keys anyone
+    holds, satisfy a native script; None when no set of signatures does."""
+    held = sorted(_native_keys(script) - anyone)
+    if len(held) > NATIVE_SCRIPT_KEYS:
+        raise InputError(f"the genesis lock native script names more than {NATIVE_SCRIPT_KEYS} keys")
+    for size in range(len(held) + 1):
+        if any(_native_satisfied(script, set(chosen) | anyone) for chosen in itertools.combinations(held, size)):
+            return size
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1290,19 +1408,7 @@ def check_supply(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView)
                                         + ": what the runtime mints after genesis is unbounded here, "
                                           "so the supply cannot be checked against the Cardano lock"))
     lock, output = launch["supply"]["genesis_lock"], cardano.lock
-    if not lock["address"].startswith(MAINNET_ADDRESS_PREFIX):
-        findings.append(Finding(SUPPLY, f"the genesis lock address {lock['address']} is not a Cardano "
-                                        "mainnet address"))
-    if output is None:
-        findings.append(Finding(SUPPLY, f"the genesis lock {lock['utxo']} is not an unspent output the Kupo "
-                                        "index holds: nothing backs genesis issuance"))
-    elif output["address"] != lock["address"]:
-        findings.append(Finding(SUPPLY, f"the genesis lock {lock['utxo']} sits at {output['address']}, "
-                                        f"not the declared {lock['address']}"))
-    elif not is_script_address(output["address"]):
-        findings.append(Finding(SUPPLY, f"the genesis lock {lock['utxo']} sits at {output['address']}, whose "
-                                        "payment credential is a key: its holder can spend the backing"))
-    elif not missing:
+    if output is not None and output["address"] == lock["address"] and not missing:
         amount = output["value"]["assets"].get(CMATRA_UNIT, 0)
         emission = sum(int.from_bytes(meta.constants[("OrinqReceipts", name)], "little")
                        for name in EMISSION_RESERVES)
@@ -1312,6 +1418,57 @@ def check_supply(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView)
                                             f"locked on Cardano at {lock['utxo']}: the difference is reserve "
                                             "counted both as cMATRA and as MATRA"))
     return findings
+
+
+def check_genesis_lock(spec: Spec, launch: dict, cardano: CardanoView, well_known: WellKnown) -> list[Finding]:
+    """The cMATRA lock backing genesis: an unspent output at the declared
+    mainnet address, which pays to the declared native script, which no fewer
+    than two key holders can spend, and whose inline datum is this genesis
+    hash, so the lock backs this chain and no other."""
+    lock, output = launch["supply"]["genesis_lock"], cardano.lock
+    findings = []
+    try:
+        paid_to = lock_script_hash(lock["address"])
+    except ValueError as e:
+        findings.append(Finding(SUPPLY, f"the genesis lock address {lock['address']} {e}"))
+        paid_to = None
+    if paid_to is not None:
+        raw = bytes.fromhex(lock["native_script"])
+        declared = hashlib.blake2b(NATIVE_SCRIPT_TAG + raw, digest_size=28).digest()
+        if declared != paid_to:
+            findings.append(Finding(SUPPLY, f"the genesis lock address {lock['address']} pays to script "
+                                            f"{paid_to.hex()}, not the declared native script {declared.hex()}; "
+                                            "a lock the preflight cannot read as a native script is refused"))
+        else:
+            anyone = {hashlib.blake2b(k.needle, digest_size=28).digest()
+                      for k in well_known.keys if k.scheme == "ed25519"}
+            holders = native_script_holders(native_script(raw), anyone)
+            if holders is not None and holders < 2:
+                findings.append(Finding(SUPPLY, f"the genesis lock's native script can be spent by {holders} key "
+                                                f"holder{'' if holders == 1 else 's'} (a well-known key counts as "
+                                                "anyone's): fewer than two can move the backing"))
+    if output is None:
+        return findings + [Finding(SUPPLY, f"the genesis lock {lock['utxo']} is not an unspent output the Kupo "
+                                           "index holds: nothing backs genesis issuance")]
+    if output["address"] != lock["address"]:
+        findings.append(Finding(SUPPLY, f"the genesis lock {lock['utxo']} sits at {output['address']}, "
+                                        f"not the declared {lock['address']}"))
+    genesis = spec_genesis_hash(spec)
+    if cardano.lock_datum is None:
+        findings.append(Finding(SUPPLY, f"the genesis lock {lock['utxo']} carries no inline datum: nothing binds "
+                                        "it to this genesis, so one lock could back two chains"))
+    elif _plutus_bytes(cardano.lock_datum) != genesis:
+        findings.append(Finding(SUPPLY, f"the genesis lock {lock['utxo']} carries a datum that is not this genesis "
+                                        f"hash 0x{genesis.hex()}: it was not made for this chain"))
+    return findings
+
+
+def _plutus_bytes(datum: bytes) -> bytes | None:
+    try:
+        value = cbor2.loads(datum)
+    except (ValueError, RecursionError):
+        return None
+    return value if isinstance(value, bytes) else None
 
 
 def check_genesis_storage(spec: Spec, meta: Metadata) -> list[Finding]:
@@ -1353,10 +1510,13 @@ def launch_manifest_hash(launch: dict) -> bytes:
     return canonical_json_hash(launch)
 
 
+def spec_genesis_hash(spec: Spec) -> bytes:
+    return genesis_hash(spec.storage, runtime_state_version(decompressed_code(spec.code)))
+
+
 def launch_hashes(spec: Spec, launch: dict) -> dict[str, bytes]:
-    wasm = decompressed_code(spec.code)
     return {
-        "genesis_hash": genesis_hash(spec.storage, runtime_state_version(wasm)),
+        "genesis_hash": spec_genesis_hash(spec),
         "code_hash": blake2_256(spec.code),
         "chain_spec_hash": canonical_json_hash(spec.doc),
         "launch_manifest_hash": launch_manifest_hash(launch),
@@ -1495,11 +1655,16 @@ def validate_launch(launch) -> None:
     for field in sorted(set(supply) - {"genesis_lock"}):
         raise InputError(f"unknown supply field {field}: the backing is read from Cardano")
     lock = supply.get("genesis_lock")
-    if not isinstance(lock, dict) or not all(isinstance(lock.get(k), str) for k in ("utxo", "address")):
-        raise InputError("supply.genesis_lock is required: the utxo and address of the cMATRA lock "
-                         "that backs genesis")
+    if isinstance(lock, dict):
+        for field in sorted(set(lock) - GENESIS_LOCK_FIELDS):
+            raise InputError(f"unknown supply.genesis_lock field {field}")
+    if not isinstance(lock, dict) or not all(isinstance(lock.get(k), str) for k in GENESIS_LOCK_FIELDS):
+        raise InputError("supply.genesis_lock is required: the utxo, address and native_script of the cMATRA "
+                         "lock that backs genesis")
     if not UTXO.fullmatch(lock["utxo"]):
         raise InputError("supply.genesis_lock.utxo must be <64 hex>#<index>")
+    if not re.fullmatch(r"(?:[0-9a-fA-F]{2})+", lock["native_script"]):
+        raise InputError("supply.genesis_lock.native_script must be the script's CBOR in hex")
     nodes = launch.get("nodes", [])
     if not isinstance(nodes, list):
         raise InputError("nodes must be a list")
@@ -1537,6 +1702,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_supply(spec, meta, launch, cardano)
+            + check_genesis_lock(spec, launch, cardano, well_known)
             + check_genesis_storage(spec, meta)
             + check_pallets(meta)
             + check_checkpoint(spec, launch, signed, key)
