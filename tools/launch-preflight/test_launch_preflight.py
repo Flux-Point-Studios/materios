@@ -216,6 +216,28 @@ def test_table_holds_dev_phrase_derivations_that_public_repos_commit(known):
         assert (path, scheme, public) in table
 
 
+# Substrate reads a numeric junction as a u64, not a string. Pinned against
+# @polkadot/keyring 13.5.9; the sr25519 keys also against substrate-interface.
+NUMERIC_DEV_PATHS = {
+    ("//0", "sr25519"): "2afba9278e30ccf6a6ceb3a8b6e336b70068f045c666f2e7f4f9cc5f47db8972",
+    ("//1", "sr25519"): "b606fc73f57f03cdb4c932d475ab426043e429cecc2ffff0d2672b0df8398c48",
+    ("//11", "sr25519"): "eeab50338d8e5176d3141802d7b010a55dadcd5f23cf8aaafa724627e967e90e",
+    ("//0", "ed25519"): "ffe0b81700cedadde9debaf7e61292d80581d4a37896055ba25f491b96b25ee6",
+    ("//1", "ed25519"): "bf3a763d817cee09bf785b9cc6118f58dab5c03f3ace6d524899bcb28ac74f27",
+    ("//11", "ed25519"): "efe91956ecf147383f508af0763c66c2a1c833ca9e2db3e8f0b51e5bba494530",
+    ("//0", "ecdsa"): "0356d97b3f7456436b315d53bc22f39414ed493db5d76d2edc2ce30a09c7ed9117",
+    ("//1", "ecdsa"): "0333022898140662dfea847e3cbfe5e989845ac6766e83472f8b0c650d85e77bae",
+    ("//11", "ecdsa"): "03e843f200e30bc5b951c73a96d968db1c0cd05e357d910fce159fc59c40e9d6e2",
+}
+
+
+def test_table_derives_numeric_dev_paths_as_substrate_does(known):
+    keys, _ = known
+    table = {(k.label, k.scheme): k.needle.hex() for k in keys if len(k.needle) != 32 or k.scheme != "ecdsa"}
+    for (path, scheme), public in NUMERIC_DEV_PATHS.items():
+        assert table[(path, scheme)] == public, (path, scheme)
+
+
 # Hardhat and Anvil's first test account (address 0xf39F...2266): its secret is in
 # their documentation and in orynq-sdk's tests.
 HARDHAT_ACCOUNT_0 = "038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed75"
@@ -1630,6 +1652,18 @@ def test_cli_refuses_a_dev_key_in_the_cardano_committee(clean, capsys):
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] Cardano permissioned candidate 0 aura: //Alice (sr25519)" in out
+
+
+def test_cli_refuses_a_numeric_dev_path_key_as_a_role_and_a_genesis_account(clean, capsys):
+    one = bytes.fromhex(NUMERIC_DEV_PATHS[("//1", "sr25519")])
+    clean.launch["roles"]["anchor_signer"] = [ss58(one)]
+    endow(clean.spec, one, 5 * MATRA)
+    clean.launch["roles"]["endowed"].append(ss58(one))
+    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 10**30})
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[1 dev-keys] roles.anchor_signer[0]: //1 (sr25519)" in out
+    assert "[1 dev-keys] System.Account: //1 (sr25519) is in genesis" in out
 
 
 def test_cli_names_keys_from_an_extra_table(clean, capsys):

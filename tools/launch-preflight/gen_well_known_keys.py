@@ -16,7 +16,6 @@ checksum, a 0x-hex 32-byte seed under a name that marks it secret, and a bare
 `//Path` URI, which derives from the dev phrase. Each is derived under all three
 schemes; only the public keys are written.
 """
-import hashlib
 import json
 import re
 import subprocess
@@ -29,6 +28,8 @@ import sr25519
 from bip39 import bip39_to_mini_secret
 from mnemonic import Mnemonic
 from substrateinterface import Keypair, KeypairType
+
+from launch_preflight import blake2_256, compact
 
 NAMES = ["Alice", "Bob", "Charlie", "Dave", "Eve", "Ferdie"]
 UNSTASHED = ["One", "Two"]
@@ -54,20 +55,22 @@ SEED = re.compile(rf"0x([0-9a-fA-F]{{64}})({HARD_PATH})")
 DEV_URI = re.compile(r"(?://[\w-]+)+")
 SECRET_NAME = re.compile(r"seed|secret|suri|private|mini|skey|signing", re.I)
 CHECKSUM = Mnemonic("english")
-
-
-def blake2_256(data: bytes) -> bytes:
-    return hashlib.blake2b(data, digest_size=32).digest()
+# What Rust's u64::from_str accepts.
+U64 = re.compile(r"\+?[0-9]+")
 
 
 def scale_str(s: str) -> bytes:
     raw = s.encode()
-    assert len(raw) < 64
-    return bytes([len(raw) << 2]) + raw
+    return compact(len(raw)) + raw
 
 
 def chain_code(junction: str) -> bytes:
-    encoded = scale_str(junction)
+    """sp-core's DeriveJunction: a junction that parses as a u64 is its
+    little-endian bytes, any other its SCALE string, hashed past 32 bytes."""
+    if U64.fullmatch(junction) and int(junction) < 1 << 64:
+        encoded = int(junction).to_bytes(8, "little")
+    else:
+        encoded = scale_str(junction)
     return encoded.ljust(32, b"\0") if len(encoded) <= 32 else blake2_256(encoded)
 
 
