@@ -3,6 +3,7 @@ use crate::{CallClass, ClassifyCall, DelayTable};
 use frame_support::{
     derive_impl, parameter_types,
     traits::{ConstU32, ConstU64},
+    weights::Weight,
 };
 use sp_runtime::BuildStorage;
 
@@ -59,6 +60,12 @@ impl ClassifyCall<RuntimeCall> for TestClassifier {
             call,
             RuntimeCall::System(frame_system::Call::kill_prefix { .. })
         )
+    }
+
+    /// Larger than every other term of a timelock call's weight, so a test
+    /// sees whether it was left out.
+    fn weight(_: &RuntimeCall) -> Weight {
+        Weight::from_parts(1_000_000_000_000, 0)
     }
 }
 

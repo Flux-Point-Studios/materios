@@ -16,6 +16,7 @@ use pallet_orinq_receipts::types::PinnedMember;
 use pallet_root_timelock::{
     CallClass, ClassifyCall, DelayTable, Guardian, PendingGuardianChange, Task, TaskId, Tasks,
 };
+use parity_scale_codec::Encode;
 use proptest::prelude::*;
 use sidechain_domain::{AssetName, DParameter, EpochNonce, MainchainAddress, PolicyId};
 use sp_io::TestExternalities;
@@ -1137,6 +1138,94 @@ fn one_extrinsic_cannot_flood_the_guardian() {
     });
 }
 
+/// Call trees paired with how many calls the classifier visits in each, the
+/// root included. It reads storage to classify every stall.
+fn call_trees() -> [(RuntimeCall, u64); 2] {
+    let ten_stalls = batch(vec![note_stalled(1, 1); 10]);
+    [
+        (batch(vec![note_stalled(1, 1); 1_000]), 1_001),
+        (
+            with_weight(dispatch_as_root(batch_all(vec![ten_stalls; 100]))),
+            3 + 100 + 1_000,
+        ),
+    ]
+}
+
+#[test]
+fn the_timelock_charges_for_every_call_its_classifier_visits() {
+    new_test_ext().execute_with(|| {
+        let read = RuntimeDbWeight::get().reads(1).ref_time();
+        for (call, visited) in call_trees() {
+            let floor = visited * read;
+            let scheduling = sudo(schedule_call(call.clone()));
+            assert!(
+                scheduling.get_dispatch_info().weight.ref_time() >= floor,
+                "schedule of {visited} calls declares {:?}",
+                scheduling.get_dispatch_info().weight
+            );
+            // The enactments add their overhead to the call's own weight,
+            // which `with_weight` lets Root declare as zero.
+            let own = call.get_dispatch_info().weight.ref_time();
+            for enacting in [
+                timelock(pallet_root_timelock::Call::enact {
+                    id: 0,
+                    call: Box::new(call.clone()),
+                }),
+                enact_approved(call.clone()),
+            ] {
+                let overhead = enacting.get_dispatch_info().weight.ref_time() - own;
+                assert!(overhead >= floor, "{visited} calls, overhead {overhead} ps");
+            }
+        }
+    });
+}
+
+#[test]
+fn a_walk_too_long_for_a_block_is_refused_before_it_runs() {
+    new_test_ext().execute_with(|| {
+        let scheduling = sudo(schedule_call(batch(vec![note_stalled(1, 1); 100_000])));
+        assert_eq!(
+            frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+                &scheduling.get_dispatch_info(),
+                scheduling.encoded_size(),
+            ),
+            Err(sp_runtime::transaction_validity::InvalidTransaction::ExhaustsResources.into())
+        );
+    });
+}
+
+/// The weight prices each call the classifier visits as one database read and
+/// a step. Timed against reads of the same state in the same run, so neither
+/// the build profile nor the machine's load decides the outcome.
+#[test]
+fn classifying_costs_at_most_two_reads_per_call_visited() {
+    new_test_ext().execute_with(|| {
+        let visited = 10_001;
+        let stalls = batch(vec![note_stalled(1, 1); visited - 1]);
+        let timed = |run: &dyn Fn()| {
+            let started = std::time::Instant::now();
+            run();
+            started.elapsed()
+        };
+        let (mut reads, mut walk) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            reads = reads.min(timed(&|| {
+                for _ in 0..visited {
+                    core::hint::black_box(Sidechain::slots_per_epoch());
+                }
+            }));
+            walk = walk.min(timed(&|| {
+                core::hint::black_box(TimelockClassifier::class_of(&stalls));
+                core::hint::black_box(TimelockClassifier::wraps_guardian_change(&stalls));
+            }));
+        }
+        assert!(
+            walk <= 2 * reads,
+            "{walk:?} to classify {visited} calls, {reads:?} to read once per call"
+        );
+    });
+}
+
 /// The session keys `select_authorities` would install for the next epoch.
 fn next_committee() -> Option<Vec<opaque::SessionKeys>> {
     <Runtime as pallet_session_validator_management::Config>::select_authorities(
@@ -1903,7 +1992,6 @@ fn a_chain_spec_must_name_a_guardian_apart_from_the_sudo_key() {
         build_chain_spec(spec(&operators, Some(custodians.clone()), false)),
         Ok(())
     );
-    assert_eq!(build_chain_spec(spec(&operators, None, true)), Ok(()));
     // A spec that names no guardian, as one that leaves the pallet out does.
     assert!(build_chain_spec(spec(&operators, None, false)).is_err());
     assert!(build_chain_spec(serde_json::json!({ "sudo": { "key": operators } })).is_err());
@@ -1927,6 +2015,32 @@ fn a_chain_spec_must_name_a_guardian_apart_from_the_sudo_key() {
         build_chain_spec(spec(&acct(SUDO), Some(acct(GUARDIAN)), false)),
         Ok(())
     );
+}
+
+/// On an unguarded chain nothing can stop a stolen sudo key from withdrawing
+/// every rotation scheduled to replace it, so only a chain whose sudo key
+/// anyone may sign for, or which has none, may start without a guardian.
+#[test]
+fn only_a_development_chain_may_start_unguarded() {
+    let unguarded = |sudo: Option<AccountId>| {
+        serde_json::json!({
+            "sudo": { "key": sudo },
+            "rootTimelock": { "delays": DELAYS, "unguarded": true },
+        })
+    };
+    let refused = build_chain_spec(unguarded(Some(AccountId::from([0x5A; 32]))));
+    assert!(
+        refused.as_ref().is_err_and(|e| e.contains("unguarded")),
+        "{refused:?}"
+    );
+    for dev in Keyring::iter() {
+        assert_eq!(
+            build_chain_spec(unguarded(Some(dev.to_account_id()))),
+            Ok(()),
+            "{dev}"
+        );
+    }
+    assert_eq!(build_chain_spec(unguarded(None)), Ok(()));
 }
 
 #[test]

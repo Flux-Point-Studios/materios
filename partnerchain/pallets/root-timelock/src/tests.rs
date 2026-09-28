@@ -1,8 +1,8 @@
 use crate::{
-    mock::*, Approval, Call, CallClass, DelayTable, Delays, Error, Event, GenesisConfig, Guardian,
-    PendingGuardianChange, Task, Tasks,
+    mock::*, Approval, Call, CallClass, ClassifyCall, DelayTable, Delays, Error, Event,
+    GenesisConfig, Guardian, PendingGuardianChange, Task, Tasks,
 };
-use frame_support::{assert_noop, assert_ok, storage::unhashed};
+use frame_support::{assert_noop, assert_ok, dispatch::GetDispatchInfo, storage::unhashed};
 use sp_runtime::{traits::Hash, DispatchError};
 
 const KEY: &[u8] = b"timelock-test-key";
@@ -963,4 +963,30 @@ fn try_state_keeps_an_approval_within_its_guardian_and_window() {
         Guardian::<Test>::kill();
         assert!(check().is_err());
     });
+}
+
+#[test]
+fn every_call_that_classifies_pays_for_the_classifier() {
+    let call = recovery_call();
+    let classifying = <TestClassifier as ClassifyCall<RuntimeCall>>::weight(&call);
+    let scheduling = RuntimeCall::RootTimelock(Call::schedule {
+        call: Box::new(call.clone()),
+    });
+    assert!(scheduling.get_dispatch_info().weight.all_gte(classifying));
+    let own = call.get_dispatch_info().weight;
+    for enacting in [
+        Call::enact {
+            id: 0,
+            call: Box::new(call.clone()),
+        },
+        Call::enact_approved {
+            call: Box::new(call.clone()),
+        },
+    ] {
+        let overhead = RuntimeCall::RootTimelock(enacting)
+            .get_dispatch_info()
+            .weight
+            .saturating_sub(own);
+        assert!(overhead.all_gte(classifying), "{overhead:?}");
+    }
 }

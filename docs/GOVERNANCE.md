@@ -246,6 +246,12 @@ Because anyone may enact a ready task, and at a time of their choosing, calls
 whose order matters go into one `Utility.batch_all` task, never into separate
 tasks.
 
+`schedule`, `enact` and `enact_approved` classify the call, which walks every
+call a wrapper carries and reads storage for some of them. Their weight
+charges each call visited one database read and a 5 µs step, so a batch of
+many calls pays for its walk, and one too large for a block is refused before
+it runs.
+
 ### Runtime upgrades
 
 1. Schedule `System.authorize_upgrade(code_hash)` and publish the WASM with
@@ -294,13 +300,16 @@ A new chain sets the guardian at genesis. The runtime's
 `GenesisBuilder::build_state`, which turns a chain spec's genesis config into
 storage (and so builds every raw spec generated from one), refuses a genesis
 whose `rootTimelock.guardian` is missing unless it also sets
-`rootTimelock.unguarded: true`. It refuses a guardian equal to the sudo key,
-and a guardian that is a well-known sr25519 development account (`//Alice` to
-`//Ferdie`, their `//stash` accounts, `//One`, `//Two`) unless the sudo key is
-one too, as on a development chain. Only a test network sets `unguarded` (the
-preprod spec and the benchmarking preset do). A raw spec written by hand never
-passes through `build_state`; the mainnet launch preflight has to apply the
-same checks to it.
+`rootTimelock.unguarded: true`, and refuses `unguarded` unless the sudo key is
+a well-known sr25519 development account (`//Alice` to `//Ferdie`, their
+`//stash` accounts, `//One`, `//Two`) or there is no sudo key, as in the
+benchmarking preset. It refuses a guardian equal to the sudo key, and a
+development-account guardian unless the sudo key is one too, as on a
+development chain. The preprod spec names the keyholders' 3-of-3 multisig: an
+account apart from the 2-of-3 sudo key, held by the same keyholders, which is
+enough to rehearse vetoes and co-signs but not to answer a stolen sudo key. A
+raw spec written by hand never passes through `build_state`; the mainnet
+launch preflight has to apply the same checks to it.
 
 A compromised guardian can veto every task except its own replacement, which
 waits the long delay: up to 30 days in which nothing but the exempt calls
@@ -354,8 +363,9 @@ What remains:
   guardian's `as_multi` and the operators' `Sudo.sudo` compete with it for
   inclusion. A single-key guardian's calls are Operational and do not.
 - On a chain with no guardian, the thief and the operators can each cancel
-  the other's tasks, so neither side's change lands. That is why only a test
-  network may start unguarded.
+  the other's tasks, so neither side's change lands. That is why only a chain
+  whose sudo key is a development account, or which has none, may start
+  unguarded.
 
 ### Changing a delay
 

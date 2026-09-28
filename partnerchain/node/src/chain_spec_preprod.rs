@@ -1,6 +1,6 @@
 //! Chain specification for Materios Preprod — clean genesis, no overrides.
 
-use materios_runtime::{TESTNET_TIMELOCK_DELAYS, WASM_BINARY};
+use materios_runtime::{Multisig, TESTNET_TIMELOCK_DELAYS, WASM_BINARY};
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
@@ -66,6 +66,13 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         0x17, 0x8d, 0x1a, 0x68, 0x04, 0x83, 0x45, 0x3d,
         0xcd, 0x3f, 0x32, 0x09, 0xe6, 0x3a, 0xf6, 0x92,
     ]);
+    let mut keyholders = [
+        keyholder_1.clone(),
+        keyholder_2.clone(),
+        keyholder_3.clone(),
+    ];
+    keyholders.sort();
+    let keyholders_3_of_3 = Multisig::multi_account_id(&keyholders, 3);
     // MacBook AURA pubkey (block-author key); SS58 (42)
     // 5CoiW8b5wm45shiSagjxyFgpz7DS8pZiESQRVUcxJU1W687J.
     let macbook_account = account([
@@ -202,11 +209,14 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         "sudo": {
             "key": multisig_sudo
         },
-        // Short delays so ceremonies can be rehearsed. No guardian until one
-        // is appointed through a scheduled `set_guardian`.
+        // Short delays so ceremonies can be rehearsed. The guardian is the
+        // keyholders' 3-of-3 multisig: an account apart from the 2-of-3 sudo
+        // key, held by the same keyholders, which rehearses vetoes and
+        // co-signs but cannot answer a stolen sudo key. A mainnet guardian
+        // is held by other keyholders.
         "rootTimelock": {
             "delays": TESTNET_TIMELOCK_DELAYS,
-            "unguarded": true,
+            "guardian": keyholders_3_of_3,
         },
         "aura": {
             "authorities": [macbook_aura, gemtek_aura, node2_aura, node3_aura],

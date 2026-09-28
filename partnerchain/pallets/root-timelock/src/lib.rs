@@ -150,6 +150,10 @@ pub trait ClassifyCall<Call> {
     /// hand the guardian a veto over its replacement or carry other calls
     /// past the veto.
     fn wraps_guardian_change(call: &Call) -> bool;
+
+    /// What `class_of` and `wraps_guardian_change` cost together on `call`.
+    /// Both walk every call a wrapper carries, so it has to grow with them.
+    fn weight(call: &Call) -> Weight;
 }
 
 pub type TaskId = u32;
@@ -423,7 +427,10 @@ pub mod pallet {
         /// Record `call` to run as Root once its class's delay has passed.
         #[pallet::call_index(0)]
         #[pallet::weight(
-            T::DbWeight::get().reads_writes(5, 4).saturating_add(call_hash_weight(call.as_ref()))
+            T::DbWeight::get()
+                .reads_writes(5, 4)
+                .saturating_add(call_hash_weight(call.as_ref()))
+                .saturating_add(T::Classifier::weight(call.as_ref()))
         )]
         pub fn schedule(
             origin: OriginFor<T>,
@@ -743,12 +750,12 @@ pub mod pallet {
         }
     }
 
-    /// The task or approval read and removal, the classifier's reads, and
-    /// hashing.
+    /// The task or approval read and removal, hashing, and classifying.
     fn enact_overhead<T: Config>(call: &<T as Config>::RuntimeCall) -> Weight {
         T::DbWeight::get()
             .reads_writes(4, 3)
             .saturating_add(call_hash_weight(call))
+            .saturating_add(T::Classifier::weight(call))
     }
 
     /// The overhead plus the call's own weight, in the call's class.

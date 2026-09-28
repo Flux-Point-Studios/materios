@@ -12,7 +12,10 @@ use crate::{
     RuntimeGenesisConfig, Sidechain,
 };
 use core::slice;
-use frame_support::traits::Contains;
+use frame_support::{
+    traits::Contains,
+    weights::{constants::RocksDbWeight, Weight},
+};
 use pallet_root_timelock::{CallClass, ClassifyCall, Guardian};
 use sp_keyring::Sr25519Keyring;
 
@@ -35,18 +38,23 @@ pub fn max_exempt_stall_delay() -> BlockNumber {
 
 /// Refuses a genesis in which nothing independent of the sudo key can veto
 /// its timelock tasks: one that names no guardian without saying so, one
+/// that says so while it has a sudo key only its holders can sign for, one
 /// whose guardian is the sudo key itself, and one whose guardian is a
 /// well-known sr25519 development account (`//Alice` to `//Ferdie`, their
 /// `//stash` accounts, `//One`, `//Two`), whose key anyone can derive, unless
 /// its sudo key is one too, as on a development chain.
 pub fn ensure_guarded_genesis(genesis: &RuntimeGenesisConfig) -> Result<(), &'static str> {
     genesis.root_timelock.ensure_guarded()?;
-    let Some(guardian) = &genesis.root_timelock.guardian else {
-        return Ok(());
-    };
     let sudo = genesis.sudo.key.as_ref();
     let development = |who: &AccountId| {
         Sr25519Keyring::iter().any(|dev| AccountId::from(<[u8; 32]>::from(dev)) == *who)
+    };
+    let Some(guardian) = &genesis.root_timelock.guardian else {
+        return if sudo.is_some_and(|key| !development(key)) {
+            Err("root-timelock genesis is `unguarded` but its sudo key is not a development account; name a guardian")
+        } else {
+            Ok(())
+        };
     };
     if sudo == Some(guardian) {
         Err("the root-timelock guardian must not be the sudo key")
@@ -151,6 +159,19 @@ fn wrapped(call: &RuntimeCall) -> Option<Wrapped<'_>> {
     })
 }
 
+/// Every call a wrapper carries, at any depth, and the wrapper itself.
+fn calls_in(call: &RuntimeCall) -> u64 {
+    wrapped(call)
+        .map_or(0, |wrapped| {
+            wrapped
+                .calls
+                .iter()
+                .map(calls_in)
+                .fold(0, u64::saturating_add)
+        })
+        .saturating_add(1)
+}
+
 /// `pallet_root_timelock::Config::Classifier`. A wrapper waits the longest
 /// class of the calls it carries, so a batch cannot hide a long call among
 /// standard ones.
@@ -239,6 +260,16 @@ impl ClassifyCall<RuntimeCall> for TimelockClassifier {
                 ) || Self::wraps_guardian_change(inner)
             })
         })
+    }
+
+    /// Per call visited: at most one storage read, priced from `RocksDbWeight`
+    /// whatever `frame_system::Config::DbWeight` says, and the step itself,
+    /// priced as `pallet_utility` benchmarks one call of a batch.
+    fn weight(call: &RuntimeCall) -> Weight {
+        RocksDbWeight::get()
+            .reads(1)
+            .saturating_add(Weight::from_parts(5_000_000, 0))
+            .saturating_mul(calls_in(call))
     }
 }
 
