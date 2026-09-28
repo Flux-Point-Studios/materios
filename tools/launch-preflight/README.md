@@ -28,7 +28,7 @@ It reads:
 |---|---|
 | 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` is not a multisig with a threshold of at least 2, or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
-| 3 rpc | A public RPC URL, probed live, lists in `rpc_methods` a method outside the safe set or answers `system_peers`, an unsafe method that changes nothing (see [Public RPC probe](#public-rpc-probe)); the launch does not declare `public_rpc`; an authority serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`, including every value one `--experimental-rpc-endpoint` takes up to the next option, with each option trimmed as the node trims it. |
+| 3 rpc | A public RPC URL, probed live, lists in `rpc_methods` a method outside the safe set or answers `system_peers`, an unsafe method that changes nothing (see [Public RPC probe](#public-rpc-probe)); the launch does not declare `public_rpc`; an authority's running node process, read from its `cmdline` capture, serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`, including every value one `--experimental-rpc-endpoint` takes up to the next option, with each option trimmed as the node trims it. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. |
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
 | 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
@@ -102,6 +102,7 @@ more than 300 slots behind its node.
     {"name": "val-1", "host": "val-1", "addresses": ["10.0.0.11"], "authority": true,
      "aura": "0x<aura public key>",
      "argv": ["materios-node", "--validator", "--chain", "mainnet-raw.json", "--rpc-methods", "safe"],
+     "cmdline": "captures/val-1.cmdline",
      "env": {}},
     {"name": "edge-1", "host": "edge-1", "addresses": ["10.0.0.2"], "authority": false}
   ],
@@ -161,9 +162,24 @@ more than 300 slots behind its node.
   stdin is a socket), a shell option other than `-a`, `-e` and `-u` (on the
   shell or through `set`: `-x` runs `$PS4` as code), or several arguments in
   one word.
-- `env` holds a node's settings as the process receives them, as
-  `/proc/<pid>/environ` lists them (systemd decodes escapes and expands
-  specifiers in an `Environment=` line first); assignments in a script
+- An authority's `cmdline` is the path of a copy of its running node
+  process's `/proc/<pid>/cmdline`: the argv the kernel holds, each word
+  ended by a NUL byte (`cat /proc/<pid>/cmdline > val-1.cmdline` on its
+  machine, with the node's own PID: a container's
+  `docker inspect -f '{{.State.Pid}}'`, a unit's `MainPID` when the unit
+  runs the node itself). `check` reads it and `sign` does not, so the
+  manifest can be signed before the nodes start. Rule 3 checks the listeners
+  of that argv, which must be word for word the argv the preflight reads the
+  launch to run: a node started another way, or a launch the preflight
+  misread, refuses as unreadable. Only an authority takes one.
+- `env` holds the settings a node's unit or container definition gives it
+  (`Environment=` and `EnvironmentFile=`, `docker run -e`, a compose file's
+  `environment:`) as the process receives them: systemd decodes escapes and
+  expands specifiers in an `Environment=` line first. The settings the
+  service manager or container runtime adds on its own (`PATH`, `LANG`,
+  `HOME`, `HOSTNAME`, `INVOCATION_ID`, `JOURNAL_STREAM`, `SYSTEMD_EXEC_PID`),
+  which `/proc/<pid>/environ` always lists, are left out: the preflight
+  takes the service manager's defaults as given. Assignments in a script
   (`NAME=value`, `export NAME=value`) count the same, and so does a setting
   any word hands a program: a `NAME=value` word, or one inside a word after
   whitespace, a quote or `=` (`systemd-run --setenv=NAME=value`, a settings

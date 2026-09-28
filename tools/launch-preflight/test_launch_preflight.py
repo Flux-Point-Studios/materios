@@ -898,7 +898,10 @@ def test_zero_baseline_is_refused(spec, runtime_meta):
 # ---------------------------------------------------------------------------
 
 def rpc_findings(tmp_path, nodes, config=None, proxy_node="edge", kind="nginx", authorities=(), other_targets=()):
-    """Rule 3 on a validated launch. A proxy node the test does not declare runs on its own machine."""
+    """Rule 3 on a validated launch. A proxy node the test does not declare runs on its own machine, and an
+    authority whose test gives no cmdline runs its node process with exactly its argv."""
+    nodes = [dict(node, cmdline=capture(tmp_path, node["name"], node.get("argv", [])))
+             if node["authority"] and "cmdline" not in node else node for node in nodes]
     proxies = []
     if config is not None:
         conf = tmp_path / ("proxy.yml" if kind == "cloudflared" else "nginx.conf")
@@ -1431,21 +1434,23 @@ def test_experimental_endpoint_options_are_read_trimmed(tmp_path, endpoint):
 LOGIN_SHELL_LAUNCH = ["/bin/bash", "-lc", "set -a; . /etc/node/node.env; set +a; "
                       "exec materios-node --validator --rpc-methods safe"]
 # A wrapper that runs no file: the node's settings are in the unit's environment.
-SELF_CONTAINED_LAUNCH = ["/bin/bash", "--norc", "-c", "set -eu; umask 077; exec materios-node --validator "
-                         "--chain /srv/chain/raw.json --rpc-methods unsafe --unsafe-rpc-external"]
+SELF_CONTAINED_NODE = ["materios-node", "--validator", "--chain", "/srv/chain/raw.json", "--rpc-methods", "unsafe",
+                       "--unsafe-rpc-external"]
+SELF_CONTAINED_LAUNCH = ["/bin/bash", "--norc", "-c", "set -eu; umask 077; exec " + " ".join(SELF_CONTAINED_NODE)]
 UNSAFE_EXTERNAL = "materios-node --validator --rpc-methods unsafe --unsafe-rpc-external"
 SAFE_NODE = "exec materios-node --validator --rpc-methods safe"
 
 
-@pytest.mark.parametrize("argv", [
-    SELF_CONTAINED_LAUNCH,
-    ["sh", "-c", "exec " + UNSAFE_EXTERNAL],
-    ["/bin/bash", "--norc", "-e", "-c", "mkdir -p /data &&\n" + UNSAFE_EXTERNAL],
-    ["bash", "--norc", "-ec", "exec bash --norc -c 'exec " + UNSAFE_EXTERNAL + "'"],
-    ["dash", "-c", "RUST_LOG=info " + UNSAFE_EXTERNAL],
+@pytest.mark.parametrize("argv, running", [
+    (SELF_CONTAINED_LAUNCH, SELF_CONTAINED_NODE),
+    (["sh", "-c", "exec " + UNSAFE_EXTERNAL], UNSAFE_EXTERNAL.split()),
+    (["/bin/bash", "--norc", "-e", "-c", "mkdir -p /data &&\n" + UNSAFE_EXTERNAL], UNSAFE_EXTERNAL.split()),
+    (["bash", "--norc", "-ec", "exec bash --norc -c 'exec " + UNSAFE_EXTERNAL + "'"], UNSAFE_EXTERNAL.split()),
+    (["dash", "-c", "RUST_LOG=info " + UNSAFE_EXTERNAL], UNSAFE_EXTERNAL.split()),
 ])
-def test_a_shell_wrapped_launch_is_read_as_the_node_it_runs(tmp_path, argv):
-    assert rpc_findings(tmp_path, [authority(argv)]) == [
+def test_a_shell_wrapped_launch_is_read_as_the_node_it_runs(tmp_path, argv, running):
+    node = dict(authority(argv), cmdline=capture(tmp_path, "val1", running))
+    assert rpc_findings(tmp_path, [node]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
@@ -1502,7 +1507,8 @@ def test_a_launch_that_starts_a_node_before_its_last_command_is_an_input_error(a
 def test_a_node_subcommand_before_the_node_process_is_not_a_node(tmp_path):
     argv = ["bash", "--norc", "-c",
             "materios-node key generate-node-key --file /data/node-key; exec " + UNSAFE_EXTERNAL]
-    assert rpc_findings(tmp_path, [authority(argv)]) == [
+    node = dict(authority(argv), cmdline=capture(tmp_path, "val1", UNSAFE_EXTERNAL.split()))
+    assert rpc_findings(tmp_path, [node]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
@@ -1539,7 +1545,8 @@ def test_a_wasm_override_on_a_prefixed_earlier_node_is_an_input_error():
 def test_setup_commands_before_the_node_are_read_through(tmp_path):
     argv = ["bash", "--norc", "-ec", "set -u; export RUST_LOG=info; cd /data; umask 077; ulimit -n 65536; "
                                      "mkdir -p /data/db && RUST_BACKTRACE=1 exec " + UNSAFE_EXTERNAL]
-    assert rpc_findings(tmp_path, [authority(argv)]) == [
+    node = dict(authority(argv), cmdline=capture(tmp_path, "val1", UNSAFE_EXTERNAL.split()))
+    assert rpc_findings(tmp_path, [node]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
@@ -1652,9 +1659,10 @@ def test_a_carriage_return_does_not_split_a_script_word():
 
 
 def test_a_hash_inside_a_script_word_is_read_literally(tmp_path):
-    argv = ["bash", "--norc", "-c",
-            "exec materios-node --validator --name val#1 --rpc-methods unsafe --unsafe-rpc-external"]
-    assert rpc_findings(tmp_path, [authority(argv)]) == [
+    running = "materios-node --validator --name val#1 --rpc-methods unsafe --unsafe-rpc-external"
+    node = dict(authority(["bash", "--norc", "-c", "exec " + running]),
+                cmdline=capture(tmp_path, "val1", running.split()))
+    assert rpc_findings(tmp_path, [node]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
@@ -1725,7 +1733,9 @@ def test_an_authority_may_set_logging_the_time_zone_and_its_node_settings(tmp_pa
            "MITHRIL_AGGREGATOR_ENDPOINT": "https://aggregator.example.org/aggregator",
            "MITHRIL_GENESIS_VERIFICATION_KEY": "5b3139312c36362c3134302c3138355d"}
     script = "set -a; export TZ=UTC; set +a; RUST_LOG=info exec " + UNSAFE_EXTERNAL
-    assert rpc_findings(tmp_path, [dict(authority(["bash", "--norc", "-euc", script]), env=env)]) == [
+    node = dict(authority(["bash", "--norc", "-euc", script]), env=env,
+                cmdline=capture(tmp_path, "val1", UNSAFE_EXTERNAL.split()))
+    assert rpc_findings(tmp_path, [node]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
@@ -1839,6 +1849,82 @@ def test_authorities_come_from_genesis_aura_and_the_cardano_candidates(spec):
     assert [aura for _, aura in labels] == aura_keys(spec) + [extra]
     assert labels[0][0] == "genesis Aura.Authorities[0]"
     assert labels[-1][0] == "Cardano permissioned candidate 0"
+
+
+# An authority's node process argv, as the kernel holds it: each word ended by a NUL, as `cat /proc/<pid>/cmdline`
+# saves it.
+def capture(tmp_path: Path, name: str, argv: list[str]) -> str:
+    path = tmp_path / f"{name}.cmdline"
+    path.write_bytes(b"".join(word.encode() + b"\0" for word in argv))
+    return str(path)
+
+
+def rpc_launch(nodes) -> dict:
+    launch = {"roles": {}, "supply": VALID_LOCK, "nodes": nodes, "rpc_proxies": []}
+    lp.validate_launch(launch)
+    return launch
+
+
+def test_an_authority_is_checked_with_the_argv_its_running_node_process_has(tmp_path):
+    argv = ["/usr/local/bin/materios-node", "--validator", "--rpc-methods", "unsafe", "--unsafe-rpc-external"]
+    node = dict(authority(argv), cmdline=capture(tmp_path, "val1", argv))
+    assert messages(lp.check_rpc(rpc_launch([node]), [])) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+def test_a_shell_wrapped_authority_is_checked_with_its_running_node_process(tmp_path):
+    node = dict(authority(["sh", "-c", "exec " + UNSAFE_EXTERNAL]),
+                cmdline=capture(tmp_path, "val1", UNSAFE_EXTERNAL.split()))
+    assert messages(lp.check_rpc(rpc_launch([node]), [])) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+def test_an_authority_with_no_captured_cmdline_is_an_input_error():
+    launch = rpc_launch([authority(["materios-node", "--validator", "--rpc-methods", "safe"])])
+    with pytest.raises(lp.InputError, match="authority val1: give its running node process's /proc/<pid>/cmdline"):
+        lp.check_rpc(launch, [])
+
+
+# Whatever the launch's reading gets wrong, the node runs with the argv the kernel holds: a process started some
+# other way, or a launch the preflight misread, cannot be resolved.
+@pytest.mark.parametrize("running, error", [
+    (UNSAFE_EXTERNAL.split(), "word 3 of its running node process differs from its launch"),
+    (SAFE_NODE.split()[1:] + ["--unsafe-rpc-external"], "its running node process has 5 words, its launch gives 4"),
+    (["/usr/local/bin/materios-node", *SAFE_NODE.split()[2:]], "word 0 of its running node process differs"),
+])
+def test_a_running_node_process_that_differs_from_its_launch_is_an_input_error(tmp_path, running, error):
+    node = dict(authority(["sh", "-c", SAFE_NODE]), cmdline=capture(tmp_path, "val1", running))
+    with pytest.raises(lp.InputError, match=f"authority val1: {error}"):
+        lp.check_rpc(rpc_launch([node]), [])
+
+
+@pytest.mark.parametrize("raw, error", [
+    (b"materios-node --validator --rpc-methods safe", "is not a /proc/<pid>/cmdline capture"),
+    (b"", "is not a /proc/<pid>/cmdline capture"),
+    (b"materios-node\0--name\0\xff\0", "is not UTF-8"),
+])
+def test_a_cmdline_that_is_not_a_proc_capture_is_an_input_error(tmp_path, raw, error):
+    path = tmp_path / "val1.cmdline"
+    path.write_bytes(raw)
+    node = dict(authority(["materios-node", "--validator", "--rpc-methods", "safe"]), cmdline=str(path))
+    with pytest.raises(lp.InputError, match=error):
+        lp.check_rpc(rpc_launch([node]), [])
+
+
+def test_an_unreadable_cmdline_is_an_input_error(tmp_path):
+    node = dict(authority(["materios-node"]), cmdline=str(tmp_path / "missing.cmdline"))
+    with pytest.raises(lp.InputError, match="cannot read cmdline"):
+        lp.check_rpc(rpc_launch([node]), [])
+
+
+@pytest.mark.parametrize("node, error", [
+    ({"name": "edge", "host": "edge", "authority": False, "cmdline": "/proc/1/cmdline"},
+     "nodes\\[0\\] cmdline is read for an authority only"),
+    (dict(authority(["materios-node"]), cmdline=7), "nodes\\[0\\] cmdline must be the path of a /proc/<pid>/cmdline"),
+])
+def test_a_misplaced_cmdline_is_an_input_error(node, error):
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_node(node, "nodes[0]")
 
 
 # ---------------------------------------------------------------------------
@@ -2620,6 +2706,11 @@ class Launch:
         self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
         # None serves this genesis hash as the lock's inline datum.
         self.lock_datum = None
+        for node in self.launch["nodes"]:
+            if node["authority"]:
+                node["cmdline"] = str(tmp_path / f"{node['name']}.cmdline")
+        # The argv each authority's node process runs with, where a test gives one other than its launch argv.
+        self.running = {}
         self.launch_key = signing.SigningKey.generate()
         self.candidates = genesis_candidates_datum(spec)
 
@@ -2630,6 +2721,9 @@ class Launch:
         return path
 
     def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
+        for node in self.launch["nodes"]:
+            if node["authority"] and isinstance(node.get("argv"), list) and "cmdline" in node:
+                capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
         spec_path = self.spec_path()
         spec = lp.load_spec(str(spec_path))
         datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
@@ -2787,6 +2881,13 @@ def test_cli_refuses_a_launch_that_does_not_declare_its_public_rpc(clean, capsys
     assert code == 1 and "[3 rpc] public_rpc is not declared" in out
 
 
+# A node started some other way than its launch says, or a launch the preflight misread.
+def test_cli_refuses_an_authority_whose_running_node_differs_from_its_launch(clean, capsys):
+    clean.running["val0"] = UNSAFE_EXTERNAL.split()
+    code, out = clean.run(capsys)
+    assert code == 2 and "authority val0: word 3 of its running node process differs from its launch" in out
+
+
 def test_cli_refuses_an_upstream_whose_port_comes_from_dns_srv_as_unreadable(clean, capsys):
     conf = clean.tmp_path / "srv.conf"
     conf.write_text(http_routes("resolver 127.0.0.1 valid=1s; upstream rpc { zone rpc 64k; "
@@ -2808,9 +2909,10 @@ def test_cli_refuses_an_include_glob_nginx_reads_apart_as_unreadable(clean, caps
 
 
 def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):
-    clean.launch["nodes"][0]["argv"] = ["/bin/bash", "--norc", "-c",
-                                        "exec materios-node --validator --rpc-methods unsafe "
-                                        "--unsafe-rpc-external --alice --wasm-runtime-overrides /srv/o"]
+    running = ("materios-node --validator --rpc-methods unsafe --unsafe-rpc-external --alice "
+               "--wasm-runtime-overrides /srv/o")
+    clean.launch["nodes"][0]["argv"] = ["/bin/bash", "--norc", "-c", "exec " + running]
+    clean.running["val0"] = running.split()
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] node val0: --alice loads the dev keyring" in out
@@ -2847,6 +2949,7 @@ def test_cli_refuses_a_command_line_string_as_unreadable(clean, capsys):
 
 def test_cli_refuses_unsafe_rpc_in_a_self_contained_unit(clean, capsys):
     clean.launch["nodes"][0]["argv"] = SELF_CONTAINED_LAUNCH
+    clean.running["val0"] = SELF_CONTAINED_NODE
     code, out = clean.run(capsys)
     assert code == 1
     assert "[3 rpc] authority val0 serves unsafe RPC methods on an external listener" in out
@@ -2932,8 +3035,8 @@ def test_cli_refuses_a_local_chain_type(clean, capsys):
 
 def test_cli_refuses_a_dev_key_in_the_cardano_committee(clean, capsys):
     clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), ALICE, fresh_account())])
-    clean.launch["nodes"].append(authority(["materios-node", "--validator", "--rpc-methods", "safe"],
-                                           "val9", "val9", ALICE))
+    clean.launch["nodes"].append(dict(authority(["materios-node", "--validator", "--rpc-methods", "safe"],
+                                                "val9", "val9", ALICE), cmdline=str(clean.tmp_path / "val9.cmdline")))
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] Cardano permissioned candidate 0 aura: //Alice (sr25519)" in out

@@ -23,9 +23,9 @@ Rules, each of which refuses on its own:
   2 rewards      attestor reward and subsidy values or validator reward
                  parameters not declared, or genesis and the runtime do not
                  hold exactly the declared values
-  3 rpc          an authority serves unsafe RPC methods on an external or
-                 proxied listener, a public RPC URL lists or answers an unsafe
-                 method, or an authority has no launch entry to check
+  3 rpc          an authority's running node process serves unsafe RPC methods
+                 on an external or proxied listener, a public RPC URL lists or
+                 answers an unsafe method, or an authority has no launch entry
   4 supply       an attestor endowment below bond + existential deposit + fee
                  buffer; genesis issuance plus the runtime's emission reserves
                  above the cMATRA the lock holds on Cardano (the reserve counted
@@ -1297,6 +1297,36 @@ def node_process(node: dict) -> list[str]:
     return argv
 
 
+def running_argv(node: dict) -> list[str]:
+    """The argv an authority's node process runs with, from its captured /proc/<pid>/cmdline, where the kernel
+    ends each word with a NUL. Its launch's reading must give the same words: a node started some other way, or a
+    launch the preflight misread, leaves which argv runs unresolved."""
+    where, path = f"authority {node['name']}", node.get("cmdline")
+    if path is None:
+        raise InputError(f"{where}: give its running node process's /proc/<pid>/cmdline as cmdline; the preflight "
+                         "checks the argv the node runs with")
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        raise InputError(f"{where}: cannot read cmdline {path}: {e}") from e
+    if not raw.endswith(b"\0"):
+        raise InputError(f"{where}: cmdline {path} is not a /proc/<pid>/cmdline capture, which ends each word with "
+                         "a NUL byte")
+    try:
+        running = raw[:-1].decode().split("\0")
+    except UnicodeDecodeError as e:
+        raise InputError(f"{where}: cmdline {path} is not UTF-8") from e
+    launched = node_process(node)
+    differs = next((i for i, (a, b) in enumerate(zip(running, launched)) if a != b), None)
+    if differs is not None:
+        raise InputError(f"{where}: word {differs} of its running node process differs from its launch; the "
+                         "preflight cannot resolve which argv runs")
+    if len(running) != len(launched):
+        raise InputError(f"{where}: its running node process has {len(running)} words, its launch gives "
+                         f"{len(launched)}; the preflight cannot resolve which argv runs")
+    return running
+
+
 def _flag(argv: list[str], name: str) -> str | None:
     for i, token in enumerate(argv):
         if token == name and i + 1 < len(argv):
@@ -1694,7 +1724,7 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Fin
                 findings.append(Finding(RPC, f"node {node['name']} runs --validator but is not "
                                              "declared an authority"))
             continue
-        argv = node_process(node)
+        argv = running_argv(node)
         port_flag = _flag(argv, "--rpc-port") or str(DEFAULT_RPC_PORT)
         if not port_flag.isdigit():
             raise InputError(f"node {node['name']}: --rpc-port {port_flag} is not a port")
@@ -2102,6 +2132,10 @@ def validate_node(node, where: str) -> None:
     env = node.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise InputError(f"{where} env must map names to strings")
+    if "cmdline" in node and not node["authority"]:
+        raise InputError(f"{where} cmdline is read for an authority only: its node process's argv")
+    if not isinstance(node.get("cmdline", ""), str):
+        raise InputError(f"{where} cmdline must be the path of a /proc/<pid>/cmdline capture")
     launch_commands(node)
     if node["authority"]:
         try:
