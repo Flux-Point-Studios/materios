@@ -162,6 +162,9 @@ AUTHORITY_SETTINGS = frozenset({
 # What an authority's launch may run before its node, as bare words: builtins and mkdir, which start nothing.
 SETUP_COMMANDS = ("set", "export", "cd", "umask", "ulimit", "mkdir")
 SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=.*", re.DOTALL)
+WORD_SETTING = re.compile(r"([^\s=\"']+?)\+?=([^\s\"']*)")
+# GNU env's long options that take the next word as their argument.
+ENV_LONG_OPTIONS_WITH_ARGUMENT = ("--argv0", "--chdir", "--unset")
 SHELL_NESTING = 4
 RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
@@ -568,17 +571,15 @@ def phraseless_uri(value: str) -> str | None:
 
 
 def secret_settings(node: dict):
-    """(setting, value) for each environment variable, shell assignment or flag
-    of a node's launch whose name marks it as a secret URI, and not a file or
-    path holding one."""
+    """(setting, value) for each environment variable, flag or setting a word
+    of a node's launch hands a program, whose name marks it as a secret URI
+    and not a file or path holding one."""
     names = [(name, value) for name, value in sorted(node.get("env", {}).items())]
     for words in launch_commands(node):
         for i, word in enumerate(words):
-            name, equals, value = word.partition("=")
-            if name.startswith("--") and not equals and i + 1 < len(words):
-                names.append((name, words[i + 1]))
-            elif equals and (name.startswith("--") or SHELL_ASSIGNMENT.fullmatch(word)):
-                names.append((name, value))
+            if word.startswith("--") and "=" not in word and i + 1 < len(words):
+                names.append((word, words[i + 1]))
+            names += word_settings(word)
     return [(name, value) for name, value in names
             if SECRET_SETTING.search(name) and not SECRET_LOCATION.search(name)]
 
@@ -1088,6 +1089,47 @@ def _setting(word: str) -> str:
     return word.split("=", 1)[0].removesuffix("+")
 
 
+def word_settings(word: str) -> list[tuple[str, str]]:
+    """(name, value) of each NAME=value or NAME+=value setting a word can hand
+    a program: the word itself, one after whitespace, a quote or '=' in it (a
+    settings string, systemd-run --setenv=NAME=value, --flag=value), or one
+    after any letter of a leading short-option cluster (docker -eNAME=value)."""
+    cluster = re.match(r"-[A-Za-z]+", word)
+    starts = {0, *range(1, cluster.end() if cluster else 0), *(m.end() for m in re.finditer(r"[\s=\"']", word))}
+    return [(m.group(1), m.group(2)) for m in (WORD_SETTING.match(word, i) for i in sorted(starts)) if m]
+
+
+def _shell_runs(program: list[str]) -> list[str]:
+    """A command's words from what the shell runs, past `builtin` and
+    `command` (and command's options), which run the next word themselves."""
+    while program[:1] in (["builtin"], ["command"]):
+        program = list(itertools.dropwhile(lambda word: word.startswith("-"), program[1:]))
+    return program
+
+
+def _env_splits_a_string(args: list[str]) -> bool:
+    """Whether GNU env's options include -S (--split-string). They end at the
+    first word that is neither an option nor the argument of -a, -C or -u."""
+    takes_next = False
+    for word in args:
+        if takes_next:
+            takes_next = False
+            continue
+        if not word.startswith("-") or word == "--":
+            return False
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if "--split-string".startswith(name):
+                return True
+            takes_next = "=" not in word and any(o.startswith(name) for o in ENV_LONG_OPTIONS_WITH_ARGUMENT)
+        else:
+            cut = next((i for i, letter in enumerate(word[1:]) if letter in "aCSu"), None)
+            if cut is not None and word[1 + cut] == "S":
+                return True
+            takes_next = cut == len(word) - 2
+    return False
+
+
 def _refuse_settings(names, authority: bool, where: str) -> None:
     for name in names:
         if LOADER_SETTINGS.fullmatch(name):
@@ -1099,8 +1141,11 @@ def _refuse_settings(names, authority: bool, where: str) -> None:
 
 
 def _commands(words: list[str], where: str, depth: int, authority: bool) -> list[list[str]]:
-    # Any NAME=value word counts, since a program such as env passes it on as a setting.
-    _refuse_settings((_setting(word) for word in words if "=" in word), False, where)
+    # A setting any word hands a program counts, since a program such as env or systemd-run passes it on.
+    _refuse_settings((name for word in words for name, _ in word_settings(word)), False, where)
+    if any(Path(word).name == "env" and _env_splits_a_string(words[i + 1:]) for i, word in enumerate(words)):
+        raise InputError(f"{where}: runs env -S, which splits a string into settings and arguments by env's own "
+                         "quoting and escapes; the preflight cannot read it")
     program = _program(words)
     assigned = [word for word in words[:len(words) - len(program)] if word != "exec"]
     if program[:1] == ["export"]:
@@ -1109,9 +1154,13 @@ def _commands(words: list[str], where: str, depth: int, authority: bool) -> list
     if program[:1] == ["set"]:
         for word in program[1:]:
             _refuse_shell_option(word, word, where)
-    if program and program[0] in (".", "source"):
-        raise InputError(f"{where}: its launch sources a file with {program[0]}, which the preflight cannot read; "
+    runs = next(iter(_shell_runs(program)), None)
+    if runs in (".", "source"):
+        raise InputError(f"{where}: its launch sources a file with {runs}, which the preflight cannot read; "
                          "put the node's settings in the unit's environment and declare them in env")
+    if runs in ("eval", "trap"):
+        raise InputError(f"{where}: its launch runs {runs}, whose string the shell runs as code the preflight "
+                         "does not open")
     if not program or Path(program[0]).name not in SHELLS:
         return [words]
     if depth == SHELL_NESTING:

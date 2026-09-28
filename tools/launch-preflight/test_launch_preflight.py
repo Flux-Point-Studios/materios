@@ -573,6 +573,9 @@ def sidecar(argv=(), **env) -> dict:
     (sidecar(["/bin/sh", "-c", "exec cert-daemon --suri /Attestor3"]), "/Attestor3"),
     (sidecar(["bash", "-c", "SIGNER_URI=/Attestor4 exec cert-daemon"]), "/Attestor4"),
     (sidecar(["bash", "-c", "SIGNER_URI+=/Attestor5 exec cert-daemon"]), "/Attestor5"),
+    (sidecar(["systemd-run", "--setenv=SIGNER_URI=/Attestor6", "cert-daemon"]), "/Attestor6"),
+    (sidecar(["docker", "run", "-eSIGNER_URI=/Attestor7", "img"]), "/Attestor7"),
+    (sidecar(["systemd-run", "-p", "Environment=RUST_LOG=info SIGNER_URI=/Attestor8", "cert-daemon"]), "/Attestor8"),
 ])
 def test_a_secret_uri_setting_with_no_phrase_is_named(spec, meta, known, launch, named):
     found = dev_key_findings(spec, meta, known, launch)
@@ -1412,7 +1415,7 @@ def test_a_node_subcommand_before_the_node_process_is_not_a_node(tmp_path):
     "/opt/node/export --rpc-methods unsafe --unsafe-rpc-external",
 ])
 def test_a_launch_that_runs_another_program_before_its_node_is_an_input_error(earlier):
-    with pytest.raises(lp.InputError, match="runs .+ before its last command"):
+    with pytest.raises(lp.InputError, match="runs .+ before its last command|runs eval, whose string"):
         lp.validate_node(authority(["bash", "-c", earlier + "; " + SAFE_NODE]), "nodes[0]")
 
 
@@ -1599,9 +1602,56 @@ def test_a_shell_option_the_preflight_does_not_read_is_an_input_error(argv, opti
         lp.validate_node(authority(argv), "nodes[0]")
 
 
-def test_a_sidecar_that_sources_its_settings_is_an_input_error(spec, meta, known):
-    with pytest.raises(lp.InputError, match="sources a file"):
-        dev_key_findings(spec, meta, known, sidecar(["sh", "-c", ". /etc/cert-daemon.env; exec cert-daemon"]))
+# bash 5.2 sources the file before the exec in each of these.
+@pytest.mark.parametrize("script, error", [
+    (". /etc/cert-daemon.env; exec cert-daemon", "sources a file with ."),
+    ("builtin source /etc/cert-daemon.env; exec cert-daemon", "sources a file with source"),
+    ("command . /etc/cert-daemon.env; exec cert-daemon", "sources a file with ."),
+    ("command -p source /etc/cert-daemon.env; exec cert-daemon", "sources a file with source"),
+    ("builtin command builtin . /etc/cert-daemon.env; exec cert-daemon", "sources a file with ."),
+    ("eval '. /etc/cert-daemon.env'; exec cert-daemon", "runs eval, whose string"),
+    ("trap '. /etc/cert-daemon.env' DEBUG; exec cert-daemon", "runs trap, whose string"),
+])
+def test_a_sidecar_that_runs_a_file_or_string_it_cannot_read_is_an_input_error(spec, meta, known, script, error):
+    with pytest.raises(lp.InputError, match=error):
+        dev_key_findings(spec, meta, known, sidecar(["sh", "-c", script]))
+
+
+# A setting reaches a program however a word hands it over: after a short option (docker -e), after '='
+# (systemd-run --setenv=), or after whitespace in a settings string.
+@pytest.mark.parametrize("argv", [
+    ["systemd-run", "--setenv=LD_PRELOAD=/srv/x.so", "cert-daemon"],
+    ["docker", "run", "-eLD_PRELOAD=/srv/x.so", "img"],
+    ["env", "-SLD_PRELOAD=/srv/x.so", "cert-daemon"],
+    ["bash", "-c", "exec systemd-run -p 'Environment=RUST_LOG=info LD_PRELOAD=/srv/x.so' cert-daemon"],
+])
+def test_a_loader_setting_handed_over_inside_a_word_is_an_input_error(argv):
+    with pytest.raises(lp.InputError, match=loader_error("LD_PRELOAD")):
+        lp.validate_node(sidecar(argv)["nodes"][0], "nodes[0]")
+
+
+# GNU env -S splits a string by its own quoting and escapes: `\_` separates two words, so X=1\_LD_PRELOAD=...
+# sets LD_PRELOAD (env 9.4 makes ld.so preload the file).
+@pytest.mark.parametrize("argv", [
+    ["env", "-S", "X=1\\_LD_PRELOAD=/srv/x.so cert-daemon"],
+    ["env", "-iS", "X=1\\_LD_PRELOAD=/srv/x.so cert-daemon"],
+    ["env", "--split-str", "X=1\\_SIGNER_URI=/Attestor0 cert-daemon"],
+    ["env", "--split-string=X=1\\_SIGNER_URI=/Attestor0 cert-daemon"],
+    ["nohup", "env", "-u", "HOME", "-S", "X=1\\_SIGNER_URI=/Attestor0 cert-daemon"],
+    ["bash", "-c", "exec env -S 'X=1\\_LD_PRELOAD=/srv/x.so' cert-daemon"],
+])
+def test_env_splitting_a_string_is_an_input_error(argv):
+    with pytest.raises(lp.InputError, match="runs env -S"):
+        lp.validate_node(sidecar(argv)["nodes"][0], "nodes[0]")
+
+
+@pytest.mark.parametrize("argv", [
+    ["env", "-uS", "cert-daemon"],
+    ["env", "-u", "S", "RUST_LOG=info", "cert-daemon", "-S", "x"],
+    ["env", "--unset", "S", "cert-daemon"],
+])
+def test_env_options_that_split_no_string_are_read_through(argv):
+    lp.validate_node(sidecar(argv)["nodes"][0], "nodes[0]")
 
 
 def test_a_shell_wrapped_non_authority_validator_is_refused(tmp_path):

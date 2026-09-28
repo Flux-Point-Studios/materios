@@ -155,20 +155,30 @@ more than 300 slots behind its node.
   runs `$PS4` as code), or several arguments in one word.
 - `env` holds a node's settings, as the unit's `Environment=` or
   `EnvironmentFile=` gives them; assignments in a script (`NAME=value`,
-  `export NAME=value`) count the same. No node may set what the shell or
-  the dynamic loader acts on: `BASH_ENV`, a `BASH_FUNC_` import, `PS4`,
-  `ENV`, `SHELLOPTS`, `BASHOPTS`, `PATH` or any `LD_` setting, and neither
-  may a `NAME=value` word passed to a program such as `env`. An authority
-  may set only logging (`RUST_LOG`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`),
-  `TZ` and the node's Cardano follower settings (`MAIN_CHAIN_FOLLOWER`,
+  `export NAME=value`) count the same, and so does a setting any word hands
+  a program: a `NAME=value` word, or one inside a word after whitespace, a
+  quote or `=` (`systemd-run --setenv=NAME=value`, a settings string) or
+  after a short option (`docker run -eNAME=value`). No node may set what the
+  shell or the dynamic loader acts on: `BASH_ENV`, a `BASH_FUNC_` import,
+  `PS4`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `PATH` or any `LD_` setting. No
+  node's launch may run `env -S` (`--split-string`), which splits a string
+  into settings and arguments by env's own quoting and escapes, or `.`,
+  `source`, `eval` or `trap`, also behind `builtin` or `command`, which run
+  a file or a string the preflight does not open. An authority may set only
+  logging (`RUST_LOG`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`), `TZ` and the
+  node's Cardano follower settings (`MAIN_CHAIN_FOLLOWER`,
   `DB_SYNC_POSTGRES_CONNECTION_STRING`, `CARDANO_SECURITY_PARAMETER`,
   `CARDANO_ACTIVE_SLOTS_COEFF`, `BLOCK_STABILITY_MARGIN`,
   `SIDECHAIN_BLOCK_BENEFICIARY`, the four `MC__` epoch settings,
   `MITHRIL_AGGREGATOR_ENDPOINT`, `MITHRIL_GENESIS_VERIFICATION_KEY`); any
-  other setting could run code or change the node beyond its argv, such as
-  a module path or the mock follower. The preflight takes a program to be
-  what its name says; it does not read binaries or anything else on the
-  machine.
+  other setting could run code or change the node beyond its argv, such as a
+  module path or the mock follower. The preflight takes a program to be what
+  its name says; it does not read binaries or anything else on the machine.
+  For a node that is not an authority, that trust covers what its programs
+  and the shell's other builtins do with their arguments: `printf -v NAME`
+  under `set -a`, for one, exports a setting that no word names. An
+  authority's launch runs only the setup commands above before its node, so
+  this does not reach it.
 - A proxy is `nginx`, `nginx-dump` or `cloudflared`. `nginx` is a config
   file: each `include` is read from disk in its place, a relative name from
   the config's directory. `nginx-dump` is what `nginx -T` prints on stdout,
