@@ -1493,6 +1493,9 @@ def nginx_routes(path: Path, text: str, dump: bool) -> list[tuple[str, int]]:
         if NGINX_CODE.fullmatch(name):
             raise InputError(f"{statement.file}: {name} runs code inside nginx that can open its own connections; "
                              "the preflight reads only forwarding directives")
+        if name.endswith("_pass") and name not in NGINX_FORWARDS:
+            raise InputError(f"{statement.file}: {name} forwards through a module that nginx does not ship, so the "
+                             "preflight cannot resolve where it connects")
         if name in NGINX_FORWARDS:
             forwards += args
         elif name == "upstream" and statement.block is not None:

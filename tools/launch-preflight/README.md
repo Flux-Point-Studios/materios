@@ -196,7 +196,9 @@ more than 300 slots behind its node.
   `"proxy_pass"` is `proxy_pass`. Every forwarding directive counts
   (`proxy_pass`, including a `stream` block's, `grpc_pass`, `fastcgi_pass`,
   `uwsgi_pass`, `scgi_pass`, `memcached_pass`), as does each cloudflared
-  `url` and ingress `service`. A config that loads a dynamic module
+  `url` and ingress `service`. Any other directive whose name ends in
+  `_pass` forwards through a module nginx does not ship and refuses as
+  unreadable. A config that loads a dynamic module
   (`load_module`) or uses a scripting module's directives (`js_*`, `perl*`,
   `*_by_lua*`, `lua_*`) refuses as unreadable: that code can open its own
   connections, which no forwarding directive shows. A forward to an upstream

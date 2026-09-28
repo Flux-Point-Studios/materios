@@ -1174,6 +1174,19 @@ def test_an_nginx_module_that_runs_code_is_an_input_error(tmp_path, nginx):
         rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1")
 
 
+# A forwarding directive nginx does not ship (OpenResty's redis2_pass, memc_pass, postgres_pass) comes with a module
+# the preflight does not read. nginx 1.29.8 and its dynamic modules name no other directive that ends in _pass.
+@pytest.mark.parametrize("directive", ["redis2_pass 127.0.0.1:9945", "memc_pass 127.0.0.1:9945", "postgres_pass db"])
+def test_a_forwarding_directive_from_another_module_is_an_input_error(tmp_path, directive):
+    with pytest.raises(lp.InputError, match=f"{directive.split()[0]} forwards through a module .*cannot resolve"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], http_routes("", f"{directive};"), "val1")
+
+
+def test_nginx_directives_that_only_start_with_a_forward_name_are_read_through(tmp_path):
+    rpc = "proxy_pass_header Server; proxy_pass_request_headers on; proxy_pass http://127.0.0.1:9945;"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], http_routes("", rpc), "val1") == BEHIND_PROXY
+
+
 def test_a_quoted_nginx_include_is_followed(tmp_path):
     (tmp_path / "rpc.inc").write_text("location /rpc { proxy_pass http://127.0.0.1:9945; }\n")
     nginx = ('events {}\nhttp { server { listen 8080; "include" rpc.inc; '
