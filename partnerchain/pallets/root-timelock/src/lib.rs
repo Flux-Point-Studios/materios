@@ -250,7 +250,8 @@ pub mod pallet {
         /// A genesis names a guardian, or says with `unguarded` that it has
         /// none. `build` cannot refuse the default config, which FRAME builds
         /// in its own tests, so the runtime calls this from
-        /// `GenesisBuilder::build_state`, the path every chain spec takes.
+        /// `GenesisBuilder::build_state`, which turns a chain spec's genesis
+        /// config into storage.
         pub fn ensure_guarded(&self) -> Result<(), &'static str> {
             match (&self.guardian, self.unguarded) {
                 (Some(_), false) | (None, true) => Ok(()),

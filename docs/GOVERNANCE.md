@@ -277,12 +277,14 @@ task after the upgrade should be the `set_guardian` that appoints one; until
 it lands (the long delay) the timelock gives notice but no independent veto.
 
 A new chain sets the guardian at genesis. The runtime's
-`GenesisBuilder::build_state`, which builds every chain spec, refuses a
-genesis whose `rootTimelock.guardian` is missing unless it also sets
-`rootTimelock.unguarded: true`, and refuses a guardian equal to the sudo
-key. Only a test network sets `unguarded` (the preprod spec and the
-benchmarking preset do). The runtime cannot tell a well-known development key
-from a real one; the mainnet launch preflight has to refuse those.
+`GenesisBuilder::build_state`, which turns a chain spec's genesis config into
+storage (and so builds every raw spec generated from one), refuses a genesis
+whose `rootTimelock.guardian` is missing unless it also sets
+`rootTimelock.unguarded: true`, and refuses a guardian equal to the sudo key.
+Only a test network sets `unguarded` (the preprod spec and the benchmarking
+preset do). A raw spec written by hand never passes through it, and the
+runtime cannot tell a well-known development key from a real one; the mainnet
+launch preflight has to refuse both.
 
 A compromised guardian can veto every task except its own replacement, which
 waits the long delay: up to 30 days in which nothing but the exempt calls
@@ -306,9 +308,10 @@ in the block after the thief acts:
    `Sudo.sudo(RootTimelock.cancel(id))`.
 
 Nothing the thief scheduled then takes effect, and the thief never holds the
-guardian seat. The runtime tests run this answer after one block of any mix
-of stolen-key extrinsics (floods of tasks and guardian changes, delay raises,
-stalls, kill-switches), including through a 2-of-3 `Multisig.as_multi`.
+guardian seat. A property test runs this answer after one block of randomly
+generated stolen-key extrinsics (floods of tasks and guardian changes, delay
+raises, stalls, kill-switches), and another test runs it through a 2-of-3
+`Multisig.as_multi`.
 
 What remains:
 
