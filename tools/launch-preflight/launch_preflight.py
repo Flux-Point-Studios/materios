@@ -183,6 +183,9 @@ NGINX_FORWARDS = frozenset({"proxy_pass", "grpc_pass", "uwsgi_pass", "scgi_pass"
 # inside nginx that can open its own connections, which no forwarding directive shows.
 NGINX_CODE = re.compile(r"load_module|js_\w+|perl\w*|\w*_by_lua\w*|lua_\w+")
 NGINX_INCLUDE_DEPTH = 8
+# Include pattern syntax glob(3), which nginx reads a pattern with, reads apart from Python's glob: glibc negates
+# with [^x], takes [[:class:]], escapes with a backslash, and in nginx's C locale matches one byte with '?'.
+NGINX_GLOB_APART = re.compile(r"[?\[\\]")
 # The upstream server parameters that leave a server's address as written. nginx takes the port and host of a
 # `service=` server from a DNS SRV record, and resolves a `resolve` server's name again, while it runs.
 NGINX_SERVER_PARAMETERS = re.compile(r"(?:weight|max_conns|max_fails|fail_timeout)=\S*|backup|down")
@@ -1430,6 +1433,10 @@ def _nginx_config(path: Path, text: str):
         if depth == NGINX_INCLUDE_DEPTH:
             raise InputError(f"nginx includes nest deeper than {NGINX_INCLUDE_DEPTH} levels")
         pattern = statement.words[1]
+        if _has_glob(pattern) and (apart := NGINX_GLOB_APART.search(pattern)):
+            raise InputError(f"nginx include {pattern} uses {apart.group()!r}, which nginx's glob(3) reads apart "
+                             "from the preflight's, so it cannot resolve the files the include names; use * alone, "
+                             "name each file, or give the output of `nginx -T` as kind nginx-dump")
         paths = sorted(glob.glob(_include_path(path.parent, pattern)))
         if not paths:
             raise InputError(f"nginx include {pattern} matches no file; give the config files it names, or the "

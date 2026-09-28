@@ -1032,6 +1032,43 @@ def test_nginx_include_is_followed(tmp_path):
         "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
+def include_tree(root: Path) -> None:
+    """conf.d with the 9945 route in a.conf and in é.conf, whose name is two bytes before .conf, and the 9933 route
+    in x.conf."""
+    (root / "conf.d").mkdir()
+    (root / "conf.d" / "a.conf").write_text("location /rpc { proxy_pass http://127.0.0.1:9945; }\n")
+    (root / "conf.d" / "é.conf").write_text("location /e { proxy_pass http://127.0.0.1:9945; }\n")
+    (root / "conf.d" / "x.conf").write_text("location /s { proxy_pass http://127.0.0.1:9933; }\n")
+
+
+# nginx reads an include pattern with glob(3), which reads this syntax apart from Python's glob: glibc negates with
+# [^x], takes classes such as [[:alpha:]], escapes with a backslash, and in nginx's C locale matches one byte with ?.
+# Through each pattern nginx 1.29.8 served a 9945 route (from a.conf, or from é.conf for ??.conf) where Python's glob
+# read x.conf alone or nothing.
+@pytest.mark.parametrize("pattern", ["[^x]*.conf", "[[:alpha:]].conf", "\\a*.conf", "??.conf", "[!x]*.conf",
+                                     "a.co?f"])
+def test_an_nginx_include_glob_that_glob3_reads_apart_is_an_input_error(tmp_path, pattern):
+    include_tree(tmp_path)
+    nginx = f"events {{}}\nhttp {{ server {{ listen 8080; include conf.d/{pattern}; }} }}\n"
+    with pytest.raises(lp.InputError, match=f"nginx include conf.d/{re.escape(pattern)} uses .*cannot resolve"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1")
+
+
+def test_an_nginx_include_star_glob_reads_every_file_it_names(tmp_path):
+    include_tree(tmp_path)
+    (tmp_path / "conf.d" / "a.conf").write_text("location /rpc { proxy_pass http://127.0.0.1:9933; }\n")
+    nginx = "events {}\nhttp { server { listen 8080; include conf.d/*.conf; } }\n"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
+
+
+# A dump holds each file nginx read, whatever pattern named it.
+def test_a_dump_reads_the_files_an_include_glob_named(tmp_path):
+    dump = ("# configuration file /etc/nginx/nginx.conf:\nevents {}\nhttp { server { listen 8080; "
+            "include /etc/nginx/conf.d/[^x]*.conf; } }\n\n"
+            "# configuration file /etc/nginx/conf.d/a.conf:\nlocation /rpc { proxy_pass http://127.0.0.1:9945; }\n")
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], dump, "val1", "nginx-dump") == BEHIND_PROXY
+
+
 def test_nginx_include_absolute_path_is_followed(tmp_path):
     route = tmp_path / "route.inc"
     route.write_text("location / { proxy_pass http://127.0.0.1:9945; }")
@@ -2450,6 +2487,16 @@ def test_cli_refuses_an_upstream_whose_port_comes_from_dns_srv_as_unreadable(cle
     clean.launch["rpc_proxies"] = [{"name": "public-rpc", "node": "val0", "kind": "nginx", "config": str(conf)}]
     code, out = clean.run(capsys)
     assert code == 2 and "server val0 takes service=_rpc._tcp; " in out and "cannot resolve" in out
+
+
+def test_cli_refuses_an_include_glob_nginx_reads_apart_as_unreadable(clean, capsys):
+    include_tree(clean.tmp_path)
+    conf = clean.tmp_path / "nginx.conf"
+    conf.write_text("events {}\nhttp { server { listen 8080; include conf.d/[^x]*.conf; } }\n")
+    clean.launch["nodes"][0]["argv"] = UNSAFE_9945
+    clean.launch["rpc_proxies"] = [{"name": "public-rpc", "node": "val0", "kind": "nginx", "config": str(conf)}]
+    code, out = clean.run(capsys)
+    assert code == 2 and "nginx include conf.d/[^x]*.conf uses '['" in out and "cannot resolve" in out
 
 
 def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):

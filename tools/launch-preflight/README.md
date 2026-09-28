@@ -182,7 +182,10 @@ more than 300 slots behind its node.
   the setup commands above before its node, so this does not reach it.
 - A proxy is `nginx`, `nginx-dump` or `cloudflared`. `nginx` is a config
   file: each `include` is read from disk in its place, a relative name from
-  the config's directory. `nginx-dump` is what `nginx -T` prints on stdout,
+  the config's directory, and an include pattern's only wildcard may be `*`:
+  nginx matches a pattern with glob(3), which reads `?`, `[...]` and a
+  backslash apart from the preflight (`[^x]` negates, `?` matches one byte),
+  so a pattern with one of them refuses as unreadable. `nginx-dump` is what `nginx -T` prints on stdout,
   every file nginx read under its `# configuration file <name>:` line, and
   each include it names must be there. The kind is declared, not guessed: in
   a config file such a line is a comment like any other. nginx is read token
