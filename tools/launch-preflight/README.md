@@ -97,7 +97,7 @@ more than 300 slots behind its node.
   "nodes": [
     {"name": "val-1", "host": "val-1", "addresses": ["10.0.0.11"], "authority": true,
      "aura": "0x<aura public key>",
-     "argv": "materios-node --validator --chain mainnet-raw.json --rpc-methods safe",
+     "argv": ["materios-node", "--validator", "--chain", "mainnet-raw.json", "--rpc-methods", "safe"],
      "env": {}},
     {"name": "edge-1", "host": "edge-1", "addresses": ["10.0.0.2"], "authority": false}
   ],
@@ -132,23 +132,27 @@ more than 300 slots behind its node.
   bytestring, CBOR `5820` followed by the 32 bytes.
 - `nodes` lists every machine that runs a launch process or a proxy. Each
   declares `authority` as `true` or `false`, and an authority its `aura`
-  public key. `argv` is the command as the process receives it; a `sh -c`
-  wrapper, as a systemd unit or a container entrypoint writes it, is opened,
-  its script split at `;`, `&&` and newlines, and an authority's last command
-  must start `materios-node` or `materios-node-spo`. Before it, an authority's
-  launch may run only `set`, `export`, `cd`, `umask`, `ulimit` and `mkdir`,
-  as bare words, and node subcommands (`build-spec`, `purge-chain`): any
-  other program could start a node whose listeners go unchecked. A launch
-  the preflight would have to evaluate refuses as unreadable: a `$VAR` or
-  backtick expansion (systemd expands `$VAR` in `ExecStart`), a NUL byte in
-  a word or setting (execve ends each one there), a script word the shell
-  rewrites (brace expansion, a `*`, `?` or `[` glob, a `~`, a word starting
-  with `#`, which is a comment) or a backslash line continuation, quoted or
-  not, a pipe, redirection, subshell or `||`, a script file, a
+  public key. `argv` is a list: the words the process receives, as
+  `/proc/<pid>/cmdline` lists them. A command line given as one string
+  refuses as unreadable, since systemd rewrites an `ExecStart` line before
+  it runs it (`\xNN` escapes, `%` specifiers such as `%i`, an `@` prefix, a
+  `;` word that starts another command) and a shell or a container runtime
+  splits one by its own rules. A `sh -c` wrapper, as a systemd unit or a
+  container entrypoint writes it, is opened, its script split at `;`, `&&`
+  and newlines, and an authority's last command must start `materios-node`
+  or `materios-node-spo`. Before it, an authority's launch may run only
+  `set`, `export`, `cd`, `umask`, `ulimit` and `mkdir`, as bare words, and
+  node subcommands (`build-spec`, `purge-chain`): any other program could
+  start a node whose listeners go unchecked. A launch the preflight would
+  have to evaluate refuses as unreadable: a `$VAR` or backtick expansion, a
+  NUL byte in a word or setting (execve ends each one there), a script word
+  the shell rewrites (brace expansion, a `*`, `?` or `[` glob, a `~`, a word
+  starting with `#`, which is a comment) or a backslash line continuation,
+  quoted or not, a pipe, redirection, subshell or `||`, a script file, a
   file the shell runs on its own (a login or interactive shell's startup
   files, `.` or `source`, and zsh, which always reads its zshenv), a shell
-  option other than `-a`, `-e` and `-u` (on the shell or through `set`:
-  `-x` runs `$PS4` as code), or several arguments in one word.
+  option other than `-a`, `-e` and `-u` (on the shell or through `set`: `-x`
+  runs `$PS4` as code), or several arguments in one word.
 - `env` holds a node's settings, as the unit's `Environment=` or
   `EnvironmentFile=` gives them; assignments in a script (`NAME=value`,
   `export NAME=value`) count the same. No node may set what the shell or

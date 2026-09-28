@@ -972,7 +972,7 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
             flag = piece.strip("\"'").split("=", 1)[0]
             if flag in DEV_KEYRING_FLAGS:
                 node_findings.append(Finding(KEYS, f"node {node['name']}: {flag} loads the dev keyring"))
-        texts = node_argv(node) + [f"{k}={v}" for k, v in sorted(node.get("env", {}).items())]
+        texts = node.get("argv", []) + [f"{k}={v}" for k, v in sorted(node.get("env", {}).items())]
         uris = [dev_uri(text) for text in texts] + [phraseless_uri(value) for _, value in secret_settings(node)]
         node_findings += [Finding(KEYS, f"node {node['name']}: launch config names {uri}") for uri in uris if uri]
         for text in texts:
@@ -1017,14 +1017,6 @@ def check_rewards(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     if declared.get("era_cap_baseline_attestor_count") == 0:
         findings.append(Finding(REWARDS, "economics.era_cap_baseline_attestor_count is zero"))
     return findings
-
-
-def node_argv(node: dict) -> list[str]:
-    argv = node.get("argv", [])
-    try:
-        return shlex.split(argv) if isinstance(argv, str) else list(argv)
-    except ValueError as e:
-        raise InputError(f"node {node['name']}: its launch command does not parse: {e}") from e
 
 
 def _program(words: list[str]) -> list[str]:
@@ -1133,13 +1125,13 @@ def _commands(words: list[str], where: str, depth: int, authority: bool) -> list
 def launch_commands(node: dict) -> list[list[str]]:
     """Every command a node's launch runs, as the words it is given, with each
     `sh -c` wrapper (a systemd unit's, a container entrypoint's) opened. A
-    command that expands a variable, as systemd does `$VAR` in ExecStart, is
-    refused: its words are not in the manifest. So is a setting the shell or
-    the dynamic loader acts on, and, for an authority, any setting outside
-    AUTHORITY_SETTINGS, in the node's env or assigned in a command."""
+    word that expands a variable or a command (`$`, a backtick) is refused:
+    what the shell makes of it is not in the manifest. So is a setting the
+    shell or the dynamic loader acts on, and, for an authority, any setting
+    outside AUTHORITY_SETTINGS, in the node's env or assigned in a command."""
     where = f"node {node['name']}"
     authority = node.get("authority") is True
-    argv = node_argv(node)
+    argv = node.get("argv", [])
     env = node.get("env", {})
     if any("\0" in text for text in (*argv, *env, *env.values())):
         raise InputError(f"{where}: its launch holds a NUL byte, where execve ends an argument or setting; "
@@ -1154,7 +1146,7 @@ def launch_commands(node: dict) -> list[list[str]]:
 def launch_pieces(node: dict) -> list[str]:
     """Every whitespace-separated piece of a node's launch words, wrapped or
     not, and of its environment: where a flag can hide."""
-    words = node_argv(node) + [word for command in launch_commands(node) for word in command]
+    words = node.get("argv", []) + [word for command in launch_commands(node) for word in command]
     return [piece for word in words + list(node.get("env", {}).values()) for piece in word.split()]
 
 
@@ -1770,8 +1762,11 @@ def validate_node(node, where: str) -> None:
     if not isinstance(addresses, list) or not all(isinstance(a, str) for a in addresses):
         raise InputError(f"{where} addresses must be a list of strings")
     argv = node.get("argv", [])
-    if not (isinstance(argv, str) or isinstance(argv, list) and all(isinstance(t, str) for t in argv)):
-        raise InputError(f"{where} argv must be a string or a list of strings")
+    if not (isinstance(argv, list) and all(isinstance(t, str) for t in argv)):
+        raise InputError(f"{where} argv must be a list of strings: the words the process receives, as "
+                         "/proc/<pid>/cmdline lists them. One command line string is not read: systemd rewrites "
+                         "an ExecStart line (\\xNN escapes, % specifiers, an '@' prefix, a ';' between commands) "
+                         "and a shell or a container runtime splits one by its own rules")
     env = node.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise InputError(f"{where} env must map names to strings")
