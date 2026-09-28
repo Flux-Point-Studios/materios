@@ -193,22 +193,25 @@ more than 300 slots behind its node.
   `"proxy_pass"` is `proxy_pass`. Every forwarding directive counts
   (`proxy_pass`, including a `stream` block's, `grpc_pass`, `fastcgi_pass`,
   `uwsgi_pass`, `scgi_pass`, `memcached_pass`), as does each cloudflared
-  `url` and ingress `service`. A forward to an upstream reaches every server
-  of every upstream block of that name, in any case, `http` and `stream`
-  alike. A `server` outside an upstream block refuses as unreadable: a dump
-  shows an included file apart from the block that includes it, and a
-  comment in a file can read as a file header, so keep each upstream's
-  servers in its own block when giving a dump. A proxy's `node` names the
-  declared node it runs on. A route reaches a node when it targets the
-  node's `host` or any of its `addresses`; a loopback or unspecified target,
-  in any spelling (`LOCALHOST`, `127.1`, `::ffff:127.0.0.1`, `0.0.0.0`),
-  reaches every node on the proxy's machine (every node sharing an address
-  with the proxy's node). A route to anything else must be listed as
-  `host:port` in the proxy's `other_targets`, which states that it reaches
-  no launch node; otherwise it refuses as unreadable, as do a unix socket, a
-  variable target, an upstream with no server, quotes or braces nginx would
-  not parse, a cloudflared bastion mode, SOCKS origin or warp-routing, and a
-  config with no route.
+  `url` and ingress `service`. A config that loads a dynamic module
+  (`load_module`) or uses a scripting module's directives (`js_*`, `perl*`,
+  `*_by_lua*`, `lua_*`) refuses as unreadable: that code can open its own
+  connections, which no forwarding directive shows. A forward to an upstream
+  reaches every server of every upstream block of that name, in any case,
+  `http` and `stream` alike. A `server` outside an upstream block refuses as
+  unreadable: a dump shows an included file apart from the block that
+  includes it, and a comment in a file can read as a file header, so keep
+  each upstream's servers in its own block when giving a dump. A proxy's
+  `node` names the declared node it runs on. A route reaches a node when it
+  targets the node's `host` or any of its `addresses`; a loopback or
+  unspecified target, in any spelling (`LOCALHOST`, `127.1`,
+  `::ffff:127.0.0.1`, `0.0.0.0`), reaches every node on the proxy's machine
+  (every node sharing an address with the proxy's node). A route to anything
+  else must be listed as `host:port` in the proxy's `other_targets`, which
+  states that it reaches no launch node; otherwise it refuses as unreadable,
+  as do a unix socket, a variable target, an upstream with no server, quotes
+  or braces nginx would not parse, a cloudflared bastion mode, SOCKS origin
+  or warp-routing, and a config with no route.
 
 ## Test networks
 

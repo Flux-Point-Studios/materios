@@ -1121,6 +1121,22 @@ def test_every_nginx_spelling_of_a_route_is_read(tmp_path, nginx):
                         other_targets=["rpc:80", 'rp"c:80', "10.9.9.9:9945"]) == BEHIND_PROXY
 
 
+# A scripting module opens its own connections: nginx 1.29.8 with its bundled njs module serves /rpc from
+# 127.0.0.1:9945 through js_content and ngx.fetch, with no forwarding directive. A build may also carry njs, perl
+# or lua statically.
+@pytest.mark.parametrize("nginx", [
+    "load_module /usr/lib/nginx/modules/ngx_http_js_module.so;\n"
+    + http_routes("js_import main from rpc.js;", "js_content main.rpc;"),
+    http_routes("js_import main from rpc.js;", "js_content main.rpc;"),
+    http_routes("", "content_by_lua_file /srv/rpc.lua;"),
+    http_routes("perl_modules perl/lib; perl_require rpc.pm;", "perl rpc::handler;"),
+    "load_module modules/ngx_http_xslt_filter_module.so;\n" + http_routes("", "proxy_pass http://127.0.0.1:9945;"),
+])
+def test_an_nginx_module_that_runs_code_is_an_input_error(tmp_path, nginx):
+    with pytest.raises(lp.InputError, match="runs code inside nginx"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1")
+
+
 def test_a_quoted_nginx_include_is_followed(tmp_path):
     (tmp_path / "rpc.inc").write_text("location /rpc { proxy_pass http://127.0.0.1:9945; }\n")
     nginx = ('events {}\nhttp { server { listen 8080; "include" rpc.inc; '

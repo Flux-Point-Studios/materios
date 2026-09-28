@@ -179,6 +179,9 @@ NGINX_SPACE = " \t\r\n"
 NGINX_ESCAPE = re.compile(r"\\([\"'\\trn])")
 NGINX_DUMP_FILE = re.compile(r"^# configuration file (.+):$", re.MULTILINE)
 NGINX_FORWARDS = frozenset({"proxy_pass", "grpc_pass", "uwsgi_pass", "scgi_pass", "fastcgi_pass", "memcached_pass"})
+# A dynamic module, or the directives of a scripting module a build may carry statically (njs, perl, lua): code
+# inside nginx that can open its own connections, which no forwarding directive shows.
+NGINX_CODE = re.compile(r"load_module|js_\w+|perl\w*|\w*_by_lua\w*|lua_\w+")
 NGINX_INCLUDE_DEPTH = 8
 HOST_PORT = re.compile(r"\[([0-9A-Fa-f:.]+)\](?::(\d+))?|([^\s:\[\]/]+)(?::(\d+))?")
 # cMATRA (v2) on Cardano mainnet: policy id and asset name, as Kupo keys assets.
@@ -1476,6 +1479,9 @@ def nginx_routes(path: Path, text: str, dump: bool) -> list[tuple[str, int]]:
     forwards, upstreams = [], {}
     for statement, parent in (_nginx_dump if dump else _nginx_config)(path, text):
         name, args = statement.words[0], statement.words[1:]
+        if NGINX_CODE.fullmatch(name):
+            raise InputError(f"{statement.file}: {name} runs code inside nginx that can open its own connections; "
+                             "the preflight reads only forwarding directives")
         if name in NGINX_FORWARDS:
             forwards += args
         elif name == "upstream" and statement.block is not None:
