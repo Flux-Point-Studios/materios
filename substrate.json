@@ -15,7 +15,7 @@
     {
       "id": "motra-fee-resource",
       "name": "MOTRA fee resource",
-      "desc": "Non-transferable transaction-fee resource generated from MATRA holdings (NIGHT/DUST model), charged by a signed extension, with sponsor delegation.",
+      "desc": "Non-transferable transaction-fee resource generated from MATRA holdings (NIGHT/DUST model), charged by a signed extension, with sponsor delegation; the extension also gives a runtime-named (signer, call) set the top transaction-pool priority, one slot per signer, so the guardian's veto cannot be outbid for a place in a block.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/motra"
@@ -79,7 +79,7 @@
     {
       "id": "root-timelock",
       "name": "Root timelock",
-      "desc": "Holds every non-exempt Root call for a per-class delay (recovery for committee toggles and delay raises, the standard delay for everything else including consensus-key levers, sudo key rotation and kill-switch restarts unless the guardian co-signs, long for the dedicated bridge and supply levers) in a bounded vetoable queue with a guardian veto, bulk veto, fast-track and a one-shot advance approval that Root runs without a queue place, plus one guardian change the guardian cannot veto and the sudo key can withdraw; the runtime call filter lets the sudo key reach Root at once only for pause, withdrawal and session-bounded finality break-glass calls, for scheduling and for the approved call, each timelock call is charged for every call its classifier walks, and genesis refuses a chain spec without an independent guardian, or with a development account as guardian, and allows an unguarded one only when its sudo key is a development account or absent.",
+      "desc": "Holds every non-exempt Root call for a per-class delay (recovery for committee toggles and delay raises, the standard delay for everything else including consensus-key levers, sudo key rotation and kill-switch restarts unless the guardian co-signs, long for the dedicated bridge and supply levers) in a bounded vetoable queue with a guardian veto, bulk veto, fast-track and a one-shot advance approval that Root runs without a queue place, plus one guardian change the guardian cannot veto and the sudo key can withdraw; the runtime call filter lets the sudo key reach Root at once only for pause, withdrawal and session-bounded finality break-glass calls, for scheduling and for the approved call, each timelock call is charged for every call its classifier walks, and genesis refuses a chain spec without an independent guardian, or with a development account as guardian, and allows an unguarded one only when its sudo key is a development account or absent. The guardian's veto and co-sign calls (cancel, cancel_all, fast_track, approve), signed by the current guardian directly or through a multisig as_multi wrapper, are given the top transaction-pool priority through the MOTRA fee extension, bounded to one slot per signer and to the wrapped call's own weight, so a stolen sudo key cannot buy its way past the veto and a compromised guardian cannot use the priority to fill blocks.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/root-timelock",
@@ -88,7 +88,8 @@
       "consumes": [
         "orinq-receipts-pallet",
         "billing-pallet",
-        "tee-attestation-pallet"
+        "tee-attestation-pallet",
+        "motra-fee-resource"
       ],
       "status": "experimental"
     }

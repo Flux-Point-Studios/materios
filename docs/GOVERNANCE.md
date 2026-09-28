@@ -283,10 +283,14 @@ ready task's enactment window or revive an expired one. The guardian cannot
 schedule, bring forward or approve anything outside those two classes, or
 veto its own replacement.
 
-The guardian's calls are Operational, so a block full of Normal extrinsics
-cannot keep out a single-key guardian. A multisig guardian submits them
-through `Multisig.as_multi`, which is Normal, so its calls compete for
-inclusion with whatever fills the Normal space of the block.
+The runtime gives the guardian's veto and co-sign calls (`cancel`,
+`cancel_all`, `fast_track`, `approve`) the top transaction-pool priority when
+the current guardian signs them, so no fee, however large, can outbid them for
+a place in the block. A multisig guardian's `Multisig.as_multi` around one of
+these is taken first in the same way, with the wrapper's declared weight bound
+to the call it carries. The priority is held to one transaction per signer, so
+it cannot itself be used to fill blocks. Their Operational class also keeps
+them off the Normal weight budget.
 
 Root cannot cancel a vetoable task while a guardian is set: a compromised
 sudo key would otherwise veto every attempt to replace it. It may withdraw
@@ -358,10 +362,11 @@ What remains:
   `void_spend`); approving them again waits the standard delay.
 - The thief can withdraw a guardian change the operators scheduled;
   scheduling it again restarts its long delay.
-- The thief pays MOTRA for its extrinsics like anyone else, but while it
-  keeps paying to fill the Normal space of every block, a multisig
-  guardian's `as_multi` and the operators' `Sudo.sudo` compete with it for
-  inclusion. A single-key guardian's calls are Operational and do not.
+- The thief pays MOTRA for its extrinsics like anyone else, and cannot buy
+  its way past the guardian: the guardian's veto and co-sign calls take the
+  top pool priority, whether the guardian signs directly or through a
+  multisig `as_multi`. The operators' `Sudo.sudo` still competes for the rest
+  of the block.
 - On a chain with no guardian, the thief and the operators can each cancel
   the other's tasks, so neither side's change lands. That is why only a chain
   whose sudo key is a development account, or which has none, may start

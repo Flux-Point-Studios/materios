@@ -63,6 +63,7 @@ impl pallet_balances::Config for Test {
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = crate::weights::SubstrateWeight;
+    type TakenFirst = frame_support::traits::Nothing;
 }
 
 /// Build genesis storage for tests.

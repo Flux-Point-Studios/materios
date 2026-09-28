@@ -419,9 +419,13 @@ pub mod pallet {
         }
     }
 
-    /// The guardian's calls are Operational, so a block full of Normal
-    /// extrinsics cannot keep out a single-key guardian. A multisig guardian
-    /// submits them through `Multisig.as_multi`, which is Normal.
+    /// The runtime gives the guardian's veto and co-sign calls (`cancel`,
+    /// `cancel_all`, `fast_track`, `approve`) the top transaction-pool
+    /// priority when the current guardian signs them, or wraps one in a
+    /// `Multisig.as_multi`, so no fee can outbid them for a place in the
+    /// block. That priority is held to one transaction per signer, so it
+    /// cannot itself be used to fill blocks. Their Operational class keeps
+    /// them off the Normal weight budget as well.
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// Record `call` to run as Root once its class's delay has passed.

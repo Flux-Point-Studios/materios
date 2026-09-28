@@ -11,9 +11,11 @@ use crate::{
     AccountId, BlockNumber, IntentSettlementDefaultMinSignerThreshold, Runtime, RuntimeCall,
     RuntimeGenesisConfig, Sidechain,
 };
+use alloc::vec::Vec;
 use core::slice;
 use frame_support::{
-    traits::Contains,
+    dispatch::GetDispatchInfo,
+    traits::{Contains, ContainsPair},
     weights::{constants::RocksDbWeight, Weight},
 };
 use pallet_root_timelock::{CallClass, ClassifyCall, Guardian};
@@ -63,6 +65,78 @@ pub fn ensure_guarded_genesis(genesis: &RuntimeGenesisConfig) -> Result<(), &'st
     } else {
         Ok(())
     }
+}
+
+/// `pallet_motra::Config::TakenFirst`: the guardian's veto and co-sign calls,
+/// and a multisig guardian's `as_multi` wrapper around one, so the pool takes
+/// them ahead of every fee-paying transaction. Only the current guardian's are
+/// taken first, so a stolen sudo key cannot buy priority the veto needs, and a
+/// wrapper's declared weight is bounded to the call it carries, so a
+/// compromised guardian cannot use the priority to fill blocks.
+pub struct GuardianVeto;
+
+impl ContainsPair<AccountId, RuntimeCall> for GuardianVeto {
+    fn contains(who: &AccountId, call: &RuntimeCall) -> bool {
+        let Some(guardian) = Guardian::<Runtime>::get() else {
+            return false;
+        };
+        match call {
+            RuntimeCall::Multisig(pallet_multisig::Call::as_multi_threshold_1 {
+                other_signatories,
+                call,
+            }) => {
+                is_guardian_veto(call)
+                    && multisig_account(who, other_signatories, 1) == Some(guardian)
+            }
+            RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
+                threshold,
+                other_signatories,
+                call,
+                max_weight,
+                ..
+            }) => {
+                is_guardian_veto(call)
+                    && max_weight.all_lte(call.get_dispatch_info().weight)
+                    && multisig_account(who, other_signatories, *threshold) == Some(guardian)
+            }
+            _ => is_guardian_veto(call) && *who == guardian,
+        }
+    }
+}
+
+/// The bare `RootTimelock` calls the guardian uses to veto a task or co-sign a
+/// recovery. Each has a small, fixed weight, so no weight bound is needed to
+/// take it first.
+fn is_guardian_veto(call: &RuntimeCall) -> bool {
+    matches!(
+        call,
+        RuntimeCall::RootTimelock(
+            pallet_root_timelock::Call::cancel { .. }
+                | pallet_root_timelock::Call::cancel_all {}
+                | pallet_root_timelock::Call::fast_track { .. }
+                | pallet_root_timelock::Call::approve { .. }
+        )
+    )
+}
+
+/// The account `pallet_multisig` derives for a call's signatories, or `None`
+/// when they are not the well-formed set the pallet would accept (a zero
+/// threshold, or the caller repeated among the others).
+fn multisig_account(
+    who: &AccountId,
+    other_signatories: &[AccountId],
+    threshold: u16,
+) -> Option<AccountId> {
+    if threshold == 0 {
+        return None;
+    }
+    let mut signatories = Vec::with_capacity(other_signatories.len().saturating_add(1));
+    signatories.extend_from_slice(other_signatories);
+    signatories.push(who.clone());
+    signatories.sort();
+    signatories.dedup();
+    (signatories.len() == other_signatories.len().saturating_add(1))
+        .then(|| pallet_multisig::Pallet::<Runtime>::multi_account_id(&signatories, threshold))
 }
 
 /// `frame_system::Config::BaseCallFilter`.

@@ -722,6 +722,7 @@ impl pallet_intent_settlement::BenchmarkHelper<AccountId>
 impl pallet_motra::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = pallet_motra::weights::SubstrateWeight;
+    type TakenFirst = root_gate::GuardianVeto;
 }
 
 // ---------------------------------------------------------------------------

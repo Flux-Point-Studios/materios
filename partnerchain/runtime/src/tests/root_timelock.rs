@@ -22,8 +22,9 @@ use sidechain_domain::{AssetName, DParameter, EpochNonce, MainchainAddress, Poli
 use sp_io::TestExternalities;
 use sp_keyring::Sr25519Keyring::{self as Keyring, Alice, Bob, Charlie, Dave, Eve, Ferdie};
 use sp_runtime::{
-    traits::{Dispatchable, Hash as _},
-    BuildStorage, DispatchError,
+    traits::{Dispatchable, Hash as _, SignedExtension},
+    transaction_validity::{TransactionPriority, ValidTransaction},
+    BuildStorage, DispatchError, Perbill,
 };
 
 const FUND: Balance = 1_000_000_000_000;
@@ -1784,33 +1785,216 @@ fn a_refill_after_the_veto_cannot_hold_off_the_rotation() {
     });
 }
 
+/// The signed-extrinsic envelope (address, signature, era, nonce, tip, length
+/// prefix): constant across senders, so pool priority turns only on the call.
+const ENVELOPE: usize = 105;
+
+fn xt_len(call: &RuntimeCall) -> usize {
+    call.encoded_size() + ENVELOPE
+}
+
+/// Fee params under which priority tracks declared weight, and balances that
+/// outlast the run so `reconcile` never lowers them.
+fn put_fee_params() {
+    pallet_motra::Params::<Runtime>::put(pallet_motra::types::MotraParams {
+        min_fee: 0,
+        congestion_rate: 1_000_000,
+        target_fullness: Perbill::from_percent(50),
+        decay_rate_per_block: Perbill::one(),
+        generation_per_matra_per_block: 0,
+        max_balance: u128::MAX,
+        max_congestion_step: 0,
+        length_fee_per_byte: 0,
+        congestion_smoothing: Perbill::zero(),
+    });
+    for who in [
+        acct(SUDO),
+        acct(GUARDIAN),
+        acct(Bob),
+        acct(Dave),
+        acct(Ferdie),
+    ] {
+        pallet_motra::MotraBalances::<Runtime>::insert(who, u128::MAX / 2);
+    }
+}
+
+/// The pool validity `ChargeMotra` assigns a signed call.
+fn pool_validity(who: Keyring, call: &RuntimeCall) -> ValidTransaction {
+    pallet_motra::fee::ChargeMotra::<Runtime>::new()
+        .validate(&acct(who), call, &call.get_dispatch_info(), xt_len(call))
+        .expect("the sender can pay")
+}
+
+fn pool_priority(who: Keyring, call: &RuntimeCall) -> TransactionPriority {
+    pool_validity(who, call).priority
+}
+
+fn new_block() {
+    frame_system::BlockWeight::<Runtime>::kill();
+    frame_system::AllExtrinsicsLen::<Runtime>::kill();
+}
+
+/// A failing Operational extrinsic any funded account can send to fill a block.
+fn stuffer() -> RuntimeCall {
+    sudo(RuntimeCall::System(frame_system::Call::set_code {
+        code: vec![],
+    }))
+}
+
+/// A synthetic Operational call declaring `ref_time`, to close the block's
+/// last sliver of budget exactly, so the veto's inclusion turns on priority
+/// alone and not on a leftover gap.
+fn sized_operational(ref_time: u64) -> RuntimeCall {
+    RuntimeCall::Utility(pallet_utility::Call::with_weight {
+        call: Box::new(cancel_all()),
+        weight: Weight::from_parts(ref_time, 0),
+    })
+}
+
+/// Applies each call into the block in pool-priority order, as the author
+/// does, and reports whether the guardian's veto is taken in.
+fn veto_survives(mut ordered: Vec<(TransactionPriority, RuntimeCall)>, veto: &RuntimeCall) -> bool {
+    ordered.sort_by(|a, b| b.0.cmp(&a.0));
+    new_block();
+    let mut included = false;
+    for (_, call) in &ordered {
+        let info = call.get_dispatch_info();
+        if frame_system::CheckWeight::<Runtime>::do_pre_dispatch(&info, xt_len(call)).is_ok()
+            && call == veto
+        {
+            included = true;
+        }
+    }
+    included
+}
+
 #[test]
-fn the_guardians_calls_are_operational_only_from_a_single_key() {
+fn a_full_operational_block_of_failing_sudo_cannot_starve_a_guardian_cancel() {
     new_test_ext().execute_with(|| {
-        for call in [
-            cancel_all(),
-            timelock(pallet_root_timelock::Call::cancel { id: 0 }),
-            timelock(pallet_root_timelock::Call::fast_track { id: 0 }),
-            approve(&rotation()),
-        ] {
-            assert_eq!(
-                call.get_dispatch_info().class,
-                DispatchClass::Operational,
-                "{call:?}"
-            );
-            let through_a_multisig = RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
-                threshold: 2,
-                other_signatories: vec![acct(Bob), acct(Ferdie)],
-                maybe_timepoint: None,
-                max_weight: call.get_dispatch_info().weight,
-                call: Box::new(call.clone()),
-            });
-            assert_eq!(
-                through_a_multisig.get_dispatch_info().class,
-                DispatchClass::Normal,
-                "{call:?}"
+        put_fee_params();
+        let thief_mint = force_set_balance(acct(Bob), FUND * 1000);
+        let id = schedule(thief_mint.clone());
+        let veto = cancel_all();
+        let veto_ref = veto.get_dispatch_info().weight.ref_time();
+
+        let weights = RuntimeBlockWeights::get();
+        let op = weights.get(DispatchClass::Operational);
+        let op_budget = op.max_total.expect("Operational has a budget").ref_time();
+        let base = op.base_extrinsic.ref_time();
+
+        // Failing Operational traffic that fills the class budget, then one
+        // gap-closer sized so the block's remaining room falls a hair below the
+        // veto's weight. Only its priority can then get the veto in.
+        let per_stuffer = stuffer().get_dispatch_info().weight.ref_time().max(1);
+        let big = (op_budget / (per_stuffer + base)) as usize;
+        new_block();
+        for _ in 0..big {
+            assert!(
+                frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+                    &stuffer().get_dispatch_info(),
+                    xt_len(&stuffer())
+                )
+                .is_ok(),
+                "a stuffer should fit while the block has room"
             );
         }
+        let remaining = op_budget
+            - frame_system::Pallet::<Runtime>::block_weight()
+                .get(DispatchClass::Operational)
+                .ref_time();
+
+        let mut ordered: Vec<(TransactionPriority, RuntimeCall)> = (0..big)
+            .map(|_| (pool_priority(Ferdie, &stuffer()), stuffer()))
+            .collect();
+        if remaining > base + veto_ref {
+            let gap = sized_operational(remaining - base - (veto_ref - 1));
+            ordered.push((pool_priority(Ferdie, &gap), gap));
+        }
+        ordered.push((pool_priority(GUARDIAN, &veto), veto.clone()));
+
+        assert!(
+            veto_survives(ordered, &veto),
+            "the guardian's veto was crowded out of a full Operational block"
+        );
+
+        // Taken first, the veto lands and the thief's mint never enacts.
+        assert_ok!(signed(GUARDIAN, veto));
+        System::set_block_number(1 + DELAYS.standard);
+        assert_eq!(
+            enact(id, thief_mint),
+            Err(timelock_error(pallet_root_timelock::Error::UnknownTask))
+        );
+        assert_eq!(Balances::free_balance(acct(Bob)), FUND);
+    });
+}
+
+#[test]
+fn no_fee_can_outbid_the_guardians_veto() {
+    new_test_ext().execute_with(|| {
+        put_fee_params();
+        let veto = cancel_all();
+        assert_eq!(pool_priority(GUARDIAN, &veto), TransactionPriority::MAX);
+
+        // A fee beyond the u64 priority range is capped one below the ceiling.
+        pallet_motra::MotraBalances::<Runtime>::insert(acct(Bob), u128::MAX);
+        pallet_motra::Params::<Runtime>::mutate(|p| p.congestion_rate = u128::MAX / 2);
+        let paid = pool_priority(Bob, &stuffer());
+        assert_eq!(paid, TransactionPriority::MAX - 1);
+        assert!(paid < pool_priority(GUARDIAN, &veto));
+    });
+}
+
+#[test]
+fn a_veto_from_a_non_guardian_is_not_taken_first() {
+    new_test_ext().execute_with(|| {
+        put_fee_params();
+        let veto = cancel_all();
+        assert_eq!(pool_priority(GUARDIAN, &veto), TransactionPriority::MAX);
+        assert!(pool_priority(Bob, &veto) < TransactionPriority::MAX);
+        assert!(pool_validity(Bob, &veto).provides.is_empty());
+    });
+}
+
+#[test]
+fn a_multisig_guardian_wrapper_is_taken_first_and_bounded() {
+    let mut signatories = vec![acct(Charlie), acct(Dave)];
+    signatories.sort();
+    let guardian = pallet_multisig::Pallet::<Runtime>::multi_account_id(&signatories, 2);
+    let wrap = |call: RuntimeCall, max_weight: Weight, signer: Keyring| {
+        let others: Vec<AccountId> = signatories
+            .iter()
+            .filter(|a| **a != acct(signer))
+            .cloned()
+            .collect();
+        RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
+            threshold: 2,
+            other_signatories: others,
+            maybe_timepoint: None,
+            max_weight,
+            call: Box::new(call),
+        })
+    };
+    ext_with(acct(SUDO), Some(guardian)).execute_with(|| {
+        put_fee_params();
+        let veto = cancel_all();
+        let honest = wrap(veto.clone(), veto.get_dispatch_info().weight, Charlie);
+        assert_eq!(pool_priority(Charlie, &honest), TransactionPriority::MAX);
+        assert!(!pool_validity(Charlie, &honest).provides.is_empty());
+
+        // Each signatory holds its own taken-first slot.
+        let from_dave = wrap(veto.clone(), veto.get_dispatch_info().weight, Dave);
+        assert_ne!(
+            pool_validity(Charlie, &honest).provides,
+            pool_validity(Dave, &from_dave).provides
+        );
+
+        // Inflating the wrapper's declared weight forfeits the boost.
+        let op_budget = RuntimeBlockWeights::get()
+            .get(DispatchClass::Operational)
+            .max_total
+            .expect("Operational has a budget");
+        let inflated = wrap(veto.clone(), op_budget, Charlie);
+        assert!(pool_priority(Charlie, &inflated) < TransactionPriority::MAX);
     });
 }
 
