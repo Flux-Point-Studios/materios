@@ -1064,6 +1064,36 @@ def test_nginx_config_the_preflight_cannot_bound_is_an_input_error(tmp_path, con
         rpc_findings(tmp_path, [authority(UNSAFE_9945)], config, "val1")
 
 
+# nginx starts a comment only at a '#' that begins a token, outside quotes and not escaped (ngx_conf_read_token).
+# `nginx -t` on nginx 1.29.8 reads a directive after each of these '#'s on the same line.
+@pytest.mark.parametrize("before", [
+    "add_header X-Frag a#b;",
+    'add_header X-Frag "#";',
+    "add_header X-Frag 'a #b';",
+    "add_header X-Frag \\#b;",
+    "add_header X-Frag a}#b;",
+    "add_header X-Frag a${host}#b;",
+    'add_header X-Frag "a\\"#b";',
+])
+def test_a_hash_that_does_not_start_an_nginx_token_is_not_a_comment(tmp_path, before):
+    nginx = f"location /rpc {{ {before} proxy_pass http://127.0.0.1:9945; }}"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+# And `nginx -t` reads each of these '#'s as a comment to the end of its line.
+@pytest.mark.parametrize("nginx", [
+    "location / { proxy_pass http://rpc-node:9944; }\n# location /rpc { proxy_pass http://127.0.0.1:9945; }",
+    "location / { proxy_pass http://rpc-node:9944; # proxy_pass http://127.0.0.1:9945;\n}",
+    "location / { proxy_pass http://rpc-node:9944;#proxy_pass http://127.0.0.1:9945;\n}",
+    "location / {#proxy_pass http://127.0.0.1:9945;\nproxy_pass http://rpc-node:9944; }",
+    "location / { proxy_pass http://rpc-node:9944; }#proxy_pass http://127.0.0.1:9945;",
+    'location / { add_header X-Frag "a" ;#proxy_pass http://127.0.0.1:9945;\nproxy_pass http://rpc-node:9944; }',
+])
+def test_an_nginx_comment_hides_the_rest_of_its_line(tmp_path, nginx):
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1", other_targets=["rpc-node:9944"]) == []
+
+
 CLOUDFLARED = """\
 tunnel: 00000000-0000-0000-0000-000000000000
 credentials-file: /etc/cloudflared/tunnel.json

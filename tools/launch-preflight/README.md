@@ -166,7 +166,9 @@ more than 300 slots behind its node.
   machine.
 - A proxy is `nginx` or `cloudflared`. Give nginx as `nginx -T` output, which
   carries every included file; a plain config has its `include`s followed from
-  its directory. Every forwarding directive counts (`proxy_pass`, including a
+  its directory. A `#` hides the rest of its line only where nginx reads it
+  as a comment: at the start of a token, outside quotes and not escaped, so
+  `a#b` and `"#"` are values. Every forwarding directive counts (`proxy_pass`, including a
   `stream` block's, `grpc_pass`, `fastcgi_pass`, `uwsgi_pass`, `scgi_pass`,
   `memcached_pass`), as does each cloudflared `url` and ingress `service`. A
   proxy's `node` names the declared node it runs on. A route reaches a node

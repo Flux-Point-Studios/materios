@@ -172,6 +172,7 @@ PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
 # Forwarding schemes nginx and cloudflared accept, with the port each implies; tcp names its own.
 DEFAULT_PORTS = {"http": 80, "ws": 80, "grpc": 80, "https": 443, "wss": 443, "grpcs": 443,
                  "ssh": 22, "rdp": 3389, "smb": 445, "tcp": None}
+NGINX_SPACE = " \t\r\n"
 NGINX_DUMP_FILE = re.compile(r"^# configuration file (.+):$", re.MULTILINE)
 NGINX_INCLUDE = re.compile(r"\binclude\s+([^;\s]+)\s*;")
 NGINX_FORWARD = re.compile(r"\b(?:proxy|grpc|uwsgi|scgi|fastcgi|memcached)_pass\s+([^;\s]+)\s*;")
@@ -1247,7 +1248,36 @@ def read_text(path: Path, what: str) -> str:
 
 
 def _strip_comments(text: str) -> str:
-    return re.sub(r"#[^\n]*", "", text)
+    """The config without its comments, read as ngx_conf_read_token does: a
+    '#' starts a comment only where a token begins (after whitespace, ';', '{'
+    or '}', or at the start), outside quotes and not escaped. Inside a token,
+    '}' and a '{' after '$' do not end it."""
+    out = []
+    comment = escaped = in_token = variable = False
+    quote = None
+    for ch in text:
+        if comment:
+            if ch != "\n":
+                continue
+            comment = False
+        elif escaped:
+            escaped = False
+        elif ch == "\\":
+            escaped, in_token, variable = True, True, False
+        elif quote:
+            quote = None if ch == quote else quote
+        elif not in_token:
+            if ch == "#":
+                comment = True
+                continue
+            if ch in "\"'":
+                quote, in_token = ch, True
+            elif ch not in NGINX_SPACE + ";{}":
+                in_token, variable = True, ch == "$"
+        elif not (ch == "{" and variable):
+            in_token, variable = ch not in NGINX_SPACE + ";{", ch == "$"
+        out.append(ch)
+    return "".join(out)
 
 
 def _include_path(base: Path, pattern: str) -> str:
