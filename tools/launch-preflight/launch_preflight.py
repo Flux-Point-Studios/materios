@@ -1472,8 +1472,9 @@ def forward_targets(target: str, upstreams: dict[str, list[str]]) -> list[tuple[
     scheme, separator, rest = target.partition("://")
     if not separator:
         scheme, rest = "", target
-    authority = rest.split("/", 1)[0]
-    # nginx matches an upstream's name case-insensitively.
+    # nginx ends the host and port at '/' or '?' (ngx_parse_inet_url), and matches an upstream's name
+    # case-insensitively.
+    authority = re.split(r"[/?]", rest, maxsplit=1)[0]
     servers = upstreams.get(authority.lower(), [authority])
     if not servers:
         raise InputError(f"proxy target {target}: upstream {authority} has no server the preflight can read")

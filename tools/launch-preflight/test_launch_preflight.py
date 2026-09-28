@@ -1188,6 +1188,17 @@ def test_an_upstream_reads_the_servers_its_include_names(tmp_path):
     assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
 
 
+# nginx ends a target's host and port at '/' or '?' (ngx_parse_inet_url): nginx 1.29.8 served /rpc from
+# 127.0.0.1:9945 through each of these.
+@pytest.mark.parametrize("upstream, target", [
+    ("upstream rpc { server 127.0.0.1:9945; }", "http://rpc?x"),
+    ("", "http://127.0.0.1:9945?x"),
+])
+def test_a_proxy_target_ends_its_host_at_a_query(tmp_path, upstream, target):
+    nginx = http_routes(upstream, f"proxy_pass {target};")
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
+
+
 # The upstream server parameters that leave the server's address as written.
 def test_upstream_server_parameters_that_keep_its_address_are_read_through(tmp_path):
     upstream = ("upstream rpc { server val1:9945 weight=2 max_conns=10 max_fails=3 fail_timeout=10s backup; "
