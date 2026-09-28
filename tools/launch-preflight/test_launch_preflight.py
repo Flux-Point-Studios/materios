@@ -1288,6 +1288,56 @@ def test_a_launch_that_runs_a_file_the_preflight_cannot_read_is_an_input_error(a
         lp.validate_node(authority(argv), "nodes[0]")
 
 
+# bash rewrites these words before the node sees them: brace, filename and tilde expansion, and a comment.
+@pytest.mark.parametrize("script", [
+    "exec materios-node --validator {--rpc-methods=unsafe,--unsafe-rpc-external}",
+    "exec materios-node --validator {--wasm-runtime-overrides,/srv/o}",
+    "exec materios-node {--validator,--alice}",
+    "exec materios-node --validator --rpc-methods unsafe {--unsafe-rpc-external}",
+    "export {RUST_LOG,BASH_ENV}=/etc/node/rc; exec bash -c '" + SAFE_NODE + "'",
+    "cd /srv; mkdir -p ./--unsafe-rpc-external; exec materios-node --validator --rpc-methods unsafe --unsafe-rpc-e*",
+    "exec materios-node --validator --rpc-methods unsafe --unsafe-rpc-externa?",
+    "exec materios-node --validator --rpc-methods unsafe --unsafe-rpc-externa[l]",
+    "exec materios-node --validator --rpc-port 9945 # --rpc-methods safe",
+    "exec materios-node --validator --rpc-port 9945;# --rpc-methods safe",
+    "exec materios-node --validator --base-path ~/data",
+])
+def test_a_script_word_the_shell_rewrites_is_an_input_error(script):
+    with pytest.raises(lp.InputError, match="that the shell rewrites"):
+        lp.validate_node(authority(["bash", "-c", script]), "nodes[0]")
+
+
+# bash drops a backslash-newline, so the words on either side join.
+@pytest.mark.parametrize("script", [
+    "exec materios-node --validator --rpc-methods unsafe --unsafe-rpc-\\\nexternal",
+    "exec materios-node --validator --rpc-methods unsafe \"--unsafe-rpc-\\\nexternal\"",
+    "RUST_LOG=info \\\nexec materios-node --validator --rpc-methods safe",
+])
+def test_a_script_line_continuation_is_an_input_error(script):
+    with pytest.raises(lp.InputError, match="continues a line with a backslash"):
+        lp.validate_node(authority(["bash", "-c", script]), "nodes[0]")
+
+
+# A tilde expands to a home directory: a phraseless secret URI to the node that reads it.
+@pytest.mark.parametrize("script", ["exec cert-daemon --suri ~", "SIGNER_URI=~ exec cert-daemon"])
+def test_a_sidecar_script_word_the_shell_rewrites_is_an_input_error(spec, meta, known, script):
+    with pytest.raises(lp.InputError, match="that the shell rewrites"):
+        dev_key_findings(spec, meta, known, sidecar(["sh", "-c", script]))
+
+
+# bash splits words at spaces and tabs only: a carriage return stays inside the word.
+def test_a_carriage_return_does_not_split_a_script_word():
+    script = "exec materios-node --validator --rpc-port 9945 --name val\r--rpc-methods\rsafe"
+    with pytest.raises(lp.InputError, match="argument 5 holds several arguments"):
+        lp.validate_node(authority(["bash", "-c", script]), "nodes[0]")
+
+
+def test_a_hash_inside_a_script_word_is_read_literally(tmp_path):
+    argv = ["bash", "-c", "exec materios-node --validator --name val#1 --rpc-methods unsafe --unsafe-rpc-external"]
+    assert rpc_findings(tmp_path, [authority(argv)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
 @pytest.mark.parametrize("env", [{"BASH_ENV": "/etc/materios/rc"}, {"BASH_FUNC_materios-node%%": "() { :; }"}])
 def test_an_environment_a_shell_runs_as_code_is_an_input_error(env):
     node = dict(authority(["bash", "-c", SAFE_NODE]), env=env)
@@ -2059,6 +2109,15 @@ def test_cli_refuses_the_bootstrap_unit_shape_as_unreadable(clean, capsys):
     code, out = clean.run(capsys, signed_launch=signed)
     assert code == 2
     assert "node val0: runs a login or interactive shell" in out
+
+
+def test_cli_refuses_brace_expanded_node_flags_as_unreadable(clean, capsys):
+    signed = copy.deepcopy(clean.launch)
+    clean.launch["nodes"][0]["argv"] = ["/bin/bash", "-c", "exec materios-node --validator {--rpc-methods=unsafe,"
+                                        "--unsafe-rpc-external} {--wasm-runtime-overrides,/srv/o}"]
+    code, out = clean.run(capsys, signed_launch=signed)
+    assert code == 2
+    assert "node val0: its shell command has a word holding '{' that the shell rewrites" in out
 
 
 def test_cli_refuses_unsafe_rpc_in_a_self_contained_unit(clean, capsys):

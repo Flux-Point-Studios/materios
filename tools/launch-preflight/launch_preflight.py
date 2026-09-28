@@ -140,6 +140,8 @@ NODE_BINARIES = ("materios-node", "materios-node-spo")
 # Shells whose `-c` script is opened. zsh is not one: it runs its zshenv files before any script.
 SHELLS = {"sh", "bash", "dash", "ash"}
 SHELL_OPERATORS = ";&|()<>\n"
+# A script word bash rewrites and shlex reads literally: brace, filename or tilde expansion, or a comment.
+SHELL_REWRITTEN = re.compile(r"[{}*?\[~]|^#")
 SHELL_QUIET_OPTIONS = {"--noprofile", "--norc"}
 # Environment a shell runs as code: bash sources $BASH_ENV before a script and imports BASH_FUNC_* as functions.
 SHELL_CODE_ENV = re.compile(r"BASH_ENV|BASH_FUNC_.*", re.DOTALL)
@@ -1038,9 +1040,13 @@ def _shell_script(argv: list[str], where: str) -> str:
 def _script_commands(script: str, where: str) -> list[list[str]]:
     """The commands of a shell script joined by `;`, `&&` or newlines. Any other
     operator (a pipe, a redirection, a subshell, `||`, `&`) is refused: the
-    command that runs, or its words, would depend on evaluation."""
+    command that runs, or its words, would depend on evaluation. So is a word
+    the shell rewrites before a command gets it, or a line it joins to the next."""
+    if "\\\n" in script:
+        raise InputError(f"{where}: its shell command continues a line with a backslash, which the shell joins "
+                         "into the next; give each command on one line")
     lexer = shlex.shlex(script, posix=True, punctuation_chars=SHELL_OPERATORS)
-    lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
+    lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t", True, ""
     try:
         tokens = list(lexer)
     except ValueError as e:
@@ -1054,6 +1060,10 @@ def _script_commands(script: str, where: str) -> list[list[str]]:
         elif token and set(token) <= set(SHELL_OPERATORS):
             raise InputError(f"{where}: its shell command uses {token!r}; the preflight reads only "
                              "commands joined by ; or &&")
+        elif rewritten := SHELL_REWRITTEN.search(token):
+            raise InputError(f"{where}: its shell command has a word holding {rewritten.group()!r} that the shell "
+                             "rewrites (brace, filename or tilde expansion, or a comment); "
+                             "give each word literally")
         else:
             words.append(token)
     return commands

@@ -140,13 +140,15 @@ more than 300 slots behind its node.
   as bare words, and node subcommands (`build-spec`, `purge-chain`): any
   other program could start a node whose listeners go unchecked. A launch
   the preflight would have to evaluate refuses as unreadable: a `$VAR` or
-  backtick expansion (systemd expands `$VAR` in `ExecStart`), a pipe,
-  redirection, subshell or `||`, a script file, a file the shell runs on its
-  own (a login or interactive shell's startup files, `.` or `source`,
-  `BASH_ENV` or a `BASH_FUNC_` import, and zsh, which always reads its
-  zshenv), or several arguments in one word. Give a node its settings in the
-  unit's environment (`Environment=`, `EnvironmentFile=`) and declare them in
-  `env`. The preflight takes a program to be what its name says; it does not
+  backtick expansion (systemd expands `$VAR` in `ExecStart`), a script word
+  the shell rewrites (brace expansion, a `*`, `?` or `[` glob, a `~`, a word
+  starting with `#`, which is a comment) or a backslash line continuation,
+  quoted or not, a pipe, redirection, subshell or `||`, a script file, a
+  file the shell runs on its own (a login or interactive shell's startup
+  files, `.` or `source`, `BASH_ENV` or a `BASH_FUNC_` import, and zsh,
+  which always reads its zshenv), or several arguments in one word. Give a
+  node its settings in the unit's environment (`Environment=`,
+  `EnvironmentFile=`) and declare them in `env`. The preflight takes a program to be what its name says; it does not
   read binaries or anything else on the machine.
 - A proxy is `nginx` or `cloudflared`. Give nginx as `nginx -T` output, which
   carries every included file; a plain config has its `include`s followed from
