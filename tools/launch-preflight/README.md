@@ -150,9 +150,12 @@ more than 300 slots behind its node.
   starting with `#`, which is a comment) or a backslash line continuation,
   quoted or not, a pipe, redirection, subshell or `||`, a script file, a
   file the shell runs on its own (a login or interactive shell's startup
-  files, `.` or `source`, and zsh, which always reads its zshenv), a shell
-  option other than `-a`, `-e` and `-u` (on the shell or through `set`: `-x`
-  runs `$PS4` as code), or several arguments in one word.
+  files, `.` or `source`, zsh, which always reads its zshenv, and bash
+  without `--norc` before its short options: under `-c` it runs
+  `~/.bashrc` and `/etc/bash.bashrc` first when `SSH_CLIENT` is set or its
+  stdin is a socket), a shell option other than `-a`, `-e` and `-u` (on the
+  shell or through `set`: `-x` runs `$PS4` as code), or several arguments in
+  one word.
 - `env` holds a node's settings as the process receives them, as
   `/proc/<pid>/environ` lists them (systemd decodes escapes and expands
   specifiers in an `Environment=` line first); assignments in a script

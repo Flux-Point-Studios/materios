@@ -1036,14 +1036,19 @@ def _program(words: list[str]) -> list[str]:
 
 
 def _shell_script(argv: list[str], where: str) -> str:
-    """The SCRIPT of `sh [-e|-u|--norc ...] -c SCRIPT`. A login or interactive
-    shell is refused: it first runs startup files, which can start or replace
-    the node."""
+    """The SCRIPT of `sh [--norc ...] [-e|-u ...] -c SCRIPT`. A shell that
+    first runs startup files, which can start or replace the node, is refused:
+    a login or interactive shell, and bash without --norc, which runs its rc
+    files under -c when started by sshd or with a socket on its stdin."""
+    quiet = set()
     for i, word in enumerate(argv[1:], 1):
         if word == "--login" or re.fullmatch(r"-[a-zA-Z]*[il][a-zA-Z]*", word):
             raise InputError(f"{where}: runs a login or interactive shell, whose startup files the preflight "
                              "cannot read; put the node's settings in the unit's environment and declare them in env")
         if word in SHELL_QUIET_OPTIONS:
+            if len(quiet) != i - 1:
+                raise InputError(f"{where}: gives {word} after a short option, where bash refuses it")
+            quiet.add(word)
             continue
         if not re.fullmatch(r"-[a-zA-Z]+", word):
             break
@@ -1051,6 +1056,10 @@ def _shell_script(argv: list[str], where: str) -> str:
         if "c" in word:
             if len(argv) != i + 2:
                 raise InputError(f"{where}: a shell launch must end with its -c script")
+            if Path(argv[0]).name == "bash" and "--norc" not in quiet:
+                raise InputError(f"{where}: runs bash -c without --norc, so bash runs ~/.bashrc and "
+                                 "/etc/bash.bashrc first when SSH_CLIENT is set or its stdin is a socket; the "
+                                 "preflight cannot read them. Start it as bash --norc -c")
             return argv[i + 1]
     raise InputError(f"{where}: runs a shell without -c; the preflight cannot read a script file")
 
