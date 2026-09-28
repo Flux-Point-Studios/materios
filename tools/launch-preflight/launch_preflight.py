@@ -137,9 +137,14 @@ HEX_SEED = re.compile(r"0x([0-9a-fA-F]{64})")
 TEST_NETWORKS = json.loads((HERE / "test_networks.json").read_text())
 TEST_NETWORK_NAME = re.compile(TEST_NETWORKS["name_pattern"], re.IGNORECASE | re.ASCII)
 NODE_BINARIES = ("materios-node", "materios-node-spo")
-SHELLS = {"sh", "bash", "dash", "ash", "zsh"}
+# Shells whose `-c` script is opened. zsh is not one: it runs its zshenv files before any script.
+SHELLS = {"sh", "bash", "dash", "ash"}
 SHELL_OPERATORS = ";&|()<>\n"
-SHELL_LOGIN_OPTIONS = {"--login", "--noprofile", "--norc"}
+SHELL_QUIET_OPTIONS = {"--noprofile", "--norc"}
+# Environment a shell runs as code: bash sources $BASH_ENV before a script and imports BASH_FUNC_* as functions.
+SHELL_CODE_ENV = re.compile(r"BASH_ENV|BASH_FUNC_.*", re.DOTALL)
+# What an authority's launch may run before its node, as bare words: builtins and mkdir, which start nothing.
+SETUP_COMMANDS = ("set", "export", "cd", "umask", "ulimit", "mkdir")
 SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=.*", re.DOTALL)
 SHELL_NESTING = 4
 RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
@@ -1014,13 +1019,18 @@ def _program(words: list[str]) -> list[str]:
 
 
 def _shell_script(argv: list[str], where: str) -> str:
-    """The SCRIPT of `sh [-l|-e|--login ...] -c SCRIPT`."""
+    """The SCRIPT of `sh [-e|-u|--norc ...] -c SCRIPT`. A login or interactive
+    shell is refused: it first runs startup files, which can start or replace
+    the node."""
     for i, word in enumerate(argv[1:], 1):
+        if word == "--login" or re.fullmatch(r"-[a-zA-Z]*[il][a-zA-Z]*", word):
+            raise InputError(f"{where}: runs a login or interactive shell, whose startup files the preflight "
+                             "cannot read; put the node's settings in the unit's environment and declare them in env")
         if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", word):
             if len(argv) != i + 2:
                 raise InputError(f"{where}: a shell launch must end with its -c script")
             return argv[i + 1]
-        if not (re.fullmatch(r"-[a-zA-Z]+", word) or word in SHELL_LOGIN_OPTIONS):
+        if not (re.fullmatch(r"-[a-zA-Z]+", word) or word in SHELL_QUIET_OPTIONS):
             break
     raise InputError(f"{where}: runs a shell without -c; the preflight cannot read a script file")
 
@@ -1049,8 +1059,18 @@ def _script_commands(script: str, where: str) -> list[list[str]]:
     return commands
 
 
+def _refuse_shell_code(names, where: str) -> None:
+    for name in names:
+        if SHELL_CODE_ENV.fullmatch(name):
+            raise InputError(f"{where}: sets {name}, which a shell runs as code; the preflight cannot read it")
+
+
 def _commands(words: list[str], where: str, depth: int) -> list[list[str]]:
+    _refuse_shell_code((word.split("=", 1)[0] for word in words), where)
     program = _program(words)
+    if program and program[0] in (".", "source"):
+        raise InputError(f"{where}: its launch sources a file with {program[0]}, which the preflight cannot read; "
+                         "put the node's settings in the unit's environment and declare them in env")
     if not program or Path(program[0]).name not in SHELLS:
         return [words]
     if depth == SHELL_NESTING:
@@ -1063,12 +1083,14 @@ def launch_commands(node: dict) -> list[list[str]]:
     """Every command a node's launch runs, as the words it is given, with each
     `sh -c` wrapper (a systemd unit's, a container entrypoint's) opened. A
     command that expands a variable, as systemd does `$VAR` in ExecStart, is
-    refused: its words are not in the manifest."""
+    refused: its words are not in the manifest. So is a setting a shell runs
+    as code, in the node's env or assigned in a command."""
     where = f"node {node['name']}"
     argv = node_argv(node)
     if any(re.search(r"[$`]", word) for word in argv):
         raise InputError(f"{where}: its launch command expands a variable or a command; "
                          "give the argv the process receives")
+    _refuse_shell_code(node.get("env", {}), where)
     return _commands(argv, where, 0) if argv else []
 
 
@@ -1082,7 +1104,8 @@ def launch_pieces(node: dict) -> list[str]:
 def node_process(node: dict) -> list[str]:
     """The argv an authority's node process receives: the last command its
     launch runs, which must start a node binary with one argument per word.
-    No earlier command may start a node: its listeners would go unchecked."""
+    An earlier command may only set up the shell or run a node subcommand:
+    any other program can start a node whose listeners go unchecked."""
     where = f"authority {node['name']}"
     commands = launch_commands(node)
     argv = _program(commands[-1]) if commands else []
@@ -1091,8 +1114,14 @@ def node_process(node: dict) -> list[str]:
         raise InputError(f"{where}: its launch runs {program}, not a node binary ({', '.join(NODE_BINARIES)}); "
                          "give the argv the node process receives")
     for earlier in map(_program, commands[:-1]):
-        # A node binary with a subcommand (`key insert`, `build-spec`) is a tool run, not a node.
-        if earlier and Path(earlier[0]).name in NODE_BINARIES and (len(earlier) == 1 or earlier[1].startswith("-")):
+        if not earlier or earlier[0] in SETUP_COMMANDS:
+            continue
+        if Path(earlier[0]).name not in NODE_BINARIES:
+            raise InputError(f"{where}: its launch runs {earlier[0]} before its last command; the preflight reads "
+                             f"only {', '.join(SETUP_COMMANDS)} or a node subcommand there, since any other "
+                             "program can start a node it never checks")
+        # A node binary with a subcommand (`build-spec`, `purge-chain`) is a tool run, not a node.
+        if len(earlier) == 1 or earlier[1].startswith("-"):
             raise InputError(f"{where}: its launch starts a node before its last command; the preflight "
                              "checks the last command as the one node process")
     for i, word in enumerate(argv):

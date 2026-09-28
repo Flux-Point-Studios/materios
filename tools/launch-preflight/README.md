@@ -135,12 +135,19 @@ more than 300 slots behind its node.
   public key. `argv` is the command as the process receives it; a `sh -c`
   wrapper, as a systemd unit or a container entrypoint writes it, is opened,
   its script split at `;`, `&&` and newlines, and an authority's last command
-  must start `materios-node` or `materios-node-spo`. No earlier command may
-  start a node (a node binary run with a subcommand, such as `key insert`, is
-  a tool run): its listeners would go unchecked. A launch the preflight
-  would have to evaluate refuses as unreadable: a `$VAR` or backtick
-  expansion (systemd expands `$VAR` in `ExecStart`), a pipe, redirection,
-  subshell or `||`, a script file, or several arguments in one word.
+  must start `materios-node` or `materios-node-spo`. Before it, an authority's
+  launch may run only `set`, `export`, `cd`, `umask`, `ulimit` and `mkdir`,
+  as bare words, and node subcommands (`build-spec`, `purge-chain`): any
+  other program could start a node whose listeners go unchecked. A launch
+  the preflight would have to evaluate refuses as unreadable: a `$VAR` or
+  backtick expansion (systemd expands `$VAR` in `ExecStart`), a pipe,
+  redirection, subshell or `||`, a script file, a file the shell runs on its
+  own (a login or interactive shell's startup files, `.` or `source`,
+  `BASH_ENV` or a `BASH_FUNC_` import, and zsh, which always reads its
+  zshenv), or several arguments in one word. Give a node its settings in the
+  unit's environment (`Environment=`, `EnvironmentFile=`) and declare them in
+  `env`. The preflight takes a program to be what its name says; it does not
+  read binaries or anything else on the machine.
 - A proxy is `nginx` or `cloudflared`. Give nginx as `nginx -T` output, which
   carries every included file; a plain config has its `include`s followed from
   its directory. Every forwarding directive counts (`proxy_pass`, including a

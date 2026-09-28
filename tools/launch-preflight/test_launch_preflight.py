@@ -413,7 +413,7 @@ def test_authority_with_a_wasm_override_is_refused(argv):
 
 
 def test_a_shell_wrapped_authority_with_a_wasm_override_is_refused():
-    launch = {"nodes": [authority(["/bin/bash", "-lc", "exec materios-node --validator "
+    launch = {"nodes": [authority(["/bin/bash", "-c", "exec materios-node --validator "
                                    "--wasm-runtime-overrides /srv/overrides"])]}
     assert messages(lp.check_code_overrides(launch)) == [
         "[6 checkpoint] authority val1 runs --wasm-runtime-overrides: a local runtime would replace "
@@ -508,7 +508,7 @@ def test_dev_keyring_flags_and_dev_uris_in_node_launch_are_named(spec, meta, kno
 def test_dev_keyring_flag_inside_a_wrapper_is_named(spec, meta, known):
     launch = {"roles": {}, "nodes": [
         {"name": "v1", "host": "h1", "authority": False,
-         "argv": ["/bin/bash", "-lc", "exec materios-node --validator '--alice'"]},
+         "argv": ["/bin/bash", "-c", "exec materios-node --validator '--alice'"]},
         {"name": "v2", "host": "h2", "authority": False,
          "argv": ["docker", "run", "--rm", "img", "bash", "-lc", "materios-node --bob"]},
     ]}
@@ -570,7 +570,7 @@ def sidecar(argv=(), **env) -> dict:
     (sidecar(["cert-daemon", "--suri", "/Attestor1"]), "/Attestor1"),
     (sidecar(["cert-daemon", "--signer-uri=/Attestor2"]), "/Attestor2"),
     (sidecar(["/bin/sh", "-c", "exec cert-daemon --suri /Attestor3"]), "/Attestor3"),
-    (sidecar(["bash", "-lc", "SIGNER_URI=/Attestor4 exec cert-daemon"]), "/Attestor4"),
+    (sidecar(["bash", "-c", "SIGNER_URI=/Attestor4 exec cert-daemon"]), "/Attestor4"),
 ])
 def test_a_secret_uri_setting_with_no_phrase_is_named(spec, meta, known, launch, named):
     found = dev_key_findings(spec, meta, known, launch)
@@ -1176,13 +1176,18 @@ def test_experimental_endpoint_options_are_read_trimmed(tmp_path, endpoint):
 BOOTSTRAP_EXECSTART = ("/bin/bash -lc 'set -a; . /etc/materios/node.env; set +a; "
                        "exec /usr/local/bin/materios-node-spo --validator --chain /etc/materios/mainnet-raw.json "
                        "--rpc-methods unsafe --rpc-port 9945 --unsafe-rpc-external'")
+# The same unit with its environment in the unit (Environment=), which runs no file.
+SELF_CONTAINED_EXECSTART = ("/bin/bash -c 'set -eu; umask 077; "
+                            "exec /usr/local/bin/materios-node-spo --validator --chain /etc/materios/mainnet-raw.json "
+                            "--rpc-methods unsafe --rpc-port 9945 --unsafe-rpc-external'")
 UNSAFE_EXTERNAL = "materios-node --validator --rpc-methods unsafe --unsafe-rpc-external"
+SAFE_NODE = "exec materios-node --validator --rpc-methods safe"
 
 
 @pytest.mark.parametrize("argv", [
-    BOOTSTRAP_EXECSTART,
+    SELF_CONTAINED_EXECSTART,
     ["sh", "-c", "exec " + UNSAFE_EXTERNAL],
-    ["/bin/bash", "-l", "-c", "mkdir -p /data &&\n" + UNSAFE_EXTERNAL],
+    ["/bin/bash", "-e", "-c", "mkdir -p /data &&\n" + UNSAFE_EXTERNAL],
     ["bash", "-ec", "exec bash -c 'exec " + UNSAFE_EXTERNAL + "'"],
     ["dash", "-c", "RUST_LOG=info " + UNSAFE_EXTERNAL],
 ])
@@ -1197,13 +1202,13 @@ def test_a_shell_wrapped_launch_is_read_as_the_node_it_runs(tmp_path, argv):
     (["bash", "-lc", "exec materios-node --validator `cat /etc/flags`"], "expands a variable"),
     (["docker", "run", "--rm", "img", "bash", "-lc", "exec " + UNSAFE_EXTERNAL], "runs docker, not a node binary"),
     (["materios-node", "--validator --rpc-methods unsafe --unsafe-rpc-external"], "argument 1 holds several"),
-    (["bash", "-lc", UNSAFE_EXTERNAL + " | tee /var/log/node.log"], "uses '|'"),
-    (["bash", "-lc", UNSAFE_EXTERNAL + " >> /var/log/node.log 2>&1"], "uses '>>'"),
-    (["bash", "-lc", "materios-node --validator || " + UNSAFE_EXTERNAL], "uses '||'"),
+    (["bash", "-c", UNSAFE_EXTERNAL + " | tee /var/log/node.log"], "uses '|'"),
+    (["bash", "-c", UNSAFE_EXTERNAL + " >> /var/log/node.log 2>&1"], "uses '>>'"),
+    (["bash", "-c", "materios-node --validator || " + UNSAFE_EXTERNAL], "uses '||'"),
     (["bash", "/opt/start-node.sh"], "without -c"),
     (["bash", "-c", "exec materios-node --validator", "arg0"], "must end with its -c script"),
-    (["bash", "-lc", "materios-node --validator; echo started"], "runs echo, not a node binary"),
-    (["bash", "-lc", "exec materios-node --name 'unbalanced"], "does not parse"),
+    (["bash", "-c", "materios-node --validator; echo started"], "runs echo, not a node binary"),
+    (["bash", "-c", "exec materios-node --name 'unbalanced"], "does not parse"),
     ([], "runs nothing, not a node binary"),
 ])
 def test_an_authority_launch_the_preflight_cannot_read_is_an_input_error(tmp_path, argv, error):
@@ -1212,8 +1217,8 @@ def test_an_authority_launch_the_preflight_cannot_read_is_an_input_error(tmp_pat
 
 
 @pytest.mark.parametrize("argv", [
-    ["bash", "-lc", UNSAFE_EXTERNAL + "; exec materios-node --validator --rpc-methods safe"],
-    ["bash", "-lc", "materios-node --validator --wasm-runtime-overrides /srv/o && exec materios-node --validator"],
+    ["bash", "-c", UNSAFE_EXTERNAL + "; exec materios-node --validator --rpc-methods safe"],
+    ["bash", "-c", "materios-node --validator --wasm-runtime-overrides /srv/o && exec materios-node --validator"],
     ["sh", "-c", "RUST_LOG=info materios-node; exec bash -c 'exec materios-node --validator --rpc-methods safe'"],
 ])
 def test_a_launch_that_starts_a_node_before_its_last_command_is_an_input_error(argv):
@@ -1222,14 +1227,82 @@ def test_a_launch_that_starts_a_node_before_its_last_command_is_an_input_error(a
 
 
 def test_a_node_subcommand_before_the_node_process_is_not_a_node(tmp_path):
-    argv = ["bash", "-lc", "materios-node key generate-node-key --file /data/node-key; exec " + UNSAFE_EXTERNAL]
+    argv = ["bash", "-c", "materios-node key generate-node-key --file /data/node-key; exec " + UNSAFE_EXTERNAL]
     assert rpc_findings(tmp_path, [authority(argv)]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
+# Any program before the node can start one the preflight never reads: a launcher prefix, eval,
+# or a node binary under another name, a builtin's name included.
+@pytest.mark.parametrize("earlier", [
+    "nohup " + UNSAFE_EXTERNAL,
+    "setsid " + UNSAFE_EXTERNAL,
+    "env RUST_LOG=info " + UNSAFE_EXTERNAL,
+    "/usr/bin/env " + UNSAFE_EXTERNAL,
+    "nice -n 5 " + UNSAFE_EXTERNAL,
+    "timeout 100d " + UNSAFE_EXTERNAL,
+    "command " + UNSAFE_EXTERNAL,
+    "exec -a materios " + UNSAFE_EXTERNAL,
+    "stdbuf -oL " + UNSAFE_EXTERNAL,
+    "sudo -u node " + UNSAFE_EXTERNAL,
+    "eval '" + UNSAFE_EXTERNAL + "'",
+    "/opt/node/validator-copy --validator --rpc-methods unsafe --unsafe-rpc-external",
+    "/opt/node/export --rpc-methods unsafe --unsafe-rpc-external",
+])
+def test_a_launch_that_runs_another_program_before_its_node_is_an_input_error(earlier):
+    with pytest.raises(lp.InputError, match="runs .+ before its last command"):
+        lp.validate_node(authority(["bash", "-c", earlier + "; " + SAFE_NODE]), "nodes[0]")
+
+
+def test_a_wasm_override_on_a_prefixed_earlier_node_is_an_input_error():
+    launch = {"nodes": [authority(["bash", "-c", "nohup materios-node --validator --wasm-runtime-overrides /srv/o; "
+                                   + SAFE_NODE])]}
+    with pytest.raises(lp.InputError, match="runs nohup before its last command"):
+        lp.check_code_overrides(launch)
+
+
+def test_setup_commands_before_the_node_are_read_through(tmp_path):
+    argv = ["bash", "-ec", "set -u; export RUST_LOG=info; cd /data; umask 077; ulimit -n 65536; "
+                           "mkdir -p /data/db && RUST_BACKTRACE=1 exec " + UNSAFE_EXTERNAL]
+    assert rpc_findings(tmp_path, [authority(argv)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+# A file the shell runs before or inside its script (a login or interactive shell's startup files,
+# a sourced file, $BASH_ENV, zsh's zshenv) can start or replace the node, and the preflight cannot read it.
+@pytest.mark.parametrize("argv, error", [
+    (["bash", "-lc", SAFE_NODE], "login or interactive shell"),
+    (["bash", "-l", "-c", SAFE_NODE], "login or interactive shell"),
+    (["bash", "--login", "-c", SAFE_NODE], "login or interactive shell"),
+    (["bash", "-ic", SAFE_NODE], "login or interactive shell"),
+    (["sh", "-c", "exec bash -elc '" + SAFE_NODE + "'"], "login or interactive shell"),
+    (BOOTSTRAP_EXECSTART, "login or interactive shell"),
+    (["bash", "-c", "set -a; . /etc/materios/node.env; set +a; " + SAFE_NODE], "sources a file"),
+    (["bash", "-c", "source /etc/materios/node.env && " + SAFE_NODE], "sources a file"),
+    (["bash", "-c", "export BASH_ENV=/etc/materios/rc; exec bash -c '" + SAFE_NODE + "'"], "sets BASH_ENV"),
+    (["bash", "-c", "BASH_ENV=/etc/materios/rc exec bash -c '" + SAFE_NODE + "'"], "sets BASH_ENV"),
+    (["zsh", "-c", SAFE_NODE], "runs zsh, not a node binary"),
+])
+def test_a_launch_that_runs_a_file_the_preflight_cannot_read_is_an_input_error(argv, error):
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_node(authority(argv), "nodes[0]")
+
+
+@pytest.mark.parametrize("env", [{"BASH_ENV": "/etc/materios/rc"}, {"BASH_FUNC_materios-node%%": "() { :; }"}])
+def test_an_environment_a_shell_runs_as_code_is_an_input_error(env):
+    node = dict(authority(["bash", "-c", SAFE_NODE]), env=env)
+    with pytest.raises(lp.InputError, match="which a shell runs as code"):
+        lp.validate_node(node, "nodes[0]")
+
+
+def test_a_sidecar_that_sources_its_settings_is_an_input_error(spec, meta, known):
+    with pytest.raises(lp.InputError, match="sources a file"):
+        dev_key_findings(spec, meta, known, sidecar(["sh", "-c", ". /etc/cert-daemon.env; exec cert-daemon"]))
+
+
 def test_a_shell_wrapped_non_authority_validator_is_refused(tmp_path):
     node = {"name": "v9", "host": "h9", "authority": False,
-            "argv": ["/bin/bash", "-lc", "exec materios-node --validator --rpc-methods safe"]}
+            "argv": ["/bin/bash", "-c", "exec materios-node --validator --rpc-methods safe"]}
     assert rpc_findings(tmp_path, [node]) == ["[3 rpc] node v9 runs --validator but is not declared an authority"]
 
 
@@ -1971,7 +2044,7 @@ def test_cli_refuses_a_same_machine_tunnel_whose_host_is_spelled_differently(cle
 
 
 def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):
-    clean.launch["nodes"][0]["argv"] = ["/bin/bash", "-lc", "exec materios-node --validator --rpc-methods unsafe "
+    clean.launch["nodes"][0]["argv"] = ["/bin/bash", "-c", "exec materios-node --validator --rpc-methods unsafe "
                                         "--unsafe-rpc-external --alice --wasm-runtime-overrides /srv/o"]
     code, out = clean.run(capsys)
     assert code == 1
@@ -1980,8 +2053,16 @@ def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):
     assert "[6 checkpoint] authority val0 runs --wasm-runtime-overrides" in out
 
 
-def test_cli_refuses_the_bootstrap_unit_shape(clean, capsys):
+def test_cli_refuses_the_bootstrap_unit_shape_as_unreadable(clean, capsys):
+    signed = copy.deepcopy(clean.launch)
     clean.launch["nodes"][0]["argv"] = BOOTSTRAP_EXECSTART
+    code, out = clean.run(capsys, signed_launch=signed)
+    assert code == 2
+    assert "node val0: runs a login or interactive shell" in out
+
+
+def test_cli_refuses_unsafe_rpc_in_a_self_contained_unit(clean, capsys):
+    clean.launch["nodes"][0]["argv"] = SELF_CONTAINED_EXECSTART
     code, out = clean.run(capsys)
     assert code == 1
     assert "[3 rpc] authority val0 serves unsafe RPC methods on an external listener" in out
