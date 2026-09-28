@@ -145,11 +145,25 @@ more than 300 slots behind its node.
   starting with `#`, which is a comment) or a backslash line continuation,
   quoted or not, a pipe, redirection, subshell or `||`, a script file, a
   file the shell runs on its own (a login or interactive shell's startup
-  files, `.` or `source`, `BASH_ENV` or a `BASH_FUNC_` import, and zsh,
-  which always reads its zshenv), or several arguments in one word. Give a
-  node its settings in the unit's environment (`Environment=`,
-  `EnvironmentFile=`) and declare them in `env`. The preflight takes a program to be what its name says; it does not
-  read binaries or anything else on the machine.
+  files, `.` or `source`, and zsh, which always reads its zshenv), a shell
+  option other than `-a`, `-e` and `-u` (on the shell or through `set`:
+  `-x` runs `$PS4` as code), or several arguments in one word.
+- `env` holds a node's settings, as the unit's `Environment=` or
+  `EnvironmentFile=` gives them; assignments in a script (`NAME=value`,
+  `export NAME=value`) count the same. No node may set what the shell or
+  the dynamic loader acts on: `BASH_ENV`, a `BASH_FUNC_` import, `PS4`,
+  `ENV`, `SHELLOPTS`, `BASHOPTS`, `PATH` or any `LD_` setting, and neither
+  may a `NAME=value` word passed to a program such as `env`. An authority
+  may set only logging (`RUST_LOG`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE`),
+  `TZ` and the node's Cardano follower settings (`MAIN_CHAIN_FOLLOWER`,
+  `DB_SYNC_POSTGRES_CONNECTION_STRING`, `CARDANO_SECURITY_PARAMETER`,
+  `CARDANO_ACTIVE_SLOTS_COEFF`, `BLOCK_STABILITY_MARGIN`,
+  `SIDECHAIN_BLOCK_BENEFICIARY`, the four `MC__` epoch settings,
+  `MITHRIL_AGGREGATOR_ENDPOINT`, `MITHRIL_GENESIS_VERIFICATION_KEY`); any
+  other setting could run code or change the node beyond its argv, such as
+  a module path or the mock follower. The preflight takes a program to be
+  what its name says; it does not read binaries or anything else on the
+  machine.
 - A proxy is `nginx` or `cloudflared`. Give nginx as `nginx -T` output, which
   carries every included file; a plain config has its `include`s followed from
   its directory. Every forwarding directive counts (`proxy_pass`, including a

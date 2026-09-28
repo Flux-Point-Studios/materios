@@ -143,11 +143,25 @@ SHELL_OPERATORS = ";&|()<>\n"
 # A script word bash rewrites and shlex reads literally: brace, filename or tilde expansion, or a comment.
 SHELL_REWRITTEN = re.compile(r"[{}*?\[~]|^#")
 SHELL_QUIET_OPTIONS = {"--noprofile", "--norc"}
-# Environment a shell runs as code: bash sources $BASH_ENV before a script and imports BASH_FUNC_* as functions.
-SHELL_CODE_ENV = re.compile(r"BASH_ENV|BASH_FUNC_.*", re.DOTALL)
+# The shell options the preflight reads through: allexport, errexit and nounset run no code and change no word.
+SHELL_OPTIONS = re.compile(r"[-+][aeu]*")
+# Settings the shell or the dynamic loader acts on, refused in any node's launch: a file or code it runs
+# ($BASH_ENV, BASH_FUNC_* imports, $PS4 under xtrace, $ENV, LD_PRELOAD and LD_AUDIT), the options it
+# starts with (SHELLOPTS, BASHOPTS), or where a program or library is found (PATH, LD_LIBRARY_PATH).
+LOADER_SETTINGS = re.compile(r"BASH_ENV|BASH_FUNC_.*|PS4|ENV|SHELLOPTS|BASHOPTS|PATH|LD_.*", re.DOTALL)
+# The settings an authority may set: logging, the time zone and the node's own Cardano follower settings.
+# Anything else (a gconv or OpenSSL module path, the mock follower, the mithril client binary) could run
+# code or change the node beyond its argv.
+AUTHORITY_SETTINGS = frozenset({
+    "RUST_LOG", "RUST_BACKTRACE", "RUST_LIB_BACKTRACE", "TZ",
+    "MAIN_CHAIN_FOLLOWER", "DB_SYNC_POSTGRES_CONNECTION_STRING", "CARDANO_SECURITY_PARAMETER",
+    "CARDANO_ACTIVE_SLOTS_COEFF", "BLOCK_STABILITY_MARGIN", "SIDECHAIN_BLOCK_BENEFICIARY",
+    "MC__FIRST_EPOCH_TIMESTAMP_MILLIS", "MC__EPOCH_DURATION_MILLIS", "MC__FIRST_EPOCH_NUMBER", "MC__FIRST_SLOT_NUMBER",
+    "MITHRIL_AGGREGATOR_ENDPOINT", "MITHRIL_GENESIS_VERIFICATION_KEY",
+})
 # What an authority's launch may run before its node, as bare words: builtins and mkdir, which start nothing.
 SETUP_COMMANDS = ("set", "export", "cd", "umask", "ulimit", "mkdir")
-SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=.*", re.DOTALL)
+SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=.*", re.DOTALL)
 SHELL_NESTING = 4
 RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
@@ -1028,13 +1042,22 @@ def _shell_script(argv: list[str], where: str) -> str:
         if word == "--login" or re.fullmatch(r"-[a-zA-Z]*[il][a-zA-Z]*", word):
             raise InputError(f"{where}: runs a login or interactive shell, whose startup files the preflight "
                              "cannot read; put the node's settings in the unit's environment and declare them in env")
-        if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", word):
+        if word in SHELL_QUIET_OPTIONS:
+            continue
+        if not re.fullmatch(r"-[a-zA-Z]+", word):
+            break
+        _refuse_shell_option(word, word.replace("c", ""), where)
+        if "c" in word:
             if len(argv) != i + 2:
                 raise InputError(f"{where}: a shell launch must end with its -c script")
             return argv[i + 1]
-        if not (re.fullmatch(r"-[a-zA-Z]+", word) or word in SHELL_QUIET_OPTIONS):
-            break
     raise InputError(f"{where}: runs a shell without -c; the preflight cannot read a script file")
+
+
+def _refuse_shell_option(word: str, options: str, where: str) -> None:
+    if not SHELL_OPTIONS.fullmatch(options):
+        raise InputError(f"{where}: sets shell option {word}; the preflight reads a shell only with -a, -e and -u: "
+                         "-x runs $PS4 as code, and other options change what a command gets")
 
 
 def _script_commands(script: str, where: str) -> list[list[str]]:
@@ -1069,15 +1092,32 @@ def _script_commands(script: str, where: str) -> list[list[str]]:
     return commands
 
 
-def _refuse_shell_code(names, where: str) -> None:
+def _setting(word: str) -> str:
+    """The name a NAME=value or NAME+=value word sets."""
+    return word.split("=", 1)[0].removesuffix("+")
+
+
+def _refuse_settings(names, authority: bool, where: str) -> None:
     for name in names:
-        if SHELL_CODE_ENV.fullmatch(name):
-            raise InputError(f"{where}: sets {name}, which a shell runs as code; the preflight cannot read it")
+        if LOADER_SETTINGS.fullmatch(name):
+            raise InputError(f"{where}: sets {name}, which changes what the shell or the dynamic loader runs; "
+                             "the preflight cannot read it")
+        if authority and name not in AUTHORITY_SETTINGS:
+            raise InputError(f"{where}: sets {name}, which is not a setting an authority may set (logging, TZ "
+                             "and the node's Cardano follower settings); the preflight cannot read what it changes")
 
 
-def _commands(words: list[str], where: str, depth: int) -> list[list[str]]:
-    _refuse_shell_code((word.split("=", 1)[0] for word in words), where)
+def _commands(words: list[str], where: str, depth: int, authority: bool) -> list[list[str]]:
+    # Any NAME=value word counts, since a program such as env passes it on as a setting.
+    _refuse_settings((_setting(word) for word in words if "=" in word), False, where)
     program = _program(words)
+    assigned = [word for word in words[:len(words) - len(program)] if word != "exec"]
+    if program[:1] == ["export"]:
+        assigned += program[1:]
+    _refuse_settings(map(_setting, assigned), authority, where)
+    if program[:1] == ["set"]:
+        for word in program[1:]:
+            _refuse_shell_option(word, word, where)
     if program and program[0] in (".", "source"):
         raise InputError(f"{where}: its launch sources a file with {program[0]}, which the preflight cannot read; "
                          "put the node's settings in the unit's environment and declare them in env")
@@ -1086,22 +1126,24 @@ def _commands(words: list[str], where: str, depth: int) -> list[list[str]]:
     if depth == SHELL_NESTING:
         raise InputError(f"{where}: shells nest more than {SHELL_NESTING} deep")
     return [command for inner in _script_commands(_shell_script(program, where), where)
-            for command in _commands(inner, where, depth + 1)]
+            for command in _commands(inner, where, depth + 1, authority)]
 
 
 def launch_commands(node: dict) -> list[list[str]]:
     """Every command a node's launch runs, as the words it is given, with each
     `sh -c` wrapper (a systemd unit's, a container entrypoint's) opened. A
     command that expands a variable, as systemd does `$VAR` in ExecStart, is
-    refused: its words are not in the manifest. So is a setting a shell runs
-    as code, in the node's env or assigned in a command."""
+    refused: its words are not in the manifest. So is a setting the shell or
+    the dynamic loader acts on, and, for an authority, any setting outside
+    AUTHORITY_SETTINGS, in the node's env or assigned in a command."""
     where = f"node {node['name']}"
+    authority = node.get("authority") is True
     argv = node_argv(node)
     if any(re.search(r"[$`]", word) for word in argv):
         raise InputError(f"{where}: its launch command expands a variable or a command; "
                          "give the argv the process receives")
-    _refuse_shell_code(node.get("env", {}), where)
-    return _commands(argv, where, 0) if argv else []
+    _refuse_settings(node.get("env", {}), authority, where)
+    return _commands(argv, where, 0, authority) if argv else []
 
 
 def launch_pieces(node: dict) -> list[str]:

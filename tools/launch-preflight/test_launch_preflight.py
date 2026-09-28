@@ -11,6 +11,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1338,11 +1339,90 @@ def test_a_hash_inside_a_script_word_is_read_literally(tmp_path):
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
-@pytest.mark.parametrize("env", [{"BASH_ENV": "/etc/materios/rc"}, {"BASH_FUNC_materios-node%%": "() { :; }"}])
-def test_an_environment_a_shell_runs_as_code_is_an_input_error(env):
-    node = dict(authority(["bash", "-c", SAFE_NODE]), env=env)
-    with pytest.raises(lp.InputError, match="which a shell runs as code"):
+# Settings the shell or the dynamic loader acts on: a file or code it runs (BASH_ENV, a BASH_FUNC_ import,
+# PS4 under xtrace, ENV, LD_PRELOAD), options it starts with (SHELLOPTS, BASHOPTS), or where a name resolves (PATH).
+LOADER_SETTINGS = ["BASH_ENV", "BASH_FUNC_materios-node%%", "PS4", "SHELLOPTS", "BASHOPTS", "ENV", "PATH",
+                   "LD_PRELOAD", "LD_AUDIT", "LD_LIBRARY_PATH"]
+
+
+def loader_error(name: str) -> str:
+    return f"sets {re.escape(name)}, which changes what the shell or the dynamic loader runs"
+
+
+@pytest.mark.parametrize("is_authority", [True, False])
+@pytest.mark.parametrize("name", LOADER_SETTINGS)
+def test_an_environment_that_changes_what_the_shell_or_loader_runs_is_an_input_error(name, is_authority):
+    node = dict(authority(["bash", "-c", SAFE_NODE]), authority=is_authority, env={name: "/srv/x"})
+    with pytest.raises(lp.InputError, match=loader_error(name)):
         lp.validate_node(node, "nodes[0]")
+
+
+@pytest.mark.parametrize("is_authority", [True, False])
+@pytest.mark.parametrize("name, script", [
+    ("PS4", "export PS4=x; " + SAFE_NODE),
+    ("PS4", "PS4=x; " + SAFE_NODE),
+    ("SHELLOPTS", "SHELLOPTS=xtrace exec bash -c '" + SAFE_NODE + "'"),
+    ("BASHOPTS", "export BASHOPTS=x; " + SAFE_NODE),
+    ("ENV", "export ENV=/srv/rc; " + SAFE_NODE),
+    ("PATH", "PATH=/srv/bin " + SAFE_NODE),
+    ("PATH", "PATH+=:/srv/bin " + SAFE_NODE),
+    ("LD_PRELOAD", "LD_PRELOAD=/srv/x.so " + SAFE_NODE),
+    ("LD_AUDIT", "exec env LD_AUDIT=/srv/x.so materios-node --validator"),
+])
+def test_a_script_setting_that_changes_what_the_shell_or_loader_runs_is_an_input_error(name, script, is_authority):
+    node = dict(authority(["bash", "-c", script]), authority=is_authority)
+    with pytest.raises(lp.InputError, match=loader_error(name)):
+        lp.validate_node(node, "nodes[0]")
+
+
+# An authority's environment is an allowlist: what else could run code or change the node goes unread.
+@pytest.mark.parametrize("name", ["GCONV_PATH", "OPENSSL_CONF", "MALLOC_CONF", "USE_MAIN_CHAIN_FOLLOWER_MOCK",
+                                  "MITHRIL_CLIENT_BIN", "HOME"])
+def test_an_authority_setting_outside_the_allowlist_is_an_input_error(name):
+    node = dict(authority(["bash", "-c", SAFE_NODE]), env={name: "/srv/x"})
+    with pytest.raises(lp.InputError, match=f"sets {name}, which is not a setting an authority may set"):
+        lp.validate_node(node, "nodes[0]")
+
+
+@pytest.mark.parametrize("name, script", [
+    ("GCONV_PATH", "export GCONV_PATH=/srv/gconv; " + SAFE_NODE),
+    ("USE_MAIN_CHAIN_FOLLOWER_MOCK", "USE_MAIN_CHAIN_FOLLOWER_MOCK=true " + SAFE_NODE),
+    ("MITHRIL_CLIENT_BIN", "MITHRIL_CLIENT_BIN=/srv/mithril; export MITHRIL_CLIENT_BIN; " + SAFE_NODE),
+    ("OPENSSL_CONF", "exec bash -c 'OPENSSL_CONF=/srv/o.cnf " + SAFE_NODE + "'"),
+])
+def test_an_authority_script_setting_outside_the_allowlist_is_an_input_error(name, script):
+    with pytest.raises(lp.InputError, match=f"sets {name}, which is not a setting an authority may set"):
+        lp.validate_node(authority(["bash", "-c", script]), "nodes[0]")
+
+
+def test_an_authority_may_set_logging_the_time_zone_and_its_node_settings(tmp_path):
+    env = {"RUST_LOG": "info", "RUST_BACKTRACE": "1", "RUST_LIB_BACKTRACE": "0", "TZ": "UTC",
+           "MAIN_CHAIN_FOLLOWER": "yaci", "DB_SYNC_POSTGRES_CONNECTION_STRING": "postgres://follower@db:5432/cexplorer",
+           "CARDANO_SECURITY_PARAMETER": "2160", "CARDANO_ACTIVE_SLOTS_COEFF": "0.05", "BLOCK_STABILITY_MARGIN": "0",
+           "MC__FIRST_EPOCH_TIMESTAMP_MILLIS": "1596059091000", "MC__EPOCH_DURATION_MILLIS": "432000000",
+           "MC__FIRST_EPOCH_NUMBER": "208", "MC__FIRST_SLOT_NUMBER": "4492800",
+           "SIDECHAIN_BLOCK_BENEFICIARY": "0x" + fresh_account().hex(),
+           "MITHRIL_AGGREGATOR_ENDPOINT": "https://aggregator.example.org/aggregator",
+           "MITHRIL_GENESIS_VERIFICATION_KEY": "5b3139312c36362c3134302c3138355d"}
+    script = "set -a; export TZ=UTC; set +a; RUST_LOG=info exec " + UNSAFE_EXTERNAL
+    assert rpc_findings(tmp_path, [dict(authority(["bash", "-euc", script]), env=env)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+# -x runs $PS4 as code before each command; -v, -k and the rest change what a command gets or the shell prints.
+@pytest.mark.parametrize("argv, option", [
+    (["bash", "-c", "set -x; " + SAFE_NODE], "-x"),
+    (["bash", "-c", "set -eux; " + SAFE_NODE], "-eux"),
+    (["bash", "-c", "set -o xtrace; " + SAFE_NODE], "-o"),
+    (["bash", "-c", "set -v; " + SAFE_NODE], "-v"),
+    (["bash", "-c", "set -k; " + SAFE_NODE], "-k"),
+    (["bash", "-xc", SAFE_NODE], "-xc"),
+    (["bash", "-e", "-x", "-c", SAFE_NODE], "-x"),
+    (["sh", "-c", "exec bash -kc '" + SAFE_NODE + "'"], "-kc"),
+])
+def test_a_shell_option_the_preflight_does_not_read_is_an_input_error(argv, option):
+    with pytest.raises(lp.InputError, match=f"sets shell option {option};"):
+        lp.validate_node(authority(argv), "nodes[0]")
 
 
 def test_a_sidecar_that_sources_its_settings_is_an_input_error(spec, meta, known):
