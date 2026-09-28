@@ -8,35 +8,38 @@ subwasm, the extractor the runtime-upgrade ceremony gate uses), the authority
 nodes' launch commands and the RPC proxy configs in front of them, and what
 Cardano holds, through a Kupo index: the cMATRA lock that backs genesis and the
 permissioned candidates that become the committee after the first rotation. A
-launch manifest, signed with the pinned launch key, supplies what genesis cannot
-show: who holds each role, the explicit economics, where the lock is.
+launch manifest, signed with a launch key launch_keys.json pins, supplies what
+genesis cannot show: who holds each role, the explicit economics, where the lock is.
 
 Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
                  role or a member of a role's multisig, a Cardano permissioned
                  candidate, a node launch command, or the manifest signing key;
                  Sudo.Key or a genesis account that no declared role accounts
-                 for; an off-chain role left undeclared; a chain spec the anchor
-                 worker would read as a test network
+                 for, or Root not a multisig of threshold 2 or more; an
+                 off-chain role left undeclared; a chain spec the anchor worker
+                 would read as a test network
   2 rewards      attestor reward and subsidy values or validator reward
                  parameters not declared, or genesis and the runtime do not
                  hold exactly the declared values
   3 rpc          an authority serves unsafe RPC methods on an external or
                  proxied listener, or an authority has no launch entry to check
   4 supply       an attestor endowment below bond + existential deposit + fee
-                 buffer, or genesis issuance plus the runtime's emission
-                 reserves above the cMATRA the lock holds on Cardano (the
-                 reserve counted both on Cardano and on Materios)
+                 buffer; genesis issuance plus the runtime's emission reserves
+                 above the cMATRA the lock holds on Cardano (the reserve counted
+                 both on Cardano and on Materios); a lock fewer than two key
+                 holders can spend, or not bound to this genesis by its datum;
+                 genesis storage outside the allowlist
   5 pallets      PerpEngine in the runtime metadata, under any name
   6 checkpoint   genesis hash, runtime code hash, chain-spec hash or launch
-                 manifest differ from the signed launch manifest, the spec
-                 carries code substitutes, an authority loads a local runtime
-                 override, or genesis turns on a Cardano deposit observation
-                 that has no checkpoint
+                 manifest differ from the signed launch manifest, or no pinned
+                 launch key signed it; the spec carries code substitutes, an
+                 authority loads a local runtime override, or genesis turns on
+                 a Cardano deposit observation that has no checkpoint
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
-        --signed-manifest signed.json --manifest-key 0x<ed25519 pubkey> \\
-        --kupo http://<mainnet kupo> [--extra-well-known exposed.json ...] [--subwasm PATH]
+        --signed-manifest signed.json --kupo http://<mainnet kupo> \\
+        [--manifest-key 0x<ed25519 pubkey>] [--extra-well-known exposed.json ...] [--subwasm PATH]
     launch_preflight.py sign --spec raw.json --launch launch.json --key <ed25519 seed file> --out signed.json
 
 Exit 0 only when every rule passes; 1 with every reason when any refuses;
@@ -70,6 +73,8 @@ from nacl import signing
 from nacl.exceptions import BadSignatureError
 
 HERE = Path(__file__).resolve().parent
+# The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
+LAUNCH_KEYS = HERE / "launch_keys.json"
 KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT = (
     "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint")
 CODE_KEY = b":code"
@@ -877,7 +882,7 @@ def check_chain_identity(spec: Spec) -> list[Finding]:
     return findings
 
 
-def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView, manifest_key: bytes,
+def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView, launch_keys: list[bytes],
                    well_known: WellKnown) -> list[Finding]:
     known = well_known.keys
     findings = []
@@ -955,8 +960,8 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
             if any(blake2_256(bytes.fromhex(seed)).hex() == well_known.seed_hash for seed in HEX_SEED.findall(text)):
                 node_findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev seed"))
         findings += dict.fromkeys(node_findings)
-    for hit in match_known(manifest_key, known):
-        findings.append(Finding(KEYS, f"manifest signing key: {hit}"))
+    for launch_key in launch_keys:
+        findings += [Finding(KEYS, f"manifest signing key: {hit}") for hit in match_known(launch_key, known)]
     return findings
 
 
@@ -1555,7 +1560,7 @@ def check_code_overrides(launch: dict) -> list[Finding]:
                 for token in node_process(node))]
 
 
-def check_checkpoint(spec: Spec, launch: dict, signed: dict, manifest_key: bytes) -> list[Finding]:
+def check_checkpoint(spec: Spec, launch: dict, signed: dict, launch_keys: list[bytes]) -> list[Finding]:
     findings = []
     if spec.doc.get("codeSubstitutes"):
         findings.append(Finding(CHECKPOINT, "chain spec carries codeSubstitutes"))
@@ -1569,15 +1574,46 @@ def check_checkpoint(spec: Spec, launch: dict, signed: dict, manifest_key: bytes
         if claimed[name] != actual:
             findings.append(Finding(CHECKPOINT, f"{name} is 0x{actual.hex()}, signed manifest "
                                                 f"says 0x{claimed[name].hex()}"))
-    try:
-        signing.VerifyKey(manifest_key).verify(canonical_payload(claimed), claimed["signature"])
-    except (BadSignatureError, ValueError, TypeError):
+    if not any(signature_verifies(key, canonical_payload(claimed), claimed["signature"]) for key in launch_keys):
         findings.append(Finding(CHECKPOINT, "signed manifest signature does not verify "
-                                            "under the pinned launch key"))
+                                            "under any launch key checked"))
     return findings
 
 
-def pinned_key(text: str) -> bytes:
+def signature_verifies(key: bytes, payload: bytes, signature: bytes) -> bool:
+    try:
+        signing.VerifyKey(key).verify(payload, signature)
+    except (BadSignatureError, ValueError, TypeError):
+        return False
+    return True
+
+
+def pinned_launch_keys() -> list[bytes]:
+    try:
+        entries = json.loads(LAUNCH_KEYS.read_text())["keys"]
+        keys = [bytes.fromhex(entry.removeprefix("0x")) for entry in entries]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise InputError(f"cannot read the pinned keys in launch_keys.json: {e}") from e
+    if not isinstance(entries, list) or any(len(key) != 32 for key in keys):
+        raise InputError("launch_keys.json must list 32-byte ed25519 public keys in 0x-hex")
+    return keys
+
+
+def launch_keys(given: str | None) -> tuple[list[bytes], list[Finding]]:
+    """The keys a signed manifest is checked against: the pinned ones, or the
+    one given on the command line, which refuses unless it is pinned."""
+    pinned = pinned_launch_keys()
+    if given is None:
+        return pinned, [] if pinned else [Finding(CHECKPOINT, "no launch key is pinned in launch_keys.json: "
+                                                              "nothing authorizes this launch")]
+    key = parse_launch_key(given)
+    if key in pinned:
+        return [key], []
+    return [key], [Finding(CHECKPOINT, f"launch key 0x{key.hex()} is not pinned in launch_keys.json: a signature "
+                                       "under it proves only that the artifacts match the key this run was handed")]
+
+
+def parse_launch_key(text: str) -> bytes:
     try:
         key = bytes.fromhex(text.removeprefix("0x"))
     except ValueError as e:
@@ -1692,20 +1728,21 @@ def validate_launch(launch) -> None:
             raise InputError(f"rpc_proxies[{i}] other_targets must be host:port strings")
 
 
-def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_key: str,
+def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_key: str | None,
                cardano: CardanoView, extra_well_known: list[Path] = ()) -> list[Finding]:
     validate_launch(launch)
-    key = pinned_key(manifest_key)
+    keys, key_findings = launch_keys(manifest_key)
     well_known = load_well_known(extra_well_known)
     return (check_chain_identity(spec)
-            + check_dev_keys(spec, meta, launch, cardano, key, well_known)
+            + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_supply(spec, meta, launch, cardano)
             + check_genesis_lock(spec, launch, cardano, well_known)
             + check_genesis_storage(spec, meta)
             + check_pallets(meta)
-            + check_checkpoint(spec, launch, signed, key)
+            + key_findings
+            + check_checkpoint(spec, launch, signed, keys)
             + check_code_overrides(launch)
             + check_observation(spec))
 
@@ -1760,7 +1797,8 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--spec", required=True, help="raw chain spec")
     check.add_argument("--launch", required=True, help="launch manifest JSON")
     check.add_argument("--signed-manifest", required=True)
-    check.add_argument("--manifest-key", required=True, help="pinned ed25519 launch key, 0x-hex")
+    check.add_argument("--manifest-key", help="check against this ed25519 launch key (0x-hex) instead of "
+                                              "the ones launch_keys.json pins; refuses unless it is pinned")
     check.add_argument("--kupo", required=True, help="Kupo on Cardano mainnet, indexing the genesis lock "
                                                      "and the permissioned candidates token")
     check.add_argument("--subwasm", default="subwasm")

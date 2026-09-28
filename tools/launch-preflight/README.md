@@ -16,7 +16,8 @@ It reads:
 - a **launch manifest**: who holds each role, the economics, where the genesis
   lock is, each node's launch command and the RPC proxy configs;
 - a **signed launch manifest**: the genesis hash, runtime code hash, chain-spec
-  hash and launch manifest hash, signed with the pinned ed25519 launch key.
+  hash and launch manifest hash, signed with an ed25519 launch key that
+  `launch_keys.json` pins.
 
 ## Rules
 
@@ -27,7 +28,7 @@ It reads:
 | 3 rpc | An authority serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. |
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
-| 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under the pinned key, the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
+| 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including a proxy
@@ -43,10 +44,17 @@ pip install -r requirements.txt
 python3 launch_preflight.py sign --spec mainnet-raw.json --launch launch.json --key launch.key --out signed.json
 
 python3 launch_preflight.py check --spec mainnet-raw.json --launch launch.json \
-    --signed-manifest signed.json --manifest-key 0x<launch key> \
+    --signed-manifest signed.json \
     --kupo http://<mainnet kupo>:1442 --subwasm ./subwasm \
     --extra-well-known ~/exposed-keys.json
 ```
+
+The signature must verify under a key `launch_keys.json` pins (`{"keys":
+["0x<ed25519 public key>"]}`), committed with the launch key holder's review.
+No key is pinned until the launch key is minted, and until then every run
+refuses. `--manifest-key` checks against a key given on the command line
+instead, for a rehearsal: a key that is not pinned is itself a refusal, so a
+rehearsal shows every other reason next to that one.
 
 The genesis hash is computed here (Substrate trie root of the raw storage at the
 runtime's state version, then the genesis header), so the check does not trust a

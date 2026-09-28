@@ -311,7 +311,7 @@ LAUNCH = {"roles": {}}
 
 def test_signed_manifest_for_this_spec_and_launch_passes(spec):
     key = signing.SigningKey.generate()
-    assert lp.check_checkpoint(spec, LAUNCH, lp.signed_manifest(spec, LAUNCH, key), pub(key)) == []
+    assert lp.check_checkpoint(spec, LAUNCH, lp.signed_manifest(spec, LAUNCH, key), [pub(key)]) == []
 
 
 def test_changed_genesis_storage_breaks_genesis_and_spec_hash(preprod_path, tmp_path):
@@ -322,7 +322,7 @@ def test_changed_genesis_storage_breaks_genesis_and_spec_hash(preprod_path, tmp_
     doc["genesis"]["raw"]["top"][alice_key] = "0x" + (bytes(16) + (1).to_bytes(16, "little") + bytes(48)).hex()
     tampered = tmp_path / "tampered.json"
     tampered.write_text(json.dumps(doc))
-    found = messages(lp.check_checkpoint(lp.load_spec(str(tampered)), LAUNCH, signed, pub(key)))
+    found = messages(lp.check_checkpoint(lp.load_spec(str(tampered)), LAUNCH, signed, [pub(key)]))
     assert any("genesis_hash is 0x" in m for m in found)
     assert any("chain_spec_hash is 0x" in m for m in found)
     assert not any("code_hash" in m for m in found)
@@ -332,7 +332,7 @@ def test_changed_runtime_code_breaks_code_hash(spec):
     key = signing.SigningKey.generate()
     signed = lp.signed_manifest(spec, LAUNCH, key)
     signed["code_hash"] = "0x" + bytes(32).hex()
-    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, pub(key)))
+    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, [pub(key)]))
     assert any("code_hash is 0x" in m for m in found)
     assert any("signature does not verify" in m for m in found)
 
@@ -341,7 +341,7 @@ def test_launch_manifest_changed_after_signing_is_refused(spec):
     key = signing.SigningKey.generate()
     signed = lp.signed_manifest(spec, {"roles": {}, "supply": {"genesis_lock": {"utxo": "aa" * 32 + "#0"}}}, key)
     moved = {"roles": {}, "supply": {"genesis_lock": {"utxo": "bb" * 32 + "#0"}}}
-    found = messages(lp.check_checkpoint(spec, moved, signed, pub(key)))
+    found = messages(lp.check_checkpoint(spec, moved, signed, [pub(key)]))
     assert len(found) == 1 and found[0].startswith("[6 checkpoint] launch_manifest_hash is 0x")
 
 
@@ -353,15 +353,15 @@ def test_launch_manifest_hash_ignores_key_order_and_whitespace():
 
 def test_manifest_signed_by_another_key_is_refused(spec):
     signed = lp.signed_manifest(spec, LAUNCH, signing.SigningKey.generate())
-    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, pub(signing.SigningKey.generate())))
-    assert found == ["[6 checkpoint] signed manifest signature does not verify under the pinned launch key"]
+    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, [pub(signing.SigningKey.generate())]))
+    assert found == ["[6 checkpoint] signed manifest signature does not verify under any launch key checked"]
 
 
 def test_code_substitutes_are_refused(spec):
     key = signing.SigningKey.generate()
     signed = lp.signed_manifest(spec, LAUNCH, key)
     spec.doc["codeSubstitutes"] = {"1": "0x00"}
-    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, pub(key)))
+    found = messages(lp.check_checkpoint(spec, LAUNCH, signed, [pub(key)]))
     assert "[6 checkpoint] chain spec carries codeSubstitutes" in found
 
 
@@ -397,7 +397,7 @@ def test_truncated_observation_config_is_an_input_error(spec):
 
 def test_malformed_manifest_is_refused(spec):
     found = messages(lp.check_checkpoint(spec, LAUNCH, {"genesis_hash": "0x00"},
-                                         pub(signing.SigningKey.generate())))
+                                         [pub(signing.SigningKey.generate())]))
     assert len(found) == 1 and "signed manifest is malformed" in found[0]
 
 
@@ -431,8 +431,8 @@ def test_wasm_override_on_a_non_authority_is_out_of_scope():
 
 def dev_key_findings(spec, meta, known, launch=None, manifest_key=None, cardano=NO_CARDANO):
     launch = {"roles": {}} if launch is None else launch
-    return messages(lp.check_dev_keys(spec, meta, launch, cardano, manifest_key or pub(signing.SigningKey.generate()),
-                                      known))
+    return messages(lp.check_dev_keys(spec, meta, launch, cardano,
+                                      [manifest_key or pub(signing.SigningKey.generate())], known))
 
 
 def test_preprod_genesis_names_alice_as_an_endowed_account(spec, meta, known):
@@ -1767,6 +1767,7 @@ class Launch:
         self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
         # None serves this genesis hash as the lock's inline datum.
         self.lock_datum = None
+        self.launch_key = signing.SigningKey.generate()
         self.candidates = genesis_candidates_datum(spec)
 
     def spec_path(self) -> Path:
@@ -1780,12 +1781,20 @@ class Launch:
         spec = lp.load_spec(str(spec_path))
         datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
         self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum)
-        return run_cli(self.tmp_path, spec_path, self.launch, capsys, self.kupo.url, key, manifest_key, extra,
-                       signed_launch)
+        return run_cli(self.tmp_path, spec_path, self.launch, capsys, self.kupo.url, key or self.launch_key,
+                       manifest_key, extra, signed_launch)
+
+
+def pin_launch_keys(monkeypatch, tmp_path, *keys: bytes) -> None:
+    path = tmp_path / "launch_keys.json"
+    path.write_text(json.dumps({"keys": ["0x" + key.hex() for key in keys]}))
+    monkeypatch.setattr(lp, "LAUNCH_KEYS", path)
 
 
 def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=None, manifest_key=None,
             extra=(), signed_launch=None) -> tuple[int, str]:
+    """Sign with `key`, then check against the pinned launch keys, or against
+    `manifest_key` given on the command line."""
     key = key or signing.SigningKey.generate()
     seed = tmp_path / "launch.key"
     seed.write_text(key.encode().hex())
@@ -1795,9 +1804,9 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
                     "--out", str(signed)]) == 0
     launch_path.write_text(json.dumps(launch))
     capsys.readouterr()
+    given = [] if manifest_key is None else ["--manifest-key", "0x" + manifest_key.hex()]
     code = lp.main(["check", "--spec", str(spec_path), "--launch", str(launch_path),
-                    "--signed-manifest", str(signed), "--manifest-key", "0x" + (manifest_key or pub(key)).hex(),
-                    "--kupo", kupo_url, "--subwasm", subwasm(), *extra])
+                    "--signed-manifest", str(signed), *given, "--kupo", kupo_url, "--subwasm", subwasm(), *extra])
     captured = capsys.readouterr()
     return code, captured.out + captured.err
 
@@ -1807,7 +1816,9 @@ def clean(preprod_path, tmp_path, kupo, monkeypatch, metadata_v14):
     """No built runtime passes yet (PerpEngine, undeclared emission reserves), so
     the extractor returns the fixture metadata with the reserves declared."""
     monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
-    return Launch(preprod_path, tmp_path, kupo)
+    launch = Launch(preprod_path, tmp_path, kupo)
+    pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))
+    return launch
 
 
 def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path, tmp_path, capsys, kupo):
@@ -2026,10 +2037,39 @@ def test_cli_names_keys_from_an_extra_table(clean, capsys):
     assert "[1 dev-keys] roles.anchor_signer[0]: exposed member (sr25519)" in out
 
 
-def test_cli_refuses_a_manifest_pinned_to_another_key(clean, capsys):
-    code, out = clean.run(capsys, manifest_key=pub(signing.SigningKey.generate()))
+def test_cli_refuses_a_launch_key_that_is_not_pinned(clean, capsys):
+    other = signing.SigningKey.generate()
+    code, out = clean.run(capsys, key=other, manifest_key=pub(other))
     assert code == 1
-    assert "[6 checkpoint] signed manifest signature does not verify" in out
+    assert out.splitlines()[1:] == [
+        f"  [6 checkpoint] launch key 0x{pub(other).hex()} is not pinned in launch_keys.json: a signature under it "
+        "proves only that the artifacts match the key this run was handed"]
+
+
+def test_cli_refuses_a_manifest_no_pinned_key_signed(clean, capsys):
+    code, out = clean.run(capsys, key=signing.SigningKey.generate())
+    assert code == 1
+    assert "[6 checkpoint] signed manifest signature does not verify under any launch key checked" in out
+
+
+def test_cli_refuses_a_launch_when_no_key_is_pinned(clean, capsys, monkeypatch, tmp_path):
+    pin_launch_keys(monkeypatch, tmp_path)
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[6 checkpoint] no launch key is pinned in launch_keys.json: nothing authorizes this launch" in out
+
+
+def test_the_repo_pins_launch_keys_as_ed25519_public_keys():
+    assert all(len(key) == 32 for key in lp.pinned_launch_keys())
+
+
+@pytest.mark.parametrize("doc", [[], {"keys": "0x00"}, {"keys": ["0xzz"]}, {"keys": ["0x" + "00" * 31]}])
+def test_a_malformed_launch_key_table_is_an_input_error(monkeypatch, tmp_path, doc):
+    path = tmp_path / "launch_keys.json"
+    path.write_text(json.dumps(doc))
+    monkeypatch.setattr(lp, "LAUNCH_KEYS", path)
+    with pytest.raises(lp.InputError, match="launch_keys.json"):
+        lp.pinned_launch_keys()
 
 
 VALID_LOCK = {"genesis_lock": LOCK}
@@ -2095,7 +2135,7 @@ def test_malformed_launch_manifest_is_an_input_error(launch, error):
 @pytest.mark.parametrize("manifest_key", ["0xzz", "0x" + "00" * 31])
 def test_malformed_manifest_key_is_an_input_error(manifest_key):
     with pytest.raises(lp.InputError, match="--manifest-key"):
-        lp.pinned_key(manifest_key)
+        lp.parse_launch_key(manifest_key)
 
 
 def test_non_numeric_rpc_port_is_an_input_error(tmp_path):
