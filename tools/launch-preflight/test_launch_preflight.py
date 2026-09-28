@@ -573,6 +573,26 @@ def test_sudo_multisig_with_a_dev_member_is_refused(spec, meta, known, threshold
     assert not any("Sudo.Key" in m for m in found)
 
 
+SUDO_FLAT = ("[1 dev-keys] roles.sudo[0] is a single key: Root must be a multisig with a threshold of at least "
+             "2, declared by its members so each one is checked")
+
+
+def test_sudo_declared_by_its_flat_address_is_refused(spec, meta, known):
+    """A wallet shows a multisig as one address; declared that way its members go unchecked."""
+    hidden = lp.multisig_account([ALICE, fresh_account(), fresh_account()], 1)
+    put(spec, "Sudo", "Key", hidden)
+    found = dev_key_findings(spec, meta, known, sudo_launch(ss58(hidden)))
+    assert SUDO_FLAT in found
+    assert not any("Sudo.Key" in m for m in found)
+
+
+def test_sudo_multisig_that_one_member_can_use_alone_is_refused(spec, meta, known):
+    members = [fresh_account() for _ in range(3)]
+    put(spec, "Sudo", "Key", lp.multisig_account(members, 1))
+    found = dev_key_findings(spec, meta, known, sudo_launch(msig(1, *members)))
+    assert "[1 dev-keys] roles.sudo[0] has threshold 1: any one member alone holds Root" in found
+
+
 def test_sudo_key_that_is_not_the_declared_multisig_is_refused(spec, meta, known):
     m1, m2, m3 = fresh_account(), fresh_account(), fresh_account()
     hidden = lp.multisig_account([ALICE, m1, m2], 2)
@@ -1572,6 +1592,15 @@ def test_cli_refuses_root_held_by_a_multisig_with_a_dev_member(clean, capsys, th
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] roles.sudo[0].members[0]: //Alice (sr25519)" in out
+
+
+def test_cli_refuses_root_declared_by_its_flat_address(clean, capsys):
+    hidden = lp.multisig_account([ALICE, *clean.sudo_members[:2]], 1)
+    put(clean.spec, "Sudo", "Key", hidden)
+    clean.launch["roles"]["sudo"] = [ss58(hidden)]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert SUDO_FLAT in out
 
 
 def test_cli_refuses_root_held_by_an_undeclared_multisig(clean, capsys):

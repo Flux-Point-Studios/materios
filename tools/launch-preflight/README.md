@@ -22,7 +22,7 @@ It reads:
 
 | Rule | Refuses when |
 |---|---|
-| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, the dev mnemonic), or as the manifest signing key. `Sudo.Key` is not the account `roles.sudo` declares, or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
+| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, the dev mnemonic), or as the manifest signing key. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` is not a multisig with a threshold of at least 2, or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
 | 3 rpc | An authority serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, whose payment credential is a script. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. |
@@ -102,12 +102,16 @@ more than 300 slots behind its node.
   0x-hex 32-byte account or 33-byte ECDSA key), never a secret URI, or a
   multisig `{"threshold": k, "members": [...]}` whose members are entries too;
   its account is pallet_multisig's for those members and threshold, and every
-  member is checked. `sudo`, `anchor_signer`, `attestors` and `oracle` must be
-  present; an empty `oracle` states that no oracle signer runs. `roles.sudo`
-  must name exactly the genesis `Sudo.Key` (or be empty when genesis sets
-  none). Every genesis account must be the account of some entry; `endowed`
-  holds the ones no other role names. `attestors` are the accounts that bond at
-  genesis and get the endowment floor check.
+  member is checked. A flat entry asserts one key that its holder alone
+  controls: the preflight cannot see inside an address, so a multisig written
+  as the address a wallet shows has its members unchecked. Declare every
+  multisig by its members. `sudo`, `anchor_signer`, `attestors` and `oracle`
+  must be present; an empty `oracle` states that no oracle signer runs.
+  `roles.sudo` must name exactly the genesis `Sudo.Key` (or be empty when
+  genesis sets none), as a multisig with a threshold of at least 2. Every
+  genesis account must be the account of some entry; `endowed` holds the ones
+  no other role names. `attestors` are the accounts that bond at genesis and
+  get the endowment floor check.
 - `supply.genesis_lock` is the Cardano output holding the cMATRA that backs
   Materios issuance. The backing is the cMATRA amount Kupo reports at that
   output; the manifest carries no backing figure.

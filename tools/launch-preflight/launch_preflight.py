@@ -739,6 +739,12 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                 except ValueError as e:
                     findings.append(Finding(KEYS, f"{where}: {e}"))
             accounts.setdefault(role, []).append(account)
+    for i, entry in enumerate(roles.get("sudo", [])):
+        if not isinstance(entry, dict):
+            findings.append(Finding(KEYS, f"roles.sudo[{i}] is a single key: Root must be a multisig with a "
+                                          "threshold of at least 2, declared by its members so each one is checked"))
+        elif entry["threshold"] < 2:
+            findings.append(Finding(KEYS, f"roles.sudo[{i}] has threshold 1: any one member alone holds Root"))
     sudo_key, sudo = spec.value("Sudo", "Key"), accounts.get("sudo", [])
     if sudo_key is None:
         if sudo:
