@@ -1353,6 +1353,18 @@ def test_a_sidecar_script_word_the_shell_rewrites_is_an_input_error(spec, meta, 
         dev_key_findings(spec, meta, known, sidecar(["sh", "-c", script]))
 
 
+# execve ends each argument and setting at a NUL byte, so the process would get less than the word says.
+@pytest.mark.parametrize("argv, env", [
+    (["materios-node", "--validator", "--rpc-methods", "unsafe", "--unsafe-rpc-external\x00"], {}),
+    (["materios-node", "--validator", "--unsafe-rpc-external", "--rpc-methods\x00x", "unsafe"], {}),
+    (["bash", "-c", "exec materios-node --validator --rpc-port 9945 --name x\x00 --rpc-methods safe"], {}),
+    (["materios-node", "--validator"], {"RUST_LOG": "info\x00"}),
+])
+def test_a_launch_word_holding_a_nul_byte_is_an_input_error(argv, env):
+    with pytest.raises(lp.InputError, match="holds a NUL byte"):
+        lp.validate_node(dict(authority(argv), env=env), "nodes[0]")
+
+
 # bash splits words at spaces and tabs only: a carriage return stays inside the word.
 def test_a_carriage_return_does_not_split_a_script_word():
     script = "exec materios-node --validator --rpc-port 9945 --name val\r--rpc-methods\rsafe"

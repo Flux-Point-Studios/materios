@@ -1140,10 +1140,14 @@ def launch_commands(node: dict) -> list[list[str]]:
     where = f"node {node['name']}"
     authority = node.get("authority") is True
     argv = node_argv(node)
+    env = node.get("env", {})
+    if any("\0" in text for text in (*argv, *env, *env.values())):
+        raise InputError(f"{where}: its launch holds a NUL byte, where execve ends an argument or setting; "
+                         "give the argv and env the process receives")
     if any(re.search(r"[$`]", word) for word in argv):
         raise InputError(f"{where}: its launch command expands a variable or a command; "
                          "give the argv the process receives")
-    _refuse_settings(node.get("env", {}), authority, where)
+    _refuse_settings(env, authority, where)
     return _commands(argv, where, 0, authority) if argv else []
 
 

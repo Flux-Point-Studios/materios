@@ -140,10 +140,11 @@ more than 300 slots behind its node.
   as bare words, and node subcommands (`build-spec`, `purge-chain`): any
   other program could start a node whose listeners go unchecked. A launch
   the preflight would have to evaluate refuses as unreadable: a `$VAR` or
-  backtick expansion (systemd expands `$VAR` in `ExecStart`), a script word
-  the shell rewrites (brace expansion, a `*`, `?` or `[` glob, a `~`, a word
-  starting with `#`, which is a comment) or a backslash line continuation,
-  quoted or not, a pipe, redirection, subshell or `||`, a script file, a
+  backtick expansion (systemd expands `$VAR` in `ExecStart`), a NUL byte in
+  a word or setting (execve ends each one there), a script word the shell
+  rewrites (brace expansion, a `*`, `?` or `[` glob, a `~`, a word starting
+  with `#`, which is a comment) or a backslash line continuation, quoted or
+  not, a pipe, redirection, subshell or `||`, a script file, a
   file the shell runs on its own (a login or interactive shell's startup
   files, `.` or `source`, and zsh, which always reads its zshenv), a shell
   option other than `-a`, `-e` and `-u` (on the shell or through `set`:
