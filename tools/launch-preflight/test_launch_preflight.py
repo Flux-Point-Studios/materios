@@ -473,6 +473,13 @@ def test_secret_uri_or_garbage_in_a_role_is_refused_without_echoing_it(spec, met
     assert not any("not a key" in m for m in found)
 
 
+def test_a_soft_path_role_is_named_as_a_dev_phrase_uri(spec, meta, known):
+    launch = {"roles": {"anchor_signer": ["/AnchorSigner///hunter2-password"]}}
+    found = dev_key_findings(spec, meta, known, launch)
+    assert "[1 dev-keys] roles.anchor_signer[0]: well-known secret URI /AnchorSigner" in found
+    assert not any("hunter2" in m for m in found)
+
+
 def test_bad_ss58_checksum_is_refused(spec, meta, known):
     good = ss58(fresh_account())
     broken = good[:-1] + ("A" if good[-1] != "A" else "B")
@@ -1171,6 +1178,22 @@ def test_a_shell_wrapped_launch_is_read_as_the_node_it_runs(tmp_path, argv):
 def test_an_authority_launch_the_preflight_cannot_read_is_an_input_error(tmp_path, argv, error):
     with pytest.raises(lp.InputError, match=error):
         lp.validate_node(authority(argv), "nodes[0]")
+
+
+@pytest.mark.parametrize("argv", [
+    ["bash", "-lc", UNSAFE_EXTERNAL + "; exec materios-node --validator --rpc-methods safe"],
+    ["bash", "-lc", "materios-node --validator --wasm-runtime-overrides /srv/o && exec materios-node --validator"],
+    ["sh", "-c", "RUST_LOG=info materios-node; exec bash -c 'exec materios-node --validator --rpc-methods safe'"],
+])
+def test_a_launch_that_starts_a_node_before_its_last_command_is_an_input_error(argv):
+    with pytest.raises(lp.InputError, match="starts a node before its last command"):
+        lp.validate_node(authority(argv), "nodes[0]")
+
+
+def test_a_node_subcommand_before_the_node_process_is_not_a_node(tmp_path):
+    argv = ["bash", "-lc", "materios-node key generate-node-key --file /data/node-key; exec " + UNSAFE_EXTERNAL]
+    assert rpc_findings(tmp_path, [authority(argv)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
 def test_a_shell_wrapped_non_authority_validator_is_refused(tmp_path):

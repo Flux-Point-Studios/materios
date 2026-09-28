@@ -135,7 +135,9 @@ more than 300 slots behind its node.
   public key. `argv` is the command as the process receives it; a `sh -c`
   wrapper, as a systemd unit or a container entrypoint writes it, is opened,
   its script split at `;`, `&&` and newlines, and an authority's last command
-  must start `materios-node` or `materios-node-spo`. A launch the preflight
+  must start `materios-node` or `materios-node-spo`. No earlier command may
+  start a node (a node binary run with a subcommand, such as `key insert`, is
+  a tool run): its listeners would go unchecked. A launch the preflight
   would have to evaluate refuses as unreadable: a `$VAR` or backtick
   expansion (systemd expands `$VAR` in `ExecStart`), a pipe, redirection,
   subshell or `||`, a script file, or several arguments in one word.

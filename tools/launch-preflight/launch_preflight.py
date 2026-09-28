@@ -1081,7 +1081,8 @@ def launch_pieces(node: dict) -> list[str]:
 
 def node_process(node: dict) -> list[str]:
     """The argv an authority's node process receives: the last command its
-    launch runs, which must start a node binary with one argument per word."""
+    launch runs, which must start a node binary with one argument per word.
+    No earlier command may start a node: its listeners would go unchecked."""
     where = f"authority {node['name']}"
     commands = launch_commands(node)
     argv = _program(commands[-1]) if commands else []
@@ -1089,6 +1090,11 @@ def node_process(node: dict) -> list[str]:
     if program not in NODE_BINARIES:
         raise InputError(f"{where}: its launch runs {program}, not a node binary ({', '.join(NODE_BINARIES)}); "
                          "give the argv the node process receives")
+    for earlier in map(_program, commands[:-1]):
+        # A node binary with a subcommand (`key insert`, `build-spec`) is a tool run, not a node.
+        if earlier and Path(earlier[0]).name in NODE_BINARIES and (len(earlier) == 1 or earlier[1].startswith("-")):
+            raise InputError(f"{where}: its launch starts a node before its last command; the preflight "
+                             "checks the last command as the one node process")
     for i, word in enumerate(argv):
         if re.search(r"\s-", word):
             raise InputError(f"{where}: argument {i} holds several arguments; give one per word")
