@@ -1202,15 +1202,12 @@ def test_experimental_endpoint_options_are_read_trimmed(tmp_path, endpoint):
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
-# A systemd unit as a validator bootstrap writes it: a login shell that loads the
-# node's environment, then execs the node.
-BOOTSTRAP_EXECSTART = ("/bin/bash -lc 'set -a; . /etc/materios/node.env; set +a; "
-                       "exec /usr/local/bin/materios-node-spo --validator --chain /etc/materios/mainnet-raw.json "
-                       "--rpc-methods unsafe --rpc-port 9945 --unsafe-rpc-external'")
-# The same unit with its environment in the unit (Environment=), which runs no file.
-SELF_CONTAINED_EXECSTART = ("/bin/bash -c 'set -eu; umask 077; "
-                            "exec /usr/local/bin/materios-node-spo --validator --chain /etc/materios/mainnet-raw.json "
-                            "--rpc-methods unsafe --rpc-port 9945 --unsafe-rpc-external'")
+# A login shell that loads the node's settings from a file, then execs the node.
+LOGIN_SHELL_EXECSTART = ("/bin/bash -lc 'set -a; . /etc/node/node.env; set +a; "
+                         "exec materios-node --validator --rpc-methods safe'")
+# A wrapper that runs no file: the node's settings are in the unit's environment.
+SELF_CONTAINED_EXECSTART = ("/bin/bash -c 'set -eu; umask 077; exec materios-node --validator "
+                            "--chain /srv/chain/raw.json --rpc-methods unsafe --unsafe-rpc-external'")
 UNSAFE_EXTERNAL = "materios-node --validator --rpc-methods unsafe --unsafe-rpc-external"
 SAFE_NODE = "exec materios-node --validator --rpc-methods safe"
 
@@ -1307,11 +1304,11 @@ def test_setup_commands_before_the_node_are_read_through(tmp_path):
     (["bash", "--login", "-c", SAFE_NODE], "login or interactive shell"),
     (["bash", "-ic", SAFE_NODE], "login or interactive shell"),
     (["sh", "-c", "exec bash -elc '" + SAFE_NODE + "'"], "login or interactive shell"),
-    (BOOTSTRAP_EXECSTART, "login or interactive shell"),
-    (["bash", "-c", "set -a; . /etc/materios/node.env; set +a; " + SAFE_NODE], "sources a file"),
-    (["bash", "-c", "source /etc/materios/node.env && " + SAFE_NODE], "sources a file"),
-    (["bash", "-c", "export BASH_ENV=/etc/materios/rc; exec bash -c '" + SAFE_NODE + "'"], "sets BASH_ENV"),
-    (["bash", "-c", "BASH_ENV=/etc/materios/rc exec bash -c '" + SAFE_NODE + "'"], "sets BASH_ENV"),
+    (LOGIN_SHELL_EXECSTART, "login or interactive shell"),
+    (["bash", "-c", "set -a; . /etc/node/node.env; set +a; " + SAFE_NODE], "sources a file"),
+    (["bash", "-c", "source /etc/node/node.env && " + SAFE_NODE], "sources a file"),
+    (["bash", "-c", "export BASH_ENV=/etc/node/rc; exec bash -c '" + SAFE_NODE + "'"], "sets BASH_ENV"),
+    (["bash", "-c", "BASH_ENV=/etc/node/rc exec bash -c '" + SAFE_NODE + "'"], "sets BASH_ENV"),
     (["zsh", "-c", SAFE_NODE], "runs zsh, not a node binary"),
 ])
 def test_a_launch_that_runs_a_file_the_preflight_cannot_read_is_an_input_error(argv, error):
@@ -2213,9 +2210,9 @@ def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):
     assert "[6 checkpoint] authority val0 runs --wasm-runtime-overrides" in out
 
 
-def test_cli_refuses_the_bootstrap_unit_shape_as_unreadable(clean, capsys):
+def test_cli_refuses_a_login_shell_launch_as_unreadable(clean, capsys):
     signed = copy.deepcopy(clean.launch)
-    clean.launch["nodes"][0]["argv"] = BOOTSTRAP_EXECSTART
+    clean.launch["nodes"][0]["argv"] = LOGIN_SHELL_EXECSTART
     code, out = clean.run(capsys, signed_launch=signed)
     assert code == 2
     assert "node val0: runs a login or interactive shell" in out
