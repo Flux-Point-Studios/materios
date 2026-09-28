@@ -548,20 +548,19 @@ def phraseless_uri(value: str) -> str | None:
 
 
 def secret_settings(node: dict):
-    """(setting, value) for each environment variable or flag of a node whose
-    name marks it as a secret URI, and not a file or path holding one."""
-    for name, value in sorted(node.get("env", {}).items()):
-        if SECRET_SETTING.search(name) and not SECRET_LOCATION.search(name):
-            yield name, value
-    argv = node_argv(node)
-    for i, word in enumerate(argv):
-        flag, equals, value = word.partition("=")
-        if not flag.startswith("--") or not SECRET_SETTING.search(flag) or SECRET_LOCATION.search(flag):
-            continue
-        if equals:
-            yield flag, value
-        elif i + 1 < len(argv):
-            yield flag, argv[i + 1]
+    """(setting, value) for each environment variable, shell assignment or flag
+    of a node's launch whose name marks it as a secret URI, and not a file or
+    path holding one."""
+    names = [(name, value) for name, value in sorted(node.get("env", {}).items())]
+    for words in launch_commands(node):
+        for i, word in enumerate(words):
+            name, equals, value = word.partition("=")
+            if name.startswith("--") and not equals and i + 1 < len(words):
+                names.append((name, words[i + 1]))
+            elif equals and (name.startswith("--") or SHELL_ASSIGNMENT.fullmatch(word)):
+                names.append((name, value))
+    return [(name, value) for name, value in names
+            if SECRET_SETTING.search(name) and not SECRET_LOCATION.search(name)]
 
 
 def dev_uri(text: str) -> str | None:

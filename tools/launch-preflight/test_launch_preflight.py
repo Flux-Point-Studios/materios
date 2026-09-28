@@ -562,6 +562,8 @@ def sidecar(argv=(), **env) -> dict:
     (sidecar(SIGNER_URI="/Oracle//hot///hunter2"), "/Oracle//hot"),
     (sidecar(["cert-daemon", "--suri", "/Attestor1"]), "/Attestor1"),
     (sidecar(["cert-daemon", "--signer-uri=/Attestor2"]), "/Attestor2"),
+    (sidecar(["/bin/sh", "-c", "exec cert-daemon --suri /Attestor3"]), "/Attestor3"),
+    (sidecar(["bash", "-lc", "SIGNER_URI=/Attestor4 exec cert-daemon"]), "/Attestor4"),
 ])
 def test_a_secret_uri_setting_with_no_phrase_is_named(spec, meta, known, launch, named):
     found = dev_key_findings(spec, meta, known, launch)
