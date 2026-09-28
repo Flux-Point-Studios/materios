@@ -373,6 +373,13 @@ repair after the rotation (restoring the delays, restarting a stopped
 service, a security upgrade) would then wait up to 90 days, with no
 co-signature able to bring it forward.
 
+A scheduled raise that nobody vetoes lands after the recovery delay, so the
+guardian has that long (one day on mainnet) to veto it, as it has for every
+recovery-class task. After a raise to `MaxDelay` lands, every standard
+change, a security upgrade included, waits up to 90 days, and lowering the
+delay back waits as long. Only recovery and authority-recovery calls still
+run at once, with the guardian's co-sign.
+
 ### Treasury
 
 `MaxSpend` bounds the treasury spends Root approves in one extrinsic to
