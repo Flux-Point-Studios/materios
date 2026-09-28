@@ -111,6 +111,8 @@ REWARD_ITEMS = (
     ("era_cap_base", "EraCapBase", 16),
     ("era_cap_baseline_attestor_count", "EraCapBaselineAttestorCount", 4),
 )
+ECONOMICS_FIELDS = {"fee_buffer", *(field for field, _ in VALIDATOR_REWARD_CONSTANTS),
+                    *(field for field, _, _ in REWARD_ITEMS)}
 # Every launch names who holds these; the ones that always run must name a key.
 REQUIRED_ROLES = ("sudo", "anchor_signer", "attestors", "oracle")
 RUNNING_ROLES = ("anchor_signer", "attestors")
@@ -1439,8 +1441,14 @@ def validate_launch(launch) -> None:
             raise InputError(f"roles.{role} must be a list of public keys")
         for i, entry in enumerate(entries):
             validate_role_entry(entry, f"roles.{role}[{i}]")
-    if not isinstance(launch.get("economics", {}), dict):
+    economics = launch.get("economics", {})
+    if not isinstance(economics, dict):
         raise InputError("economics must be an object")
+    for field in sorted(set(economics) - ECONOMICS_FIELDS):
+        raise InputError(f"unknown economics field {field}")
+    for field, value in sorted(economics.items()):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise InputError(f"economics.{field} must be a non-negative integer")
     supply = launch.get("supply", {})
     if not isinstance(supply, dict):
         raise InputError("supply must be an object")

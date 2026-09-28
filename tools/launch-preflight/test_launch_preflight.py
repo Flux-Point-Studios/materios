@@ -1762,6 +1762,14 @@ def test_cli_refuses_a_pending_withdrawal_planted_in_raw_genesis(clean, capsys):
     assert f"[4 supply] genesis sets storage 0x{stray.hex()} (1 entry), which a mainnet genesis may not set" in out
 
 
+def test_cli_refuses_a_negative_fee_buffer_that_would_lower_the_endowment_floor(clean, capsys):
+    endow(clean.spec, clean.attestor, 0)
+    signed = copy.deepcopy(clean.launch)
+    clean.launch["economics"]["fee_buffer"] = -FLOOR
+    code, out = clean.run(capsys, signed_launch=signed)
+    assert code == 2 and "economics.fee_buffer must be a non-negative integer" in out
+
+
 def test_cli_refuses_a_launch_manifest_edited_after_signing(clean, capsys):
     signed_launch = copy.deepcopy(clean.launch)
     signed_launch["roles"]["anchor_signer"] = [ss58(fresh_account())]
@@ -1827,6 +1835,13 @@ VALID_LOCK = {"genesis_lock": LOCK}
     ({"roles": {"sudo": [{"threshold": 1, "members": ["a", "b"], "note": 1}]}, "supply": VALID_LOCK},
      "roles.sudo\\[0\\] must hold exactly threshold and members"),
     ({"roles": {}, "economics": [], "supply": VALID_LOCK}, "economics must be an object"),
+    ({"roles": {}, "economics": {"fee_buffer": -1}, "supply": VALID_LOCK},
+     "economics.fee_buffer must be a non-negative integer"),
+    ({"roles": {}, "economics": {"fee_buffer": True}, "supply": VALID_LOCK},
+     "economics.fee_buffer must be a non-negative integer"),
+    ({"roles": {}, "economics": {"era_cap_base": "50000"}, "supply": VALID_LOCK},
+     "economics.era_cap_base must be a non-negative integer"),
+    ({"roles": {}, "economics": {"fee_bufer": 1}, "supply": VALID_LOCK}, "unknown economics field fee_bufer"),
     ({"roles": {}}, "supply.genesis_lock is required"),
     ({"roles": {}, "supply": []}, "supply must be an object"),
     ({"roles": {}, "supply": {"cardano_backing": 1, **VALID_LOCK}}, "unknown supply field cardano_backing"),

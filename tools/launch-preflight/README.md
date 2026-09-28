@@ -114,6 +114,8 @@ more than 300 slots behind its node.
   genesis account must be the account of some entry; `endowed` holds the ones
   no other role names. `attestors` are the accounts that bond at genesis and
   get the endowment floor check.
+- Every `economics` value is a non-negative integer in the smallest unit; an
+  unknown field or any other value refuses as unreadable.
 - `supply.genesis_lock` is the Cardano output holding the cMATRA that backs
   Materios issuance. The backing is the cMATRA amount Kupo reports at that
   output; the manifest carries no backing figure.
