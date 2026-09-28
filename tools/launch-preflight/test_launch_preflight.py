@@ -1140,6 +1140,37 @@ def test_experimental_endpoint_without_listen_addr_is_an_input_error(tmp_path):
         rpc_findings(tmp_path, [authority(argv)])
 
 
+# sc-cli takes the flag with num_args = 1..: one flag collects every word up to the next option.
+@pytest.mark.parametrize("values", [
+    ["listen-addr=127.0.0.1:9955,methods=safe", "listen-addr=0.0.0.0:9956,methods=unsafe"],
+    ["listen-addr=127.0.0.1:9955", "listen-addr=[::1]:9957,methods=safe", "listen-addr=[::]:9956,methods=unsafe"],
+])
+def test_every_value_after_one_experimental_endpoint_flag_is_a_listener(tmp_path, values):
+    argv = ["materios-node", "--validator", "--experimental-rpc-endpoint", *values, "--rpc-methods", "safe"]
+    assert rpc_findings(tmp_path, [authority(argv)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+def test_a_later_value_of_one_experimental_endpoint_flag_behind_a_proxy_is_refused(tmp_path):
+    argv = ["materios-node", "--rpc-methods", "safe", "--experimental-rpc-endpoint",
+            "listen-addr=127.0.0.1:9955,methods=safe", "listen-addr=127.0.0.1:9966"]
+    nginx = "location / { proxy_pass http://127.0.0.1:9966; }"
+    assert rpc_findings(tmp_path, [authority(argv)], nginx, "val1") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
+# The node trims each option, its key and its value before matching them.
+@pytest.mark.parametrize("endpoint", [
+    "listen-addr=0.0.0.0:9956, methods=unsafe",
+    " listen-addr = 0.0.0.0:9956 , methods = unsafe ",
+    "listen-addr=0.0.0.0:9956,\tmethods=unsafe",
+])
+def test_experimental_endpoint_options_are_read_trimmed(tmp_path, endpoint):
+    argv = ["materios-node", "--validator", "--rpc-methods", "safe", "--experimental-rpc-endpoint", endpoint]
+    assert rpc_findings(tmp_path, [authority(argv)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
 # A systemd unit as a validator bootstrap writes it: a login shell that loads the
 # node's environment, then execs the node.
 BOOTSTRAP_EXECSTART = ("/bin/bash -lc 'set -a; . /etc/materios/node.env; set +a; "

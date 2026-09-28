@@ -1341,14 +1341,16 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Fin
         # (port, external, methods) for the default listener and every experimental endpoint.
         listeners = [(int(port_flag), "--rpc-external" in argv or "--unsafe-rpc-external" in argv,
                       (_flag(argv, "--rpc-methods") or "auto").lower())]
+        # sc-cli takes `--flag=value` as one endpoint, and `--flag` as every word up to the next
+        # option (a word starting with '-', other than '-' itself).
+        endpoints = [token.split("=", 1)[1] for token in argv if token.startswith(RPC_ENDPOINT_FLAG + "=")]
         for i, token in enumerate(argv):
-            if token == RPC_ENDPOINT_FLAG and i + 1 < len(argv):
-                endpoint = argv[i + 1]
-            elif token.startswith(RPC_ENDPOINT_FLAG + "="):
-                endpoint = token.split("=", 1)[1]
-            else:
-                continue
-            options = dict(opt.split("=", 1) if "=" in opt else (opt, "") for opt in endpoint.split(","))
+            if token == RPC_ENDPOINT_FLAG:
+                endpoints += itertools.takewhile(lambda word: word == "-" or not word.startswith("-"), argv[i + 1:])
+        for endpoint in endpoints:
+            # Trimmed as the node trims each option, its key and its value.
+            options = {key.strip(): value.strip()
+                       for key, _, value in (opt.partition("=") for opt in endpoint.split(","))}
             address = options.get("listen-addr", "")
             if not re.search(r":\d+$", address):
                 raise InputError(f"node {node['name']}: {RPC_ENDPOINT_FLAG} {endpoint} has no "
