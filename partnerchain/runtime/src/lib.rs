@@ -28,7 +28,7 @@ use frame_support::{
         constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         Weight,
     },
-    genesis_builder_helper::{build_state, get_preset},
+    genesis_builder_helper::get_preset,
     BoundedVec, PalletId,
 };
 use frame_system::{EnsureRoot, EnsureRootWithSuccess};
@@ -1871,21 +1871,22 @@ impl_runtime_apis! {
 
     impl sp_genesis_builder::GenesisBuilder<Block> for Runtime {
         fn build_state(config: Vec<u8>) -> sp_genesis_builder::Result {
-            build_state::<RuntimeGenesisConfig>(config)
+            let genesis = serde_json::from_slice::<RuntimeGenesisConfig>(&config)
+                .map_err(|e| sp_runtime::format_runtime_string!("Invalid JSON blob: {}", e))?;
+            root_gate::ensure_guarded_genesis(&genesis)?;
+            <RuntimeGenesisConfig as frame_support::traits::BuildGenesisConfig>::build(&genesis);
+            Ok(())
         }
 
         fn get_preset(id: &Option<sp_genesis_builder::PresetId>) -> Option<Vec<u8>> {
             get_preset::<RuntimeGenesisConfig>(id, |preset_id| {
                 // The `development` preset exists only to satisfy
-                // frame-omni-bencher's default `--genesis-builder-preset=development`.
-                // Returning `{}` lets `build_state` apply each pallet's genesis
-                // defaults in isolation — several IOG partner-chains pallets ship
-                // `#[derive(DefaultNoBound)]` GenesisConfigs whose serialized form
-                // omits a `_marker: PhantomData<T>` field that the deserializer
-                // demands, so serializing the default config round-trips into a
-                // deserialize error.
+                // frame-omni-bencher's default `--genesis-builder-preset=development`,
+                // which applies it as a patch over every pallet's genesis
+                // defaults. A benchmarking genesis has no guardian and has to
+                // say so, or `build_state` refuses it.
                 if preset_id.as_ref() == sp_genesis_builder::DEV_RUNTIME_PRESET.as_bytes() {
-                    Some(b"{}".to_vec())
+                    Some(br#"{"rootTimelock":{"unguarded":true}}"#.to_vec())
                 } else {
                     None
                 }

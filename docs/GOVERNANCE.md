@@ -164,17 +164,21 @@ call filter, so none of them is a way around the delay.
 
 | Call | Why it may skip the delay |
 |------|---------------------------|
-| `Grandpa.note_stalled` with a delay of at most 100 blocks | Finality break-glass. It forces the GRANDPA set the session already selected at the next session boundary; it cannot choose that set. In a session of at least 200 blocks the bound keeps the forced change, and GRANDPA's refusal of another one for twice the delay, inside one session, so a stall never blocks the next rotation. Preprod sessions are 600 slots; the 60-slot dev chain does not meet this. A longer stall is scheduled. |
+| `Grandpa.note_stalled` with a delay of at most 100 blocks and at most a quarter of the session (`slots_per_epoch / 4`) | Finality break-glass. It forces the GRANDPA set the session already selected at the next session boundary; it cannot choose that set. The bound keeps the forced change, and GRANDPA's refusal of another one for twice the delay, inside half a session, so a stall never blocks the next rotation even with half the session's slots empty. Preprod's 600-slot sessions allow 100 blocks; the 60-slot dev chain allows 15. A longer stall is scheduled. |
 | `TeeAttestation.set_disabled(true)` | Kill-switch, stopping direction only. |
 | `Billing.governance_set_debits_enabled(false)` | Kill-switch, stopping direction only. |
 | `Treasury.remove_approval`, `Treasury.void_spend` | Withdraw a spend before it pays out. |
 | `RootTimelock.schedule` | Starts the delay. |
 | `RootTimelock.set_delay` raising a delay | Only slows Root down, and never past `MaxDelay` (90 days). |
-| `RootTimelock.cancel`, `cancel_all`, only while no guardian is set | Without a guardian nothing can veto the sudo key's tasks, so its own veto gives it nothing new; it lets the operators withdraw a task they abandoned. |
+| `RootTimelock.cancel` of the pending guardian change | Keeps the current guardian in place. After a stolen key is rotated out, the new key withdraws the guardian change the thief scheduled, so it never lands. |
+| `RootTimelock.cancel`, `cancel_all` of any task, only while no guardian is set | Without a guardian nothing can veto the sudo key's tasks, so its own veto gives it nothing new; it lets the operators withdraw a task they abandoned. |
 | `Utility.batch`, `batch_all`, `force_batch` | Only when every call inside is on this list. |
 
 Anything else wrapped in `Sudo.sudo` fails with `CallFiltered`, as do
-`Sudo.sudo_as`, `Sudo.set_key` and `Sudo.remove_key`.
+`Sudo.sudo_unchecked_weight`, `Sudo.sudo_as`, `Sudo.set_key` and
+`Sudo.remove_key`. `sudo_unchecked_weight` is refused even for an exempt
+call: it would let the key declare any weight and fill the blocks the
+guardian's veto needs.
 
 The last-finalized hint in `note_stalled` is taken on trust: the runtime
 cannot see finality. A hint at or above a standard change the client still
@@ -187,9 +191,9 @@ sits at or just below the finalized head.
 
 | Class | Mainnet | Preprod and dev | Calls |
 |-------|---------|-----------------|-------|
-| Recovery | 1 day | 30 blocks | Levers that cannot fix who holds authority: `Grandpa.note_stalled` with a delay of at most 100 blocks, and `OrinqReceipts.clear_pinned_committee`, `set_break_glass_floor_enabled`, `set_core_eviction_enabled`, `set_contribution_window_enabled`, `set_slack_invariant_enabled`, `reset_candidate_liveness`. They change how the committee is drawn from the Cardano-registered candidates. The guardian may fast-track them. |
-| Authority recovery | the standard delay | the standard delay | Levers that can fix who holds authority: `OrinqReceipts.set_pinned_committee` (installed verbatim, bypassing the draw and every floor), `OrinqReceipts.set_break_glass_aura_keys` (decides which draws the floor accepts), and `Grandpa.note_stalled` with a longer delay (can freeze rotation). The guardian may fast-track them, which is its co-signature; without it the sudo key alone installs authors no sooner than it could mint. |
-| Standard | 7 days | 300 blocks | Everything not listed elsewhere, including `System.set_code`, `System.authorize_upgrade`, `System.set_storage`, the `Balances` force calls, treasury spends, `OrinqReceipts.set_committee` and `join_committee`, the emission setters, `Sudo.set_key`, `Recovery.set_recovered`, and lowering the standard or recovery delay. |
+| Recovery | 1 day | 30 blocks | Levers that cannot fix who holds authority: `Grandpa.note_stalled` within the exempt bound above, and `OrinqReceipts.clear_pinned_committee`, `set_break_glass_floor_enabled`, `set_core_eviction_enabled`, `set_contribution_window_enabled`, `set_slack_invariant_enabled`, `reset_candidate_liveness`. They change how the committee is drawn from the Cardano-registered candidates. The guardian may fast-track them. |
+| Authority recovery | the standard delay | the standard delay | Levers that can fix who holds authority: `OrinqReceipts.set_pinned_committee` (installed verbatim, bypassing the draw and every floor), `OrinqReceipts.set_break_glass_aura_keys` (decides which draws the floor accepts), `Grandpa.note_stalled` with a longer delay (can freeze rotation), and `Sudo.set_key` (the defence against a stolen key). The guardian may fast-track them, which is its co-signature; without it the sudo key alone installs authors or a new key no sooner than it could mint. |
+| Standard | 7 days | 300 blocks | Everything not listed elsewhere, including `System.set_code`, `System.authorize_upgrade`, `System.set_storage`, the `Balances` force calls, treasury spends, `OrinqReceipts.set_committee` and `join_committee`, the emission setters, `Recovery.set_recovered`, and lowering the standard or recovery delay. |
 | Long | 30 days | 1,200 blocks | The dedicated bridge and supply levers (`NativeTokenManagement.set_main_chain_scripts`, lowering `IntentSettlement.set_min_signer_threshold`), `RootTimelock.set_guardian`, lowering the long delay, and `Sudo.remove_key`. |
 
 A wrapper (`Utility.batch`, `batch_all`, `force_batch`, `with_weight`,
@@ -219,17 +223,19 @@ Root, after that delay, is the ultimate override, and it is disclosed as one.
 2. Until the call is enacted the guardian may `RootTimelock.cancel(id)`, or
    `cancel_all` to veto every pending task in one call. The one exception is
    a task whose call is `RootTimelock.set_guardian` itself, which the guardian
-   cannot veto. `set_guardian` is therefore scheduled on its own: `schedule`
-   refuses a wrapper that carries it, so a batch can neither hand the
-   guardian a veto over its replacement nor carry other calls past the veto.
+   cannot veto; the sudo key may withdraw it instead. `set_guardian` is
+   therefore scheduled on its own: `schedule` refuses a wrapper that carries
+   it, so a batch can neither hand the guardian a veto over its replacement
+   nor carry other calls past the veto.
 3. From `ready_at`, and for `EnactmentWindow` (7 days) after it, any signed
    account may submit `RootTimelock.enact(id, call)`. The call must hash to
    the scheduled hash and must not now classify into a longer class than the
    one it waited. If the call fails the task stays, so it can be retried.
-4. At most 64 tasks are stored at once, expired ones included, so no burst of
-   scheduling can outrun the guardian: once the queue is full `schedule`
-   fails with `TooManyTasks`. Anyone may `prune(id)` a task whose enactment
-   window has closed.
+4. At most 64 vetoable tasks are stored at once, expired ones included, and
+   at most one guardian change beside them. Once either is full `schedule`
+   fails with `TooManyTasks`, so no burst of scheduling can outrun the
+   guardian or leave the operators no place for a key rotation. Anyone may
+   `prune(id)` a task whose enactment window has closed.
 
 Because anyone may enact a ready task, and at a time of their choosing, calls
 whose order matters go into one `Utility.batch_all` task, never into separate
@@ -262,18 +268,64 @@ brings a task forward: it cannot extend a ready task's enactment window or
 revive an expired one. The guardian cannot schedule, enact early anything
 outside those two classes, or veto its own replacement.
 
-Root cannot cancel while a guardian is set: a compromised sudo key would
-otherwise veto every attempt to replace it. While no guardian is set the sudo
-key may cancel, since nothing else can. On a chain that gains this pallet by
-upgrade, as preprod does, the first task after the upgrade should be the
-`set_guardian` that appoints one; until it lands (the long delay) the
-timelock gives notice but no independent veto. Mainnet sets the guardian at
-genesis.
+Root cannot cancel a vetoable task while a guardian is set: a compromised
+sudo key would otherwise veto every attempt to replace it. It may withdraw
+the one pending guardian change, which leaves the current guardian in place.
+While no guardian is set the sudo key may cancel any task, since nothing else
+can. On a chain that gains this pallet by upgrade, as preprod does, the first
+task after the upgrade should be the `set_guardian` that appoints one; until
+it lands (the long delay) the timelock gives notice but no independent veto.
+
+A new chain sets the guardian at genesis. The runtime's
+`GenesisBuilder::build_state`, which builds every chain spec, refuses a
+genesis whose `rootTimelock.guardian` is missing unless it also sets
+`rootTimelock.unguarded: true`, and refuses a guardian equal to the sudo
+key. Only a test network sets `unguarded` (the preprod spec and the
+benchmarking preset do). The runtime cannot tell a well-known development key
+from a real one; the mainnet launch preflight has to refuse those.
 
 A compromised guardian can veto every task except its own replacement, which
 waits the long delay: up to 30 days in which nothing but the exempt calls
 runs, security upgrades included. The only faster route is off-chain: a
 runtime override (`--wasm-runtime-overrides`) that every validator runs.
+
+### A stolen sudo key
+
+The threat the guardian is for: someone copies the sudo key while the
+operators still hold it and the guardian stays honest. The operators' answer,
+in the block after the thief acts:
+
+1. The guardian calls `cancel_all`, which vetoes every task the thief
+   scheduled except a guardian change.
+2. The operators schedule `Sudo.set_key(new key)`. There is always a place
+   for it: the thief can fill the 64 vetoable places and the one guardian
+   change place, and `cancel_all` has just emptied the first.
+3. The guardian `fast_track`s it, whatever delays the thief raised, and any
+   account enacts it.
+4. The new key withdraws the thief's pending guardian change with an exempt
+   `Sudo.sudo(RootTimelock.cancel(id))`.
+
+Nothing the thief scheduled then takes effect, and the thief never holds the
+guardian seat. The runtime tests run this answer after one block of any mix
+of stolen-key extrinsics (floods of tasks and guardian changes, delay raises,
+stalls, kill-switches), including through a 2-of-3 `Multisig.as_multi`.
+
+What remains:
+
+- A thief who keeps flooding in every block can race the operators for the
+  place `cancel_all` frees. It gains nothing it can enact, since every
+  vetoable task is still vetoed and its guardian change is still withdrawn,
+  but the rotation lands only in a block where the operators' `schedule` is
+  ordered before the thief's refill.
+- Delay raises and the stopping-direction kill-switches stay. A thief can
+  raise every delay to `MaxDelay` (90 days) before it is rotated out. After
+  that, lowering a delay back, restarting `TeeAttestation` or billing debits,
+  and every other standard change waits up to 90 days. Recovery and
+  authority-recovery levers still run the same day with the guardian's
+  co-sign.
+- On a chain with no guardian, the thief and the operators can each cancel
+  the other's tasks, so neither side's change lands. That is why only a test
+  network may start unguarded.
 
 ### Changing a delay
 

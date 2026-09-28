@@ -1,4 +1,7 @@
-use crate::{mock::*, Call, CallClass, DelayTable, Delays, Error, Event, Guardian, Task, Tasks};
+use crate::{
+    mock::*, Call, CallClass, DelayTable, Delays, Error, Event, GenesisConfig, Guardian,
+    PendingGuardianChange, Task, Tasks,
+};
 use frame_support::{assert_noop, assert_ok, storage::unhashed};
 use sp_runtime::{traits::Hash, DispatchError};
 
@@ -207,7 +210,7 @@ fn without_a_guardian_root_withdraws_a_task() {
         Guardian::<Test>::kill();
         let abandoned = schedule(set_storage_call(b"a"));
         let others = [schedule(set_storage_call(b"b")), schedule(long_call())];
-        let replacement = schedule(guardian_change(Some(GUARDIAN)));
+        let withdrawn = schedule(guardian_change(Some(ANYONE)));
         assert_noop!(
             RootTimelock::cancel(RuntimeOrigin::signed(GUARDIAN), abandoned),
             DispatchError::BadOrigin
@@ -219,10 +222,8 @@ fn without_a_guardian_root_withdraws_a_task() {
 
         assert_ok!(RootTimelock::cancel(RuntimeOrigin::root(), abandoned));
         System::assert_last_event(Event::Cancelled { id: abandoned }.into());
-        assert_noop!(
-            RootTimelock::cancel(RuntimeOrigin::root(), replacement),
-            Error::<Test>::NotVetoable
-        );
+        assert_ok!(RootTimelock::cancel(RuntimeOrigin::root(), withdrawn));
+        let replacement = schedule(guardian_change(Some(GUARDIAN)));
         assert_ok!(RootTimelock::cancel_all(RuntimeOrigin::root()));
         for id in others {
             assert!(Tasks::<Test>::get(id).is_none());
@@ -240,6 +241,85 @@ fn without_a_guardian_root_withdraws_a_task() {
             RootTimelock::cancel_all(RuntimeOrigin::root()),
             DispatchError::BadOrigin
         );
+    });
+}
+
+#[test]
+fn root_withdraws_a_pending_guardian_change_and_nothing_else() {
+    new_test_ext().execute_with(|| {
+        let change = schedule(guardian_change(Some(66)));
+        let task = schedule(set_storage_call(b"a"));
+        assert_noop!(
+            RootTimelock::cancel(RuntimeOrigin::root(), task),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            RootTimelock::cancel_all(RuntimeOrigin::root()),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            RootTimelock::cancel(RuntimeOrigin::signed(GUARDIAN), change),
+            Error::<Test>::NotVetoable
+        );
+        assert_noop!(
+            RootTimelock::cancel(RuntimeOrigin::signed(ANYONE), change),
+            DispatchError::BadOrigin
+        );
+
+        assert_ok!(RootTimelock::cancel(RuntimeOrigin::root(), change));
+        System::assert_last_event(Event::Cancelled { id: change }.into());
+        assert_eq!(PendingGuardianChange::<Test>::get(), None);
+        System::set_block_number(31);
+        assert_noop!(
+            enact(change, guardian_change(Some(66))),
+            Error::<Test>::UnknownTask
+        );
+        assert_eq!(Guardian::<Test>::get(), Some(GUARDIAN));
+        assert!(Tasks::<Test>::get(task).is_some());
+    });
+}
+
+#[test]
+fn one_guardian_change_is_pending_at_a_time_and_takes_no_vetoable_place() {
+    new_test_ext().execute_with(|| {
+        let pending = schedule(guardian_change(Some(66)));
+        assert_eq!(PendingGuardianChange::<Test>::get(), Some(pending));
+        assert_noop!(
+            RootTimelock::schedule(RuntimeOrigin::root(), Box::new(guardian_change(Some(67)))),
+            Error::<Test>::TooManyTasks
+        );
+        for _ in 0..MAX_PENDING {
+            schedule(set_storage_call(b"a"));
+        }
+        assert_noop!(
+            RootTimelock::schedule(RuntimeOrigin::root(), Box::new(set_storage_call(b"a"))),
+            Error::<Test>::TooManyTasks
+        );
+
+        // The guardian's veto frees every vetoable place.
+        assert_ok!(RootTimelock::cancel_all(RuntimeOrigin::signed(GUARDIAN)));
+        assert_eq!(Tasks::<Test>::count(), 1);
+        schedule(set_storage_call(b"rotate"));
+    });
+}
+
+#[test]
+fn enacting_or_pruning_a_guardian_change_frees_its_place() {
+    new_test_ext().execute_with(|| {
+        let enacted = schedule(guardian_change(Some(66)));
+        assert_eq!(PendingGuardianChange::<Test>::get(), Some(enacted));
+        System::set_block_number(31);
+        assert_ok!(enact(enacted, guardian_change(Some(66))));
+        assert_eq!(PendingGuardianChange::<Test>::get(), None);
+
+        // Ready at 61, enactable through 66.
+        let expired = schedule(guardian_change(Some(67)));
+        assert_eq!(PendingGuardianChange::<Test>::get(), Some(expired));
+        System::set_block_number(67);
+        assert_ok!(RootTimelock::prune(RuntimeOrigin::signed(ANYONE), expired));
+        assert_eq!(PendingGuardianChange::<Test>::get(), None);
+        let next = schedule(guardian_change(Some(68)));
+        assert_eq!(PendingGuardianChange::<Test>::get(), Some(next));
     });
 }
 
@@ -655,4 +735,39 @@ fn delay_table_validity() {
         standard: 2,
         long: 6
     }));
+}
+
+#[test]
+fn a_genesis_names_a_guardian_or_says_it_has_none() {
+    let genesis = |guardian, unguarded| GenesisConfig::<Test> {
+        delays: TestDelays::get(),
+        guardian,
+        unguarded,
+    };
+    assert_eq!(genesis(Some(GUARDIAN), false).ensure_guarded(), Ok(()));
+    assert_eq!(genesis(None, true).ensure_guarded(), Ok(()));
+    assert!(genesis(None, false).ensure_guarded().is_err());
+    assert!(GenesisConfig::<Test>::default().ensure_guarded().is_err());
+    assert!(genesis(Some(GUARDIAN), true).ensure_guarded().is_err());
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn try_state_bounds_the_vetoable_queue_and_tracks_the_guardian_change() {
+    use frame_support::traits::Hooks;
+    new_test_ext().execute_with(|| {
+        let check = || <RootTimelock as Hooks<u64>>::try_state(System::block_number());
+        let change = schedule(guardian_change(Some(66)));
+        for _ in 0..MAX_PENDING {
+            schedule(set_storage_call(b"a"));
+        }
+        assert_ok!(check());
+
+        PendingGuardianChange::<Test>::kill();
+        assert!(check().is_err());
+        PendingGuardianChange::<Test>::put(change + 1);
+        assert!(check().is_err());
+        PendingGuardianChange::<Test>::put(change);
+        assert_ok!(check());
+    });
 }

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 5fe1d8dc03dae057fb9d5d23eb19332c66b794afba3d51f4f8a77b9772e31cce # shrinks to actions = [Schedule { wrapper: Plain, target: Lever { which: 0, on: false } }, FastTrack { pick: 0 }, FastTrack { pick: 0 }]
+cc 4ef5c8af6eebf02c689f34cd27a9004ba1829f85456a379f99442b91facc7d2a # shrinks to actions = [Direct { path: SudoUncheckedWeight, wrapper: Plain, target: SetDelay { class: 0, blocks: 5 } }]

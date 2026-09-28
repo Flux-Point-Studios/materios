@@ -38,6 +38,9 @@ steps:
       - apt-get install -y --no-install-recommends clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
       - cargo check --workspace --all-targets --locked
       - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing -p pallet-root-timelock --no-fail-fast
+      # The timelock's try_state invariants, which only the try-runtime
+      # feature compiles in.
+      - cargo test -p pallet-root-timelock --features try-runtime --lib --locked
       # The runtime's own tests: the Root gate, the timelock classifier and
       # its property test, committee seating, treasury and migrations. They
       # run natively; the blob is already built by the check above.

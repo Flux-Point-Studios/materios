@@ -79,7 +79,7 @@
     {
       "id": "root-timelock",
       "name": "Root timelock",
-      "desc": "Holds every non-exempt Root call for a per-class delay (recovery for committee toggles, the standard delay for everything else including consensus-key levers unless the guardian co-signs, long for the dedicated bridge and supply levers) in a bounded queue with a guardian veto, bulk veto and fast-track; the runtime call filter lets the sudo key reach Root at once only for pause, withdrawal and bounded finality break-glass calls and for scheduling.",
+      "desc": "Holds every non-exempt Root call for a per-class delay (recovery for committee toggles, the standard delay for everything else including consensus-key levers and sudo key rotation unless the guardian co-signs, long for the dedicated bridge and supply levers) in a bounded vetoable queue with a guardian veto, bulk veto and fast-track, plus one guardian change the guardian cannot veto and the sudo key can withdraw; the runtime call filter lets the sudo key reach Root at once only for pause, withdrawal, delay-raise and session-bounded finality break-glass calls and for scheduling, and genesis refuses a chain spec without an independent guardian unless it declares itself unguarded.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/root-timelock",

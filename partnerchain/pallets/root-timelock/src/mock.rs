@@ -79,6 +79,7 @@ pub fn genesis_ext(delays: DelayTable<u64>) -> sp_io::TestExternalities {
     pallet_root_timelock::GenesisConfig::<Test> {
         delays,
         guardian: Some(GUARDIAN),
+        unguarded: false,
     }
     .assimilate_storage(&mut storage)
     .unwrap();

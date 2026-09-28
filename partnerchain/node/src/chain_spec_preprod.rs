@@ -206,6 +206,7 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         // is appointed through a scheduled `set_guardian`.
         "rootTimelock": {
             "delays": TESTNET_TIMELOCK_DELAYS,
+            "unguarded": true,
         },
         "aura": {
             "authorities": [macbook_aura, gemtek_aura, node2_aura, node3_aura],

@@ -6,17 +6,21 @@
 //! the same call, which then dispatches as Root. Until then the guardian may
 //! `cancel` it, and may `fast_track` a recovery or authority-recovery call.
 //!
-//! Root cannot cancel while a guardian is set. A compromised sudo key holds
-//! Root, and a Root veto would let it cancel every attempt to replace it.
-//! With no guardian nothing can veto the sudo key's own tasks, so Root may
-//! cancel then, which lets an operator withdraw a task it abandoned. The
-//! guardian cannot veto a scheduled `set_guardian`, which waits the long delay
-//! instead, so a compromised guardian can be replaced but not faster than
-//! the public can see it coming.
+//! Root cannot cancel a vetoable task while a guardian is set. A compromised
+//! sudo key holds Root, and a Root veto would let it cancel every attempt to
+//! replace it. With no guardian nothing can veto the sudo key's own tasks, so
+//! Root may cancel then, which lets an operator withdraw a task it abandoned.
 //!
-//! At most `MaxPendingTasks` tasks are stored, so no burst of scheduling can
-//! outrun the veto: `cancel_all` clears every vetoable task in one call, and
-//! anyone may `prune` a task whose enactment window has closed.
+//! The guardian cannot veto a scheduled `set_guardian`, which waits the long
+//! delay instead, so a compromised guardian can be replaced but not faster
+//! than the public can see it coming. Root may withdraw one: after a sudo
+//! key is stolen and rotated out, the new key withdraws the guardian change
+//! the thief scheduled, so it never lands.
+//!
+//! At most `MaxPendingTasks` vetoable tasks and one guardian change are
+//! stored, so no burst of scheduling can outrun the veto or crowd out a key
+//! rotation: `cancel_all` clears every vetoable task in one call, and anyone
+//! may `prune` a task whose enactment window has closed.
 //!
 //! The pallet does not stop Root from being used directly. The runtime's call
 //! filter must admit the sudo key's Root only for its exempt calls and for
@@ -197,9 +201,10 @@ pub mod pallet {
         /// A task left unenacted longer than this can no longer run.
         type EnactmentWindow: Get<BlockNumberFor<Self>>;
 
-        /// Tasks that may be stored at once, expired ones included until
-        /// pruned. It bounds what the guardian must veto: `cancel_all` clears
-        /// the whole queue in one call.
+        /// Vetoable tasks that may be stored at once, expired ones included
+        /// until pruned. It bounds what the guardian must veto: `cancel_all`
+        /// clears them all in one call. A pending guardian change is not
+        /// counted; at most one is stored beside them.
         type MaxPendingTasks: Get<u32>;
     }
 
@@ -217,10 +222,18 @@ pub mod pallet {
     pub type Tasks<T: Config> =
         CountedStorageMap<_, Twox64Concat, TaskId, Task<T::Hash, BlockNumberFor<T>>, OptionQuery>;
 
+    /// The one guardian change that may be pending. It takes no place among
+    /// the `MaxPendingTasks` vetoable tasks.
+    #[pallet::storage]
+    pub type PendingGuardianChange<T: Config> = StorageValue<_, TaskId, OptionQuery>;
+
     #[pallet::genesis_config]
     pub struct GenesisConfig<T: Config> {
         pub delays: DelayTable<BlockNumberFor<T>>,
         pub guardian: Option<T::AccountId>,
+        /// Starts with no guardian, which only a test network should: without
+        /// one nothing independent of the sudo key can veto its tasks.
+        pub unguarded: bool,
     }
 
     impl<T: Config> Default for GenesisConfig<T> {
@@ -228,6 +241,25 @@ pub mod pallet {
             Self {
                 delays: T::DefaultDelays::get(),
                 guardian: None,
+                unguarded: false,
+            }
+        }
+    }
+
+    impl<T: Config> GenesisConfig<T> {
+        /// A genesis names a guardian, or says with `unguarded` that it has
+        /// none. `build` cannot refuse the default config, which FRAME builds
+        /// in its own tests, so the runtime calls this from
+        /// `GenesisBuilder::build_state`, the path every chain spec takes.
+        pub fn ensure_guarded(&self) -> Result<(), &'static str> {
+            match (&self.guardian, self.unguarded) {
+                (Some(_), false) | (None, true) => Ok(()),
+                (None, false) => Err(
+                    "root-timelock genesis names no guardian; only a test network may set `unguarded`",
+                ),
+                (Some(_), true) => {
+                    Err("root-timelock genesis names a guardian and also sets `unguarded`")
+                }
             }
         }
     }
@@ -294,8 +326,9 @@ pub mod pallet {
         /// The task is already ready or has expired. A fast-track only brings
         /// a pending task forward; it never extends or revives one.
         AlreadyReady,
-        /// `MaxPendingTasks` tasks are stored. Prune expired ones, or wait
-        /// for tasks to be enacted or cancelled.
+        /// `MaxPendingTasks` vetoable tasks, or a guardian change, are already
+        /// stored. Prune expired ones, or wait for tasks to be enacted or
+        /// cancelled.
         TooManyTasks,
         /// The task can still be enacted.
         NotExpired,
@@ -325,8 +358,18 @@ pub mod pallet {
                 "stored delays are zero, out of order or above MaxDelay"
             );
             ensure!(
-                Tasks::<T>::count() <= T::MaxPendingTasks::get(),
-                "more tasks stored than MaxPendingTasks"
+                Self::vetoable_tasks() <= T::MaxPendingTasks::get(),
+                "more vetoable tasks stored than MaxPendingTasks"
+            );
+            let guardian_changes: Vec<TaskId> = Tasks::<T>::iter()
+                .filter_map(|(id, task)| (!task.vetoable).then_some(id))
+                .collect();
+            ensure!(
+                guardian_changes
+                    == PendingGuardianChange::<T>::get()
+                        .into_iter()
+                        .collect::<Vec<_>>(),
+                "the stored guardian changes are not the pending one"
             );
             Ok(())
         }
@@ -337,7 +380,7 @@ pub mod pallet {
         /// Record `call` to run as Root once its class's delay has passed.
         #[pallet::call_index(0)]
         #[pallet::weight(
-            T::DbWeight::get().reads_writes(4, 3).saturating_add(call_hash_weight(call.as_ref()))
+            T::DbWeight::get().reads_writes(5, 4).saturating_add(call_hash_weight(call.as_ref()))
         )]
         pub fn schedule(
             origin: OriginFor<T>,
@@ -348,12 +391,14 @@ pub mod pallet {
                 !T::Classifier::wraps_guardian_change(&call),
                 Error::<T>::GuardianChangeNotAlone
             );
-            ensure!(
-                Tasks::<T>::count() < T::MaxPendingTasks::get(),
-                Error::<T>::TooManyTasks
-            );
-            let class = T::Classifier::class_of(&call);
             let vetoable = !matches!(call.is_sub_type(), Some(Call::set_guardian { .. }));
+            let has_room = if vetoable {
+                Self::vetoable_tasks() < T::MaxPendingTasks::get()
+            } else {
+                !PendingGuardianChange::<T>::exists()
+            };
+            ensure!(has_room, Error::<T>::TooManyTasks);
+            let class = T::Classifier::class_of(&call);
             let ready_at = frame_system::Pallet::<T>::block_number()
                 .saturating_add(Delays::<T>::get().of(class));
             let id = NextTaskId::<T>::get();
@@ -368,6 +413,9 @@ pub mod pallet {
                     vetoable,
                 },
             );
+            if !vetoable {
+                PendingGuardianChange::<T>::put(id);
+            }
             Self::deposit_event(Event::Scheduled {
                 id,
                 call_hash,
@@ -377,17 +425,23 @@ pub mod pallet {
             Ok(())
         }
 
-        /// The guardian's veto. Operational so a full block cannot keep it out.
+        /// The guardian's veto over a vetoable task, and Root's withdrawal of
+        /// a pending guardian change (or of any task while no guardian is
+        /// set). Operational so a full block cannot keep it out.
         #[pallet::call_index(1)]
         #[pallet::weight((
-            T::DbWeight::get().reads_writes(3, 2).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
+            T::DbWeight::get().reads_writes(4, 3).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
             DispatchClass::Operational,
         ))]
         pub fn cancel(origin: OriginFor<T>, id: TaskId) -> DispatchResult {
-            Self::ensure_canceller(origin)?;
             let task = Tasks::<T>::get(id).ok_or(Error::<T>::UnknownTask)?;
-            ensure!(task.vetoable, Error::<T>::NotVetoable);
-            Tasks::<T>::remove(id);
+            if ensure_root(origin.clone()).is_ok() {
+                ensure!(Self::root_may_cancel(id), DispatchError::BadOrigin);
+            } else {
+                Self::ensure_guardian(origin)?;
+                ensure!(task.vetoable, Error::<T>::NotVetoable);
+            }
+            Self::remove_task(id, &task);
             Self::deposit_event(Event::Cancelled { id });
             Ok(())
         }
@@ -447,7 +501,7 @@ pub mod pallet {
                 T::Classifier::class_of(&call) <= task.class,
                 Error::<T>::ClassRaised
             );
-            Tasks::<T>::remove(id);
+            Self::remove_task(id, &task);
             let overhead = enact_overhead::<T>(call.as_ref());
             let post = call
                 .dispatch(frame_system::RawOrigin::Root.into())
@@ -496,7 +550,8 @@ pub mod pallet {
         /// The guardian's veto over every task it may veto, in one call.
         #[pallet::call_index(6)]
         #[pallet::weight({
-            let tasks = u64::from(T::MaxPendingTasks::get());
+            // Every vetoable task, and the pending guardian change it skips.
+            let tasks = u64::from(T::MaxPendingTasks::get()).saturating_add(1);
             (
                 T::DbWeight::get()
                     .reads_writes(tasks.saturating_add(2), tasks.saturating_add(1))
@@ -509,11 +564,11 @@ pub mod pallet {
         })]
         pub fn cancel_all(origin: OriginFor<T>) -> DispatchResult {
             Self::ensure_canceller(origin)?;
-            let vetoable: Vec<TaskId> = Tasks::<T>::iter()
-                .filter_map(|(id, task)| task.vetoable.then_some(id))
+            let vetoable: Vec<(TaskId, Task<T::Hash, BlockNumberFor<T>>)> = Tasks::<T>::iter()
+                .filter(|(_, task)| task.vetoable)
                 .collect();
-            for id in vetoable {
-                Tasks::<T>::remove(id);
+            for (id, task) in vetoable {
+                Self::remove_task(id, &task);
                 Self::deposit_event(Event::Cancelled { id });
             }
             Ok(())
@@ -523,7 +578,7 @@ pub mod pallet {
         /// in the queue. Anyone may submit it: an expired task can never run.
         #[pallet::call_index(7)]
         #[pallet::weight(
-            T::DbWeight::get().reads_writes(2, 2).saturating_add(Weight::from_parts(BASE_REF_TIME, 0))
+            T::DbWeight::get().reads_writes(2, 3).saturating_add(Weight::from_parts(BASE_REF_TIME, 0))
         )]
         pub fn prune(origin: OriginFor<T>, id: TaskId) -> DispatchResult {
             ensure_signed(origin)?;
@@ -532,7 +587,7 @@ pub mod pallet {
                 frame_system::Pallet::<T>::block_number() > Self::enactable_until(&task),
                 Error::<T>::NotExpired
             );
-            Tasks::<T>::remove(id);
+            Self::remove_task(id, &task);
             Self::deposit_event(Event::Pruned { id });
             Ok(())
         }
@@ -546,6 +601,23 @@ pub mod pallet {
                 DispatchError::BadOrigin
             );
             Ok(())
+        }
+
+        /// Whether Root may cancel task `id`: the pending guardian change, or
+        /// any task while no guardian is set.
+        pub fn root_may_cancel(id: TaskId) -> bool {
+            Guardian::<T>::get().is_none() || PendingGuardianChange::<T>::get() == Some(id)
+        }
+
+        fn vetoable_tasks() -> u32 {
+            Tasks::<T>::count().saturating_sub(u32::from(PendingGuardianChange::<T>::exists()))
+        }
+
+        fn remove_task(id: TaskId, task: &Task<T::Hash, BlockNumberFor<T>>) {
+            Tasks::<T>::remove(id);
+            if !task.vetoable {
+                PendingGuardianChange::<T>::kill();
+            }
         }
 
         /// The guardian, or Root while no guardian is set.
@@ -580,7 +652,7 @@ pub mod pallet {
     /// The task read and removal, the classifier's reads, and hashing.
     fn enact_overhead<T: Config>(call: &<T as Config>::RuntimeCall) -> Weight {
         T::DbWeight::get()
-            .reads_writes(4, 2)
+            .reads_writes(4, 3)
             .saturating_add(call_hash_weight(call))
     }
 }
