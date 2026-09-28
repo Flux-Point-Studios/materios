@@ -123,6 +123,10 @@ DEV_KEYRING_FLAGS = {"--alice", "--bob", "--charlie", "--dave", "--eve", "--ferd
 # optional ///password that is never echoed. Not after a word, a scheme's colon
 # or a path, and not a protocol-relative host.
 DEV_URI = re.compile(r"(?<![\w:/.])(//[\w-]+(?:/{1,2}[\w-]+)*)(?:///\S*)?(?![\w./-])")
+# A setting that holds a secret URI, unless its name says it holds where one is.
+SECRET_SETTING = re.compile(r"uri|seed|mnemonic|phrase|secret", re.IGNORECASE)
+SECRET_LOCATION = re.compile(r"(file|path|dir)$", re.IGNORECASE)
+HEX_SEED = re.compile(r"0x([0-9a-fA-F]{64})")
 # What the anchor worker reads as a test network, shared with it in test_networks.json.
 TEST_NETWORKS = json.loads((HERE / "test_networks.json").read_text())
 TEST_NETWORK_NAME = re.compile(TEST_NETWORKS["name_pattern"], re.IGNORECASE | re.ASCII)
@@ -462,10 +466,17 @@ class KnownKey:
         return f"{self.label} ({self.scheme})"
 
 
-def load_well_known(extra: list[Path] = ()) -> tuple[list[KnownKey], str]:
+@dataclass(frozen=True)
+class WellKnown:
+    keys: list[KnownKey]
+    phrase_hash: str
+    seed_hash: str
+
+
+def load_well_known(extra: list[Path] = ()) -> WellKnown:
     """The public table plus operator tables of keys whose exposure must not be
     named in a public repo. A 33-byte ECDSA key also matches the blake2-256
-    account it maps to."""
+    account it maps to. The dev phrase and its seed are held by their hashes."""
     base = HERE / "well_known_keys.json"
     keys = []
     for path in (base, *extra):
@@ -485,7 +496,8 @@ def load_well_known(extra: list[Path] = ()) -> tuple[list[KnownKey], str]:
             for needle in (public, blake2_256(public)) if len(public) == 33 else (public,):
                 if not any(k.needle == needle for k in keys):
                     keys.append(KnownKey(entry["label"], entry["scheme"], needle))
-    return keys, json.loads(base.read_text())["dev_phrase_blake2_256"]
+    table = json.loads(base.read_text())
+    return WellKnown(keys, table["dev_phrase_blake2_256"], table["dev_seed_blake2_256"])
 
 
 def decode_public_key(text: str) -> bytes:
@@ -511,6 +523,31 @@ def decode_public_key(text: str) -> bytes:
     if hashlib.blake2b(b"SS58PRE" + body, digest_size=64).digest()[:2] != checksum:
         raise ValueError("SS58 checksum mismatch")
     return body[prefix_len:]
+
+
+def phraseless_uri(value: str) -> str | None:
+    """The path of a secret URI with no phrase (`/Name`, `//Name//x`, `///pw`):
+    Substrate and @polkadot/keyring derive it from the dev phrase. The result
+    stops before any `///password`; the root reads as `(root)`."""
+    match = re.fullmatch(r"((?:/{1,2}[^/]+)*)(?:///.*)?", value.strip(), re.DOTALL)
+    return (match.group(1) or "(root)") if match and value.strip().startswith("/") else None
+
+
+def secret_settings(node: dict):
+    """(setting, value) for each environment variable or flag of a node whose
+    name marks it as a secret URI, and not a file or path holding one."""
+    for name, value in sorted(node.get("env", {}).items()):
+        if SECRET_SETTING.search(name) and not SECRET_LOCATION.search(name):
+            yield name, value
+    argv = node_argv(node)
+    for i, word in enumerate(argv):
+        flag, equals, value = word.partition("=")
+        if not flag.startswith("--") or not SECRET_SETTING.search(flag) or SECRET_LOCATION.search(flag):
+            continue
+        if equals:
+            yield flag, value
+        elif i + 1 < len(argv):
+            yield flag, argv[i + 1]
 
 
 def dev_uri(text: str) -> str | None:
@@ -723,7 +760,8 @@ def check_chain_identity(spec: Spec) -> list[Finding]:
 
 
 def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView, manifest_key: bytes,
-                   known: list[KnownKey], phrase_hash: str) -> list[Finding]:
+                   well_known: WellKnown) -> list[Finding]:
+    known = well_known.keys
     findings = []
     code = decompressed_code(spec.code)
     for key, value in sorted(spec.storage.items()):
@@ -743,7 +781,7 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
             where = f"roles.{role}[{i}]"
             decoded = True
             for leaf, text in role_leaves(entry, where):
-                uri = dev_uri(text)
+                uri = phraseless_uri(text) or dev_uri(text)
                 if uri:
                     findings.append(Finding(KEYS, f"{leaf}: well-known secret URI {uri}"))
                     decoded = False
@@ -790,12 +828,14 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
             flag = piece.strip("\"'").split("=", 1)[0]
             if flag in DEV_KEYRING_FLAGS:
                 node_findings.append(Finding(KEYS, f"node {node['name']}: {flag} loads the dev keyring"))
-        for text in node_argv(node) + [f"{k}={v}" for k, v in sorted(node.get("env", {}).items())]:
-            uri = dev_uri(text)
-            if uri:
-                node_findings.append(Finding(KEYS, f"node {node['name']}: launch config names {uri}"))
-            if contains_phrase(text, phrase_hash):
+        texts = node_argv(node) + [f"{k}={v}" for k, v in sorted(node.get("env", {}).items())]
+        uris = [dev_uri(text) for text in texts] + [phraseless_uri(value) for _, value in secret_settings(node)]
+        node_findings += [Finding(KEYS, f"node {node['name']}: launch config names {uri}") for uri in uris if uri]
+        for text in texts:
+            if contains_phrase(text, well_known.phrase_hash):
                 node_findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev mnemonic"))
+            if any(blake2_256(bytes.fromhex(seed)).hex() == well_known.seed_hash for seed in HEX_SEED.findall(text)):
+                node_findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev seed"))
         findings += dict.fromkeys(node_findings)
     for hit in match_known(manifest_key, known):
         findings.append(Finding(KEYS, f"manifest signing key: {hit}"))
@@ -1491,9 +1531,9 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
                cardano: CardanoView, extra_well_known: list[Path] = ()) -> list[Finding]:
     validate_launch(launch)
     key = pinned_key(manifest_key)
-    known, phrase_hash = load_well_known(extra_well_known)
+    well_known = load_well_known(extra_well_known)
     return (check_chain_identity(spec)
-            + check_dev_keys(spec, meta, launch, cardano, key, known, phrase_hash)
+            + check_dev_keys(spec, meta, launch, cardano, key, well_known)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_supply(spec, meta, launch, cardano)

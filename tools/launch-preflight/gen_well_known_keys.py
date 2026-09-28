@@ -175,7 +175,8 @@ def main():
         if (entry["scheme"], entry["public"]) not in seen:
             seen.add((entry["scheme"], entry["public"]))
             keys.append(entry)
-    table = {"dev_phrase_blake2_256": blake2_256(" ".join(phrase.split()).encode()).hex(), "keys": keys}
+    table = {"dev_phrase_blake2_256": blake2_256(" ".join(phrase.split()).encode()).hex(),
+             "dev_seed_blake2_256": blake2_256(bytes(bip39_to_mini_secret(phrase, ""))).hex(), "keys": keys}
     json.dump(table, sys.stdout, indent=1)
     sys.stdout.write("\n")
 

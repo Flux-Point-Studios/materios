@@ -6,6 +6,7 @@ implementation against the reference one. Cardano is served by a local HTTP
 server that answers with Kupo's response shapes.
 """
 import copy
+import dataclasses
 import gzip
 import hashlib
 import json
@@ -154,14 +155,14 @@ NO_CARDANO = lp.CardanoView(lock=None, candidates=[])
 
 @pytest.mark.parametrize("scheme", ["sr25519", "ed25519"])
 def test_table_holds_every_sp_keyring_key(scheme, known):
-    keys, _ = known
+    keys = known.keys
     table = {(k.label, k.scheme): k.needle.hex() for k in keys}
     for label, public in SP_KEYRING[scheme].items():
         assert table[(label, scheme)] == public
 
 
 def test_table_holds_published_ecdsa_alice_and_its_account(known):
-    keys, _ = known
+    keys = known.keys
     needles = {k.needle.hex(): str(k) for k in keys}
     assert needles[ALICE_ECDSA] == "//Alice (ecdsa)"
     account = hashlib.blake2b(bytes.fromhex(ALICE_ECDSA), digest_size=32).hexdigest()
@@ -169,7 +170,7 @@ def test_table_holds_published_ecdsa_alice_and_its_account(known):
 
 
 def test_table_holds_retired_published_keys(known):
-    keys, _ = known
+    keys = known.keys
     retired = [k for k in keys if k.label.startswith("retired")]
     assert {k.scheme for k in retired} == {"sr25519", "ed25519"}
 
@@ -179,7 +180,7 @@ ORYNQ_TEST_OBSERVER = "5CfCr47V5Dte6bwxNBE8K9oNnQd9fiay6aDEEkgYtFv7w4Fq"
 
 
 def test_table_holds_keys_whose_seed_is_committed_to_a_public_repo(known):
-    keys, _ = known
+    keys = known.keys
     observer = [k for k in keys if k.needle == lp.decode_public_key(ORYNQ_TEST_OBSERVER)]
     assert [str(k) for k in observer] == ["orynq-sdk test key, secret committed to a public repo (sr25519)"]
 
@@ -194,7 +195,7 @@ PARTNER_CHAINS_KEYSTORE = {
 
 
 def test_table_holds_keystore_keys_a_public_repo_commits(known):
-    keys, _ = known
+    keys = known.keys
     table = {(k.scheme, k.needle.hex()): k.label for k in keys}
     for scheme, public in PARTNER_CHAINS_KEYSTORE.items():
         assert table[(scheme, public)] == "partner-chains test key, secret committed to a public repo"
@@ -210,7 +211,7 @@ PUBLIC_REPO_DERIVATIONS = {
 
 
 def test_table_holds_dev_phrase_derivations_that_public_repos_commit(known):
-    keys, _ = known
+    keys = known.keys
     table = {(k.label, k.scheme, k.needle.hex()) for k in keys}
     for (path, scheme), public in PUBLIC_REPO_DERIVATIONS.items():
         assert (path, scheme, public) in table
@@ -232,7 +233,7 @@ NUMERIC_DEV_PATHS = {
 
 
 def test_table_derives_numeric_dev_paths_as_substrate_does(known):
-    keys, _ = known
+    keys = known.keys
     table = {(k.label, k.scheme): k.needle.hex() for k in keys if len(k.needle) != 32 or k.scheme != "ecdsa"}
     for (path, scheme), public in NUMERIC_DEV_PATHS.items():
         assert table[(path, scheme)] == public, (path, scheme)
@@ -244,7 +245,7 @@ HARDHAT_ACCOUNT_0 = "038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa73
 
 
 def test_table_holds_the_hardhat_test_account(known):
-    keys, _ = known
+    keys = known.keys
     hits = [k for k in keys if k.needle.hex() == HARDHAT_ACCOUNT_0]
     assert [k.scheme for k in hits] == ["ecdsa"]
     assert "public repo" in hits[0].label
@@ -263,11 +264,9 @@ def test_extra_well_known_keys_are_named_with_their_label(spec, meta, tmp_path):
         {"label": "exposed multisig member", "scheme": "sr25519", "public": exposed.hex()},
         {"label": "exposed cross-chain key", "scheme": "ecdsa", "public": ecdsa_pub.hex()},
     ])
-    keys, phrase_hash = lp.load_well_known([path])
     launch = {"roles": {"multisig_members": [ss58(exposed)],
                         "committee": [ss58(hashlib.blake2b(ecdsa_pub, digest_size=32).digest())]}}
-    found = messages(lp.check_dev_keys(spec, meta, launch, NO_CARDANO, pub(signing.SigningKey.generate()),
-                                       keys, phrase_hash))
+    found = dev_key_findings(spec, meta, lp.load_well_known([path]), launch)
     assert "[1 dev-keys] roles.multisig_members[0]: exposed multisig member (sr25519)" in found
     assert "[1 dev-keys] roles.committee[0]: exposed cross-chain key (ecdsa)" in found
 
@@ -420,10 +419,9 @@ def test_wasm_override_on_a_non_authority_is_out_of_scope():
 # ---------------------------------------------------------------------------
 
 def dev_key_findings(spec, meta, known, launch=None, manifest_key=None, cardano=NO_CARDANO):
-    keys, phrase_hash = known
     launch = {"roles": {}} if launch is None else launch
     return messages(lp.check_dev_keys(spec, meta, launch, cardano, manifest_key or pub(signing.SigningKey.generate()),
-                                      keys, phrase_hash))
+                                      known))
 
 
 def test_preprod_genesis_names_alice_as_an_endowed_account(spec, meta, known):
@@ -526,15 +524,55 @@ def test_dev_phrase_uri_with_a_password_is_named_without_the_password(spec, meta
     assert not any(secret in m for m in found for secret in ("hunter2", "s3cret", "quartz"))
 
 
-def test_dev_mnemonic_in_a_launch_config_is_detected_by_hash(spec, meta):
-    keys, _ = lp.load_well_known()
+def test_dev_mnemonic_in_a_launch_config_is_detected_by_hash(spec, meta, known):
     phrase = "one two three four five six seven eight nine ten eleven twelve"
-    phrase_hash = lp.blake2_256(phrase.encode()).hex()
+    known = dataclasses.replace(known, phrase_hash=lp.blake2_256(phrase.encode()).hex())
     launch = {"roles": {}, "nodes": [{"name": "v1", "host": "h1", "argv": [],
                                       "env": {"SEED": f"  {phrase.replace(' ', '   ')}//Alice"}}]}
-    found = messages(lp.check_dev_keys(spec, meta, launch, NO_CARDANO, pub(signing.SigningKey.generate()),
-                                       keys, phrase_hash))
+    found = dev_key_findings(spec, meta, known, launch)
     assert "[1 dev-keys] node v1: launch config holds the dev mnemonic" in found
+
+
+# sp-core's DEV_PHRASE as its seed, which @polkadot/keyring exports as DEV_SEED.
+DEV_SEED = "0xfac7959dbfe72f052e5a0c3c8d6530f202b02fd8f9f5ca3580ec8deb7797479e"
+
+
+def test_table_holds_the_dev_seed_by_its_hash(known):
+    assert known.seed_hash == lp.blake2_256(bytes.fromhex(DEV_SEED[2:])).hex()
+
+
+def sidecar(argv=(), **env) -> dict:
+    return {"roles": {}, "nodes": [{"name": "cd", "host": "h1", "authority": False, "argv": list(argv), "env": env}]}
+
+
+@pytest.mark.parametrize("launch, named", [
+    (sidecar(SIGNER_URI="/Attestor0"), "/Attestor0"),
+    (sidecar(ORACLE_SURI=" //cert.daemon "), "//cert.daemon"),
+    (sidecar(SIGNER_URI="/Oracle//hot///hunter2"), "/Oracle//hot"),
+    (sidecar(["cert-daemon", "--suri", "/Attestor1"]), "/Attestor1"),
+    (sidecar(["cert-daemon", "--signer-uri=/Attestor2"]), "/Attestor2"),
+])
+def test_a_secret_uri_setting_with_no_phrase_is_named(spec, meta, known, launch, named):
+    found = dev_key_findings(spec, meta, known, launch)
+    assert f"[1 dev-keys] node cd: launch config names {named}" in found
+    assert not any("hunter2" in m for m in found)
+
+
+@pytest.mark.parametrize("launch", [
+    sidecar(SIGNER_URI=DEV_SEED),
+    sidecar(SIGNER_URI=DEV_SEED + "//AnchorSigner"),
+    sidecar(["worker", "--seed", "0x" + DEV_SEED[2:].upper()]),
+])
+def test_the_dev_seed_in_a_launch_config_is_named_without_echoing_it(spec, meta, known, launch):
+    found = dev_key_findings(spec, meta, known, launch)
+    assert "[1 dev-keys] node cd: launch config holds the dev seed" in found
+    assert not any(DEV_SEED[2:12] in m.lower() for m in found)
+
+
+def test_file_paths_are_not_secret_uris(spec, meta, known):
+    launch = sidecar(["cert-daemon", "--base-path", "/data", "--config=/etc/cd.toml", "--suri-file", "/run/s"],
+                     DATA_DIR="/var/lib/materios", SIGNER_URI_FILE="/run/secrets/signer", SEED_PATH="/k/seed")
+    assert not any("node cd" in m for m in dev_key_findings(spec, meta, known, launch))
 
 
 def test_dev_manifest_signing_key_is_refused(spec, meta, known):

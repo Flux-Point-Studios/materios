@@ -1,5 +1,6 @@
 {
  "dev_phrase_blake2_256": "2080870422982ac1d8ac77ca2eb39ec85df8dadef289844ffdcd14ea604d9c2d",
+ "dev_seed_blake2_256": "b3a6886b4b56616e127b44738d54f39fc86200c81ab803b4f8d774ae79e50e5b",
  "keys": [
   {
    "label": "dev phrase root",
