@@ -90,10 +90,12 @@ more than 300 slots behind its node.
     {"name": "val-1", "host": "val-1", "addresses": ["10.0.0.11"], "authority": true,
      "aura": "0x<aura public key>",
      "argv": "materios-node --validator --chain mainnet-raw.json --rpc-methods safe",
-     "env": {}}
+     "env": {}},
+    {"name": "edge-1", "host": "edge-1", "addresses": ["10.0.0.2"], "authority": false}
   ],
   "rpc_proxies": [
-    {"name": "public-rpc", "host": "edge-1", "kind": "nginx", "config": "nginx-T.txt"}
+    {"name": "public-rpc", "node": "edge-1", "kind": "nginx", "config": "nginx-T.txt",
+     "other_targets": ["status.example.org:443"]}
   ]
 }
 ```
@@ -115,19 +117,29 @@ more than 300 slots behind its node.
 - `supply.genesis_lock` is the Cardano output holding the cMATRA that backs
   Materios issuance. The backing is the cMATRA amount Kupo reports at that
   output; the manifest carries no backing figure.
-- Every node declares `authority` as `true` or `false`, and an authority its
-  `aura` public key.
+- `nodes` lists every machine that runs a launch process or a proxy. Each
+  declares `authority` as `true` or `false`, and an authority its `aura`
+  public key. `argv` is the command as the process receives it; a `sh -c`
+  wrapper, as a systemd unit or a container entrypoint writes it, is opened,
+  its script split at `;`, `&&` and newlines, and an authority's last command
+  must start `materios-node` or `materios-node-spo`. A launch the preflight
+  would have to evaluate refuses as unreadable: a `$VAR` or backtick
+  expansion (systemd expands `$VAR` in `ExecStart`), a pipe, redirection,
+  subshell or `||`, a script file, or several arguments in one word.
 - A proxy is `nginx` or `cloudflared`. Give nginx as `nginx -T` output, which
   carries every included file; a plain config has its `include`s followed from
   its directory. Every forwarding directive counts (`proxy_pass`, including a
   `stream` block's, `grpc_pass`, `fastcgi_pass`, `uwsgi_pass`, `scgi_pass`,
   `memcached_pass`), as does each cloudflared `url` and ingress `service`. A
-  route matches an authority when it reaches the authority's RPC port on its
-  `host` or any of its `addresses`; a loopback or unspecified target, in any
-  spelling (`LOCALHOST`, `127.1`, `::ffff:127.0.0.1`, `0.0.0.0`), means the
-  proxy's own host. A unix socket, a variable target, a cloudflared bastion
-  mode, SOCKS origin or warp-routing, or a config with no route refuses as
-  unreadable.
+  proxy's `node` names the declared node it runs on. A route reaches a node
+  when it targets the node's `host` or any of its `addresses`; a loopback or
+  unspecified target, in any spelling (`LOCALHOST`, `127.1`,
+  `::ffff:127.0.0.1`, `0.0.0.0`), reaches every node on the proxy's machine
+  (every node sharing an address with the proxy's node). A route to anything
+  else must be listed as `host:port` in the proxy's `other_targets`, which
+  states that it reaches no launch node; otherwise it refuses as unreadable,
+  as do a unix socket, a variable target, a cloudflared bastion mode, SOCKS
+  origin or warp-routing, and a config with no route.
 
 ## Test networks
 

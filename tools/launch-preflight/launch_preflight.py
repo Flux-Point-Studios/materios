@@ -115,6 +115,7 @@ DEFAULT_RPC_PORT = 9944
 WASM_OVERRIDES_FLAG = "--wasm-runtime-overrides"
 LAUNCH_FIELDS = {"roles", "economics", "supply", "nodes", "rpc_proxies"}
 PROXY_KINDS = ("nginx", "cloudflared")
+PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
 # Forwarding schemes nginx and cloudflared accept, with the port each implies; tcp names its own.
 DEFAULT_PORTS = {"http": 80, "ws": 80, "grpc": 80, "https": 443, "wss": 443, "grpcs": 443,
                  "ssh": 22, "rdp": 3389, "smb": 445, "tcp": None}
@@ -1099,12 +1100,37 @@ def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
                      for i, cand in enumerate(cardano.candidates)]
 
 
-def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Finding]:
-    proxied = set()
+def node_addresses(node: dict) -> set[str]:
+    return {canonical_host(a) for a in (node["host"], *node.get("addresses", []))}
+
+
+def proxied_nodes(launch: dict) -> set[tuple[str, int, str]]:
+    """(node name, port, proxy name) for every route a proxy forwards. A
+    loopback target reaches every node on the proxy's machine (the nodes that
+    share an address with the proxy's node); any other target must be a
+    declared node's host or address, or one of the proxy's other_targets."""
+    nodes = launch.get("nodes", [])
+    by_name = {node["name"]: node for node in nodes}
+    routes = set()
     for proxy in launch.get("rpc_proxies", []):
+        machine = node_addresses(by_name[proxy["node"]])
+        others = {(canonical_host(host), port)
+                  for host, port in (host_port(t, None) for t in proxy.get("other_targets", []))}
         for host, port in proxy_routes(proxy):
-            target = proxy["host"] if reaches_proxy_host(host) else host
-            proxied.add((canonical_host(target), port, proxy["name"]))
+            if reaches_proxy_host(host):
+                reached = [node["name"] for node in nodes if node_addresses(node) & machine]
+            else:
+                reached = [node["name"] for node in nodes if canonical_host(host) in node_addresses(node)]
+            if not reached and (canonical_host(host), port) not in others:
+                raise InputError(f"proxy {proxy['name']} forwards to {host}:{port}, which is no declared node's host "
+                                 "or address and not in its other_targets: the preflight cannot tell whether it "
+                                 "reaches an authority")
+            routes.update((name, port, proxy["name"]) for name in reached)
+    return routes
+
+
+def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Finding]:
+    proxied = proxied_nodes(launch)
     findings = []
     nodes = launch.get("nodes", [])
     covered = {decode_public_key(node["aura"]) for node in nodes if node["authority"]}
@@ -1139,7 +1165,6 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Fin
                                  "listen-addr ip:port")
             host, _, port = address.rpartition(":")
             listeners.append((int(port), not is_loopback(host), options.get("methods", "auto").lower()))
-        addresses = {canonical_host(a) for a in (node["host"], *node.get("addresses", []))}
         reasons = []
         for port, external, methods in listeners:
             if methods not in ("auto", "safe", "unsafe"):
@@ -1149,7 +1174,7 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Fin
                 continue
             if external:
                 reasons.append(f"authority {node['name']} serves unsafe RPC methods on an external listener")
-            via = sorted(name for host, p, name in proxied if host in addresses and p == port)
+            via = sorted(proxy for name, p, proxy in proxied if name == node["name"] and p == port)
             if via:
                 reasons.append(f"authority {node['name']} serves unsafe RPC methods behind proxy {', '.join(via)}")
         findings += [Finding(RPC, reason) for reason in dict.fromkeys(reasons)]
@@ -1395,11 +1420,23 @@ def validate_launch(launch) -> None:
     proxies = launch.get("rpc_proxies", [])
     if not isinstance(proxies, list):
         raise InputError("rpc_proxies must be a list")
+    node_names = {node["name"] for node in nodes}
     for i, proxy in enumerate(proxies):
-        if not isinstance(proxy, dict) or not all(isinstance(proxy.get(k), str) for k in ("name", "host", "config")):
-            raise InputError(f"rpc_proxies[{i}] needs a name, a host and a config path")
+        if not isinstance(proxy, dict):
+            raise InputError(f"rpc_proxies[{i}] must be an object")
+        for field in sorted(set(proxy) - PROXY_FIELDS):
+            raise InputError(f"rpc_proxies[{i}] has unknown field {field}")
+        if not all(isinstance(proxy.get(k), str) for k in ("name", "node", "config")):
+            raise InputError(f"rpc_proxies[{i}] needs a name, the node it runs on and a config path")
         if proxy.get("kind") not in PROXY_KINDS:
             raise InputError(f"rpc_proxies[{i}] kind must be nginx or cloudflared")
+        if proxy["node"] not in node_names:
+            raise InputError(f"rpc_proxies[{i}] runs on {proxy['node']}, which is not a declared node: "
+                             "declare the machine it runs on in nodes")
+        others = proxy.get("other_targets", [])
+        if not (isinstance(others, list) and all(isinstance(t, str) and HOST_PORT.fullmatch(t) and ":" in t
+                                                 for t in others)):
+            raise InputError(f"rpc_proxies[{i}] other_targets must be host:port strings")
 
 
 def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_key: str,

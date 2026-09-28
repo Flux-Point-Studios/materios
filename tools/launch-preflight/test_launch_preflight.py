@@ -833,13 +833,19 @@ def test_zero_baseline_is_refused(spec, runtime_meta):
 # Rule 3: unsafe RPC on authorities
 # ---------------------------------------------------------------------------
 
-def rpc_findings(tmp_path, nodes, config=None, proxy_host="edge", kind="nginx", authorities=()):
+def rpc_findings(tmp_path, nodes, config=None, proxy_node="edge", kind="nginx", authorities=(), other_targets=()):
+    """Rule 3 on a validated launch. A proxy node the test does not declare runs on its own machine."""
     proxies = []
     if config is not None:
         conf = tmp_path / ("proxy.yml" if kind == "cloudflared" else "nginx.conf")
         conf.write_text(config)
-        proxies = [{"name": "public-rpc", "host": proxy_host, "kind": kind, "config": str(conf)}]
-    return messages(lp.check_rpc({"nodes": nodes, "rpc_proxies": proxies}, list(authorities)))
+        proxies = [{"name": "public-rpc", "node": proxy_node, "kind": kind, "config": str(conf),
+                    "other_targets": list(other_targets)}]
+        if proxy_node not in {node["name"] for node in nodes}:
+            nodes = [*nodes, {"name": proxy_node, "host": proxy_node, "authority": False}]
+    launch = {"roles": {}, "supply": VALID_LOCK, "nodes": nodes, "rpc_proxies": proxies}
+    lp.validate_launch(launch)
+    return messages(lp.check_rpc(launch, list(authorities)))
 
 
 def authority(argv, host="val1", name="val1", aura=None):
@@ -879,7 +885,36 @@ def test_safe_methods_pass_even_when_exposed(tmp_path, argv):
 
 def test_proxy_to_another_host_or_port_does_not_implicate_the_authority(tmp_path):
     nginx = "location / { proxy_pass http://rpc-node:9944; } location /b { proxy_pass http://127.0.0.1:9944; }"
-    assert rpc_findings(tmp_path, [authority("materios-node --rpc-methods unsafe")], nginx, "edge") == []
+    assert rpc_findings(tmp_path, [authority("materios-node --rpc-methods unsafe")], nginx, "edge",
+                        other_targets=["rpc-node:9944"]) == []
+
+
+def test_a_proxy_must_run_on_a_declared_node(tmp_path):
+    conf = tmp_path / "tunnel.yml"
+    conf.write_text(CLOUDFLARED.format(service="http://localhost:9945"))
+    launch = {"roles": {}, "supply": VALID_LOCK, "nodes": [authority(UNSAFE_9945)],
+              "rpc_proxies": [{"name": "tunnel", "node": "val1.lan", "kind": "cloudflared", "config": str(conf)}]}
+    with pytest.raises(lp.InputError, match="rpc_proxies\\[0\\] runs on val1.lan, which is not a declared node"):
+        lp.validate_launch(launch)
+
+
+@pytest.mark.parametrize("target", ["http://val1.lan:9945", "http://VAL1.internal:9945", "http://10.9.9.9:9945"])
+def test_a_proxy_target_that_is_no_declared_address_is_an_input_error(tmp_path, target):
+    nginx = f"location / {{ proxy_pass {target}; }}"
+    with pytest.raises(lp.InputError, match="forwards to .*, which is no declared node's host or address"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1")
+
+
+def test_other_targets_name_routes_that_reach_no_launch_node(tmp_path):
+    nginx = "location / { proxy_pass https://rpc.example.org; }"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, other_targets=["rpc.example.org:443"]) == []
+
+
+def test_loopback_reaches_every_node_on_the_proxy_machine(tmp_path):
+    edge = {"name": "edge", "host": "box1", "authority": False}
+    nginx = "location / { proxy_pass http://127.0.0.1:9945; }"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945, host="box1"), edge], nginx, "edge") == [
+        "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
 def test_proxy_to_another_address_of_the_authority_is_refused(tmp_path):
@@ -1117,7 +1152,7 @@ def test_every_authority_needs_a_node_entry(tmp_path):
 def test_authority_left_out_of_nodes_behind_a_proxy_is_refused(tmp_path):
     nginx = "location / { proxy_pass http://127.0.0.1:9945; }"
     aura = fresh_account()
-    found = rpc_findings(tmp_path, [], nginx, "val1", authorities=[("genesis Aura.Authorities[0]", aura)])
+    found = rpc_findings(tmp_path, [], nginx, authorities=[("genesis Aura.Authorities[0]", aura)])
     assert found == [f"[3 rpc] genesis Aura.Authorities[0] (aura 0x{aura.hex()}) has no authority node in the "
                      "launch manifest: its RPC listeners are unchecked"]
 
@@ -1513,8 +1548,10 @@ class Launch:
             "economics": dict(TUNED, fee_buffer=100 * MATRA),
             "supply": {"genesis_lock": LOCK},
             "nodes": [authority("materios-node --validator --rpc-methods safe", f"val{i}", f"val{i}", aura)
-                      for i, aura in enumerate(aura_keys(spec))],
-            "rpc_proxies": [{"name": "public-rpc", "host": "edge", "kind": "nginx", "config": str(conf)}],
+                      for i, aura in enumerate(aura_keys(spec))]
+            + [{"name": "edge", "host": "edge", "authority": False}],
+            "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
+                             "other_targets": ["rpc-node:9944"]}],
         }
         self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
         self.candidates = genesis_candidates_datum(spec)
@@ -1547,7 +1584,8 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
     code = lp.main(["check", "--spec", str(spec_path), "--launch", str(launch_path),
                     "--signed-manifest", str(signed), "--manifest-key", "0x" + (manifest_key or pub(key)).hex(),
                     "--kupo", kupo_url, "--subwasm", subwasm(), *extra])
-    return code, capsys.readouterr().out
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
 
 
 @pytest.fixture
@@ -1620,7 +1658,8 @@ def test_cli_refuses_a_launch_that_leaves_off_chain_roles_out(clean, capsys):
 
 
 def test_cli_refuses_an_authority_left_out_of_the_nodes(clean, capsys):
-    dropped = clean.launch["nodes"].pop()
+    dropped = [node for node in clean.launch["nodes"] if node["authority"]][-1]
+    clean.launch["nodes"].remove(dropped)
     code, out = clean.run(capsys)
     assert code == 1
     assert f"[3 rpc] genesis Aura.Authorities[3] (aura {dropped['aura']}) has no authority node" in out
@@ -1630,10 +1669,24 @@ def test_cli_refuses_unsafe_rpc_behind_a_cloudflared_tunnel(clean, capsys):
     tunnel = clean.tmp_path / "tunnel.yml"
     tunnel.write_text(CLOUDFLARED.format(service="http://localhost:9945"))
     clean.launch["nodes"][0]["argv"] = UNSAFE_9945
-    clean.launch["rpc_proxies"] = [{"name": "tunnel", "host": "val0", "kind": "cloudflared", "config": str(tunnel)}]
+    clean.launch["rpc_proxies"] = [{"name": "tunnel", "node": "val0", "kind": "cloudflared", "config": str(tunnel)}]
     code, out = clean.run(capsys)
     assert code == 1
     assert "[3 rpc] authority val0 serves unsafe RPC methods behind proxy tunnel" in out
+
+
+@pytest.mark.parametrize("spelling", ["val0.lan", "VAL0.internal", "10.9.9.9"])
+def test_cli_refuses_a_same_machine_tunnel_whose_host_is_spelled_differently(clean, capsys, spelling):
+    tunnel = clean.tmp_path / "tunnel.yml"
+    tunnel.write_text(CLOUDFLARED.format(service=f"http://{spelling}:9945"))
+    clean.launch["nodes"][0]["argv"] = UNSAFE_9945
+    clean.launch["rpc_proxies"] = [{"name": "tunnel", "node": "val0", "kind": "cloudflared", "config": str(tunnel)}]
+    code, out = clean.run(capsys)
+    assert code == 2 and f"proxy tunnel forwards to {spelling}:9945, which is no declared node's" in out
+    signed = copy.deepcopy(clean.launch)
+    clean.launch["rpc_proxies"][0]["node"] = spelling
+    code, out = clean.run(capsys, signed_launch=signed)
+    assert code == 2 and f"rpc_proxies[0] runs on {spelling}, which is not a declared node" in out
 
 
 def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):
@@ -1732,8 +1785,13 @@ VALID_LOCK = {"genesis_lock": LOCK}
      "supply.genesis_lock.utxo must be <64 hex>#<index>"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": {"a": 1}}, "nodes must be a list"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),
-    ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": [{"name": "p", "host": "h", "config": "c"}]},
+    ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": [{"name": "p", "node": "h", "config": "c"}]},
      "rpc_proxies\\[0\\] kind must be nginx or cloudflared"),
+    ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": [{"name": "p", "host": "h", "kind": "nginx", "config": "c"}]},
+     "rpc_proxies\\[0\\] has unknown field host"),
+    ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "h", "host": "h", "authority": False}],
+      "rpc_proxies": [{"name": "p", "node": "h", "kind": "nginx", "config": "c", "other_targets": ["h"]}]},
+     "rpc_proxies\\[0\\] other_targets must be host:port strings"),
     ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": {"p": 1}}, "rpc_proxies must be a list"),
     ({"roles": {}, "supply": VALID_LOCK,
       "nodes": [{"name": "v1", "host": "h", "authority": True, "aura": "0x" + "11" * 32, "addresses": "10.0.0.1"}]},
