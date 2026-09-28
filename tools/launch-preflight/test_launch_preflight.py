@@ -1808,6 +1808,21 @@ def test_cli_refuses_a_negative_fee_buffer_that_would_lower_the_endowment_floor(
     assert code == 2 and "economics.fee_buffer must be a non-negative integer" in out
 
 
+def test_cli_refuses_an_authority_that_overrides_the_signed_runtime(clean, capsys):
+    clean.launch["nodes"][1]["argv"] = "materios-node --validator --rpc-methods safe --wasm-runtime-overrides /srv/o"
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[6 checkpoint] authority val1 runs --wasm-runtime-overrides: a local runtime would replace the signed " \
+           "runtime code" in out
+
+
+def test_cli_refuses_a_genesis_that_turns_on_the_cardano_observation(clean, capsys):
+    put(clean.spec, "NativeTokenManagement", "MainChainScriptsConfiguration", ntm_scripts(SCRIPT_ADDRESS.encode()))
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[6 checkpoint] genesis turns on the Cardano deposit observation for {SCRIPT_ADDRESS}" in out
+
+
 def test_cli_refuses_a_launch_manifest_edited_after_signing(clean, capsys):
     signed_launch = copy.deepcopy(clean.launch)
     signed_launch["roles"]["anchor_signer"] = [ss58(fresh_account())]
