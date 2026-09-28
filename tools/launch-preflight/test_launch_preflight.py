@@ -572,6 +572,7 @@ def sidecar(argv=(), **env) -> dict:
     (sidecar(["cert-daemon", "--signer-uri=/Attestor2"]), "/Attestor2"),
     (sidecar(["/bin/sh", "-c", "exec cert-daemon --suri /Attestor3"]), "/Attestor3"),
     (sidecar(["bash", "-c", "SIGNER_URI=/Attestor4 exec cert-daemon"]), "/Attestor4"),
+    (sidecar(["bash", "-c", "SIGNER_URI+=/Attestor5 exec cert-daemon"]), "/Attestor5"),
 ])
 def test_a_secret_uri_setting_with_no_phrase_is_named(spec, meta, known, launch, named):
     found = dev_key_findings(spec, meta, known, launch)
@@ -1074,6 +1075,9 @@ def test_nginx_config_the_preflight_cannot_bound_is_an_input_error(tmp_path, con
     "add_header X-Frag a}#b;",
     "add_header X-Frag a${host}#b;",
     'add_header X-Frag "a\\"#b";',
+    'add_header X-Frag "a\\" #b";',
+    "add_header X-Frag 'a\\' #b';",
+    "server_name a${#b;",
 ])
 def test_a_hash_that_does_not_start_an_nginx_token_is_not_a_comment(tmp_path, before):
     nginx = f"location /rpc {{ {before} proxy_pass http://127.0.0.1:9945; }}"
@@ -1425,6 +1429,7 @@ def test_an_authority_setting_outside_the_allowlist_is_an_input_error(name):
 
 @pytest.mark.parametrize("name, script", [
     ("GCONV_PATH", "export GCONV_PATH=/srv/gconv; " + SAFE_NODE),
+    ("GCONV_PATH", "GCONV_PATH+=/srv/gconv " + SAFE_NODE),
     ("USE_MAIN_CHAIN_FOLLOWER_MOCK", "USE_MAIN_CHAIN_FOLLOWER_MOCK=true " + SAFE_NODE),
     ("MITHRIL_CLIENT_BIN", "MITHRIL_CLIENT_BIN=/srv/mithril; export MITHRIL_CLIENT_BIN; " + SAFE_NODE),
     ("OPENSSL_CONF", "exec bash -c 'OPENSSL_CONF=/srv/o.cnf " + SAFE_NODE + "'"),
