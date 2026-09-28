@@ -209,8 +209,12 @@ more than 300 slots behind its node.
   (every node sharing an address with the proxy's node). A route to anything
   else must be listed as `host:port` in the proxy's `other_targets`, which
   states that it reaches no launch node; otherwise it refuses as unreadable,
-  as do a unix socket, a variable target, an upstream with no server, quotes
-  or braces nginx would not parse, a cloudflared bastion mode, SOCKS origin
+  as do a unix socket, a variable target, an upstream with no server, an
+  upstream server with any parameter but `weight=`, `max_conns=`,
+  `max_fails=`, `fail_timeout=`, `backup` and `down` (nginx takes a
+  `service=` server's port and host from DNS SRV, and looks a `resolve`
+  server's name up again, while it runs), quotes or braces nginx would not
+  parse, a cloudflared bastion mode, SOCKS origin
   or warp-routing, and a config with no route.
 
 ## Test networks

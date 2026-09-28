@@ -1151,6 +1151,35 @@ def test_an_upstream_reads_the_servers_its_include_names(tmp_path):
     assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
 
 
+# The upstream server parameters that leave the server's address as written.
+def test_upstream_server_parameters_that_keep_its_address_are_read_through(tmp_path):
+    upstream = ("upstream rpc { server val1:9945 weight=2 max_conns=10 max_fails=3 fail_timeout=10s backup; "
+                "server 10.9.9.9:1 down; }")
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], http_routes(upstream, "proxy_pass http://rpc;"), "val1",
+                        other_targets=["10.9.9.9:1"]) == BEHIND_PROXY
+
+
+# With service= nginx takes the port, and the host it connects to, from a DNS SRV record while it runs, and with
+# resolve it resolves the name again while it runs. nginx 1.29.8 served /rpc from 127.0.0.1:9945 through the first
+# upstream, where the preflight read val1:80. Any other parameter is one the preflight does not read: drain comes
+# with a build that has the sticky module.
+@pytest.mark.parametrize("kind", ["nginx", "nginx-dump"])
+@pytest.mark.parametrize("text, parameter", [
+    (http_routes("resolver 127.0.0.1 ipv6=off valid=1s;\n  upstream rpc { zone rpc 64k; "
+                 "server val1 service=_rpc._tcp resolve; }", "proxy_pass http://rpc;"), "service=_rpc._tcp"),
+    (http_routes("resolver 127.0.0.1 valid=1s; upstream rpc { zone rpc 64k; server val1:9945 resolve; }",
+                 "proxy_pass http://rpc;"), "resolve"),
+    (http_routes("upstream rpc { zone rpc 64k; server val1:9945 drain; }", "proxy_pass http://rpc;"), "drain"),
+    (http_routes("", "return 204;") + "stream { resolver 127.0.0.1 valid=1s; upstream rpc { zone rpc 64k; "
+     "server val1:9945 resolve; } server { listen 9000; proxy_pass rpc; } }\n", "resolve"),
+], ids=["service", "resolve", "drain", "stream-resolve"])
+def test_an_upstream_server_nginx_resolves_while_it_runs_is_an_input_error(tmp_path, text, parameter, kind):
+    if kind == "nginx-dump":
+        text = "# configuration file /etc/nginx/nginx.conf:\n" + text
+    with pytest.raises(lp.InputError, match=f"server val1(:9945)? takes {re.escape(parameter)}; .*cannot resolve"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], text, "val1", kind)
+
+
 # In a dump, an included file shows under its own header, apart from the block that includes it, and a comment in
 # a file can read as a header. So a server outside an upstream block in its own file could serve any upstream:
 # nginx serves 127.0.0.1:9945 in upstream rpc from up.d/a.conf, and in the second dump a comment in a.conf would
@@ -2411,6 +2440,16 @@ def test_cli_refuses_a_same_machine_tunnel_whose_host_is_spelled_differently(cle
     clean.launch["rpc_proxies"][0]["node"] = spelling
     code, out = clean.run(capsys, signed_launch=signed)
     assert code == 2 and f"rpc_proxies[0] runs on {spelling}, which is not a declared node" in out
+
+
+def test_cli_refuses_an_upstream_whose_port_comes_from_dns_srv_as_unreadable(clean, capsys):
+    conf = clean.tmp_path / "srv.conf"
+    conf.write_text(http_routes("resolver 127.0.0.1 valid=1s; upstream rpc { zone rpc 64k; "
+                                "server val0 service=_rpc._tcp resolve; }", "proxy_pass http://rpc;"))
+    clean.launch["nodes"][0]["argv"] = UNSAFE_9945
+    clean.launch["rpc_proxies"] = [{"name": "public-rpc", "node": "val0", "kind": "nginx", "config": str(conf)}]
+    code, out = clean.run(capsys)
+    assert code == 2 and "server val0 takes service=_rpc._tcp; " in out and "cannot resolve" in out
 
 
 def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):

@@ -183,6 +183,9 @@ NGINX_FORWARDS = frozenset({"proxy_pass", "grpc_pass", "uwsgi_pass", "scgi_pass"
 # inside nginx that can open its own connections, which no forwarding directive shows.
 NGINX_CODE = re.compile(r"load_module|js_\w+|perl\w*|\w*_by_lua\w*|lua_\w+")
 NGINX_INCLUDE_DEPTH = 8
+# The upstream server parameters that leave a server's address as written. nginx takes the port and host of a
+# `service=` server from a DNS SRV record, and resolves a `resolve` server's name again, while it runs.
+NGINX_SERVER_PARAMETERS = re.compile(r"(?:weight|max_conns|max_fails|fail_timeout)=\S*|backup|down")
 HOST_PORT = re.compile(r"\[([0-9A-Fa-f:.]+)\](?::(\d+))?|([^\s:\[\]/]+)(?::(\d+))?")
 # cMATRA (v2) on Cardano mainnet: policy id and asset name, as Kupo keys assets.
 CMATRA_UNIT = "7ff33a5565393dc47b48ac47becc12d92c9952e724e8446dfb6adc66.634d41545241"
@@ -1493,6 +1496,12 @@ def nginx_routes(path: Path, text: str, dump: bool) -> list[tuple[str, int]]:
                 raise InputError(f"{statement.file}: server {args[0]} sits outside any upstream block, so the "
                                  "preflight cannot tell which upstream it serves; keep each upstream's servers in "
                                  "its own block, since `nginx -T` output shows an included file apart from it")
+            for parameter in args[1:]:
+                if not NGINX_SERVER_PARAMETERS.fullmatch(parameter):
+                    raise InputError(f"{statement.file}: server {args[0]} takes {parameter}; the preflight reads "
+                                     "weight=, max_conns=, max_fails=, fail_timeout=, backup and down, and cannot "
+                                     "resolve where nginx connects otherwise (service= takes the port and host from "
+                                     "DNS SRV, resolve looks the name up again while nginx runs)")
             upstreams[_upstream_name(parent)].append(args[0])
     return [route for target in forwards for route in forward_targets(target, upstreams)]
 
