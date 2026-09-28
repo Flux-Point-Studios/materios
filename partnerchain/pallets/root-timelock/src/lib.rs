@@ -63,9 +63,10 @@ pub use pallet::*;
     MaxEncodedLen,
 )]
 pub enum CallClass {
-    /// A recovery lever that cannot fix who holds authority: it changes how
-    /// the committee is drawn, or forces the finality set the session already
-    /// chose. Waits the recovery delay; the guardian may fast-track it.
+    /// A call that cannot fix who holds authority: a recovery lever that
+    /// changes how the committee is drawn or forces the finality set the
+    /// session already chose, or a raise of a delay, which only slows Root
+    /// down. Waits the recovery delay; the guardian may fast-track it.
     Recovery,
     /// A recovery lever the sudo key alone may pull no sooner than anything
     /// else: one that can fix who holds authority, such as a pinned committee

@@ -1,6 +1,7 @@
 //! Root behind a delay: the sudo key reaches Root at once only for the
-//! safety-only exempt calls and `RootTimelock::schedule`; everything else
-//! waits its class's delay in `RootTimelock`, where the guardian can veto it.
+//! safety-only exempt calls, `RootTimelock::schedule` and the call the
+//! guardian approved; everything else waits its class's delay in
+//! `RootTimelock`, where the guardian can veto it.
 
 use crate::migrations::{InitRootTimelock, PREPROD_GENESIS_HASH};
 use crate::root_gate::{max_exempt_stall_delay, TimelockClassifier, MAX_EXEMPT_STALL_DELAY};
