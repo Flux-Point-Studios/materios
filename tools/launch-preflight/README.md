@@ -13,8 +13,11 @@ It reads:
 - **Cardano mainnet through a Kupo index**: the cMATRA lock that backs genesis,
   and the permissioned candidates datum, which sets the committee after the
   first rotation;
+- **each public RPC URL, live**: the methods it lists and whether it answers
+  an unsafe one, over HTTP and over a WebSocket;
 - a **launch manifest**: who holds each role, the economics, where the genesis
-  lock is, each node's launch command and the RPC proxy configs;
+  lock is, each node's launch command, the RPC proxy configs and the public RPC
+  URLs;
 - a **signed launch manifest**: the genesis hash, runtime code hash, chain-spec
   hash and launch manifest hash, signed with an ed25519 launch key that
   `launch_keys.json` pins.
@@ -25,15 +28,16 @@ It reads:
 |---|---|
 | 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` is not a multisig with a threshold of at least 2, or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
-| 3 rpc | An authority serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`, including every value one `--experimental-rpc-endpoint` takes up to the next option, with each option trimmed as the node trims it. |
+| 3 rpc | A public RPC URL, probed live, lists in `rpc_methods` a method outside the safe set or answers `system_peers`, an unsafe method that changes nothing (see [Public RPC probe](#public-rpc-probe)); the launch does not declare `public_rpc`; an authority serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`, including every value one `--experimental-rpc-endpoint` takes up to the next option, with each option trimmed as the node trims it. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. |
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
 | 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including a proxy
-config with no route the preflight can read and a Kupo that is unreachable,
-behind its node or does not index the permissioned candidates token.
+config with no route the preflight can read, a Kupo that is unreachable,
+behind its node or does not index the permissioned candidates token, and a
+public RPC URL whose answers the probe cannot resolve.
 
 ## Usage
 
@@ -104,7 +108,8 @@ more than 300 slots behind its node.
   "rpc_proxies": [
     {"name": "public-rpc", "node": "edge-1", "kind": "nginx-dump", "config": "nginx-T.txt",
      "other_targets": ["status.example.org:443"]}
-  ]
+  ],
+  "public_rpc": ["https://rpc.example.org/rpc"]
 }
 ```
 
@@ -224,6 +229,35 @@ more than 300 slots behind its node.
   server's name up again, while it runs), quotes or braces nginx would not
   parse, a cloudflared bastion mode, SOCKS origin
   or warp-routing, and a config with no route.
+
+- `public_rpc` lists every URL that serves the chain's RPC to the public,
+  as `http`, `https`, `ws` or `wss` with no user, password or fragment, or
+  is `[]` when the launch serves none. Leaving it out refuses.
+
+## Public RPC probe
+
+For each URL in `public_rpc` the preflight calls, over HTTP POST and over a
+WebSocket at the same address (`https://` and `wss://`, `http://` and
+`ws://`), two methods and nothing else:
+
+- `rpc_methods`. Every method it lists must be in `SAFE_RPC_METHODS`: what a
+  node built from polkadot-stable2409-4 serves under `--rpc-methods safe`,
+  its `rpc_methods` less each method whose handler calls `check_if_safe`. A
+  node lists every method it registers, the unsafe ones included, even under
+  `--rpc-methods safe`, so a URL that reaches a node directly refuses: serve
+  it through a filter that lists only what it serves, as rpc-safe-filter
+  does. A method the set does not name refuses too, until it is classified.
+- `system_peers`, whose handler calls `check_if_safe` and then only reads the
+  peer list. An answer with a result refuses; a JSON-RPC error `-32601` is
+  the refusal expected (sc-rpc answers an unsafe call with it where unsafe
+  methods are denied, and a filter an unknown method).
+
+Anything else is an input the preflight cannot resolve: no connection, a
+redirect or any HTTP status but 200, a refused WebSocket upgrade, a body that
+is not a JSON-RPC 2.0 answer to the call, `rpc_methods` without a list of
+methods, or `system_peers` refused with another error code. The probe uses no
+proxy from the environment and verifies TLS certificates. It sees each URL as
+the machine it runs on does, so run it from outside the launch's own network.
 
 ## Test networks
 

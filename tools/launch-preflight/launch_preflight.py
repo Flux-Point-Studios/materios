@@ -5,11 +5,12 @@ safe to run with real value.
 It reads the artifacts that actually launch: the raw chain spec every node
 loads, the runtime metadata extracted from that spec's own `:code` (with
 subwasm, the extractor the runtime-upgrade ceremony gate uses), the authority
-nodes' launch commands and the RPC proxy configs in front of them, and what
-Cardano holds, through a Kupo index: the cMATRA lock that backs genesis and the
-permissioned candidates that become the committee after the first rotation. A
-launch manifest, signed with a launch key launch_keys.json pins, supplies what
-genesis cannot show: who holds each role, the explicit economics, where the lock is.
+nodes' launch commands and the RPC proxy configs in front of them, what each
+public RPC URL serves, probed live, and what Cardano holds, through a Kupo index:
+the cMATRA lock that backs genesis and the permissioned candidates that become
+the committee after the first rotation. A launch manifest, signed with a launch
+key launch_keys.json pins, supplies what genesis cannot show: who holds each
+role, the explicit economics, where the lock is.
 
 Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
@@ -23,7 +24,8 @@ Rules, each of which refuses on its own:
                  parameters not declared, or genesis and the runtime do not
                  hold exactly the declared values
   3 rpc          an authority serves unsafe RPC methods on an external or
-                 proxied listener, or an authority has no launch entry to check
+                 proxied listener, a public RPC URL lists or answers an unsafe
+                 method, or an authority has no launch entry to check
   4 supply       an attestor endowment below bond + existential deposit + fee
                  buffer; genesis issuance plus the runtime's emission reserves
                  above the cMATRA the lock holds on Cardano (the reserve counted
@@ -60,6 +62,8 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +75,8 @@ import yaml
 import zstandard
 from nacl import signing
 from nacl.exceptions import BadSignatureError
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import connect as ws_connect
 
 HERE = Path(__file__).resolve().parent
 # The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
@@ -169,9 +175,56 @@ SHELL_NESTING = 4
 RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
 WASM_OVERRIDES_FLAG = "--wasm-runtime-overrides"
-LAUNCH_FIELDS = {"roles", "economics", "supply", "nodes", "rpc_proxies"}
+LAUNCH_FIELDS = {"roles", "economics", "supply", "nodes", "rpc_proxies", "public_rpc"}
 PROXY_KINDS = ("nginx", "nginx-dump", "cloudflared")
 PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
+# What a node built from polkadot-stable2409-4 serves under --rpc-methods safe: its rpc_methods less each method whose
+# handler calls check_if_safe (author, system, offchain and state in sc-rpc, and substrate-frame-rpc-system's dry
+# run). A node lists every method it registers under --rpc-methods safe too, the unsafe ones included.
+SAFE_RPC_METHODS = frozenset({
+    "account_nextIndex",
+    "author_pendingExtrinsics", "author_submitAndWatchExtrinsic", "author_submitExtrinsic",
+    "author_unwatchExtrinsic",
+    "chainHead_v1_body", "chainHead_v1_call", "chainHead_v1_continue", "chainHead_v1_follow", "chainHead_v1_header",
+    "chainHead_v1_stopOperation", "chainHead_v1_storage", "chainHead_v1_unfollow", "chainHead_v1_unpin",
+    "chainSpec_v1_chainName", "chainSpec_v1_genesisHash", "chainSpec_v1_properties",
+    "chain_getBlock", "chain_getBlockHash", "chain_getFinalisedHead", "chain_getFinalizedHead", "chain_getHead",
+    "chain_getHeader", "chain_getRuntimeVersion", "chain_subscribeAllHeads", "chain_subscribeFinalisedHeads",
+    "chain_subscribeFinalizedHeads", "chain_subscribeNewHead", "chain_subscribeNewHeads",
+    "chain_subscribeRuntimeVersion", "chain_unsubscribeAllHeads", "chain_unsubscribeFinalisedHeads",
+    "chain_unsubscribeFinalizedHeads", "chain_unsubscribeNewHead", "chain_unsubscribeNewHeads",
+    "chain_unsubscribeRuntimeVersion",
+    "childstate_getKeys", "childstate_getKeysPaged", "childstate_getKeysPagedAt", "childstate_getStorage",
+    "childstate_getStorageEntries", "childstate_getStorageHash", "childstate_getStorageSize",
+    "motra_estimateFee", "motra_getBalance", "motra_getParams", "motra_insufficientFailures", "motra_totalBurned",
+    "motra_totalIssued",
+    "orinq_getReceipt", "orinq_getReceiptCount", "orinq_getReceiptStatus", "orinq_getReceiptsByContent",
+    "orinq_receiptExists",
+    "rpc_methods",
+    "state_call", "state_callAt", "state_getChildReadProof", "state_getKeys", "state_getKeysPaged",
+    "state_getKeysPagedAt", "state_getMetadata", "state_getReadProof", "state_getRuntimeVersion",
+    "state_getStorage", "state_getStorageAt", "state_getStorageHash", "state_getStorageHashAt",
+    "state_getStorageSize", "state_getStorageSizeAt", "state_queryStorageAt", "state_subscribeRuntimeVersion",
+    "state_subscribeStorage", "state_unsubscribeRuntimeVersion", "state_unsubscribeStorage",
+    "subscribe_newHead",
+    "system_accountNextIndex", "system_chain", "system_chainType", "system_health", "system_localListenAddresses",
+    "system_localPeerId", "system_name", "system_nodeRoles", "system_properties", "system_reservedPeers",
+    "system_syncState", "system_version",
+    "transactionWatch_v1_submitAndWatch", "transactionWatch_v1_unwatch",
+    "transaction_v1_broadcast", "transaction_v1_stop",
+    "unsubscribe_newHead",
+})
+# An unsafe method that changes nothing: its handler calls check_if_safe, then reads the peer list.
+UNSAFE_PROBE = "system_peers"
+# What sc-rpc answers an unsafe call with where unsafe methods are denied, and a proxy an unknown method with.
+METHOD_NOT_FOUND = -32601
+# A node serves JSON-RPC over HTTP and over a WebSocket at one address, and a client picks either.
+RPC_TRANSPORTS = {"http": "ws", "https": "wss", "ws": "http", "wss": "https"}
+PUBLIC_RPC_TIMEOUT = 30
+PUBLIC_RPC_LIMIT = 1024 * 1024
+# The probe subscribes to nothing, so a WebSocket carries only answers.
+PUBLIC_RPC_MESSAGES = 16
+USER_AGENT = "materios-launch-preflight"
 # Forwarding schemes nginx and cloudflared accept, with the port each implies; tcp names its own.
 DEFAULT_PORTS = {"http": 80, "ws": 80, "grpc": 80, "https": 443, "wss": 443, "grpcs": 443,
                  "ssh": 22, "rdp": 3389, "smb": 445, "tcp": None}
@@ -1680,6 +1733,85 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Fin
     return findings
 
 
+def rpc_transports(url: str) -> list[str]:
+    """A public RPC URL as given, then the same address over the other transport."""
+    parts = urllib.parse.urlsplit(url)
+    return [parts.geturl(), parts._replace(scheme=RPC_TRANSPORTS[parts.scheme]).geturl()]
+
+
+def _http_answer(url: str, call: str, method: str):
+    parts = urllib.parse.urlsplit(url)
+    connection = (http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection)(
+        parts.hostname, parts.port, timeout=PUBLIC_RPC_TIMEOUT)
+    try:
+        connection.request("POST", urllib.parse.urlunsplit(("", "", parts.path or "/", parts.query, "")), call,
+                           {"Content-Type": "application/json", "User-Agent": USER_AGENT})
+        response = connection.getresponse()
+        body = response.read(PUBLIC_RPC_LIMIT + 1)
+    finally:
+        connection.close()
+    if response.status != 200:
+        raise InputError(f"public RPC {url} answered {method} with HTTP {response.status}; the preflight cannot "
+                         "resolve what it serves")
+    if len(body) > PUBLIC_RPC_LIMIT:
+        raise InputError(f"public RPC {url} answered {method} with over {PUBLIC_RPC_LIMIT} bytes")
+    return json.loads(body)
+
+
+def _ws_answer(url: str, call: str, method: str):
+    """The first message over the WebSocket that answers a call."""
+    with ws_connect(url, proxy=None, open_timeout=PUBLIC_RPC_TIMEOUT, close_timeout=PUBLIC_RPC_TIMEOUT,
+                    max_size=PUBLIC_RPC_LIMIT, user_agent_header=USER_AGENT) as ws:
+        ws.send(call)
+        deadline = time.monotonic() + PUBLIC_RPC_TIMEOUT
+        for _ in range(PUBLIC_RPC_MESSAGES):
+            message = json.loads(ws.recv(timeout=max(deadline - time.monotonic(), 0)))
+            if isinstance(message, dict) and "id" in message:
+                return message
+    raise InputError(f"public RPC {url} sent no answer to {method} in {PUBLIC_RPC_MESSAGES} messages")
+
+
+def rpc_answer(url: str, method: str) -> dict:
+    """A public endpoint's JSON-RPC 2.0 answer to `method` with no params: over HTTP POST at an http(s) URL, over
+    a WebSocket at a ws(s) URL. Anything but a result or an error object answering this call is unreadable."""
+    call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": []})
+    try:
+        answer = (_ws_answer if url.startswith("ws") else _http_answer)(url, call, method)
+    except (OSError, ValueError, http.client.HTTPException, WebSocketException) as e:
+        raise InputError(f"public RPC {url}: {method} failed: {e}") from e
+    error = answer.get("error") if isinstance(answer, dict) else None
+    if not (isinstance(answer, dict) and answer.get("jsonrpc") == "2.0" and type(answer.get("id")) is int
+            and answer["id"] == 1 and ("result" in answer) != ("error" in answer)
+            and ("result" in answer or isinstance(error, dict) and type(error.get("code")) is int)):
+        raise InputError(f"public RPC {url} did not answer {method} as JSON-RPC 2.0")
+    return answer
+
+
+def check_public_rpc(launch: dict) -> list[Finding]:
+    """Rule 3 on what each public RPC URL serves, over HTTP and over a WebSocket: every method rpc_methods lists
+    must be in the safe set, and an unsafe method that changes nothing must be refused."""
+    if "public_rpc" not in launch:
+        return [Finding(RPC, "public_rpc is not declared: the public RPC endpoints go unprobed; list every public "
+                             "RPC URL, or [] when the launch serves none")]
+    findings = []
+    for url in dict.fromkeys(transport for given in launch["public_rpc"] for transport in rpc_transports(given)):
+        listed = rpc_answer(url, "rpc_methods").get("result")
+        methods = listed.get("methods") if isinstance(listed, dict) else None
+        if not (isinstance(methods, list) and all(isinstance(method, str) for method in methods)):
+            raise InputError(f"public RPC {url} did not answer rpc_methods with a list of methods; the preflight "
+                             "cannot resolve which methods it serves")
+        if outside := sorted(set(methods) - SAFE_RPC_METHODS):
+            findings.append(Finding(RPC, f"public RPC {url} lists methods outside the safe set: {', '.join(outside)}"))
+        probe = rpc_answer(url, UNSAFE_PROBE)
+        if "result" in probe:
+            findings.append(Finding(RPC, f"public RPC {url} answers {UNSAFE_PROBE}, which a node serves only with "
+                                         "unsafe methods on"))
+        elif probe["error"]["code"] != METHOD_NOT_FOUND:
+            raise InputError(f"public RPC {url} answered {UNSAFE_PROBE} with error {probe['error']['code']}: the "
+                             "preflight cannot resolve whether it serves unsafe methods")
+    return findings
+
+
 def free_balance(spec: Spec, account: bytes) -> int:
     key = storage_key("System", "Account") + hashlib.blake2b(account, digest_size=16).digest() + account
     info = spec.storage.get(key)
@@ -2043,6 +2175,20 @@ def validate_launch(launch) -> None:
         if not (isinstance(others, list) and all(isinstance(t, str) and HOST_PORT.fullmatch(t) and ":" in t
                                                  for t in others)):
             raise InputError(f"rpc_proxies[{i}] other_targets must be host:port strings")
+    public = launch.get("public_rpc", [])
+    if not isinstance(public, list):
+        raise InputError("public_rpc must be a list of URLs")
+    for i, url in enumerate(public):
+        parts = urllib.parse.urlsplit(url) if isinstance(url, str) else None
+        try:
+            readable = parts is not None and parts.scheme in RPC_TRANSPORTS and bool(parts.hostname) \
+                and parts.port != 0
+        except ValueError:
+            readable = False
+        if not readable:
+            raise InputError(f"public_rpc[{i}] must be an http, https, ws or wss URL")
+        if parts.username is not None or parts.password is not None or parts.fragment:
+            raise InputError(f"public_rpc[{i}] must name no user, password or fragment")
 
 
 def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_key: str | None,
@@ -2054,6 +2200,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
+            + check_public_rpc(launch)
             + check_supply(spec, meta, launch, cardano)
             + check_genesis_lock(spec, launch, cardano, well_known)
             + check_genesis_storage(spec, meta)

@@ -5,6 +5,7 @@ genesis hash was read from a live node, so the genesis-hash test checks this
 implementation against the reference one. Cardano is served by a local HTTP
 server that answers with Kupo's response shapes.
 """
+import base64
 import copy
 import dataclasses
 import gzip
@@ -1841,6 +1842,230 @@ def test_authorities_come_from_genesis_aura_and_the_cardano_candidates(spec):
 
 
 # ---------------------------------------------------------------------------
+# Rule 3, live: what each public RPC URL serves
+# ---------------------------------------------------------------------------
+
+# The preprod node's rpc_methods answer: a node lists every method it registers, the unsafe ones included, under
+# --rpc-methods safe too (sc-rpc-server utils.rs).
+NODE_METHODS = json.loads((FIXTURES / "node-rpc-methods.json").read_text())
+# The methods whose sc-rpc handler calls check_if_safe, at polkadot-stable2409-4.
+UNSAFE_CLASS = {
+    # substrate/client/rpc/src/author/mod.rs
+    "author_insertKey", "author_rotateKeys", "author_hasKey", "author_hasSessionKeys", "author_removeExtrinsic",
+    # substrate/client/rpc/src/system/mod.rs
+    "system_peers", "system_unstable_networkState", "system_addReservedPeer", "system_removeReservedPeer",
+    "system_addLogFilter", "system_resetLogFilter",
+    # substrate/client/rpc/src/offchain/mod.rs
+    "offchain_localStorageSet", "offchain_localStorageGet",
+    # substrate/client/rpc/src/state/mod.rs
+    "state_getPairs", "state_queryStorage", "state_traceBlock",
+    # substrate/utils/frame/rpc/system/src/lib.rs
+    "system_dryRun", "system_dryRunAt",
+}
+UNSAFE_REFUSED = {"error": {"code": -32601, "message": "RPC call is unsafe to be called externally"}}
+WS_GUID = b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def test_the_safe_set_is_every_node_method_whose_handler_serves_it_under_safe():
+    assert lp.SAFE_RPC_METHODS == set(NODE_METHODS) - UNSAFE_CLASS
+    assert UNSAFE_CLASS < set(NODE_METHODS)
+
+
+# system_peers calls check_if_safe and then only reads the peer list (sc-rpc system/mod.rs).
+def test_the_probe_calls_an_unsafe_method_that_only_reads():
+    assert lp.UNSAFE_PROBE == "system_peers"
+
+
+def _ws_frame(stream) -> tuple[int, bytes] | None:
+    """(opcode, payload) of one client frame, which RFC 6455 masks."""
+    head = stream.read(2)
+    if len(head) < 2:
+        return None
+    size = head[1] & 0x7F
+    if size >= 126:
+        size = int.from_bytes(stream.read(2 if size == 126 else 8), "big")
+    mask = stream.read(4)
+    return head[0] & 0x0F, bytes(b ^ mask[i % 4] for i, b in enumerate(stream.read(size)))
+
+
+def _ws_text(payload: bytes) -> bytes:
+    size = len(payload)
+    head = bytes([size]) if size < 126 else bytes([126]) + size.to_bytes(2, "big") if size < 65536 \
+        else bytes([127]) + size.to_bytes(8, "big")
+    return b"\x81" + head + payload
+
+
+class RpcEndpoint:
+    """A local server that answers JSON-RPC over HTTP POST and over a WebSocket at one address, like a node or a
+    proxy in front of one. Per transport: the rpc_methods list, and the answer part (result or error) to any other
+    method, -32601 when it has none. Unset, it answers like a filter that serves only safe methods."""
+
+    def __init__(self):
+        self.methods = {"http": sorted(lp.SAFE_RPC_METHODS), "ws": sorted(lp.SAFE_RPC_METHODS)}
+        self.answers = {"http": {}, "ws": {}}
+        self.http_status, self.upgrade = 200, True
+        self.calls = []
+        endpoint = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                call = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                body = json.dumps(endpoint.answer(call, "http")).encode()
+                self.send_response(endpoint.http_status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                key = self.headers.get("Sec-WebSocket-Key")
+                if not endpoint.upgrade or key is None:
+                    self.send_error(403)
+                    return
+                self.send_response(101)
+                self.send_header("Upgrade", "websocket")
+                self.send_header("Connection", "Upgrade")
+                accept = base64.b64encode(hashlib.sha1(key.encode() + WS_GUID).digest()).decode()
+                self.send_header("Sec-WebSocket-Accept", accept)
+                self.end_headers()
+                while (frame := _ws_frame(self.rfile)) is not None and frame[0] != 8:
+                    reply = endpoint.answer(json.loads(frame[1]), "ws")
+                    self.wfile.write(_ws_text(json.dumps(reply).encode()))
+                self.wfile.write(b"\x88\x00")
+                self.close_connection = True
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, args=(0.05,), daemon=True).start()
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/rpc"
+        self.ws_url = "ws" + self.url[len("http"):]
+
+    def answer(self, call: dict, transport: str) -> dict:
+        self.calls.append((transport, call["method"]))
+        listed = {"result": {"version": 1, "methods": self.methods[transport]}}
+        missing = {"error": {"code": -32601, "message": "Method not found"}}
+        default = listed if call["method"] == "rpc_methods" else missing
+        return {"jsonrpc": "2.0", "id": call["id"]} | self.answers[transport].get(call["method"], default)
+
+    def run_unsafe_node(self, *transports: str) -> None:
+        """What a node run with --rpc-methods unsafe answers."""
+        for transport in transports or ("http", "ws"):
+            self.methods[transport] = NODE_METHODS
+            self.answers[transport] = {"system_peers": {"result": []}}
+
+
+@pytest.fixture
+def endpoint():
+    server = RpcEndpoint()
+    yield server
+    server.server.shutdown()
+
+
+def public_findings(*urls) -> list[str]:
+    launch = {"roles": {}, "supply": VALID_LOCK, "public_rpc": list(urls)}
+    lp.validate_launch(launch)
+    return messages(lp.check_public_rpc(launch))
+
+
+def test_a_public_endpoint_that_lists_only_safe_methods_and_refuses_an_unsafe_one_passes(endpoint):
+    assert public_findings(endpoint.url) == []
+    assert endpoint.calls == [("http", "rpc_methods"), ("http", "system_peers"),
+                              ("ws", "rpc_methods"), ("ws", "system_peers")]
+
+
+def test_a_websocket_url_is_probed_over_http_too(endpoint):
+    assert public_findings(endpoint.ws_url) == []
+    assert {transport for transport, _ in endpoint.calls} == {"http", "ws"}
+
+
+def test_a_public_endpoint_in_front_of_an_unsafe_node_is_refused(endpoint):
+    endpoint.run_unsafe_node()
+    unsafe = ", ".join(sorted(UNSAFE_CLASS))
+    assert public_findings(endpoint.url) == [
+        f"[3 rpc] public RPC {endpoint.url} lists methods outside the safe set: {unsafe}",
+        f"[3 rpc] public RPC {endpoint.url} answers system_peers, which a node serves only with unsafe methods on",
+        f"[3 rpc] public RPC {endpoint.ws_url} lists methods outside the safe set: {unsafe}",
+        f"[3 rpc] public RPC {endpoint.ws_url} answers system_peers, which a node serves only with unsafe methods on"]
+
+
+# A node run with --rpc-methods safe refuses each unsafe call but lists every unsafe method.
+def test_a_safe_node_behind_a_public_url_lists_its_unsafe_methods(endpoint):
+    for transport in ("http", "ws"):
+        endpoint.methods[transport] = NODE_METHODS
+        endpoint.answers[transport] = {"system_peers": UNSAFE_REFUSED}
+    found = public_findings(endpoint.url)
+    assert [f.split(" lists ")[0] for f in found] == [f"[3 rpc] public RPC {endpoint.url}",
+                                                      f"[3 rpc] public RPC {endpoint.ws_url}"]
+
+
+# A proxy can send the WebSocket upgrade somewhere other than the HTTP calls.
+def test_a_websocket_route_to_an_unsafe_node_behind_a_filtered_http_route_is_refused(endpoint):
+    endpoint.run_unsafe_node("ws")
+    found = public_findings(endpoint.url)
+    assert found and all(f.startswith(f"[3 rpc] public RPC {endpoint.ws_url} ") for f in found)
+
+
+def test_an_endpoint_that_lists_a_method_no_node_has_is_refused(endpoint):
+    endpoint.methods["http"] = [*endpoint.methods["http"], "debug_dumpKeystore"]
+    assert public_findings(endpoint.url) == [
+        f"[3 rpc] public RPC {endpoint.url} lists methods outside the safe set: debug_dumpKeystore"]
+
+
+def test_every_public_rpc_url_must_be_declared():
+    assert messages(lp.check_public_rpc({"roles": {}})) == [
+        "[3 rpc] public_rpc is not declared: the public RPC endpoints go unprobed; list every public RPC URL, "
+        "or [] when the launch serves none"]
+    assert messages(lp.check_public_rpc({"public_rpc": []})) == []
+
+
+@pytest.mark.parametrize("change, error", [
+    (lambda e: setattr(e, "http_status", 502), "public RPC http://.* answered rpc_methods with HTTP 502"),
+    (lambda e: setattr(e, "upgrade", False), "public RPC ws://.*: rpc_methods failed"),
+    (lambda e: e.answers["http"].update(rpc_methods={"error": {"code": -32601, "message": "Method not found"}}),
+     "did not answer rpc_methods with a list of methods"),
+    (lambda e: e.methods.update(http={"methods": "all"}), "did not answer rpc_methods with a list of methods"),
+    (lambda e: e.methods.update(ws=[1, 2]), "did not answer rpc_methods with a list of methods"),
+    (lambda e: e.answers["ws"].update(system_peers={"error": {"code": -32999, "message": "rate limited"}}),
+     "answered system_peers with error -32999: the preflight cannot resolve whether it serves unsafe methods"),
+    (lambda e: e.answers["http"].update(system_peers={"error": "unsafe"}), "did not answer system_peers as JSON-RPC"),
+])
+def test_a_public_endpoint_the_preflight_cannot_read_is_an_input_error(endpoint, change, error):
+    change(endpoint)
+    with pytest.raises(lp.InputError, match=error):
+        public_findings(endpoint.url)
+
+
+def test_an_answer_to_another_call_is_an_input_error(endpoint, monkeypatch):
+    answer = endpoint.answer
+    monkeypatch.setattr(endpoint, "answer", lambda call, transport: dict(answer(call, transport), id=True))
+    with pytest.raises(lp.InputError, match="did not answer rpc_methods as JSON-RPC 2.0"):
+        public_findings(endpoint.url)
+
+
+def test_an_unreachable_public_rpc_url_is_an_input_error():
+    with pytest.raises(lp.InputError, match="public RPC http://127.0.0.1:9/rpc: rpc_methods failed"):
+        public_findings("http://127.0.0.1:9/rpc")
+
+
+@pytest.mark.parametrize("urls, error", [
+    ("https://rpc.example.org", "public_rpc must be a list of URLs"),
+    (["ftp://rpc.example.org"], "public_rpc\\[0\\] must be an http, https, ws or wss URL"),
+    (["rpc.example.org:443"], "public_rpc\\[0\\] must be an http, https, ws or wss URL"),
+    (["https:///rpc"], "public_rpc\\[0\\] must be an http, https, ws or wss URL"),
+    (["https://user:pw@rpc.example.org"], "public_rpc\\[0\\] must name no user, password or fragment"),
+    (["https://rpc.example.org/#x"], "public_rpc\\[0\\] must name no user, password or fragment"),
+    (["https://rpc.example.org:99999"], "public_rpc\\[0\\] must be an http, https, ws or wss URL"),
+])
+def test_a_malformed_public_rpc_list_is_an_input_error(urls, error):
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_launch({"roles": {}, "supply": VALID_LOCK, "public_rpc": urls})
+
+
+# ---------------------------------------------------------------------------
 # Rule 4: endowments and supply
 # ---------------------------------------------------------------------------
 
@@ -2356,10 +2581,11 @@ def subwasm() -> str:
 class Launch:
     """A clean launch: the preprod genesis with //Alice removed, Root held by a
     multisig of fresh keys, the tuned rewards stored, one attestor endowed at the
-    floor, the chain renamed, every account and authority declared, and Cardano
-    holding the lock and the candidates. Every rule accepts it."""
+    floor, the chain renamed, every account and authority declared, Cardano
+    holding the lock and the candidates, and a public RPC URL that serves only
+    safe methods. Every rule accepts it."""
 
-    def __init__(self, preprod_path, tmp_path, kupo):
+    def __init__(self, preprod_path, tmp_path, kupo, endpoint):
         spec = lp.load_spec(str(preprod_path))
         del spec.storage[account_key(ALICE)]
         spec.doc.update({"name": "Materios", "id": "materios"})
@@ -2388,7 +2614,9 @@ class Launch:
             + [{"name": "edge", "host": "edge", "authority": False}],
             "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
                              "other_targets": ["rpc-node:9944"]}],
+            "public_rpc": [endpoint.url],
         }
+        self.endpoint = endpoint
         self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
         # None serves this genesis hash as the lock's inline datum.
         self.lock_datum = None
@@ -2437,11 +2665,11 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
 
 
 @pytest.fixture
-def clean(preprod_path, tmp_path, kupo, monkeypatch, metadata_v14):
+def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch, metadata_v14):
     """No built runtime passes yet (PerpEngine, undeclared emission reserves), so
     the extractor returns the fixture metadata with the reserves declared."""
     monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
-    launch = Launch(preprod_path, tmp_path, kupo)
+    launch = Launch(preprod_path, tmp_path, kupo, endpoint)
     pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))
     return launch
 
@@ -2537,6 +2765,26 @@ def test_cli_refuses_a_same_machine_tunnel_whose_host_is_spelled_differently(cle
     clean.launch["rpc_proxies"][0]["node"] = spelling
     code, out = clean.run(capsys, signed_launch=signed)
     assert code == 2 and f"rpc_proxies[0] runs on {spelling}, which is not a declared node" in out
+
+
+def test_cli_refuses_a_public_rpc_url_in_front_of_an_unsafe_node(clean, capsys):
+    clean.endpoint.run_unsafe_node("ws")
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[3 rpc] public RPC {clean.endpoint.ws_url} answers system_peers, which a node serves only with unsafe " \
+           "methods on" in out
+
+
+def test_cli_refuses_an_unreachable_public_rpc_url_as_unreadable(clean, capsys):
+    clean.launch["public_rpc"] = ["https://127.0.0.1:9/rpc"]
+    code, out = clean.run(capsys)
+    assert code == 2 and "public RPC https://127.0.0.1:9/rpc: rpc_methods failed" in out
+
+
+def test_cli_refuses_a_launch_that_does_not_declare_its_public_rpc(clean, capsys):
+    del clean.launch["public_rpc"]
+    code, out = clean.run(capsys)
+    assert code == 1 and "[3 rpc] public_rpc is not declared" in out
 
 
 def test_cli_refuses_an_upstream_whose_port_comes_from_dns_srv_as_unreadable(clean, capsys):
