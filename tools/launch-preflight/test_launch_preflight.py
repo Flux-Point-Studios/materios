@@ -908,6 +908,9 @@ def rpc_findings(tmp_path, nodes, config=None, proxy_node="edge", kind="nginx", 
     return messages(lp.check_rpc(launch, list(authorities)))
 
 
+BEHIND_PROXY = ["[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
+
+
 def authority(argv, host="val1", name="val1", aura=None):
     return {"name": name, "host": host, "authority": True, "aura": "0x" + (aura or fresh_account()).hex(),
             "argv": argv}
@@ -1034,6 +1037,13 @@ def test_nginx_include_absolute_path_is_followed(tmp_path):
         "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
+def test_nginx_includes_that_nest_without_end_are_an_input_error(tmp_path):
+    (tmp_path / "loop.inc").write_text("include loop.inc;\n")
+    nginx = "http { include loop.inc; server { location / { proxy_pass http://127.0.0.1:9945; } } }"
+    with pytest.raises(lp.InputError, match="nginx includes nest deeper than 8 levels"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1")
+
+
 def test_nginx_include_that_cannot_be_read_is_an_input_error(tmp_path):
     nginx = "http { server { listen 80; include /nonexistent/nginx/rpc.inc; location / { proxy_pass http://x:1; } } }"
     with pytest.raises(lp.InputError, match="include /nonexistent/nginx/rpc.inc matches no file"):
@@ -1046,7 +1056,7 @@ def test_nginx_dump_carries_its_includes(tmp_path):
             "http { include /etc/nginx/rpc-route.inc; }\n\n"
             "# configuration file /etc/nginx/rpc-route.inc:\n"
             "server { location / { proxy_pass http://127.0.0.1:9945; } }\n")
-    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], dump, "val1") == [
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], dump, "val1", "nginx-dump") == [
         "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
@@ -1054,7 +1064,92 @@ def test_nginx_dump_missing_an_included_file_is_an_input_error(tmp_path):
     dump = ("# configuration file /etc/nginx/nginx.conf:\n"
             "http { include /etc/nginx/rpc-route.inc; server { location / { proxy_pass http://x:1; } } }\n")
     with pytest.raises(lp.InputError, match="include /etc/nginx/rpc-route.inc"):
-        rpc_findings(tmp_path, [authority(UNSAFE_9945)], dump, "val1")
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], dump, "val1", "nginx-dump")
+
+
+@pytest.mark.parametrize("text", [
+    "events {}\nhttp { server { location / { proxy_pass http://127.0.0.1:9945; } } }\n",
+    "http { server { location / { proxy_pass http://127.0.0.1:9945; } } }\n"
+    "# configuration file /etc/nginx/nginx.conf:\nevents {}\n",
+])
+def test_nginx_dump_output_is_read_only_where_the_proxy_declares_it(tmp_path, text):
+    with pytest.raises(lp.InputError, match="is not `nginx -T` output"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], text, "val1", "nginx-dump")
+
+
+# A plain config is read as nginx reads it, a comment that looks like a dump's file header included:
+# nginx follows the include from its directory, and serves the 9945 route in rpc.inc.
+def test_a_plain_nginx_config_follows_its_includes_whatever_its_comments_say(tmp_path):
+    (tmp_path / "rpc.inc").write_text("location /rpc { proxy_pass http://127.0.0.1:9945; }\n")
+    nginx = ("# configuration file /etc/nginx/nginx.conf:\n# configuration file /etc/nginx/rpc.inc:\n"
+             "events {}\nhttp { server { listen 8080; include rpc.inc; "
+             "location /s { proxy_pass http://127.0.0.1:9933; } } }\n")
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
+
+
+def http_routes(upstream: str, rpc: str) -> str:
+    """A whole nginx config: this upstream text in its http block, a /s route to a port no node serves unsafe
+    methods on, and this /rpc location."""
+    return (f"events {{}}\nhttp {{ {upstream}\n  server {{ listen 8080;"
+            f"\n    location /s {{ proxy_pass http://127.0.0.1:9933; }}\n    location /rpc {{ {rpc} }} }} }}\n")
+
+
+# nginx reads a directive the way it reads any other token: a quoted name is the same directive, and a '}' ends
+# nothing inside a token (${var} included). Each config passes `nginx -t` on nginx 1.29.8, and nginx proxies
+# /rpc to 127.0.0.1:9945.
+@pytest.mark.parametrize("nginx", [
+    http_routes("", '"proxy_pass" http://127.0.0.1:9945;'),
+    http_routes("", "'proxy_pass' http://127.0.0.1:9945;"),
+    http_routes("", 'proxy_pass "http://127.0.0.1:9945";'),
+    http_routes('upstream rpc { server 127.0.0.1:9933; "server" 127.0.0.1:9945; }', "proxy_pass http://rpc;"),
+    http_routes("upstream rpc { hash ${remote_addr}-rpc consistent; server 127.0.0.1:9945; }",
+                "proxy_pass http://rpc;"),
+    http_routes("upstream rpc { zone z}a 64k; server 127.0.0.1:9945; }", "proxy_pass http://rpc;"),
+    http_routes('upstream rpc { zone "z}a" 64k; server 127.0.0.1:9945; }', "proxy_pass http://rpc;"),
+    http_routes("upstream RPC { server 127.0.0.1:9945; }", "proxy_pass http://rpc;"),
+    http_routes("upstream rpc { server 127.0.0.1:9945; }", "proxy_pass http://RPC;"),
+    http_routes('upstream "rp\\"c" { server 127.0.0.1:9945; }', "proxy_pass 'http://rp\"c';"),
+    http_routes("", 'if ($http_x != "y") { proxy_pass http://127.0.0.1:9945; }'),
+    http_routes("upstream rpc { server 127.0.0.1:9945; }", "proxy_pass http://rpc;")
+    + "stream { upstream rpc { server 10.9.9.9:9945; } server { listen 9000; proxy_pass rpc; } }\n",
+])
+def test_every_nginx_spelling_of_a_route_is_read(tmp_path, nginx):
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1",
+                        other_targets=["rpc:80", 'rp"c:80', "10.9.9.9:9945"]) == BEHIND_PROXY
+
+
+def test_a_quoted_nginx_include_is_followed(tmp_path):
+    (tmp_path / "rpc.inc").write_text("location /rpc { proxy_pass http://127.0.0.1:9945; }\n")
+    nginx = ('events {}\nhttp { server { listen 8080; "include" rpc.inc; '
+             "location /s { proxy_pass http://127.0.0.1:9933; } } }\n")
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
+
+
+def test_an_upstream_reads_the_servers_its_include_names(tmp_path):
+    (tmp_path / "servers.inc").write_text("server 127.0.0.1:9945;\n")
+    nginx = ("events {}\nhttp { upstream rpc { include servers.inc; }\n"
+             "  server { listen 8080; location /rpc { proxy_pass http://rpc; } } }\n")
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
+
+
+# In a dump, an included file shows under its own header, apart from the block that includes it, and a comment in
+# a file can read as a header. So a server outside an upstream block in its own file could serve any upstream:
+# nginx serves 127.0.0.1:9945 in upstream rpc from up.d/a.conf, and in the second dump a comment in a.conf would
+# move it under tail.d. Each dump is what `nginx -T` prints for those files.
+DUMP_MAIN = ("# configuration file /etc/nginx/nginx.conf:\n"
+             "events {}\nhttp { upstream rpc { server 10.9.9.9:1; include /etc/nginx/up.d/*.conf; }\n"
+             "  server { listen 8080; location /rpc { proxy_pass http://rpc; } } include /etc/nginx/tail.d/*.conf; }\n"
+             "\n# configuration file /etc/nginx/up.d/a.conf:\n")
+
+
+@pytest.mark.parametrize("included", [
+    "server 127.0.0.1:9945;\n",
+    "# configuration file /etc/nginx/tail.d/x.conf:\nserver 127.0.0.1:9945;\n",
+])
+def test_a_dump_that_cannot_show_which_upstream_a_server_serves_is_an_input_error(tmp_path, included):
+    with pytest.raises(lp.InputError, match="server 127.0.0.1:9945 sits outside any upstream block"):
+        rpc_findings(tmp_path, [authority(UNSAFE_9945)], DUMP_MAIN + included + "\n", "val1", "nginx-dump",
+                     other_targets=["10.9.9.9:1"])
 
 
 @pytest.mark.parametrize("config, error", [
@@ -1062,6 +1157,18 @@ def test_nginx_dump_missing_an_included_file_is_an_input_error(tmp_path):
     ("location / { proxy_pass http://unix:/run/node.sock; }", "unix socket"),
     ("location / { proxy_pass http://$backend; }", "is a variable"),
     ("location / { uwsgi_pass val1; }", "names no port"),
+    ("http { server 127.0.0.1:9945; server { location / { proxy_pass http://127.0.0.1:9933; } } }",
+     "server 127.0.0.1:9945 sits outside any upstream block"),
+    ("upstream rpc { } location / { proxy_pass http://rpc; }", "upstream rpc has no server"),
+    ("location / { proxy_pass http://127.0.0.1:9945;", "unexpected end of file"),
+    ("location / { proxy_pass http://127.0.0.1:9945; } }", "unexpected '}'"),
+    ('location / { proxy_pass "http://127.0.0.1:9945"x; }', "unexpected 'x'"),
+    ("location / { proxy_pass http://127.0.0.1:9933; }\nproxy_pass http://127.0.0.1:9945", "unexpected end of file"),
+    ("location / { ; proxy_pass http://127.0.0.1:9945; }", "unexpected ';'"),
+    ("location / { proxy_pass http://127.0.0.1:9945 }", "unexpected '}'"),
+    ("include a b; location / { proxy_pass http://127.0.0.1:9945; }", "include takes one file name"),
+    ("upstream rpc { server; } location / { proxy_pass http://rpc; }", "a server directive names no address"),
+    ("upstream rpc b { server 127.0.0.1:9945; } location / { proxy_pass http://rpc; }", "upstream takes one name"),
 ])
 def test_nginx_config_the_preflight_cannot_bound_is_an_input_error(tmp_path, config, error):
     with pytest.raises(lp.InputError, match=error):
@@ -2461,7 +2568,7 @@ VALID_LOCK = {"genesis_lock": LOCK}
     ({"roles": {}, "supply": VALID_LOCK, "nodes": {"a": 1}}, "nodes must be a list"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),
     ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": [{"name": "p", "node": "h", "config": "c"}]},
-     "rpc_proxies\\[0\\] kind must be nginx or cloudflared"),
+     "rpc_proxies\\[0\\] kind must be nginx, nginx-dump or cloudflared"),
     ({"roles": {}, "supply": VALID_LOCK, "rpc_proxies": [{"name": "p", "host": "h", "kind": "nginx", "config": "c"}]},
      "rpc_proxies\\[0\\] has unknown field host"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "h", "host": "h", "authority": False}],

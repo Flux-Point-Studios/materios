@@ -167,17 +167,15 @@ RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
 WASM_OVERRIDES_FLAG = "--wasm-runtime-overrides"
 LAUNCH_FIELDS = {"roles", "economics", "supply", "nodes", "rpc_proxies"}
-PROXY_KINDS = ("nginx", "cloudflared")
+PROXY_KINDS = ("nginx", "nginx-dump", "cloudflared")
 PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
 # Forwarding schemes nginx and cloudflared accept, with the port each implies; tcp names its own.
 DEFAULT_PORTS = {"http": 80, "ws": 80, "grpc": 80, "https": 443, "wss": 443, "grpcs": 443,
                  "ssh": 22, "rdp": 3389, "smb": 445, "tcp": None}
 NGINX_SPACE = " \t\r\n"
+NGINX_ESCAPE = re.compile(r"\\([\"'\\trn])")
 NGINX_DUMP_FILE = re.compile(r"^# configuration file (.+):$", re.MULTILINE)
-NGINX_INCLUDE = re.compile(r"\binclude\s+([^;\s]+)\s*;")
-NGINX_FORWARD = re.compile(r"\b(?:proxy|grpc|uwsgi|scgi|fastcgi|memcached)_pass\s+([^;\s]+)\s*;")
-NGINX_UPSTREAM = re.compile(r"\bupstream\s+([\w.-]+)\s*\{([^}]*)\}")
-NGINX_SERVER = re.compile(r"\bserver\s+([^\s;]+)")
+NGINX_FORWARDS = frozenset({"proxy_pass", "grpc_pass", "uwsgi_pass", "scgi_pass", "fastcgi_pass", "memcached_pass"})
 NGINX_INCLUDE_DEPTH = 8
 HOST_PORT = re.compile(r"\[([0-9A-Fa-f:.]+)\](?::(\d+))?|([^\s:\[\]/]+)(?::(\d+))?")
 # cMATRA (v2) on Cardano mainnet: policy id and asset name, as Kupo keys assets.
@@ -1243,41 +1241,126 @@ def read_text(path: Path, what: str) -> str:
         raise InputError(f"cannot read {what} {path}: {e}") from e
 
 
-def _strip_comments(text: str) -> str:
-    """The config without its comments, read as ngx_conf_read_token does: a
-    '#' starts a comment only where a token begins (after whitespace, ';', '{'
-    or '}', or at the start), outside quotes and not escaped. Inside a token,
-    '}' and a '{' after '$' do not end it."""
-    out = []
-    comment = escaped = in_token = variable = False
-    quote = None
-    for ch in text:
-        if comment:
-            if ch != "\n":
-                continue
+@dataclass
+class NginxStatement:
+    file: str
+    words: list[str]
+    block: list[NginxStatement] | None
+
+
+def _nginx_word(raw: str) -> str:
+    """A token as nginx stores it: \\", \\' and \\\\ lose the backslash, and \\t, \\r and \\n become the character."""
+    return NGINX_ESCAPE.sub(lambda m: {"t": "\t", "r": "\r", "n": "\n"}.get(m.group(1), m.group(1)), raw)
+
+
+def _nginx_tokens(text: str, where: str):
+    """(words, ';' or '{') for each directive and ([], '}') for each block end, read as ngx_conf_read_token
+    reads them. A token ends at whitespace, ';' or '{', not at '}' nor at a '{' after '$'; a quoted token ends
+    at its closing quote, which whitespace, ';', '{' or ')' must follow; a '#' starts a comment only where a
+    token would start; a backslash keeps the next character in the token."""
+    words: list[str] = []
+    start, quote = 0, None
+    last_space, need_space, comment, escaped, variable = True, False, False, False, False
+    for pos, ch in enumerate(text):
+        if ch == "\n":
             comment = False
-        elif escaped:
+        if comment:
+            continue
+        if escaped:
             escaped = False
-        elif ch == "\\":
-            escaped, in_token, variable = True, True, False
-        elif quote:
-            quote = None if ch == quote else quote
-        elif not in_token:
-            if ch == "#":
-                comment = True
+            continue
+        if need_space:
+            need_space = False
+            if ch in NGINX_SPACE:
+                last_space = True
                 continue
-            if ch in "\"'":
-                quote, in_token = ch, True
-            elif ch not in NGINX_SPACE + ";{}":
-                in_token, variable = True, ch == "$"
-        elif not (ch == "{" and variable):
-            in_token, variable = ch not in NGINX_SPACE + ";{", ch == "$"
-        out.append(ch)
-    return "".join(out)
+            if ch in ";{":
+                yield words, ch
+                words, last_space = [], True
+                continue
+            if ch != ")":
+                raise InputError(f"{where}: unexpected {ch!r} after a quoted token")
+            last_space = True
+        if last_space:
+            start = pos
+            if ch in NGINX_SPACE:
+                continue
+            if ch in ";{" and not words or ch == "}" and words:
+                raise InputError(f"{where}: unexpected {ch!r}")
+            if ch in ";{}":
+                yield words, ch
+                words = []
+            elif ch == "#":
+                comment = True
+            else:
+                last_space, escaped, variable = False, ch == "\\", ch == "$"
+                if ch in "\"'":
+                    start, quote = pos + 1, ch
+            continue
+        if ch == "{" and variable:
+            continue
+        variable = False
+        if ch == "\\":
+            escaped = True
+            continue
+        if ch == "$":
+            variable = True
+            continue
+        if quote:
+            if ch != quote:
+                continue
+            quote, need_space = None, True
+        elif ch in NGINX_SPACE or ch in ";{":
+            last_space = True
+        else:
+            continue
+        words.append(_nginx_word(text[start:pos]))
+        if ch in ";{":
+            yield words, ch
+            words = []
+    if words or not last_space:
+        raise InputError(f"{where}: unexpected end of file")
+
+
+def _nginx_statements(text: str, where: str) -> list[NginxStatement]:
+    """A file's directives, each block directive holding its own, as ngx_conf_parse nests them."""
+    top: list[NginxStatement] = []
+    blocks = [top]
+    for words, end in _nginx_tokens(text, where):
+        if end == "}":
+            if len(blocks) == 1:
+                raise InputError(f"{where}: unexpected '}}'")
+            blocks.pop()
+            continue
+        statement = NginxStatement(where, words, [] if end == "{" else None)
+        blocks[-1].append(statement)
+        if statement.block is not None:
+            blocks.append(statement.block)
+    if len(blocks) > 1:
+        raise InputError(f"{where}: unexpected end of file, expecting '}}'")
+    return top
+
+
+def _nginx_walk(statements: list[NginxStatement], include):
+    """(directive, the block directive it sits directly in, or None) for every directive, depth first, with
+    each include replaced in its place by the statements include(statement, depth) gives for it."""
+    stack = [(iter(statements), None, 0)]
+    while stack:
+        items, parent, depth = stack[-1]
+        statement = next(items, None)
+        if statement is None:
+            stack.pop()
+        elif statement.words[0] == "include" and statement.block is None:
+            if len(statement.words) != 2:
+                raise InputError(f"{statement.file}: include takes one file name")
+            stack.append((iter(include(statement, depth)), parent, depth + 1))
+        else:
+            yield statement, parent
+            if statement.block is not None:
+                stack.append((iter(statement.block), statement, depth))
 
 
 def _include_path(base: Path, pattern: str) -> str:
-    pattern = pattern.strip("\"'")
     return pattern if pattern.startswith("/") else str(base / pattern)
 
 
@@ -1285,54 +1368,84 @@ def _has_glob(pattern: str) -> bool:
     return any(c in pattern for c in "*?[")
 
 
-def _nginx_expand(text: str, base: Path, depth: int) -> str:
-    if depth > NGINX_INCLUDE_DEPTH:
-        raise InputError(f"nginx includes nest deeper than {NGINX_INCLUDE_DEPTH} levels")
-
-    def inline(match: re.Match) -> str:
-        paths = sorted(glob.glob(_include_path(base, match.group(1))))
+def _nginx_config(path: Path, text: str):
+    """The walk of a config file, with each include read from disk in its place, a relative name from the
+    config's directory, as nginx reads them from its prefix."""
+    def include(statement: NginxStatement, depth: int) -> list[NginxStatement]:
+        if depth == NGINX_INCLUDE_DEPTH:
+            raise InputError(f"nginx includes nest deeper than {NGINX_INCLUDE_DEPTH} levels")
+        pattern = statement.words[1]
+        paths = sorted(glob.glob(_include_path(path.parent, pattern)))
         if not paths:
-            raise InputError(f"nginx include {match.group(1)} matches no file; give the output of "
-                             "`nginx -T`, which carries every included file")
-        return "\n".join(_nginx_expand(_strip_comments(read_text(Path(p), "nginx include")), base, depth + 1)
-                         for p in paths)
+            raise InputError(f"nginx include {pattern} matches no file; give the config files it names, or the "
+                             "output of `nginx -T` as kind nginx-dump")
+        return [s for p in paths for s in _nginx_statements(read_text(Path(p), "nginx include"), p)]
 
-    return NGINX_INCLUDE.sub(inline, text)
+    return _nginx_walk(_nginx_statements(text, str(path)), include)
 
 
-def nginx_text(path: Path, text: str) -> str:
-    """The config with every include in it. `nginx -T` output already carries
-    each file it read, under a `# configuration file <path>:` line."""
-    files = NGINX_DUMP_FILE.findall(text)
-    body = _strip_comments(text)
-    if not files:
-        return _nginx_expand(body, path.parent, 0)
-    base = Path(files[0]).parent
-    for pattern in NGINX_INCLUDE.findall(body):
-        target = _include_path(base, pattern)
-        if not _has_glob(target) and target not in files:
-            raise InputError(f"nginx include {pattern} matches no file in the dump")
-    return body
+def _nginx_dump(path: Path, text: str):
+    """The walks of each file `nginx -T` printed, under its `# configuration file <name>:` line. An include is
+    not read in place: its file has its own walk, and a named file must be in the dump."""
+    heads = list(NGINX_DUMP_FILE.finditer(text))
+    if not heads or text[:heads[0].start()].strip():
+        raise InputError(f"{path} is not `nginx -T` output: it does not start with a `# configuration file` line")
+    files = [(head.group(1), text[head.end():end])
+             for head, end in zip(heads, [head.start() for head in heads[1:]] + [len(text)])]
+    names = {name for name, _ in files}
+    base = Path(files[0][0]).parent
+
+    def include(statement: NginxStatement, depth: int) -> list[NginxStatement]:
+        target = _include_path(base, statement.words[1])
+        if not _has_glob(target) and target not in names:
+            raise InputError(f"nginx include {statement.words[1]} matches no file in the dump")
+        return []
+
+    return itertools.chain.from_iterable(_nginx_walk(_nginx_statements(body, name), include) for name, body in files)
 
 
 def forward_targets(target: str, upstreams: dict[str, list[str]]) -> list[tuple[str, int]]:
-    target = target.strip("\"'")
     if "$" in target:
         raise InputError(f"proxy target {target} is a variable; the preflight cannot tell which node it reaches")
     scheme, separator, rest = target.partition("://")
     if not separator:
         scheme, rest = "", target
     authority = rest.split("/", 1)[0]
-    servers = upstreams.get(authority, [authority])
+    # nginx matches an upstream's name case-insensitively.
+    servers = upstreams.get(authority.lower(), [authority])
+    if not servers:
+        raise InputError(f"proxy target {target}: upstream {authority} has no server the preflight can read")
     if any(server.startswith("unix:") for server in servers):
         raise InputError(f"proxy target {target} is a unix socket; the preflight cannot tell which node it reaches")
     return [host_port(server, DEFAULT_PORTS.get(scheme)) for server in servers]
 
 
-def nginx_routes(path: Path, text: str) -> list[tuple[str, int]]:
-    body = nginx_text(path, text)
-    upstreams = {name: NGINX_SERVER.findall(block) for name, block in NGINX_UPSTREAM.findall(body)}
-    return [route for target in NGINX_FORWARD.findall(body) for route in forward_targets(target, upstreams)]
+def nginx_routes(path: Path, text: str, dump: bool) -> list[tuple[str, int]]:
+    """(host, port) of every place an nginx config forwards to, read directive by directive as nginx parses
+    it: each forwarding directive, and each upstream's servers by the block they sit in. An upstream's name
+    counts for every upstream block that takes it, http and stream alike."""
+    forwards, upstreams = [], {}
+    for statement, parent in (_nginx_dump if dump else _nginx_config)(path, text):
+        name, args = statement.words[0], statement.words[1:]
+        if name in NGINX_FORWARDS:
+            forwards += args
+        elif name == "upstream" and statement.block is not None:
+            upstreams.setdefault(_upstream_name(statement), [])
+        elif name == "server" and statement.block is None:
+            if not args:
+                raise InputError(f"{statement.file}: a server directive names no address")
+            if parent is None or parent.words[0] != "upstream":
+                raise InputError(f"{statement.file}: server {args[0]} sits outside any upstream block, so the "
+                                 "preflight cannot tell which upstream it serves; keep each upstream's servers in "
+                                 "its own block, since `nginx -T` output shows an included file apart from it")
+            upstreams[_upstream_name(parent)].append(args[0])
+    return [route for target in forwards for route in forward_targets(target, upstreams)]
+
+
+def _upstream_name(statement: NginxStatement) -> str:
+    if len(statement.words) != 2:
+        raise InputError(f"{statement.file}: upstream takes one name")
+    return statement.words[1].lower()
 
 
 def cloudflared_routes(text: str) -> list[tuple[str, int]]:
@@ -1374,7 +1487,10 @@ def proxy_routes(proxy: dict) -> list[tuple[str, int]]:
     refuses: a route the parser missed would pass unchecked."""
     path = Path(proxy["config"])
     text = read_text(path, "proxy config")
-    routes = nginx_routes(path, text) if proxy["kind"] == "nginx" else cloudflared_routes(text)
+    if proxy["kind"] == "cloudflared":
+        routes = cloudflared_routes(text)
+    else:
+        routes = nginx_routes(path, text, dump=proxy["kind"] == "nginx-dump")
     if not routes:
         raise InputError(f"proxy {proxy['name']}: {path} has no forwarding route the preflight can read")
     return routes
@@ -1835,7 +1951,7 @@ def validate_launch(launch) -> None:
         if not all(isinstance(proxy.get(k), str) for k in ("name", "node", "config")):
             raise InputError(f"rpc_proxies[{i}] needs a name, the node it runs on and a config path")
         if proxy.get("kind") not in PROXY_KINDS:
-            raise InputError(f"rpc_proxies[{i}] kind must be nginx or cloudflared")
+            raise InputError(f"rpc_proxies[{i}] kind must be nginx, nginx-dump or cloudflared")
         if proxy["node"] not in node_names:
             raise InputError(f"rpc_proxies[{i}] runs on {proxy['node']}, which is not a declared node: "
                              "declare the machine it runs on in nodes")

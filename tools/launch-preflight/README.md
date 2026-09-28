@@ -102,7 +102,7 @@ more than 300 slots behind its node.
     {"name": "edge-1", "host": "edge-1", "addresses": ["10.0.0.2"], "authority": false}
   ],
   "rpc_proxies": [
-    {"name": "public-rpc", "node": "edge-1", "kind": "nginx", "config": "nginx-T.txt",
+    {"name": "public-rpc", "node": "edge-1", "kind": "nginx-dump", "config": "nginx-T.txt",
      "other_targets": ["status.example.org:443"]}
   ]
 }
@@ -169,22 +169,35 @@ more than 300 slots behind its node.
   a module path or the mock follower. The preflight takes a program to be
   what its name says; it does not read binaries or anything else on the
   machine.
-- A proxy is `nginx` or `cloudflared`. Give nginx as `nginx -T` output, which
-  carries every included file; a plain config has its `include`s followed from
-  its directory. A `#` hides the rest of its line only where nginx reads it
-  as a comment: at the start of a token, outside quotes and not escaped, so
-  `a#b` and `"#"` are values. Every forwarding directive counts (`proxy_pass`, including a
-  `stream` block's, `grpc_pass`, `fastcgi_pass`, `uwsgi_pass`, `scgi_pass`,
-  `memcached_pass`), as does each cloudflared `url` and ingress `service`. A
-  proxy's `node` names the declared node it runs on. A route reaches a node
-  when it targets the node's `host` or any of its `addresses`; a loopback or
-  unspecified target, in any spelling (`LOCALHOST`, `127.1`,
-  `::ffff:127.0.0.1`, `0.0.0.0`), reaches every node on the proxy's machine
-  (every node sharing an address with the proxy's node). A route to anything
-  else must be listed as `host:port` in the proxy's `other_targets`, which
-  states that it reaches no launch node; otherwise it refuses as unreadable,
-  as do a unix socket, a variable target, a cloudflared bastion mode, SOCKS
-  origin or warp-routing, and a config with no route.
+- A proxy is `nginx`, `nginx-dump` or `cloudflared`. `nginx` is a config
+  file: each `include` is read from disk in its place, a relative name from
+  the config's directory. `nginx-dump` is what `nginx -T` prints on stdout,
+  every file nginx read under its `# configuration file <name>:` line, and
+  each include it names must be there. The kind is declared, not guessed: in
+  a config file such a line is a comment like any other. nginx is read token
+  by token as nginx reads it: quotes and backslash escapes, a `#` that
+  starts a comment only at the start of a token, outside quotes and not
+  escaped (so `a#b` and `"#"` are values), and a `}` or a `${` that ends
+  nothing inside a token. A directive counts by its unquoted name, so
+  `"proxy_pass"` is `proxy_pass`. Every forwarding directive counts
+  (`proxy_pass`, including a `stream` block's, `grpc_pass`, `fastcgi_pass`,
+  `uwsgi_pass`, `scgi_pass`, `memcached_pass`), as does each cloudflared
+  `url` and ingress `service`. A forward to an upstream reaches every server
+  of every upstream block of that name, in any case, `http` and `stream`
+  alike. A `server` outside an upstream block refuses as unreadable: a dump
+  shows an included file apart from the block that includes it, and a
+  comment in a file can read as a file header, so keep each upstream's
+  servers in its own block when giving a dump. A proxy's `node` names the
+  declared node it runs on. A route reaches a node when it targets the
+  node's `host` or any of its `addresses`; a loopback or unspecified target,
+  in any spelling (`LOCALHOST`, `127.1`, `::ffff:127.0.0.1`, `0.0.0.0`),
+  reaches every node on the proxy's machine (every node sharing an address
+  with the proxy's node). A route to anything else must be listed as
+  `host:port` in the proxy's `other_targets`, which states that it reaches
+  no launch node; otherwise it refuses as unreadable, as do a unix socket, a
+  variable target, an upstream with no server, quotes or braces nginx would
+  not parse, a cloudflared bastion mode, SOCKS origin or warp-routing, and a
+  config with no route.
 
 ## Test networks
 
