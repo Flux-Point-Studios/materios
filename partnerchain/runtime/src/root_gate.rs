@@ -8,15 +8,17 @@
 //! call once its delay has passed.
 
 use crate::{
-    BlockNumber, IntentSettlementDefaultMinSignerThreshold, Runtime, RuntimeCall,
+    AccountId, BlockNumber, IntentSettlementDefaultMinSignerThreshold, Runtime, RuntimeCall,
     RuntimeGenesisConfig, Sidechain,
 };
 use core::slice;
 use frame_support::traits::Contains;
-use pallet_root_timelock::{CallClass, ClassifyCall, Delays, Guardian};
+use pallet_root_timelock::{CallClass, ClassifyCall, Guardian};
+use sp_keyring::Sr25519Keyring;
 
-/// The ceiling on [`max_exempt_stall_delay`]. The recorded recoveries used 30.
-pub const MAX_EXEMPT_STALL_DELAY: BlockNumber = 100;
+/// The ceiling on [`max_exempt_stall_delay`]: the delay the recorded
+/// recoveries and the recovery tooling use.
+pub const MAX_EXEMPT_STALL_DELAY: BlockNumber = 30;
 
 /// The longest `Grandpa.note_stalled` delay the sudo key may set without
 /// waiting. The forced change it asks for is applied that many blocks after
@@ -25,21 +27,33 @@ pub const MAX_EXEMPT_STALL_DELAY: BlockNumber = 100;
 /// it, so the next rotation always goes through. A longer delay can hold a
 /// change pending across boundaries, and every rotation is refused while one
 /// is pending. A session is `slots_per_epoch` slots; the bound keeps twice the
-/// delay inside half of them, so it holds with up to half the slots empty.
+/// delay inside a tenth of them, so it holds with up to nine tenths of the
+/// slots empty.
 pub fn max_exempt_stall_delay() -> BlockNumber {
-    MAX_EXEMPT_STALL_DELAY.min(Sidechain::slots_per_epoch().0 / 4)
+    MAX_EXEMPT_STALL_DELAY.min(Sidechain::slots_per_epoch().0 / 20)
 }
 
 /// Refuses a genesis in which nothing independent of the sudo key can veto
-/// its timelock tasks: one that names no guardian without saying so, or one
-/// whose guardian is the sudo key itself.
+/// its timelock tasks: one that names no guardian without saying so, one
+/// whose guardian is the sudo key itself, and one whose guardian is a
+/// well-known sr25519 development account (`//Alice` to `//Ferdie`, their
+/// `//stash` accounts, `//One`, `//Two`), whose key anyone can derive, unless
+/// its sudo key is one too, as on a development chain.
 pub fn ensure_guarded_genesis(genesis: &RuntimeGenesisConfig) -> Result<(), &'static str> {
     genesis.root_timelock.ensure_guarded()?;
-    match &genesis.root_timelock.guardian {
-        Some(guardian) if genesis.sudo.key.as_ref() == Some(guardian) => {
-            Err("the root-timelock guardian must not be the sudo key")
-        }
-        _ => Ok(()),
+    let Some(guardian) = &genesis.root_timelock.guardian else {
+        return Ok(());
+    };
+    let sudo = genesis.sudo.key.as_ref();
+    let development = |who: &AccountId| {
+        Sr25519Keyring::iter().any(|dev| AccountId::from(<[u8; 32]>::from(dev)) == *who)
+    };
+    if sudo == Some(guardian) {
+        Err("the root-timelock guardian must not be the sudo key")
+    } else if development(guardian) && !sudo.is_some_and(development) {
+        Err("the root-timelock guardian must not be a development account unless the sudo key is one too")
+    } else {
+        Ok(())
     }
 }
 
@@ -82,6 +96,9 @@ fn runs_at_once(call: &RuntimeCall) -> bool {
             | pallet_treasury::Call::void_spend { .. },
         ) => true,
         RuntimeCall::RootTimelock(pallet_root_timelock::Call::schedule { .. }) => true,
+        // Runs only the one call the guardian approved, and only one the
+        // guardian could have fast-tracked.
+        RuntimeCall::RootTimelock(pallet_root_timelock::Call::enact_approved { .. }) => true,
         // Withdrawing the pending guardian change keeps the guardian in
         // place. With no guardian nothing can veto the sudo key's tasks, so
         // its own veto gives it nothing new; it lets it withdraw an abandoned
@@ -91,10 +108,6 @@ fn runs_at_once(call: &RuntimeCall) -> bool {
         }
         RuntimeCall::RootTimelock(pallet_root_timelock::Call::cancel_all {}) => {
             Guardian::<Runtime>::get().is_none()
-        }
-        // Raising a delay only slows Root down. Lowering one is scheduled.
-        RuntimeCall::RootTimelock(pallet_root_timelock::Call::set_delay { class, blocks }) => {
-            *blocks >= Delays::<Runtime>::get().of(*class)
         }
         RuntimeCall::Utility(
             pallet_utility::Call::batch { calls }
@@ -182,13 +195,22 @@ impl ClassifyCall<RuntimeCall> for TimelockClassifier {
             // the floor accepts; a longer stall can freeze GRANDPA rotation;
             // a new sudo key is the defence against a stolen one, and with
             // the guardian's co-sign it lands before anything the stolen key
-            // scheduled. Without a co-sign they wait as long as a mint does.
+            // scheduled. Restarting what a kill-switch stopped joins them: a
+            // stolen key may stop a service at once, and the guardian's
+            // co-sign restarts it the same day. Without a co-sign they wait
+            // as long as a mint does.
             RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { .. })
             | RuntimeCall::OrinqReceipts(
                 pallet_orinq_receipts::Call::set_pinned_committee { .. }
                 | pallet_orinq_receipts::Call::set_break_glass_aura_keys { .. },
             )
-            | RuntimeCall::Sudo(pallet_sudo::Call::set_key { .. }) => CallClass::AuthorityRecovery,
+            | RuntimeCall::Sudo(pallet_sudo::Call::set_key { .. })
+            | RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_disabled {
+                disabled: false,
+            })
+            | RuntimeCall::Billing(pallet_billing::Call::governance_set_debits_enabled {
+                enabled: true,
+            }) => CallClass::AuthorityRecovery,
             // The Cardano scripts observed for native-token transfers into
             // this chain, and the signer floor for deposit attestations. The
             // long class binds these levers only: `set_code`, `set_storage`,

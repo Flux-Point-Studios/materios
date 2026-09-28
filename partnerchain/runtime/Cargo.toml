@@ -116,9 +116,11 @@ sp-storage = { workspace = true }
 sp-consensus-slots = { workspace = true }
 pallet-session = { workspace = true }
 log = { workspace = true }
+# The well-known development accounts, which a genesis may not make its
+# root-timelock guardian unless its sudo key is one too.
+sp-keyring = { workspace = true }
 
 [dev-dependencies]
-sp-keyring = { workspace = true }
 sp-io = { workspace = true }
 hex-literal = { workspace = true }
 proptest = { workspace = true }
@@ -135,6 +137,7 @@ std = [
     "sp-runtime/std",
     "sp-std/std",
     "sp-io/std",
+    "sp-keyring/std",
     "sp-version/std",
     "sp-genesis-builder/std",
     "sp-inherents/std",

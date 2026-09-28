@@ -5,6 +5,9 @@
 //! After the delay of the call's class, anyone may `enact` it by resubmitting
 //! the same call, which then dispatches as Root. Until then the guardian may
 //! `cancel` it, and may `fast_track` a recovery or authority-recovery call.
+//! The guardian may also `approve` such a call before it is submitted; Root
+//! then runs it at once with `enact_approved`, without a place in the queue,
+//! so no refill of the queue can hold off a co-signed key rotation.
 //!
 //! Root cannot cancel a vetoable task while a guardian is set. A compromised
 //! sudo key holds Root, and a Root veto would let it cancel every attempt to
@@ -23,9 +26,10 @@
 //! may `prune` a task whose enactment window has closed.
 //!
 //! The pallet does not stop Root from being used directly. The runtime's call
-//! filter must admit the sudo key's Root only for its exempt calls and for
-//! `schedule`, and its classifier must map every call to the class whose delay
-//! it has to wait, using [`Call::class`] for this pallet's own calls.
+//! filter must admit the sudo key's Root only for its exempt calls, `schedule`
+//! and `enact_approved`, and its classifier must map every call to the class
+//! whose delay it has to wait, using [`Call::class`] for this pallet's own
+//! calls.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -63,16 +67,25 @@ pub enum CallClass {
     /// the committee is drawn, or forces the finality set the session already
     /// chose. Waits the recovery delay; the guardian may fast-track it.
     Recovery,
-    /// A recovery lever that can fix who holds authority, such as a pinned
-    /// committee of named consensus keys. Waits the standard delay unless the
-    /// guardian fast-tracks it, so the sudo key alone installs authors no
-    /// sooner than it could do anything else.
+    /// A recovery lever the sudo key alone may pull no sooner than anything
+    /// else: one that can fix who holds authority, such as a pinned committee
+    /// of named consensus keys or a new sudo key, or one that restarts what a
+    /// kill-switch stopped. Waits the standard delay unless the guardian
+    /// fast-tracks it.
     AuthorityRecovery,
     /// Everything not classified otherwise.
     Standard,
     /// Loosening a parameter the runtime commits to changing slowly, changing
     /// the guardian, or lowering the long delay itself.
     Long,
+}
+
+impl CallClass {
+    /// Whether the guardian may co-sign a call of this class, so that it
+    /// runs before its delay.
+    pub fn is_fast_trackable(self) -> bool {
+        matches!(self, CallClass::Recovery | CallClass::AuthorityRecovery)
+    }
 }
 
 /// The delay of each class, in blocks.
@@ -117,8 +130,7 @@ impl<BlockNumber: Copy + Ord + Default> DelayTable<BlockNumber> {
     }
 
     /// Non-zero, `recovery <= standard <= long <= max`. The ceiling bounds how
-    /// long a sudo key can freeze governance by raising a delay, which it may
-    /// do without waiting.
+    /// long a raise, once enacted, holds back every later change.
     pub fn is_valid(&self, max: BlockNumber) -> bool {
         self.recovery > BlockNumber::default()
             && self.recovery <= self.standard
@@ -227,6 +239,11 @@ pub mod pallet {
     #[pallet::storage]
     pub type PendingGuardianChange<T: Config> = StorageValue<_, TaskId, OptionQuery>;
 
+    /// The hash of the one call the guardian has approved in advance, and
+    /// the last block in which Root may run it.
+    #[pallet::storage]
+    pub type Approval<T: Config> = StorageValue<_, (T::Hash, BlockNumberFor<T>), OptionQuery>;
+
     #[pallet::genesis_config]
     pub struct GenesisConfig<T: Config> {
         pub delays: DelayTable<BlockNumberFor<T>>,
@@ -308,6 +325,15 @@ pub mod pallet {
         Pruned {
             id: TaskId,
         },
+        /// The guardian approved the call with this hash, or, with `None`,
+        /// withdrew its approval.
+        Approved {
+            call_hash: Option<T::Hash>,
+        },
+        /// Root ran the approved call.
+        EnactedApproved {
+            call_hash: T::Hash,
+        },
     }
 
     #[pallet::error]
@@ -333,6 +359,8 @@ pub mod pallet {
         TooManyTasks,
         /// The task can still be enacted.
         NotExpired,
+        /// The guardian has not approved this call.
+        NotApproved,
     }
 
     #[pallet::hooks]
@@ -353,7 +381,7 @@ pub mod pallet {
         }
 
         #[cfg(feature = "try-runtime")]
-        fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
+        fn try_state(n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
             ensure!(
                 Delays::<T>::get().is_valid(T::MaxDelay::get()),
                 "stored delays are zero, out of order or above MaxDelay"
@@ -372,10 +400,23 @@ pub mod pallet {
                         .collect::<Vec<_>>(),
                 "the stored guardian changes are not the pending one"
             );
+            if let Some((_, until)) = Approval::<T>::get() {
+                ensure!(
+                    Guardian::<T>::exists(),
+                    "an approval is stored without a guardian"
+                );
+                ensure!(
+                    until <= n.saturating_add(T::EnactmentWindow::get()),
+                    "an approval outlasts the enactment window"
+                );
+            }
             Ok(())
         }
     }
 
+    /// The guardian's calls are Operational, so a block full of Normal
+    /// extrinsics cannot keep out a single-key guardian. A multisig guardian
+    /// submits them through `Multisig.as_multi`, which is Normal.
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// Record `call` to run as Root once its class's delay has passed.
@@ -428,7 +469,7 @@ pub mod pallet {
 
         /// The guardian's veto over a vetoable task, and Root's withdrawal of
         /// a pending guardian change (or of any task while no guardian is
-        /// set). Operational so a full block cannot keep it out.
+        /// set).
         #[pallet::call_index(1)]
         #[pallet::weight((
             T::DbWeight::get().reads_writes(4, 3).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
@@ -458,13 +499,7 @@ pub mod pallet {
             Self::ensure_guardian(origin)?;
             Tasks::<T>::try_mutate(id, |task| {
                 let task = task.as_mut().ok_or(Error::<T>::UnknownTask)?;
-                ensure!(
-                    matches!(
-                        task.class,
-                        CallClass::Recovery | CallClass::AuthorityRecovery
-                    ),
-                    Error::<T>::NotFastTrackable
-                );
+                ensure!(task.class.is_fast_trackable(), Error::<T>::NotFastTrackable);
                 let now = frame_system::Pallet::<T>::block_number();
                 ensure!(now < task.ready_at, Error::<T>::AlreadyReady);
                 task.ready_at = now;
@@ -480,10 +515,7 @@ pub mod pallet {
         /// on state (whether a threshold change lowers it) may have risen
         /// since it was scheduled.
         #[pallet::call_index(3)]
-        #[pallet::weight({
-            let info = call.get_dispatch_info();
-            (enact_overhead::<T>(call.as_ref()).saturating_add(info.weight), info.class)
-        })]
+        #[pallet::weight(enact_weight::<T>(call.as_ref()))]
         pub fn enact(
             origin: OriginFor<T>,
             id: TaskId,
@@ -503,20 +535,15 @@ pub mod pallet {
                 Error::<T>::ClassRaised
             );
             Self::remove_task(id, &task);
-            let overhead = enact_overhead::<T>(call.as_ref());
-            let post = call
-                .dispatch(frame_system::RawOrigin::Root.into())
-                .map_err(|e| e.error)?;
+            let post = Self::dispatch_as_root(call)?;
             Self::deposit_event(Event::Enacted { id });
-            Ok(post
-                .actual_weight
-                .map(|w| w.saturating_add(overhead))
-                .into())
+            Ok(post)
         }
 
-        /// Takes effect at once. The runtime's filter lets the sudo key raise
-        /// a delay immediately; lowering one has to be scheduled, and waits
-        /// at least the class's current delay.
+        /// Root's change of a delay, which the sudo key schedules. A raise
+        /// waits the recovery delay and the guardian may co-sign it; a
+        /// lowering waits the delay it lowers (see [`Call::class`]). Neither
+        /// moves a task already scheduled.
         #[pallet::call_index(4)]
         #[pallet::weight(
             T::DbWeight::get().reads_writes(1, 1).saturating_add(Weight::from_parts(BASE_REF_TIME, 0))
@@ -536,14 +563,16 @@ pub mod pallet {
             Ok(())
         }
 
+        /// A guardian's approval ends with its seat.
         #[pallet::call_index(5)]
-        #[pallet::weight(T::DbWeight::get().writes(1).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)))]
+        #[pallet::weight(T::DbWeight::get().writes(2).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)))]
         pub fn set_guardian(
             origin: OriginFor<T>,
             guardian: Option<T::AccountId>,
         ) -> DispatchResult {
             ensure_root(origin)?;
             Guardian::<T>::set(guardian.clone());
+            Approval::<T>::kill();
             Self::deposit_event(Event::GuardianSet { guardian });
             Ok(())
         }
@@ -592,6 +621,51 @@ pub mod pallet {
             Self::deposit_event(Event::Pruned { id });
             Ok(())
         }
+
+        /// The guardian's co-signature given before a call is submitted:
+        /// Root may run the call with this hash once, through
+        /// `enact_approved`, for `EnactmentWindow` blocks. It replaces any
+        /// earlier approval; `None` withdraws it.
+        #[pallet::call_index(8)]
+        #[pallet::weight((
+            T::DbWeight::get().reads_writes(1, 1).saturating_add(Weight::from_parts(BASE_REF_TIME, 0)),
+            DispatchClass::Operational,
+        ))]
+        pub fn approve(origin: OriginFor<T>, call_hash: Option<T::Hash>) -> DispatchResult {
+            Self::ensure_guardian(origin)?;
+            let until =
+                frame_system::Pallet::<T>::block_number().saturating_add(T::EnactmentWindow::get());
+            Approval::<T>::set(call_hash.map(|hash| (hash, until)));
+            Self::deposit_event(Event::Approved { call_hash });
+            Ok(())
+        }
+
+        /// Run the call the guardian approved as Root, at once and without a
+        /// place in the queue. Only a call the guardian could fast-track
+        /// qualifies, classified as it is now. The approval is used up.
+        #[pallet::call_index(9)]
+        #[pallet::weight(enact_weight::<T>(call.as_ref()))]
+        pub fn enact_approved(
+            origin: OriginFor<T>,
+            call: Box<<T as Config>::RuntimeCall>,
+        ) -> DispatchResultWithPostInfo {
+            ensure_root(origin)?;
+            let call_hash = T::Hashing::hash_of(&call);
+            let (approved, until) = Approval::<T>::get().ok_or(Error::<T>::NotApproved)?;
+            ensure!(call_hash == approved, Error::<T>::NotApproved);
+            ensure!(
+                frame_system::Pallet::<T>::block_number() <= until,
+                Error::<T>::Expired
+            );
+            ensure!(
+                T::Classifier::class_of(&call).is_fast_trackable(),
+                Error::<T>::NotFastTrackable
+            );
+            Approval::<T>::kill();
+            let post = Self::dispatch_as_root(call)?;
+            Self::deposit_event(Event::EnactedApproved { call_hash });
+            Ok(post)
+        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -632,14 +706,32 @@ pub mod pallet {
         fn enactable_until(task: &Task<T::Hash, BlockNumberFor<T>>) -> BlockNumberFor<T> {
             task.ready_at.saturating_add(T::EnactmentWindow::get())
         }
+
+        /// Dispatches `call` as Root. The actual weight it reports, if any,
+        /// comes back with the enactment overhead added.
+        fn dispatch_as_root(call: Box<<T as Config>::RuntimeCall>) -> DispatchResultWithPostInfo {
+            let overhead = enact_overhead::<T>(call.as_ref());
+            let post = call
+                .dispatch(frame_system::RawOrigin::Root.into())
+                .map_err(|e| e.error)?;
+            Ok(post
+                .actual_weight
+                .map(|w| w.saturating_add(overhead))
+                .into())
+        }
     }
 
     impl<T: Config> Call<T> {
-        /// The class this pallet's own call waits when scheduled. Lowering
-        /// the recovery delay waits the standard delay so the guardian cannot
-        /// fast-track it.
+        /// The class this pallet's own call waits when scheduled. Raising a
+        /// delay, or keeping it, only slows Root down: it waits the recovery
+        /// delay, and the guardian may co-sign it. Lowering one waits the
+        /// delay it lowers, and lowering the recovery delay waits the
+        /// standard delay so the guardian cannot fast-track it.
         pub fn class(&self) -> CallClass {
             match self {
+                Call::set_delay { class, blocks } if *blocks >= Delays::<T>::get().of(*class) => {
+                    CallClass::Recovery
+                }
                 Call::set_guardian { .. }
                 | Call::set_delay {
                     class: CallClass::Long,
@@ -650,10 +742,20 @@ pub mod pallet {
         }
     }
 
-    /// The task read and removal, the classifier's reads, and hashing.
+    /// The task or approval read and removal, the classifier's reads, and
+    /// hashing.
     fn enact_overhead<T: Config>(call: &<T as Config>::RuntimeCall) -> Weight {
         T::DbWeight::get()
             .reads_writes(4, 3)
             .saturating_add(call_hash_weight(call))
+    }
+
+    /// The overhead plus the call's own weight, in the call's class.
+    fn enact_weight<T: Config>(call: &<T as Config>::RuntimeCall) -> (Weight, DispatchClass) {
+        let info = call.get_dispatch_info();
+        (
+            enact_overhead::<T>(call).saturating_add(info.weight),
+            info.class,
+        )
     }
 }

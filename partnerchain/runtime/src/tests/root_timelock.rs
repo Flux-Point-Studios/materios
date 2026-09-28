@@ -117,8 +117,12 @@ fn timelock(call: pallet_root_timelock::Call<Runtime>) -> RuntimeCall {
 }
 
 fn schedule(call: RuntimeCall) -> TaskId {
+    schedule_by(SUDO, call)
+}
+
+fn schedule_by(key: Keyring, call: RuntimeCall) -> TaskId {
     let id = pallet_root_timelock::NextTaskId::<Runtime>::get();
-    assert_ok!(signed(SUDO, sudo(schedule_call(call))));
+    assert_ok!(signed(key, sudo(schedule_call(call))));
     assert!(
         Tasks::<Runtime>::contains_key(id),
         "the sudo key could not schedule"
@@ -174,6 +178,27 @@ fn schedule_call(call: RuntimeCall) -> RuntimeCall {
     timelock(pallet_root_timelock::Call::schedule {
         call: Box::new(call),
     })
+}
+
+fn cancel_all() -> RuntimeCall {
+    timelock(pallet_root_timelock::Call::cancel_all {})
+}
+
+/// The guardian's co-signature of `call`, given before the call runs.
+fn approve(call: &RuntimeCall) -> RuntimeCall {
+    timelock(pallet_root_timelock::Call::approve {
+        call_hash: Some(BlakeTwo256::hash_of(call)),
+    })
+}
+
+fn enact_approved(call: RuntimeCall) -> RuntimeCall {
+    timelock(pallet_root_timelock::Call::enact_approved {
+        call: Box::new(call),
+    })
+}
+
+fn batch_all(calls: Vec<RuntimeCall>) -> RuntimeCall {
+    RuntimeCall::Utility(pallet_utility::Call::batch_all { calls })
 }
 
 fn appoint(guardian: Option<AccountId>) -> RuntimeCall {
@@ -311,6 +336,7 @@ fn no_direct_sudo_form_reaches_root_for_a_non_exempt_call() {
             sudo(appoint(Some(acct(Alice)))),
             sudo(timelock(pallet_root_timelock::Call::cancel { id: 0 })),
             sudo(timelock(pallet_root_timelock::Call::fast_track { id: 0 })),
+            sudo(approve(&mint())),
         ];
         for call in attempts {
             assert_eq!(signed(SUDO, call.clone()), Err(call_filtered()), "{call:?}");
@@ -412,6 +438,7 @@ fn every_root_gated_call_waits_unless_exempt() {
                 model: pallet_billing::types::PricingModel::FREE,
             }),
             set_delay(CallClass::Standard, DELAYS.standard - 1),
+            set_delay(CallClass::Standard, DELAYS.standard + 1),
             note_stalled(MAX_EXEMPT_STALL_DELAY + 1, 1),
             note_stalled(1_000_000_000, 1),
         ];
@@ -611,34 +638,64 @@ fn exempt_calls_work_immediately() {
 }
 
 #[test]
-fn lowering_a_delay_waits_the_current_delay_and_raising_is_immediate() {
+fn a_delay_change_waits_and_only_a_raise_can_be_co_signed() {
     new_test_ext().execute_with(|| {
-        assert_eq!(
-            signed(SUDO, sudo(set_delay(CallClass::Standard, 10))),
-            Err(call_filtered())
-        );
-        assert_ok!(signed(SUDO, sudo(set_delay(CallClass::Standard, 60))));
-        assert_eq!(pallet_root_timelock::Delays::<Runtime>::get().standard, 60);
+        let fast_track = |id| {
+            signed(
+                GUARDIAN,
+                timelock(pallet_root_timelock::Call::fast_track { id }),
+            )
+        };
+        for change in [
+            set_delay(CallClass::Standard, 10),
+            set_delay(CallClass::Standard, 60),
+        ] {
+            assert_eq!(signed(SUDO, sudo(change)), Err(call_filtered()));
+        }
 
+        // A raise waits the recovery delay, and the guardian may co-sign it.
+        let raise = set_delay(CallClass::Standard, 60);
+        let alone = schedule(raise.clone());
+        assert_eq!(
+            (task(alone).class, task(alone).ready_at),
+            (CallClass::Recovery, 1 + DELAYS.recovery)
+        );
+        let smaller_raise = set_delay(CallClass::Standard, 55);
+        let stale = schedule(smaller_raise.clone());
+        let co_signed = schedule(raise.clone());
+        assert_ok!(fast_track(co_signed));
+        assert_ok!(enact(co_signed, raise.clone()));
+        assert_eq!(pallet_root_timelock::Delays::<Runtime>::get().standard, 60);
+        // A raise that has since become a lowering cannot run.
+        System::set_block_number(1 + DELAYS.recovery);
+        assert_eq!(
+            enact(stale, smaller_raise),
+            Err(timelock_error(pallet_root_timelock::Error::ClassRaised))
+        );
+        assert_ok!(enact(alone, raise));
+
+        // A lowering waits the delay it lowers.
+        let now = System::block_number();
         let lower = set_delay(CallClass::Standard, 10);
         let id = schedule(lower.clone());
         assert_eq!(
             (task(id).class, task(id).ready_at),
-            (CallClass::Standard, 61)
+            (CallClass::Standard, now + 60)
         );
-        System::set_block_number(60);
+        System::set_block_number(now + 59);
         assert_eq!(
             enact(id, lower.clone()),
             Err(timelock_error(pallet_root_timelock::Error::NotReady))
         );
-        System::set_block_number(61);
+        System::set_block_number(now + 60);
         assert_ok!(enact(id, lower));
         assert_eq!(pallet_root_timelock::Delays::<Runtime>::get().standard, 10);
 
+        let now = System::block_number();
         let id = schedule(set_delay(CallClass::Long, 100));
         assert_eq!(
             (task(id).class, task(id).ready_at),
-            (CallClass::Long, 61 + 200)
+            (CallClass::Long, now + 200)
         );
 
         // Lowering the recovery delay waits the standard delay and the
@@ -646,20 +703,20 @@ fn lowering_a_delay_waits_the_current_delay_and_raising_is_immediate() {
         let id = schedule(set_delay(CallClass::Recovery, 1));
         assert_eq!(task(id).class, CallClass::Standard);
         assert_eq!(
-            signed(
-                GUARDIAN,
-                timelock(pallet_root_timelock::Call::fast_track { id })
-            ),
+            fast_track(id),
             Err(timelock_error(
                 pallet_root_timelock::Error::NotFastTrackable
             ))
         );
 
-        // Raising is bounded, so a stolen key cannot freeze governance forever.
-        assert_ok!(signed(
-            SUDO,
-            sudo(set_delay(CallClass::Long, RootTimelockMaxDelay::get() + 1))
-        ));
+        // A raise is bounded, even with the guardian's co-sign.
+        let past_max = set_delay(CallClass::Long, RootTimelockMaxDelay::get() + 1);
+        let id = schedule(past_max.clone());
+        assert_ok!(fast_track(id));
+        assert_eq!(
+            enact(id, past_max),
+            Err(timelock_error(pallet_root_timelock::Error::InvalidDelays))
+        );
         assert_eq!(pallet_root_timelock::Delays::<Runtime>::get().long, 200);
     });
 }
@@ -875,6 +932,17 @@ fn calls_are_classified_by_what_they_can_change() {
             ),
             (set_delay(Standard, 1), Standard),
             (set_delay(Recovery, 1), Standard),
+            // A raise, or keeping a delay, only slows Root down.
+            (set_delay(Recovery, DELAYS.recovery), Recovery),
+            (set_delay(Standard, DELAYS.standard + 1), Recovery),
+            (set_delay(Long, RootTimelockMaxDelay::get()), Recovery),
+            // Restarting what a kill-switch stopped lands the same day only
+            // with the guardian's co-sign. Stopping is exempt; scheduled, it
+            // waits like anything else.
+            (tee_disabled(false), AuthorityRecovery),
+            (debits_enabled(true), AuthorityRecovery),
+            (tee_disabled(true), Standard),
+            (debits_enabled(false), Standard),
             (min_signer_threshold(4), Standard),
             (min_signer_threshold(3), Standard),
             (bridge_scripts(1), Long),
@@ -1221,8 +1289,9 @@ fn finalize_blocks(from: BlockNumber, to: BlockNumber) {
 #[test]
 fn an_exempt_stall_never_freezes_grandpa_rotation() {
     for slots in [60, 200, SESSION_SLOTS] {
-        // Sessions with a block in every slot, and with half the slots empty.
-        for session in [slots, slots / 2] {
+        // Sessions with a block in every slot, and with half, three
+        // quarters and nine tenths of the slots empty.
+        for session in [slots, slots / 2, slots / 4, slots / 10] {
             ext_with_session(acct(SUDO), Some(acct(GUARDIAN)), slots).execute_with(|| {
                 let stall = max_exempt_stall_delay();
                 let mut block = 10;
@@ -1250,7 +1319,7 @@ fn an_exempt_stall_never_freezes_grandpa_rotation() {
 
 #[test]
 fn the_exempt_stall_bound_follows_the_session_length() {
-    for (slots, bound) in [(SESSION_SLOTS, MAX_EXEMPT_STALL_DELAY), (200, 50), (60, 15)] {
+    for (slots, bound) in [(SESSION_SLOTS, MAX_EXEMPT_STALL_DELAY), (200, 10), (60, 3)] {
         ext_with_session(acct(SUDO), Some(acct(GUARDIAN)), slots).execute_with(|| {
             assert_eq!(max_exempt_stall_delay(), bound, "{slots}-slot sessions");
             assert_eq!(
@@ -1374,7 +1443,7 @@ fn mainnet_defaults() {
     assert_eq!(RootTimelockMaxDelay::get(), 90 * DAYS);
     assert_eq!(RootTimelockEnactmentWindow::get(), 7 * DAYS);
     assert_eq!(RootTimelockMaxPendingTasks::get(), 64);
-    assert_eq!(MAX_EXEMPT_STALL_DELAY, 100);
+    assert_eq!(MAX_EXEMPT_STALL_DELAY, 30);
     assert!(TESTNET_TIMELOCK_DELAYS.is_valid(RootTimelockMaxDelay::get()));
 }
 
@@ -1434,6 +1503,7 @@ fn the_sudo_key_cannot_declare_the_weight_of_an_exempt_call() {
             note_stalled(30, 7),
             tee_disabled(true),
             schedule_call(remark()),
+            enact_approved(remark()),
         ] {
             assert_eq!(
                 signed(SUDO, unchecked(exempt.clone())),
@@ -1463,34 +1533,94 @@ fn the_guardian_co_signs_a_key_rotation() {
     });
 }
 
-/// The defenders' answer to a stolen sudo key, one block after the thief
-/// acts: the guardian vetoes every vetoable task, the operators, who still
-/// hold the key, schedule a rotation, the guardian co-signs it and anyone
-/// enacts it. The new key then withdraws any guardian change still pending.
+fn rotation() -> RuntimeCall {
+    set_key(acct(NEW_KEY))
+}
+
+/// The services a live chain runs, which the kill-switches stop.
+fn start_services() {
+    assert_ok!(pallet_tee_attestation::Pallet::<Runtime>::set_disabled(
+        RuntimeOrigin::root(),
+        false
+    ));
+    assert_ok!(
+        pallet_billing::Pallet::<Runtime>::governance_set_debits_enabled(
+            RuntimeOrigin::root(),
+            true
+        )
+    );
+}
+
+fn services_running() -> bool {
+    !pallet_tee_attestation::Disabled::<Runtime>::get()
+        && pallet_billing::DebitsEnabled::<Runtime>::get()
+}
+
+fn restart_services() -> RuntimeCall {
+    batch_all(vec![tee_disabled(false), debits_enabled(true)])
+}
+
+/// The defenders' answer to a stolen sudo key, which the operators still
+/// hold, one step at a time. A thief holding the key may act before any step.
+const DEFENDER_STEPS: usize = 5;
+
+fn defender_step(step: usize) {
+    match step {
+        // The guardian vetoes every vetoable task and co-signs the rotation
+        // before it is submitted.
+        0 => {
+            assert_ok!(signed(
+                GUARDIAN,
+                batch_all(vec![cancel_all(), approve(&rotation())])
+            ));
+        }
+        // The operators run it at once. It takes no place in the queue, so
+        // no refill of the queue can hold it off. A thief that runs it first
+        // only does what the defenders asked.
+        1 => {
+            if sudo_key() != Some(acct(NEW_KEY)) {
+                assert_ok!(signed(SUDO, sudo(enact_approved(rotation()))));
+                assert_eq!(last_sudo_result(), Ok(()));
+            }
+            assert_eq!(sudo_key(), Some(acct(NEW_KEY)));
+        }
+        // The guardian vetoes whatever the thief scheduled before the
+        // rotation landed.
+        2 => {
+            assert_ok!(signed(GUARDIAN, cancel_all()));
+        }
+        // The new key withdraws any guardian change still pending.
+        3 => {
+            if let Some(change) = PendingGuardianChange::<Runtime>::get() {
+                assert_ok!(signed(
+                    NEW_KEY,
+                    sudo(timelock(pallet_root_timelock::Call::cancel { id: change }))
+                ));
+                assert_eq!(last_sudo_result(), Ok(()));
+            }
+        }
+        // With the guardian's co-sign, the new key restarts at once whatever
+        // the thief stopped.
+        _ => {
+            if !services_running() {
+                assert_ok!(signed(GUARDIAN, approve(&restart_services())));
+                assert_ok!(signed(NEW_KEY, sudo(enact_approved(restart_services()))));
+                assert_eq!(last_sudo_result(), Ok(()));
+            }
+        }
+    }
+}
+
 fn rotate_out_stolen_key() {
-    assert_ok!(signed(
-        GUARDIAN,
-        timelock(pallet_root_timelock::Call::cancel_all {})
-    ));
-    let rotate = set_key(acct(NEW_KEY));
-    let id = schedule(rotate.clone());
-    assert_ok!(signed(
-        GUARDIAN,
-        timelock(pallet_root_timelock::Call::fast_track { id })
-    ));
-    assert_ok!(enact(id, rotate));
-    assert_eq!(sudo_key(), Some(acct(NEW_KEY)));
-    if let Some(change) = PendingGuardianChange::<Runtime>::get() {
-        assert_ok!(signed(
-            NEW_KEY,
-            sudo(timelock(pallet_root_timelock::Call::cancel { id: change }))
-        ));
-        assert_eq!(last_sudo_result(), Ok(()));
+    for step in 0..DEFENDER_STEPS {
+        defender_step(step);
     }
 }
 
 /// Nothing the stolen key did survives the rotation.
 fn assert_stolen_key_is_out(attacker: &AccountId) {
+    assert!(services_running());
+    assert_eq!(pallet_root_timelock::Delays::<Runtime>::get(), DELAYS);
     assert_eq!(Tasks::<Runtime>::count(), 0);
     assert_eq!(PendingGuardianChange::<Runtime>::get(), None);
     assert_eq!(Guardian::<Runtime>::get(), Some(acct(GUARDIAN)));
@@ -1504,11 +1634,13 @@ fn assert_stolen_key_is_out(attacker: &AccountId) {
     );
     assert_eq!(Guardian::<Runtime>::get(), Some(acct(GUARDIAN)));
     assert_eq!(Balances::free_balance(attacker), FUND);
+    assert_eq!(pallet_root_timelock::Delays::<Runtime>::get(), DELAYS);
 }
 
 #[test]
 fn a_flood_of_guardian_changes_leaves_room_for_the_rotation() {
     new_test_ext().execute_with(|| {
+        start_services();
         let cap = RootTimelockMaxPendingTasks::get() as usize;
         let attacker = acct(Bob);
         let appoint = appoint(Some(attacker.clone()));
@@ -1540,32 +1672,121 @@ fn a_flood_of_guardian_changes_leaves_room_for_the_rotation() {
 }
 
 #[test]
-fn a_rotation_outruns_raised_delays() {
+fn a_refill_after_the_veto_cannot_hold_off_the_rotation() {
     new_test_ext().execute_with(|| {
-        let attacker = acct(Bob);
-        let appoint = appoint(Some(attacker.clone()));
-        let max = RootTimelockMaxDelay::get();
+        let cap = RootTimelockMaxPendingTasks::get() as usize;
+        System::set_block_number(2);
+        defender_step(0);
+        // One thief extrinsic ordered after the veto refills every place.
         assert_ok!(signed(
             SUDO,
-            sudo(batch(vec![
-                schedule_call(appoint.clone()),
-                set_delay(CallClass::Long, max),
-                set_delay(CallClass::Standard, max),
-                set_delay(CallClass::Recovery, max),
-            ]))
+            sudo(batch(vec![schedule_call(remark()); cap]))
         ));
         assert_eq!(last_sudo_result(), Ok(()));
-        assert_eq!(task(0).ready_at, 1 + DELAYS.long);
-        assert_eq!(pallet_root_timelock::Delays::<Runtime>::get().standard, max);
+        assert_ok!(signed(SUDO, sudo(schedule_call(rotation()))));
+        assert_eq!(
+            last_sudo_result(),
+            Err(timelock_error(pallet_root_timelock::Error::TooManyTasks))
+        );
+        // The co-signed rotation needs no place.
+        defender_step(1);
+        assert_eq!(Tasks::<Runtime>::count() as usize, cap);
+    });
+}
+
+#[test]
+fn the_guardians_calls_are_operational_only_from_a_single_key() {
+    new_test_ext().execute_with(|| {
+        for call in [
+            cancel_all(),
+            timelock(pallet_root_timelock::Call::cancel { id: 0 }),
+            timelock(pallet_root_timelock::Call::fast_track { id: 0 }),
+            approve(&rotation()),
+        ] {
+            assert_eq!(
+                call.get_dispatch_info().class,
+                DispatchClass::Operational,
+                "{call:?}"
+            );
+            let through_a_multisig = RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
+                threshold: 2,
+                other_signatories: vec![acct(Bob), acct(Ferdie)],
+                maybe_timepoint: None,
+                max_weight: call.get_dispatch_info().weight,
+                call: Box::new(call.clone()),
+            });
+            assert_eq!(
+                through_a_multisig.get_dispatch_info().class,
+                DispatchClass::Normal,
+                "{call:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn one_extrinsic_cannot_freeze_governance_past_the_rotation() {
+    new_test_ext().execute_with(|| {
+        start_services();
+        let max = RootTimelockMaxDelay::get();
+        let raises = vec![
+            set_delay(CallClass::Long, max),
+            set_delay(CallClass::Standard, max),
+            set_delay(CallClass::Recovery, max),
+        ];
+        let stop = vec![tee_disabled(true), debits_enabled(false)];
+        assert_eq!(
+            signed(SUDO, sudo(batch([raises.clone(), stop.clone()].concat()))),
+            Err(call_filtered())
+        );
+        assert_eq!(pallet_root_timelock::Delays::<Runtime>::get(), DELAYS);
+
+        // What the stolen key can do: stop the services at once, and
+        // schedule the raises, which the guardian can veto.
+        assert_ok!(signed(SUDO, sudo(batch(stop))));
+        assert!(!services_running());
+        let raise_all = batch_all(raises);
+        let raising = schedule(raise_all.clone());
+        assert_eq!(task(raising).class, CallClass::Recovery);
 
         System::set_block_number(2);
         rotate_out_stolen_key();
-        System::set_block_number(1 + DELAYS.long);
+        assert!(services_running());
+        System::set_block_number(1 + DELAYS.recovery);
         assert_eq!(
-            enact(0, appoint),
+            enact(raising, raise_all),
             Err(timelock_error(pallet_root_timelock::Error::UnknownTask))
         );
-        assert_stolen_key_is_out(&attacker);
+
+        // A security upgrade the new key schedules waits the standard delay.
+        let upgrade = authorize_upgrade(7);
+        let id = schedule_by(NEW_KEY, upgrade.clone());
+        let ready_at = System::block_number() + DELAYS.standard;
+        assert_eq!(task(id).ready_at, ready_at);
+        System::set_block_number(ready_at);
+        assert_ok!(enact(id, upgrade));
+        assert_stolen_key_is_out(&thief());
+    });
+}
+
+#[test]
+fn a_task_scheduled_during_the_answer_never_lands() {
+    new_test_ext().execute_with(|| {
+        start_services();
+        let mint = force_set_balance(thief(), 1_000 * FUND);
+        System::set_block_number(2);
+        defender_step(0);
+        // The thief, still holding the key, schedules after the veto.
+        let late = schedule(mint.clone());
+        for step in 1..DEFENDER_STEPS {
+            defender_step(step);
+        }
+        System::set_block_number(2 + DELAYS.standard);
+        assert_eq!(
+            enact(late, mint),
+            Err(timelock_error(pallet_root_timelock::Error::UnknownTask))
+        );
+        assert_stolen_key_is_out(&thief());
     });
 }
 
@@ -1622,20 +1843,15 @@ fn a_stolen_2_of_3_key_is_rotated_out_through_its_own_custody() {
         assert_eq!(Tasks::<Runtime>::count(), 1);
 
         System::set_block_number(2);
-        assert_ok!(signed(
-            GUARDIAN,
-            timelock(pallet_root_timelock::Call::cancel_all {})
-        ));
-        let rotate = set_key(acct(NEW_KEY));
-        let id = pallet_root_timelock::NextTaskId::<Runtime>::get();
-        two_of_three(sudo(schedule_call(rotate.clone())));
+        defender_step(0);
+        // The thief refills the queue after the veto; the co-signed rotation
+        // needs no place in it.
+        two_of_three(sudo(batch(vec![schedule_call(remark()); cap])));
+        assert_eq!(Tasks::<Runtime>::count() as usize, 1 + cap);
+        two_of_three(sudo(enact_approved(rotation())));
         assert_eq!(last_sudo_result(), Ok(()));
-        assert_ok!(signed(
-            GUARDIAN,
-            timelock(pallet_root_timelock::Call::fast_track { id })
-        ));
-        assert_ok!(enact(id, rotate));
         assert_eq!(sudo_key(), Some(acct(NEW_KEY)));
+        assert_ok!(signed(GUARDIAN, cancel_all()));
         assert_ok!(signed(
             NEW_KEY,
             sudo(timelock(pallet_root_timelock::Call::cancel { id: 0 }))
@@ -1673,20 +1889,43 @@ fn build_chain_spec(patch: serde_json::Value) -> Result<(), String> {
 
 #[test]
 fn a_chain_spec_must_name_a_guardian_apart_from_the_sudo_key() {
-    let spec = |guardian: Option<AccountId>, unguarded: bool| {
+    // Keys no one derives from a public development seed.
+    let operators = AccountId::from([0x5A; 32]);
+    let custodians = AccountId::from([0x6B; 32]);
+    let spec = |sudo: &AccountId, guardian: Option<AccountId>, unguarded: bool| {
         serde_json::json!({
-            "sudo": { "key": acct(SUDO) },
+            "sudo": { "key": sudo },
             "rootTimelock": { "delays": DELAYS, "guardian": guardian, "unguarded": unguarded },
         })
     };
-    assert_eq!(build_chain_spec(spec(Some(acct(GUARDIAN)), false)), Ok(()));
-    assert_eq!(build_chain_spec(spec(None, true)), Ok(()));
+    assert_eq!(
+        build_chain_spec(spec(&operators, Some(custodians.clone()), false)),
+        Ok(())
+    );
+    assert_eq!(build_chain_spec(spec(&operators, None, true)), Ok(()));
     // A spec that names no guardian, as one that leaves the pallet out does.
-    assert!(build_chain_spec(spec(None, false)).is_err());
-    assert!(build_chain_spec(serde_json::json!({ "sudo": { "key": acct(SUDO) } })).is_err());
+    assert!(build_chain_spec(spec(&operators, None, false)).is_err());
+    assert!(build_chain_spec(serde_json::json!({ "sudo": { "key": operators } })).is_err());
     // A guardian that is the sudo key vetoes nothing the key schedules.
-    assert!(build_chain_spec(spec(Some(acct(SUDO)), false)).is_err());
-    assert!(build_chain_spec(spec(Some(acct(GUARDIAN)), true)).is_err());
+    assert!(build_chain_spec(spec(&operators, Some(operators.clone()), false)).is_err());
+    assert!(build_chain_spec(spec(&operators, Some(custodians), true)).is_err());
+
+    // Anyone can sign as a development account: as guardian it would let
+    // anyone veto every task, and co-sign a stolen sudo key's key rotation.
+    for dev in Keyring::iter() {
+        let refused = build_chain_spec(spec(&operators, Some(dev.to_account_id()), false));
+        assert!(
+            refused
+                .as_ref()
+                .is_err_and(|e| e.contains("development account")),
+            "{dev}: {refused:?}"
+        );
+    }
+    // A development chain, whose sudo key is one too, may use one.
+    assert_eq!(
+        build_chain_spec(spec(&acct(SUDO), Some(acct(GUARDIAN)), false)),
+        Ok(())
+    );
 }
 
 #[test]
@@ -1763,6 +2002,16 @@ enum Action {
     },
     Advance {
         blocks: BlockNumber,
+    },
+    Approve {
+        wrapper: Wrapper,
+        target: Target,
+    },
+    EnactApproved {
+        /// Submit the approved call, if there is one.
+        approved: bool,
+        wrapper: Wrapper,
+        target: Target,
     },
 }
 
@@ -1851,6 +2100,8 @@ struct Model {
     tee_disabled: bool,
     stalled: Option<(BlockNumber, BlockNumber)>,
     pin: Option<u8>,
+    /// The guardian's approval, and the last block it may be used in.
+    approval: Option<(Wrapper, Target, BlockNumber)>,
 }
 
 impl Model {
@@ -1868,6 +2119,7 @@ impl Model {
             tee_disabled: true,
             stalled: None,
             pin: None,
+            approval: None,
         }
     }
 
@@ -1876,23 +2128,25 @@ impl Model {
         match t {
             Target::TeeDisabled { disabled } => disabled,
             Target::Stall { value } => BlockNumber::from(value) < MAX_EXEMPT_STALL_DELAY,
-            Target::SetDelay { class, blocks } => blocks >= self.delays.of(class_index(class)),
             _ => false,
         }
     }
 
     /// The policy: how long a scheduled call waits.
-    fn class(w: Wrapper, t: Target) -> CallClass {
+    fn class(&self, w: Wrapper, t: Target) -> CallClass {
         let own = match t {
-            Target::Store { .. } | Target::Mint { .. } | Target::TeeDisabled { .. } => {
-                CallClass::Standard
-            }
+            Target::Store { .. } | Target::Mint { .. } => CallClass::Standard,
+            Target::TeeDisabled { disabled: true } => CallClass::Standard,
+            Target::TeeDisabled { disabled: false } => CallClass::AuthorityRecovery,
             Target::Lever { .. } => CallClass::Recovery,
             Target::Stall { value } if BlockNumber::from(value) < MAX_EXEMPT_STALL_DELAY => {
                 CallClass::Recovery
             }
             Target::Stall { .. } | Target::Pin { .. } => CallClass::AuthorityRecovery,
             Target::Bridge { .. } => CallClass::Long,
+            Target::SetDelay { class, blocks } if blocks >= self.delays.of(class_index(class)) => {
+                CallClass::Recovery
+            }
             Target::SetDelay { class, .. } if class_index(class) == CallClass::Long => {
                 CallClass::Long
             }
@@ -1960,7 +2214,7 @@ impl Model {
                 let call = wrap(wrapper, target_call(target));
                 let id = schedule(call.clone());
                 assert_eq!(id, self.next_id);
-                let class = Self::class(wrapper, target);
+                let class = self.class(wrapper, target);
                 let ready_at = self.now + self.delays.of(class);
                 assert_eq!(
                     task(id),
@@ -1989,13 +2243,19 @@ impl Model {
                     assert_eq!(enact(id, remark()), Err(timelock_error(E::UnknownTask)));
                     return;
                 };
-                let (wrapper, target, ready_at) =
-                    (pending.wrapper, pending.target, pending.ready_at);
+                let (wrapper, target, class, ready_at) = (
+                    pending.wrapper,
+                    pending.target,
+                    pending.class,
+                    pending.ready_at,
+                );
                 let result = enact(id, wrap(wrapper, target_call(target)));
                 if self.now < ready_at {
                     assert_eq!(result, Err(timelock_error(E::NotReady)));
                 } else if self.now > ready_at + RootTimelockEnactmentWindow::get() {
                     assert_eq!(result, Err(timelock_error(E::Expired)));
+                } else if self.class(wrapper, target) > class {
+                    assert_eq!(result, Err(timelock_error(E::ClassRaised)));
                 } else if self.apply(target) {
                     assert_ok!(result);
                     self.tasks.remove(&id);
@@ -2073,6 +2333,54 @@ impl Model {
                 self.now += blocks;
                 System::set_block_number(self.now);
             }
+            Action::Approve { wrapper, target } => {
+                assert_ok!(signed(
+                    GUARDIAN,
+                    approve(&wrap(wrapper, target_call(target)))
+                ));
+                self.approval = Some((
+                    wrapper,
+                    target,
+                    self.now + RootTimelockEnactmentWindow::get(),
+                ));
+            }
+            Action::EnactApproved {
+                approved,
+                wrapper,
+                target,
+            } => {
+                let (wrapper, target) = match self.approval {
+                    Some((wrapper, target, _)) if approved => (wrapper, target),
+                    _ => (wrapper, target),
+                };
+                let call = wrap(wrapper, target_call(target));
+                assert_ok!(signed(SUDO, sudo(enact_approved(call.clone()))));
+                let result = last_sudo_result();
+                let Some((approved_wrapper, approved_target, until)) = self.approval else {
+                    assert_eq!(result, Err(timelock_error(E::NotApproved)));
+                    return;
+                };
+                if wrap(approved_wrapper, target_call(approved_target)) != call {
+                    assert_eq!(result, Err(timelock_error(E::NotApproved)));
+                } else if self.now > until {
+                    assert_eq!(result, Err(timelock_error(E::Expired)));
+                } else if !matches!(
+                    self.class(wrapper, target),
+                    CallClass::Recovery | CallClass::AuthorityRecovery
+                ) {
+                    assert_eq!(result, Err(timelock_error(E::NotFastTrackable)));
+                } else if self.apply(target)
+                    || matches!(
+                        wrapper,
+                        Wrapper::Batch | Wrapper::DispatchAsRoot | Wrapper::NestedSudo
+                    )
+                {
+                    assert_eq!(result, Ok(()));
+                    self.approval = None;
+                } else {
+                    assert_eq!(result, Err(timelock_error(E::InvalidDelays)));
+                }
+            }
         }
     }
 
@@ -2122,6 +2430,13 @@ impl Model {
             .collect();
         stored.sort();
         assert_eq!(stored, pending);
+        assert_eq!(
+            pallet_root_timelock::Approval::<Runtime>::get(),
+            self.approval.map(|(wrapper, target, until)| (
+                BlakeTwo256::hash_of(&wrap(wrapper, target_call(target))),
+                until
+            ))
+        );
     }
 }
 
@@ -2179,6 +2494,11 @@ fn action_strategy() -> impl Strategy<Value = Action> {
             1 => Just(RootTimelockMaxDelay::get()),
         ]
         .prop_map(|blocks| Action::Advance { blocks }),
+        1 => (wrapper_strategy(), target_strategy())
+            .prop_map(|(wrapper, target)| Action::Approve { wrapper, target }),
+        2 => (any::<bool>(), wrapper_strategy(), target_strategy()).prop_map(
+            |(approved, wrapper, target)| Action::EnactApproved { approved, wrapper, target }
+        ),
     ]
 }
 
@@ -2200,10 +2520,11 @@ proptest! {
 }
 
 // ---------------------------------------------------------------------------
-// Property: whatever one block of stolen-key extrinsics does (floods of
-// scheduled calls and guardian changes, delay raises, stalls, kill-switches,
-// withdrawals), the defenders rotate the key in the next block, and nothing
-// the stolen key scheduled or appointed ever takes effect.
+// Property: whatever the stolen key does before each step of the defenders'
+// answer (floods of scheduled calls and guardian changes, delay raises,
+// stalls, kill-switches, withdrawals, running the approved rotation itself),
+// the answer rotates the key out, and nothing the stolen key scheduled,
+// appointed, raised or stopped outlasts it.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug)]
@@ -2216,6 +2537,7 @@ enum Stolen {
     RemoveKey,
     NestedAppoint,
     LowerStandard,
+    RaiseLong,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2225,6 +2547,7 @@ enum BurstCall {
     Stall,
     KillSwitches,
     WithdrawGuardianChange,
+    RunTheApprovedRotation,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2248,6 +2571,7 @@ fn stolen_call(what: Stolen) -> RuntimeCall {
         Stolen::RemoveKey => RuntimeCall::Sudo(pallet_sudo::Call::remove_key {}),
         Stolen::NestedAppoint => schedule_call(appoint(Some(thief()))),
         Stolen::LowerStandard => set_delay(CallClass::Standard, 1),
+        Stolen::RaiseLong => set_delay(CallClass::Long, RootTimelockMaxDelay::get()),
     }
 }
 
@@ -2270,6 +2594,7 @@ fn burst_calls(call: BurstCall) -> Vec<RuntimeCall> {
         BurstCall::WithdrawGuardianChange => vec![timelock(pallet_root_timelock::Call::cancel {
             id: PendingGuardianChange::<Runtime>::get().unwrap_or(TaskId::MAX),
         })],
+        BurstCall::RunTheApprovedRotation => vec![enact_approved(rotation())],
     }
 }
 
@@ -2283,6 +2608,7 @@ fn stolen_strategy() -> impl Strategy<Value = Stolen> {
         1 => Just(Stolen::RemoveKey),
         1 => Just(Stolen::NestedAppoint),
         1 => Just(Stolen::LowerStandard),
+        1 => Just(Stolen::RaiseLong),
     ]
 }
 
@@ -2294,6 +2620,7 @@ fn burst_call_strategy() -> impl Strategy<Value = BurstCall> {
         1 => Just(BurstCall::Stall),
         1 => Just(BurstCall::KillSwitches),
         1 => Just(BurstCall::WithdrawGuardianChange),
+        1 => Just(BurstCall::RunTheApprovedRotation),
     ]
 }
 
@@ -2305,33 +2632,45 @@ fn grouping_strategy() -> impl Strategy<Value = Grouping> {
     ])
 }
 
+/// One turn of stolen-key extrinsics. Once the key is rotated they are
+/// refused, and a thief's extrinsic may be refused before that too; only what
+/// lands matters.
+fn thief_acts(turn: Vec<(Grouping, Vec<BurstCall>)>) {
+    for (grouping, calls) in turn {
+        let calls: Vec<RuntimeCall> = calls.into_iter().flat_map(burst_calls).collect();
+        let extrinsics = match grouping {
+            Grouping::OneExtrinsicEach => calls.into_iter().map(sudo).collect(),
+            Grouping::Batch => vec![sudo(batch(calls))],
+            Grouping::ForceBatch => vec![sudo(RuntimeCall::Utility(
+                pallet_utility::Call::force_batch { calls },
+            ))],
+        };
+        for extrinsic in extrinsics {
+            let _refused_or_landed = signed(SUDO, extrinsic);
+        }
+    }
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
 
     #[test]
-    fn the_defenders_rotate_the_key_after_any_single_burst(
-        burst in prop::collection::vec(
-            (grouping_strategy(), prop::collection::vec(burst_call_strategy(), 1..6)),
-            1..4,
+    fn the_defenders_rotate_the_key_whatever_the_thief_does_between_their_steps(
+        turns in prop::collection::vec(
+            prop::collection::vec(
+                (grouping_strategy(), prop::collection::vec(burst_call_strategy(), 1..6)),
+                0..3,
+            ),
+            DEFENDER_STEPS,
         )
     ) {
         new_test_ext().execute_with(|| {
-            for (grouping, calls) in burst {
-                let calls: Vec<RuntimeCall> = calls.into_iter().flat_map(burst_calls).collect();
-                let extrinsics = match grouping {
-                    Grouping::OneExtrinsicEach => calls.into_iter().map(sudo).collect(),
-                    Grouping::Batch => vec![sudo(batch(calls))],
-                    Grouping::ForceBatch => vec![sudo(RuntimeCall::Utility(
-                        pallet_utility::Call::force_batch { calls },
-                    ))],
-                };
-                // A thief's extrinsic may be refused; only what lands matters.
-                for extrinsic in extrinsics {
-                    let _refused_or_landed = signed(SUDO, extrinsic);
-                }
+            start_services();
+            for (step, turn) in turns.into_iter().enumerate() {
+                thief_acts(turn);
+                System::set_block_number(2);
+                defender_step(step);
             }
-            System::set_block_number(2);
-            rotate_out_stolen_key();
             assert_stolen_key_is_out(&thief());
         });
     }

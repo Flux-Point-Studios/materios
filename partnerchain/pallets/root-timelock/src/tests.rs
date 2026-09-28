@@ -1,5 +1,5 @@
 use crate::{
-    mock::*, Call, CallClass, DelayTable, Delays, Error, Event, GenesisConfig, Guardian,
+    mock::*, Approval, Call, CallClass, DelayTable, Delays, Error, Event, GenesisConfig, Guardian,
     PendingGuardianChange, Task, Tasks,
 };
 use frame_support::{assert_noop, assert_ok, storage::unhashed};
@@ -46,6 +46,29 @@ fn enact(id: u32, call: RuntimeCall) -> Result<(), DispatchError> {
 
 fn stored() -> Option<Vec<u8>> {
     unhashed::get_raw(KEY)
+}
+
+fn hash_of(call: &RuntimeCall) -> sp_core::H256 {
+    <Test as frame_system::Config>::Hashing::hash_of(call)
+}
+
+/// An authority-recovery call in the mock, with an effect to observe.
+fn heap_pages_call(pages: u64) -> RuntimeCall {
+    RuntimeCall::System(frame_system::Call::set_heap_pages { pages })
+}
+
+fn heap_pages() -> Option<u64> {
+    unhashed::get(sp_core::storage::well_known_keys::HEAP_PAGES)
+}
+
+fn approve(call: Option<&RuntimeCall>) -> sp_runtime::DispatchResult {
+    RootTimelock::approve(RuntimeOrigin::signed(GUARDIAN), call.map(hash_of))
+}
+
+fn enact_approved(call: RuntimeCall) -> Result<(), DispatchError> {
+    RootTimelock::enact_approved(RuntimeOrigin::root(), Box::new(call))
+        .map(|_| ())
+        .map_err(|e| e.error)
 }
 
 #[test]
@@ -622,39 +645,62 @@ fn task_ids_are_unique_across_cancellations() {
 
 #[test]
 fn own_calls_wait_the_class_they_protect() {
-    let class = |call: Call<Test>| call.class();
-    assert_eq!(
-        class(Call::set_guardian { guardian: None }),
-        CallClass::Long
-    );
-    assert_eq!(
-        class(Call::set_delay {
-            class: CallClass::Long,
-            blocks: 1
-        }),
-        CallClass::Long
-    );
-    assert_eq!(
-        class(Call::set_delay {
-            class: CallClass::Standard,
-            blocks: 1
-        }),
-        CallClass::Standard
-    );
-    // Lowering the recovery delay must not become fast-trackable.
-    assert_eq!(
-        class(Call::set_delay {
-            class: CallClass::Recovery,
-            blocks: 1
-        }),
-        CallClass::Standard
-    );
-    assert_eq!(
-        class(Call::schedule {
-            call: Box::new(recovery_call())
-        }),
-        CallClass::Standard
-    );
+    new_test_ext().execute_with(|| {
+        let class = |call: Call<Test>| call.class();
+        assert_eq!(
+            class(Call::set_guardian { guardian: None }),
+            CallClass::Long
+        );
+        // Lowering a delay waits at least that delay.
+        assert_eq!(
+            class(Call::set_delay {
+                class: CallClass::Long,
+                blocks: 1
+            }),
+            CallClass::Long
+        );
+        assert_eq!(
+            class(Call::set_delay {
+                class: CallClass::Standard,
+                blocks: 1
+            }),
+            CallClass::Standard
+        );
+        // Lowering the recovery delay must not become fast-trackable.
+        assert_eq!(
+            class(Call::set_delay {
+                class: CallClass::Recovery,
+                blocks: 1
+            }),
+            CallClass::Standard
+        );
+        // Raising one, or keeping it, only slows Root down: it waits the
+        // recovery delay, and the guardian may co-sign it.
+        for (delay, blocks) in [
+            (CallClass::Recovery, 2),
+            (CallClass::Recovery, 3),
+            (CallClass::Standard, 10),
+            (CallClass::Standard, 30),
+            (CallClass::Long, 30),
+            (CallClass::Long, MAX_DELAY),
+            (CallClass::Long, MAX_DELAY + 1),
+        ] {
+            assert_eq!(
+                class(Call::set_delay {
+                    class: delay,
+                    blocks
+                }),
+                CallClass::Recovery,
+                "{delay:?} to {blocks}"
+            );
+        }
+        assert_eq!(
+            class(Call::schedule {
+                call: Box::new(recovery_call())
+            }),
+            CallClass::Standard
+        );
+    });
 }
 
 #[test]
@@ -769,5 +815,152 @@ fn try_state_bounds_the_vetoable_queue_and_tracks_the_guardian_change() {
         assert!(check().is_err());
         PendingGuardianChange::<Test>::put(change);
         assert_ok!(check());
+    });
+}
+
+#[test]
+fn the_guardian_approves_a_call_that_root_then_runs_at_once() {
+    new_test_ext().execute_with(|| {
+        let install = heap_pages_call(7);
+        let hash = hash_of(&install);
+        assert_noop!(
+            RootTimelock::approve(RuntimeOrigin::signed(ANYONE), Some(hash)),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            RootTimelock::approve(RuntimeOrigin::root(), Some(hash)),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(enact_approved(install.clone()), Error::<Test>::NotApproved);
+
+        assert_ok!(approve(Some(&install)));
+        System::assert_last_event(
+            Event::Approved {
+                call_hash: Some(hash),
+            }
+            .into(),
+        );
+        // Usable through the enactment window.
+        assert_eq!(Approval::<Test>::get(), Some((hash, 1 + 5)));
+        assert_noop!(
+            RootTimelock::enact_approved(
+                RuntimeOrigin::signed(GUARDIAN),
+                Box::new(install.clone())
+            ),
+            DispatchError::BadOrigin
+        );
+        assert_noop!(
+            enact_approved(heap_pages_call(8)),
+            Error::<Test>::NotApproved
+        );
+
+        // It takes no place in the queue, so a full one cannot hold it off.
+        for _ in 0..MAX_PENDING {
+            schedule(set_storage_call(b"a"));
+        }
+        let next_id = crate::NextTaskId::<Test>::get();
+        assert_ok!(enact_approved(install.clone()));
+        System::assert_last_event(Event::EnactedApproved { call_hash: hash }.into());
+        assert_eq!(heap_pages(), Some(7));
+        assert_eq!(Tasks::<Test>::count(), MAX_PENDING);
+        assert_eq!(crate::NextTaskId::<Test>::get(), next_id);
+
+        // Once.
+        assert_eq!(Approval::<Test>::get(), None);
+        assert_noop!(enact_approved(install), Error::<Test>::NotApproved);
+    });
+}
+
+#[test]
+fn an_approval_covers_only_a_call_the_guardian_could_fast_track() {
+    new_test_ext().execute_with(|| {
+        for call in [
+            set_storage_call(b"v"),
+            long_call(),
+            guardian_change(Some(ANYONE)),
+        ] {
+            assert_ok!(approve(Some(&call)));
+            assert_noop!(enact_approved(call), Error::<Test>::NotFastTrackable);
+        }
+        // The class is the one the call has when it runs.
+        assert_ok!(approve(Some(&recovery_call())));
+        RemarkIsLong::set(&true);
+        assert_noop!(
+            enact_approved(recovery_call()),
+            Error::<Test>::NotFastTrackable
+        );
+        RemarkIsLong::set(&false);
+        assert_ok!(enact_approved(recovery_call()));
+    });
+}
+
+#[test]
+fn an_approval_expires_is_replaced_or_withdrawn() {
+    new_test_ext().execute_with(|| {
+        // Given at block 1, usable through block 6.
+        assert_ok!(approve(Some(&heap_pages_call(1))));
+        System::set_block_number(7);
+        assert_noop!(enact_approved(heap_pages_call(1)), Error::<Test>::Expired);
+
+        assert_ok!(approve(Some(&heap_pages_call(1))));
+        assert_ok!(approve(Some(&heap_pages_call(2))));
+        assert_noop!(
+            enact_approved(heap_pages_call(1)),
+            Error::<Test>::NotApproved
+        );
+
+        assert_ok!(approve(None));
+        System::assert_last_event(Event::Approved { call_hash: None }.into());
+        assert_noop!(
+            enact_approved(heap_pages_call(2)),
+            Error::<Test>::NotApproved
+        );
+        assert_eq!(heap_pages(), None);
+    });
+}
+
+#[test]
+fn an_approval_ends_with_the_guardian_that_gave_it() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(approve(Some(&recovery_call())));
+        assert!(Approval::<Test>::get().is_some());
+        assert_ok!(RootTimelock::set_guardian(
+            RuntimeOrigin::root(),
+            Some(ANYONE)
+        ));
+        assert_eq!(Approval::<Test>::get(), None);
+        assert_noop!(enact_approved(recovery_call()), Error::<Test>::NotApproved);
+    });
+}
+
+#[test]
+fn a_failing_approved_call_keeps_the_approval() {
+    new_test_ext().execute_with(|| {
+        // A raise past the long delay, which the table refuses.
+        let raise = RuntimeCall::RootTimelock(Call::set_delay {
+            class: CallClass::Standard,
+            blocks: 31,
+        });
+        assert_ok!(approve(Some(&raise)));
+        assert_noop!(enact_approved(raise.clone()), Error::<Test>::InvalidDelays);
+        assert_eq!(Approval::<Test>::get(), Some((hash_of(&raise), 6)));
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn try_state_keeps_an_approval_within_its_guardian_and_window() {
+    use frame_support::traits::Hooks;
+    new_test_ext().execute_with(|| {
+        let check = || <RootTimelock as Hooks<u64>>::try_state(System::block_number());
+        let hash = hash_of(&recovery_call());
+        assert_ok!(approve(Some(&recovery_call())));
+        assert_ok!(check());
+
+        Approval::<Test>::put((hash, 1 + 5 + 1));
+        assert!(check().is_err());
+        Approval::<Test>::put((hash, 1 + 5));
+        Guardian::<Test>::kill();
+        assert!(check().is_err());
     });
 }

@@ -6,3 +6,7 @@
 # everyone who runs the test benefits from these saved cases.
 cc 5fe1d8dc03dae057fb9d5d23eb19332c66b794afba3d51f4f8a77b9772e31cce # shrinks to actions = [Schedule { wrapper: Plain, target: Lever { which: 0, on: false } }, FastTrack { pick: 0 }, FastTrack { pick: 0 }]
 cc 4ef5c8af6eebf02c689f34cd27a9004ba1829f85456a379f99442b91facc7d2a # shrinks to actions = [Direct { path: SudoUncheckedWeight, wrapper: Plain, target: SetDelay { class: 0, blocks: 5 } }]
+cc d4aed38ade63d4eb9ae2abc1b214a9374a99eb96928acccaf072dfa4ff48701a # shrinks to turns = [[], [(OneExtrinsicEach, [Schedule { what: RotateToThief, copies: 1 }])], [], []]
+cc 1e20a959efed893e952f750257c431d88de29bfd52b4320ae97197ce1c387ff5 # shrinks to turns = [[], [(OneExtrinsicEach, [Raise { class: 0, to_max: false }])], [], [], []]
+cc 8109d55025513e687edc9da66a891f8fc83e2d7b48ceb38d2933614946ea2e88 # shrinks to actions = [Approve { wrapper: Plain, target: Lever { which: 0, on: false } }, EnactApproved { approved: true, wrapper: Plain, target: Store { slot: 0, value: 0 } }]
+cc f64babf6c45dd306c0122add2ae50e7d0729a550e3ec3d3b1361b2262eaea4c9 # shrinks to actions = [Approve { wrapper: Plain, target: Store { slot: 0, value: 0 } }, Advance { blocks: 1296000 }, EnactApproved { approved: true, wrapper: Plain, target: Store { slot: 0, value: 0 } }]

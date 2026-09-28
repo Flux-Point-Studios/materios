@@ -40,7 +40,7 @@ sp-runtime = { workspace = true, features = ["std"] }
 sp-io = { workspace = true, features = ["std"] }
 sp-consensus-aura = { workspace = true, features = ["std"] }
 sp-consensus-grandpa = { workspace = true, features = ["std"] }
-sp-keyring = { workspace = true }
+sp-keyring = { workspace = true, features = ["std"] }
 sp-blockchain = { workspace = true }
 sp-api = { workspace = true, features = ["std"] }
 sp-block-builder = { workspace = true, features = ["std"] }
