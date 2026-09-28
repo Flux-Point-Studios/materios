@@ -370,8 +370,8 @@ def test_malformed_manifest_is_refused(spec):
 
 
 @pytest.mark.parametrize("argv", [
-    "node --validator --wasm-runtime-overrides /srv/overrides",
-    ["node", "--validator", "--wasm-runtime-overrides=/srv/overrides"],
+    "materios-node --validator --wasm-runtime-overrides /srv/overrides",
+    ["materios-node", "--validator", "--wasm-runtime-overrides=/srv/overrides"],
 ])
 def test_authority_with_a_wasm_override_is_refused(argv):
     launch = {"nodes": [authority(argv)]}
@@ -380,8 +380,16 @@ def test_authority_with_a_wasm_override_is_refused(argv):
         "the signed runtime code"]
 
 
+def test_a_shell_wrapped_authority_with_a_wasm_override_is_refused():
+    launch = {"nodes": [authority(["/bin/bash", "-lc", "exec materios-node --validator "
+                                   "--wasm-runtime-overrides /srv/overrides"])]}
+    assert messages(lp.check_code_overrides(launch)) == [
+        "[6 checkpoint] authority val1 runs --wasm-runtime-overrides: a local runtime would replace "
+        "the signed runtime code"]
+
+
 def test_wasm_override_on_a_non_authority_is_out_of_scope():
-    node = {"name": "rpc", "host": "r", "authority": False, "argv": "node --wasm-runtime-overrides /o"}
+    node = {"name": "rpc", "host": "r", "authority": False, "argv": "materios-node --wasm-runtime-overrides /o"}
     assert lp.check_code_overrides({"nodes": [node]}) == []
 
 
@@ -457,6 +465,18 @@ def test_dev_keyring_flags_and_dev_uris_in_node_launch_are_named(spec, meta, kno
     assert "[1 dev-keys] node v1: --alice loads the dev keyring" in found
     assert "[1 dev-keys] node v2: --dev loads the dev keyring" in found
     assert "[1 dev-keys] node cd: launch config names //Ferdie" in found
+
+
+def test_dev_keyring_flag_inside_a_wrapper_is_named(spec, meta, known):
+    launch = {"roles": {}, "nodes": [
+        {"name": "v1", "host": "h1", "authority": False,
+         "argv": ["/bin/bash", "-lc", "exec materios-node --validator '--alice'"]},
+        {"name": "v2", "host": "h2", "authority": False,
+         "argv": ["docker", "run", "--rm", "img", "bash", "-lc", "materios-node --bob"]},
+    ]}
+    found = dev_key_findings(spec, meta, known, launch)
+    assert "[1 dev-keys] node v1: --alice loads the dev keyring" in found
+    assert "[1 dev-keys] node v2: --bob loads the dev keyring" in found
 
 
 def test_any_derivation_of_the_dev_phrase_in_a_launch_config_is_named(spec, meta, known):
@@ -785,30 +805,30 @@ def authority(argv, host="val1", name="val1", aura=None):
             "argv": argv}
 
 
-UNSAFE_9945 = "node --validator --rpc-methods unsafe --rpc-port 9945"
+UNSAFE_9945 = "materios-node --validator --rpc-methods unsafe --rpc-port 9945"
 
 
 def test_unsafe_methods_on_an_external_listener_are_refused(tmp_path):
-    found = rpc_findings(tmp_path, [authority("node --validator --rpc-methods unsafe --unsafe-rpc-external")])
+    found = rpc_findings(tmp_path, [authority("materios-node --validator --rpc-methods unsafe --unsafe-rpc-external")])
     assert found == ["[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
 def test_unsafe_methods_behind_a_loopback_proxy_on_the_same_host_are_refused(tmp_path):
     nginx = "location /rpc { proxy_pass http://127.0.0.1:9945; }"
-    found = rpc_findings(tmp_path, [authority("node --rpc-methods=Unsafe --rpc-port 9945")], nginx, "val1")
+    found = rpc_findings(tmp_path, [authority("materios-node --rpc-methods=Unsafe --rpc-port 9945")], nginx, "val1")
     assert found == ["[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
 def test_default_methods_on_loopback_are_unsafe_so_a_proxy_is_refused(tmp_path):
     nginx = "upstream chain { server val1:9944; }\nlocation / { proxy_pass http://chain; }"
-    found = rpc_findings(tmp_path, [authority(["node", "--validator"])], nginx)
+    found = rpc_findings(tmp_path, [authority(["materios-node", "--validator"])], nginx)
     assert found == ["[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
 @pytest.mark.parametrize("argv", [
-    "node --validator --rpc-external",
-    "node --validator --rpc-methods safe --unsafe-rpc-external",
-    "node --validator --rpc-methods safe --rpc-port 9945",
+    "materios-node --validator --rpc-external",
+    "materios-node --validator --rpc-methods safe --unsafe-rpc-external",
+    "materios-node --validator --rpc-methods safe --rpc-port 9945",
 ])
 def test_safe_methods_pass_even_when_exposed(tmp_path, argv):
     nginx = "location / { proxy_pass http://127.0.0.1:9945; }"
@@ -817,11 +837,11 @@ def test_safe_methods_pass_even_when_exposed(tmp_path, argv):
 
 def test_proxy_to_another_host_or_port_does_not_implicate_the_authority(tmp_path):
     nginx = "location / { proxy_pass http://rpc-node:9944; } location /b { proxy_pass http://127.0.0.1:9944; }"
-    assert rpc_findings(tmp_path, [authority("node --rpc-methods unsafe")], nginx, "edge") == []
+    assert rpc_findings(tmp_path, [authority("materios-node --rpc-methods unsafe")], nginx, "edge") == []
 
 
 def test_proxy_to_another_address_of_the_authority_is_refused(tmp_path):
-    node = dict(authority("node --rpc-methods unsafe --rpc-port 9950"), addresses=["10.1.2.3", "val1.lan"])
+    node = dict(authority("materios-node --rpc-methods unsafe --rpc-port 9950"), addresses=["10.1.2.3", "val1.lan"])
     nginx = "location /rpc { proxy_pass http://10.1.2.3:9950/; }"
     assert rpc_findings(tmp_path, [node], nginx) == [
         "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
@@ -951,7 +971,7 @@ def test_cloudflared_config_the_preflight_cannot_bound_is_an_input_error(tmp_pat
 
 
 def test_non_authority_nodes_are_out_of_scope(tmp_path):
-    node = {"name": "rpc", "host": "r", "authority": False, "argv": "node --rpc-methods unsafe --rpc-external"}
+    node = {"name": "rpc", "host": "r", "authority": False, "argv": "materios-node --rpc-methods unsafe --rpc-external"}
     assert rpc_findings(tmp_path, [node]) == []
 
 
@@ -960,47 +980,93 @@ def test_non_authority_nodes_are_out_of_scope(tmp_path):
     "listen-addr=[::]:9955,cors=all,methods=Unsafe",
 ])
 def test_unsafe_experimental_endpoint_on_an_external_address_is_refused(tmp_path, endpoint):
-    argv = ["node", "--validator", "--rpc-methods", "safe", "--experimental-rpc-endpoint", endpoint]
+    argv = ["materios-node", "--validator", "--rpc-methods", "safe", "--experimental-rpc-endpoint", endpoint]
     assert rpc_findings(tmp_path, [authority(argv)]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
 
 
 def test_loopback_experimental_endpoint_behind_a_proxy_is_refused(tmp_path):
-    argv = ["node", "--rpc-methods", "safe", "--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9966"]
+    argv = ["materios-node", "--rpc-methods", "safe", "--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9966"]
     nginx = "location / { proxy_pass http://127.0.0.1:9966; }"
     assert rpc_findings(tmp_path, [authority(argv)], nginx, "val1") == [
         "[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
 def test_safe_experimental_endpoint_passes(tmp_path):
-    argv = ["node", "--rpc-methods", "safe",
+    argv = ["materios-node", "--rpc-methods", "safe",
             "--experimental-rpc-endpoint=listen-addr=0.0.0.0:9944,methods=safe"]
     nginx = "location / { proxy_pass http://127.0.0.1:9944; }"
     assert rpc_findings(tmp_path, [authority(argv)], nginx, "val1") == []
 
 
 def test_experimental_endpoint_without_listen_addr_is_an_input_error(tmp_path):
-    argv = ["node", "--experimental-rpc-endpoint", "methods=unsafe"]
+    argv = ["materios-node", "--experimental-rpc-endpoint", "methods=unsafe"]
     with pytest.raises(lp.InputError, match="listen-addr"):
         rpc_findings(tmp_path, [authority(argv)])
 
 
+# A systemd unit as a validator bootstrap writes it: a login shell that loads the
+# node's environment, then execs the node.
+BOOTSTRAP_EXECSTART = ("/bin/bash -lc 'set -a; . /etc/materios/node.env; set +a; "
+                       "exec /usr/local/bin/materios-node-spo --validator --chain /etc/materios/mainnet-raw.json "
+                       "--rpc-methods unsafe --rpc-port 9945 --unsafe-rpc-external'")
+UNSAFE_EXTERNAL = "materios-node --validator --rpc-methods unsafe --unsafe-rpc-external"
+
+
+@pytest.mark.parametrize("argv", [
+    BOOTSTRAP_EXECSTART,
+    ["sh", "-c", "exec " + UNSAFE_EXTERNAL],
+    ["/bin/bash", "-l", "-c", "mkdir -p /data &&\n" + UNSAFE_EXTERNAL],
+    ["bash", "-ec", "exec bash -c 'exec " + UNSAFE_EXTERNAL + "'"],
+    ["dash", "-c", "RUST_LOG=info " + UNSAFE_EXTERNAL],
+])
+def test_a_shell_wrapped_launch_is_read_as_the_node_it_runs(tmp_path, argv):
+    assert rpc_findings(tmp_path, [authority(argv)]) == [
+        "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+@pytest.mark.parametrize("argv, error", [
+    ("materios-node --validator $RPC_FLAGS", "expands a variable"),
+    (["materios-node", "--validator", "${RPC_FLAGS}"], "expands a variable"),
+    (["bash", "-lc", "exec materios-node --validator `cat /etc/flags`"], "expands a variable"),
+    (["docker", "run", "--rm", "img", "bash", "-lc", "exec " + UNSAFE_EXTERNAL], "runs docker, not a node binary"),
+    (["materios-node", "--validator --rpc-methods unsafe --unsafe-rpc-external"], "argument 1 holds several"),
+    (["bash", "-lc", UNSAFE_EXTERNAL + " | tee /var/log/node.log"], "uses '|'"),
+    (["bash", "-lc", UNSAFE_EXTERNAL + " >> /var/log/node.log 2>&1"], "uses '>>'"),
+    (["bash", "-lc", "materios-node --validator || " + UNSAFE_EXTERNAL], "uses '||'"),
+    (["bash", "/opt/start-node.sh"], "without -c"),
+    (["bash", "-c", "exec materios-node --validator", "arg0"], "must end with its -c script"),
+    (["bash", "-lc", "materios-node --validator; echo started"], "runs echo, not a node binary"),
+    (["bash", "-lc", "exec materios-node --name 'unbalanced"], "does not parse"),
+    ([], "runs nothing, not a node binary"),
+])
+def test_an_authority_launch_the_preflight_cannot_read_is_an_input_error(tmp_path, argv, error):
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_node(authority(argv), "nodes[0]")
+
+
+def test_a_shell_wrapped_non_authority_validator_is_refused(tmp_path):
+    node = {"name": "v9", "host": "h9", "authority": False,
+            "argv": ["/bin/bash", "-lc", "exec materios-node --validator --rpc-methods safe"]}
+    assert rpc_findings(tmp_path, [node]) == ["[3 rpc] node v9 runs --validator but is not declared an authority"]
+
+
 def test_validator_not_declared_an_authority_is_refused(tmp_path):
     node = {"name": "v9", "host": "h9", "authority": False,
-            "argv": "node --validator --rpc-methods unsafe --rpc-external"}
+            "argv": "materios-node --validator --rpc-methods unsafe --rpc-external"}
     assert rpc_findings(tmp_path, [node]) == [
         "[3 rpc] node v9 runs --validator but is not declared an authority"]
 
 
 def test_unknown_rpc_methods_value_is_refused(tmp_path):
-    found = rpc_findings(tmp_path, [authority("node --rpc-methods everything")])
+    found = rpc_findings(tmp_path, [authority("materios-node --rpc-methods everything")])
     assert found == ["[3 rpc] node val1: unknown --rpc-methods everything"]
 
 
 def test_every_authority_needs_a_node_entry(tmp_path):
     listed, missing = fresh_account(), fresh_account()
     authorities = [("genesis Aura.Authorities[0]", listed), ("Cardano permissioned candidate 0", missing)]
-    found = rpc_findings(tmp_path, [authority("node --validator --rpc-methods safe", aura=listed)],
+    found = rpc_findings(tmp_path, [authority("materios-node --validator --rpc-methods safe", aura=listed)],
                          authorities=authorities)
     assert found == [f"[3 rpc] Cardano permissioned candidate 0 (aura 0x{missing.hex()}) has no authority "
                      "node in the launch manifest: its RPC listeners are unchecked"]
@@ -1519,6 +1585,23 @@ def test_cli_refuses_unsafe_rpc_behind_a_cloudflared_tunnel(clean, capsys):
     assert "[3 rpc] authority val0 serves unsafe RPC methods behind proxy tunnel" in out
 
 
+def test_cli_reads_an_authority_through_its_shell_wrapper(clean, capsys):
+    clean.launch["nodes"][0]["argv"] = ["/bin/bash", "-lc", "exec materios-node --validator --rpc-methods unsafe "
+                                        "--unsafe-rpc-external --alice --wasm-runtime-overrides /srv/o"]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[1 dev-keys] node val0: --alice loads the dev keyring" in out
+    assert "[3 rpc] authority val0 serves unsafe RPC methods on an external listener" in out
+    assert "[6 checkpoint] authority val0 runs --wasm-runtime-overrides" in out
+
+
+def test_cli_refuses_the_bootstrap_unit_shape(clean, capsys):
+    clean.launch["nodes"][0]["argv"] = BOOTSTRAP_EXECSTART
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[3 rpc] authority val0 serves unsafe RPC methods on an external listener" in out
+
+
 def test_cli_refuses_a_lock_smaller_than_what_materios_can_issue(clean, capsys):
     clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 975_000 * MATRA})
     code, out = clean.run(capsys)
@@ -1592,7 +1675,7 @@ VALID_LOCK = {"genesis_lock": LOCK}
     ({"roles": {}, "supply": VALID_LOCK,
       "nodes": [{"name": "v1", "host": "h", "authority": True, "aura": "0x" + "11" * 32, "addresses": "10.0.0.1"}]},
      "nodes\\[0\\] addresses must be a list of strings"),
-    ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1", "host": "h", "argv": "node --validator"}]},
+    ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1", "host": "h", "argv": "materios-node --validator"}]},
      "nodes\\[0\\] must declare authority as true or false"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1", "host": "h", "authority": True}]},
      "nodes\\[0\\] is an authority and must declare its aura public key"),
@@ -1615,7 +1698,7 @@ def test_malformed_manifest_key_is_an_input_error(manifest_key):
 
 def test_non_numeric_rpc_port_is_an_input_error(tmp_path):
     with pytest.raises(lp.InputError, match="is not a port"):
-        rpc_findings(tmp_path, [authority("node --rpc-port nine")])
+        rpc_findings(tmp_path, [authority("materios-node --rpc-port nine")])
 
 
 def test_decompression_bomb_is_an_input_error(monkeypatch):

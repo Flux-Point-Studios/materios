@@ -104,6 +104,12 @@ DEV_URI = re.compile(r"(?<![\w:/.])(//[\w-]+(?:/{1,2}[\w-]+)*)(?:///\S*)?(?![\w.
 # What the anchor worker reads as a test network, shared with it in test_networks.json.
 TEST_NETWORKS = json.loads((HERE / "test_networks.json").read_text())
 TEST_NETWORK_NAME = re.compile(TEST_NETWORKS["name_pattern"], re.IGNORECASE | re.ASCII)
+NODE_BINARIES = ("materios-node", "materios-node-spo")
+SHELLS = {"sh", "bash", "dash", "ash", "zsh"}
+SHELL_OPERATORS = ";&|()<>\n"
+SHELL_LOGIN_OPTIONS = {"--login", "--noprofile", "--norc"}
+SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=.*", re.DOTALL)
+SHELL_NESTING = 4
 RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
 WASM_OVERRIDES_FLAG = "--wasm-runtime-overrides"
@@ -750,16 +756,18 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
             for hit in match_known(raw, known):
                 findings.append(Finding(KEYS, f"Cardano permissioned candidate {i} {name}: {hit}"))
     for node in launch.get("nodes", []):
-        strings = node_argv(node) + [f"{k}={v}" for k, v in sorted(node.get("env", {}).items())]
-        for text in strings:
-            flag = text.split("=", 1)[0]
+        node_findings = []
+        for piece in launch_pieces(node):
+            flag = piece.strip("\"'").split("=", 1)[0]
             if flag in DEV_KEYRING_FLAGS:
-                findings.append(Finding(KEYS, f"node {node['name']}: {flag} loads the dev keyring"))
+                node_findings.append(Finding(KEYS, f"node {node['name']}: {flag} loads the dev keyring"))
+        for text in node_argv(node) + [f"{k}={v}" for k, v in sorted(node.get("env", {}).items())]:
             uri = dev_uri(text)
             if uri:
-                findings.append(Finding(KEYS, f"node {node['name']}: launch config names {uri}"))
+                node_findings.append(Finding(KEYS, f"node {node['name']}: launch config names {uri}"))
             if contains_phrase(text, phrase_hash):
-                findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev mnemonic"))
+                node_findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev mnemonic"))
+        findings += dict.fromkeys(node_findings)
     for hit in match_known(manifest_key, known):
         findings.append(Finding(KEYS, f"manifest signing key: {hit}"))
     return findings
@@ -800,7 +808,100 @@ def check_rewards(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
 
 def node_argv(node: dict) -> list[str]:
     argv = node.get("argv", [])
-    return shlex.split(argv) if isinstance(argv, str) else list(argv)
+    try:
+        return shlex.split(argv) if isinstance(argv, str) else list(argv)
+    except ValueError as e:
+        raise InputError(f"node {node['name']}: its launch command does not parse: {e}") from e
+
+
+def _program(words: list[str]) -> list[str]:
+    """A shell command's words from its program on, past `exec` and NAME=value prefixes."""
+    i = 0
+    while i < len(words) and (words[i] == "exec" or SHELL_ASSIGNMENT.fullmatch(words[i])):
+        i += 1
+    return words[i:]
+
+
+def _shell_script(argv: list[str], where: str) -> str:
+    """The SCRIPT of `sh [-l|-e|--login ...] -c SCRIPT`."""
+    for i, word in enumerate(argv[1:], 1):
+        if re.fullmatch(r"-[a-zA-Z]*c[a-zA-Z]*", word):
+            if len(argv) != i + 2:
+                raise InputError(f"{where}: a shell launch must end with its -c script")
+            return argv[i + 1]
+        if not (re.fullmatch(r"-[a-zA-Z]+", word) or word in SHELL_LOGIN_OPTIONS):
+            break
+    raise InputError(f"{where}: runs a shell without -c; the preflight cannot read a script file")
+
+
+def _script_commands(script: str, where: str) -> list[list[str]]:
+    """The commands of a shell script joined by `;`, `&&` or newlines. Any other
+    operator (a pipe, a redirection, a subshell, `||`, `&`) is refused: the
+    command that runs, or its words, would depend on evaluation."""
+    lexer = shlex.shlex(script, posix=True, punctuation_chars=SHELL_OPERATORS)
+    lexer.whitespace, lexer.whitespace_split, lexer.commenters = " \t\r", True, ""
+    try:
+        tokens = list(lexer)
+    except ValueError as e:
+        raise InputError(f"{where}: its shell command does not parse: {e}") from e
+    commands, words = [], []
+    for token in [*tokens, ";"]:
+        if token and set(token.replace("&&", "")) <= {";", "\n"}:
+            if words:
+                commands.append(words)
+            words = []
+        elif token and set(token) <= set(SHELL_OPERATORS):
+            raise InputError(f"{where}: its shell command uses {token!r}; the preflight reads only "
+                             "commands joined by ; or &&")
+        else:
+            words.append(token)
+    return commands
+
+
+def _commands(words: list[str], where: str, depth: int) -> list[list[str]]:
+    program = _program(words)
+    if not program or Path(program[0]).name not in SHELLS:
+        return [words]
+    if depth == SHELL_NESTING:
+        raise InputError(f"{where}: shells nest more than {SHELL_NESTING} deep")
+    return [command for inner in _script_commands(_shell_script(program, where), where)
+            for command in _commands(inner, where, depth + 1)]
+
+
+def launch_commands(node: dict) -> list[list[str]]:
+    """Every command a node's launch runs, as the words it is given, with each
+    `sh -c` wrapper (a systemd unit's, a container entrypoint's) opened. A
+    command that expands a variable, as systemd does `$VAR` in ExecStart, is
+    refused: its words are not in the manifest."""
+    where = f"node {node['name']}"
+    argv = node_argv(node)
+    if any(re.search(r"[$`]", word) for word in argv):
+        raise InputError(f"{where}: its launch command expands a variable or a command; "
+                         "give the argv the process receives")
+    return _commands(argv, where, 0) if argv else []
+
+
+def launch_pieces(node: dict) -> list[str]:
+    """Every whitespace-separated piece of a node's launch words, wrapped or
+    not, and of its environment: where a flag can hide."""
+    words = node_argv(node) + [word for command in launch_commands(node) for word in command]
+    return [piece for word in words + list(node.get("env", {}).values()) for piece in word.split()]
+
+
+def node_process(node: dict) -> list[str]:
+    """The argv an authority's node process receives: the last command its
+    launch runs, which must start a node binary with one argument per word."""
+    where = f"authority {node['name']}"
+    commands = launch_commands(node)
+    argv = _program(commands[-1]) if commands else []
+    program = Path(argv[0]).name if argv else "nothing"
+    if program not in NODE_BINARIES:
+        raise InputError(f"{where}: its launch runs {program}, not a node binary ({', '.join(NODE_BINARIES)}); "
+                         "give the argv the node process receives")
+    for i, word in enumerate(argv):
+        if re.search(r"\s-", word):
+            raise InputError(f"{where}: argument {i} holds several arguments; give one per word")
+    return argv
 
 
 def _flag(argv: list[str], name: str) -> str | None:
@@ -1006,12 +1107,12 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Fin
             findings.append(Finding(RPC, f"{label} (aura 0x{aura.hex()}) has no authority node in the launch "
                                          "manifest: its RPC listeners are unchecked"))
     for node in nodes:
-        argv = node_argv(node)
         if not node["authority"]:
-            if "--validator" in argv:
+            if "--validator" in launch_pieces(node):
                 findings.append(Finding(RPC, f"node {node['name']} runs --validator but is not "
                                              "declared an authority"))
             continue
+        argv = node_process(node)
         port_flag = _flag(argv, "--rpc-port") or str(DEFAULT_RPC_PORT)
         if not port_flag.isdigit():
             raise InputError(f"node {node['name']}: --rpc-port {port_flag} is not a port")
@@ -1178,7 +1279,7 @@ def check_code_overrides(launch: dict) -> list[Finding]:
                                 "replace the signed runtime code")
             for node in launch.get("nodes", []) if node["authority"] and any(
                 token == WASM_OVERRIDES_FLAG or token.startswith(WASM_OVERRIDES_FLAG + "=")
-                for token in node_argv(node))]
+                for token in node_process(node))]
 
 
 def check_checkpoint(spec: Spec, launch: dict, signed: dict, manifest_key: bytes) -> list[Finding]:
@@ -1243,6 +1344,7 @@ def validate_node(node, where: str) -> None:
     env = node.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise InputError(f"{where} env must map names to strings")
+    launch_commands(node)
     if node["authority"]:
         try:
             aura = decode_public_key(node["aura"]) if isinstance(node.get("aura"), str) else b""
@@ -1250,6 +1352,7 @@ def validate_node(node, where: str) -> None:
             aura = b""
         if len(aura) != 32:
             raise InputError(f"{where} is an authority and must declare its aura public key (SS58 or 0x-hex)")
+        node_process(node)
 
 
 def validate_launch(launch) -> None:
