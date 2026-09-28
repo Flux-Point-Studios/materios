@@ -80,6 +80,26 @@ HASH_FIELDS = ("genesis_hash", "code_hash", "chain_spec_hash", "launch_manifest_
 # Pallet name in construct_runtime, and the crate its types keep under any name.
 FORBIDDEN_PALLETS = {"PerpEngine": "pallet_perp_engine"}
 EMISSION_RESERVES = ("ValidatorEmissionReserve", "AttestationRewardReserve")
+# The storage a mainnet genesis may set, besides each pallet's storage version.
+# Anything else (a pending withdrawal, a credit ledger entry) can hold a claim
+# on MATRA that the supply check does not count.
+GENESIS_STORAGE = frozenset({
+    "System.Account", "System.BlockHash", "System.ParentHash", "System.LastRuntimeUpgrade",
+    "System.UpgradedToU32RefCount", "System.UpgradedToTripleRefCount",
+    "Aura.Authorities", "Grandpa.Authorities", "Grandpa.CurrentSetId", "Grandpa.SetIdSession",
+    "Balances.TotalIssuance", "Sudo.Key",
+    "OrinqReceipts.AttestationRewardPerSigner", "OrinqReceipts.EraCapBase", "OrinqReceipts.EraCapBaselineAttestorCount",
+    "OrinqReceipts.BondRequirement", "OrinqReceipts.ReceiptExpiryBlocks", "OrinqReceipts.ReceiptSubmissionFee",
+    "OrinqReceipts.ReceiptSubmissionFeeFloor",
+    "Motra.Params", "Sidechain.GenesisUtxo", "Sidechain.SlotsPerEpoch",
+    "SessionCommitteeManagement.CurrentCommittee", "SessionCommitteeManagement.MainChainScriptsConfiguration",
+    "PalletSession.QueuedKeys", "PalletSession.Validators", "Session.ValidatorsAndKeys",
+    "NativeTokenManagement.MainChainScriptsConfiguration", "Vesting.StorageVersion",
+    "IntentSettlement.IntentTTL", "IntentSettlement.ClaimTTL", "IntentSettlement.MinSignerThreshold",
+    "IntentSettlement.PoolUtilization",
+})
+GENESIS_WELL_KNOWN_KEYS = {CODE_KEY, b":extrinsic_index"}
+STORAGE_VERSION_KEY = b":__STORAGE_VERSION__:"
 POLICY_ID_LEN = 28
 # Validator reward parameters are runtime constants: (economics field, OrinqReceipts constant).
 VALIDATOR_REWARD_CONSTANTS = (
@@ -1252,6 +1272,26 @@ def check_supply(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView)
     return findings
 
 
+def check_genesis_storage(spec: Spec, meta: Metadata) -> list[Finding]:
+    """Genesis may set only GENESIS_STORAGE, each pallet's storage version and
+    the runtime's own well-known keys."""
+    versions = {twox_128(name.encode()) + twox_128(STORAGE_VERSION_KEY) for name in meta.pallets}
+    outside: dict[str, int] = {}
+    for key in sorted(spec.storage):
+        if key in GENESIS_WELL_KNOWN_KEYS or key in versions:
+            continue
+        if key.startswith(b":"):
+            label = key.decode(errors="replace")
+        else:
+            label = meta.storage_names.get(key[:32], f"storage 0x{key[:32].hex()}")
+        if label not in GENESIS_STORAGE:
+            outside[label] = outside.get(label, 0) + 1
+    return [Finding(SUPPLY, f"genesis sets {label} ({count} {'entry' if count == 1 else 'entries'}), which a "
+                            "mainnet genesis may not set: storage outside the genesis allowlist can hold a claim on "
+                            "MATRA that the supply check does not count")
+            for label, count in outside.items()]
+
+
 def check_pallets(meta: Metadata) -> list[Finding]:
     findings = []
     for name, crate in FORBIDDEN_PALLETS.items():
@@ -1449,6 +1489,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_supply(spec, meta, launch, cardano)
+            + check_genesis_storage(spec, meta)
             + check_pallets(meta)
             + check_checkpoint(spec, launch, signed, key)
             + check_code_overrides(launch)

@@ -1350,6 +1350,45 @@ def test_empty_attestor_roster_is_refused(spec, runtime_meta):
     assert "[4 supply] roles.attestors names no account: the endowment floor has nothing to check" in found
 
 
+def with_billing(metadata_v14: dict) -> lp.Metadata:
+    """The fixture metadata plus the billing pallet, whose withdrawal path mints MATRA."""
+    v14 = copy.deepcopy(metadata_v14)
+    v14["pallets"].append({"name": "Billing", "constants": [], "storage": {
+        "prefix": "Billing", "entries": [{"name": "Balances"}, {"name": "PendingWithdrawals"}]}})
+    return lp.Metadata.from_v14(v14)
+
+
+def map_key(pallet: str, item: str, account: bytes) -> bytes:
+    return lp.storage_key(pallet, item) + hashlib.blake2b(account, digest_size=16).digest() + account
+
+
+def test_preprod_genesis_sets_only_storage_a_mainnet_genesis_may_set(spec, meta):
+    assert lp.check_genesis_storage(spec, meta) == []
+
+
+def test_a_mint_claim_planted_in_raw_genesis_is_refused(spec, metadata_v14):
+    claim = (10**30).to_bytes(16, "little") + bytes(4)
+    spec.storage[map_key("Billing", "PendingWithdrawals", fresh_account())] = claim
+    spec.storage[map_key("Billing", "PendingWithdrawals", fresh_account())] = claim
+    spec.storage[map_key("IntentSettlement", "Credits", fresh_account())] = claim
+    assert messages(lp.check_genesis_storage(spec, with_billing(metadata_v14))) == [
+        "[4 supply] genesis sets Billing.PendingWithdrawals (2 entries), which a mainnet genesis may not set: "
+        "storage outside the genesis allowlist can hold a claim on MATRA that the supply check does not count",
+        "[4 supply] genesis sets IntentSettlement.Credits (1 entry), which a mainnet genesis may not set: "
+        "storage outside the genesis allowlist can hold a claim on MATRA that the supply check does not count"]
+
+
+def test_storage_no_runtime_item_declares_is_refused(spec, meta):
+    stray = lp.storage_key("Billing", "PendingWithdrawals")
+    spec.storage[stray + bytes(48)] = bytes(20)
+    spec.storage[b":heappages"] = (4096).to_bytes(8, "little")
+    found = messages(lp.check_genesis_storage(spec, meta))
+    assert f"[4 supply] genesis sets storage 0x{stray.hex()} (1 entry), which a mainnet genesis may not set: " \
+           "storage outside the genesis allowlist can hold a claim on MATRA that the supply check does not count" \
+           in found
+    assert any(m.startswith("[4 supply] genesis sets :heappages (1 entry)") for m in found)
+
+
 def test_runtime_that_hides_its_emission_reserves_is_refused(spec, meta):
     found = supply_findings(spec, meta, roster(spec), 0)
     assert found == ["[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve, "
@@ -1711,6 +1750,16 @@ def test_cli_refuses_a_lock_smaller_than_what_materios_can_issue(clean, capsys):
     code, out = clean.run(capsys)
     assert code == 1
     assert "counted both as cMATRA and as MATRA" in out
+
+
+def test_cli_refuses_a_pending_withdrawal_planted_in_raw_genesis(clean, capsys):
+    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 10**30})
+    stray = lp.storage_key("Billing", "PendingWithdrawals")
+    clean.spec.storage[map_key("Billing", "PendingWithdrawals", fresh_account())] = \
+        (10**30).to_bytes(16, "little") + bytes(4)
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[4 supply] genesis sets storage 0x{stray.hex()} (1 entry), which a mainnet genesis may not set" in out
 
 
 def test_cli_refuses_a_launch_manifest_edited_after_signing(clean, capsys):
