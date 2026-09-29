@@ -106,7 +106,16 @@ parameter_types! {
     /// used by `era_emission_respects_configurable_treasury_share` to retune
     /// the split at test-time. Default matches the production 15%.
     pub static TreasuryEmissionShareValue: Perbill = Perbill::from_percent(15);
+    /// Mock era reward and emission reserves at the production values;
+    /// `pub static` so the `emission_reserves` tests can change them.
+    pub static ValidatorRewardPerEraValue: u128 = VALIDATOR_REWARD_PER_ERA;
+    pub static ValidatorEmissionReserveValue: u128 = VALIDATOR_EMISSION_RESERVE;
+    pub static AttestationRewardReserveValue: u128 = ATTESTATION_REWARD_RESERVE;
 }
+
+const VALIDATOR_REWARD_PER_ERA: u128 = 102_739_726;
+const VALIDATOR_EMISSION_RESERVE: u128 = 150_000_000_000_000;
+const ATTESTATION_REWARD_RESERVE: u128 = 50_000_000_000_000;
 
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
@@ -121,6 +130,9 @@ impl pallet::Config for Test {
     type AttestorReservePotId = AttestorReservePotId;
     type TreasuryPotId = TreasuryPotId;
     type TreasuryEmissionShare = TreasuryEmissionShareValue;
+    type ValidatorRewardPerEra = ValidatorRewardPerEraValue;
+    type ValidatorEmissionReserve = ValidatorEmissionReserveValue;
+    type AttestationRewardReserve = AttestationRewardReserveValue;
 }
 
 /// Construct a deterministic AccountId32 from a single byte seed (for tests).
@@ -133,14 +145,12 @@ fn new_test_ext() -> sp_io::TestExternalities {
     let mut t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap();
-    // Seed Component-5 storage from genesis (defaults match the previous
-    // const values: 10 MATRA/signer, 50K MATRA/era base, baseline 16).
-    // Component 4: seed the per-receipt fee, floor, and expiry deadline at
-    // the documented defaults.
+    // The reward and cap figures the existing tests were written against:
+    // 10 MATRA/signer, 50K MATRA/era base, baseline 16.
     pallet_orinq_receipts::GenesisConfig::<Test> {
-        attestation_reward_per_signer: 10_000_000,
-        era_cap_base: 50_000_000_000,
-        era_cap_baseline_attestor_count: 16,
+        attestation_reward_per_signer: Some(10_000_000),
+        era_cap_base: Some(50_000_000_000),
+        era_cap_baseline_attestor_count: Some(16),
         bond_requirement: 1_000_000_000,
         receipt_submission_fee: 1_000_000,
         receipt_submission_fee_floor: 100_000,
@@ -3230,4 +3240,229 @@ fn six_attests_pay_the_certification_exactly_once() {
         }
         assert!(pallet::Attestations::<Test>::get(rid).is_none());
     });
+}
+
+// ---------------------------------------------------------------------------
+// Genesis: attestor reward and subsidy parameters have no default
+// ---------------------------------------------------------------------------
+//
+// A chain spec's genesis patch is merged over the runtime's serialized default
+// config before it is deserialized, so these tests build genesis the same way.
+// A reward field the spec leaves out must stay unset: it once fell back to
+// 10 MATRA per signer.
+
+mod explicit_reward_genesis {
+    use super::*;
+    use sp_runtime::BuildStorage;
+
+    fn build_from_patch(patch: serde_json::Value) -> sp_io::TestExternalities {
+        let mut config =
+            serde_json::to_value(pallet_orinq_receipts::GenesisConfig::<Test>::default()).unwrap();
+        for (key, value) in patch.as_object().unwrap() {
+            config[key] = value.clone();
+        }
+        let config: pallet_orinq_receipts::GenesisConfig<Test> =
+            serde_json::from_value(config).expect("genesis JSON deserializes");
+        sp_io::TestExternalities::new(config.build_storage().unwrap())
+    }
+
+    fn explicit_rewards() -> serde_json::Value {
+        serde_json::json!({
+            "attestationRewardPerSigner": 1_000_000u64,
+            "eraCapBase": 50_000_000_000u64,
+            "eraCapBaselineAttestorCount": 32u32,
+        })
+    }
+
+    fn assert_rewards_unset() {
+        assert!(!pallet::AttestationRewardPerSigner::<Test>::exists());
+        assert!(!pallet::EraCapBase::<Test>::exists());
+        assert!(!pallet::EraCapBaselineAttestorCount::<Test>::exists());
+        assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 0);
+    }
+
+    #[test]
+    fn omitted_reward_fields_stay_unset() {
+        build_from_patch(serde_json::json!({ "bondRequirement": 1_000_000_000u64 }))
+            .execute_with(assert_rewards_unset);
+    }
+
+    #[test]
+    fn default_genesis_builds_without_attestor_rewards() {
+        let storage = pallet_orinq_receipts::GenesisConfig::<Test>::default()
+            .build_storage()
+            .unwrap();
+        sp_io::TestExternalities::new(storage).execute_with(assert_rewards_unset);
+    }
+
+    #[test]
+    fn explicit_values_land_in_storage() {
+        build_from_patch(explicit_rewards()).execute_with(|| {
+            assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 1_000_000);
+            assert_eq!(OrinqReceipts::era_cap_base(), 50_000_000_000);
+            assert_eq!(OrinqReceipts::era_cap_baseline_attestor_count(), 32);
+        });
+    }
+
+    #[test]
+    fn explicit_zero_reward_and_cap_are_stored_as_zero() {
+        let mut patch = explicit_rewards();
+        patch["attestationRewardPerSigner"] = 0u64.into();
+        patch["eraCapBase"] = 0u64.into();
+        build_from_patch(patch).execute_with(|| {
+            assert!(pallet::AttestationRewardPerSigner::<Test>::exists());
+            assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 0);
+            assert!(pallet::EraCapBase::<Test>::exists());
+            assert_eq!(OrinqReceipts::era_cap_base(), 0);
+        });
+    }
+
+    #[test]
+    fn runtime_upgrade_leaves_unset_rewards_unset() {
+        use frame_support::traits::Hooks;
+        build_from_patch(serde_json::json!({})).execute_with(|| {
+            let _ = <OrinqReceipts as Hooks<_>>::on_runtime_upgrade();
+            assert_rewards_unset();
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "attestation reward, era cap base and era cap baseline must be set together"
+    )]
+    fn reward_and_cap_without_a_baseline_refuse_genesis() {
+        let mut patch = explicit_rewards();
+        patch
+            .as_object_mut()
+            .unwrap()
+            .remove("eraCapBaselineAttestorCount");
+        build_from_patch(patch);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "attestation reward, era cap base and era cap baseline must be set together"
+    )]
+    fn cap_and_baseline_without_a_reward_refuse_genesis() {
+        let mut patch = explicit_rewards();
+        patch
+            .as_object_mut()
+            .unwrap()
+            .remove("attestationRewardPerSigner");
+        build_from_patch(patch);
+    }
+
+    #[test]
+    #[should_panic(expected = "era_cap_baseline_attestor_count must be non-zero")]
+    fn zero_baseline_refuses_genesis() {
+        let mut patch = explicit_rewards();
+        patch["eraCapBaselineAttestorCount"] = 0u32.into();
+        build_from_patch(patch);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Emission reserves are Config constants, so they show in runtime metadata
+// ---------------------------------------------------------------------------
+//
+// The era emission and the attestation rewards both mint. Their lifetime
+// ceilings are what a supply audit has to add to genesis issuance, so they are
+// read from `Config` rather than from constants inside the hooks.
+
+mod emission_reserves {
+    use super::*;
+    use frame_support::traits::Hooks;
+
+    #[test]
+    fn era_emission_mints_no_more_than_the_configured_reserve() {
+        ValidatorEmissionReserveValue::set(1_000);
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&acc(0xA1), 1_000);
+            Balances::make_free_balance_be(&treasury_account(), 1_000);
+            pallet::BlocksAuthored::<Test>::insert(&acc(0xA1), 14_400u32);
+            pallet::EraStartBlock::<Test>::put(1u32);
+            let before = Balances::total_issuance();
+
+            System::set_block_number(14_402);
+            let _ = <OrinqReceipts as Hooks<_>>::on_initialize(14_402);
+
+            assert_eq!(Balances::total_issuance() - before, 1_000);
+            assert_eq!(pallet::TotalRewardsDistributed::<Test>::get(), 1_000);
+        });
+        ValidatorEmissionReserveValue::set(VALIDATOR_EMISSION_RESERVE);
+    }
+
+    #[test]
+    fn era_emission_mints_the_configured_reward_per_era() {
+        ValidatorRewardPerEraValue::set(4_000_000);
+        new_test_ext().execute_with(|| {
+            Balances::make_free_balance_be(&acc(0xA1), 1_000);
+            Balances::make_free_balance_be(&treasury_account(), 1_000);
+            pallet::BlocksAuthored::<Test>::insert(&acc(0xA1), 14_400u32);
+            pallet::EraStartBlock::<Test>::put(1u32);
+            let before = Balances::total_issuance();
+
+            System::set_block_number(14_402);
+            let _ = <OrinqReceipts as Hooks<_>>::on_initialize(14_402);
+
+            assert_eq!(Balances::total_issuance() - before, 4_000_000);
+        });
+        ValidatorRewardPerEraValue::set(VALIDATOR_REWARD_PER_ERA);
+    }
+
+    #[test]
+    fn attestation_rewards_stop_at_the_configured_reserve() {
+        AttestationRewardReserveValue::set(5_000_000);
+        new_test_ext().execute_with(|| {
+            seed_submitter_and_committee(10, &[1, 2, 3]);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                vec![acc(1), acc(2), acc(3)],
+                3
+            ));
+            pallet::TotalAttestationRewards::<Test>::put(5_000_000);
+
+            let rid = H256::from([0xE1; 32]);
+            assert_ok!(submit_c4(10, rid, H256::from([0xE2; 32])));
+            for s in 1u8..=3 {
+                assert_ok!(OrinqReceipts::attest_availability_cert(
+                    RuntimeOrigin::signed(acc(s)),
+                    rid,
+                    canonical_for(rid)
+                ));
+            }
+
+            assert_eq!(pallet::TotalAttestationRewards::<Test>::get(), 5_000_000);
+            assert_eq!(OrinqReceipts::attestation_rewards(acc(1)), 0);
+        });
+        AttestationRewardReserveValue::set(ATTESTATION_REWARD_RESERVE);
+    }
+
+    #[test]
+    fn attestation_rewards_are_paid_below_the_reserve() {
+        new_test_ext().execute_with(|| {
+            seed_submitter_and_committee(10, &[1, 2, 3]);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                vec![acc(1), acc(2), acc(3)],
+                3
+            ));
+
+            let rid = H256::from([0xE3; 32]);
+            assert_ok!(submit_c4(10, rid, H256::from([0xE4; 32])));
+            for s in 1u8..=3 {
+                assert_ok!(OrinqReceipts::attest_availability_cert(
+                    RuntimeOrigin::signed(acc(s)),
+                    rid,
+                    canonical_for(rid)
+                ));
+            }
+
+            assert_eq!(
+                pallet::TotalAttestationRewards::<Test>::get(),
+                3 * 10_000_000
+            );
+            assert_eq!(OrinqReceipts::attestation_rewards(acc(1)), 10_000_000);
+        });
+    }
 }

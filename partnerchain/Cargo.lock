@@ -5793,6 +5793,7 @@ dependencies = [
  "pallet-timestamp",
  "parity-scale-codec",
  "scale-info",
+ "serde_json",
  "sp-consensus-aura",
  "sp-consensus-grandpa",
  "sp-core",
