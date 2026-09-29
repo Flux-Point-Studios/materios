@@ -1058,6 +1058,13 @@ def test_an_nginx_include_glob_that_glob3_reads_apart_is_an_input_error(tmp_path
         rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1")
 
 
+# With no *, ? or [ nginx opens the name as written, a backslash included.
+def test_an_nginx_include_of_a_literal_name_with_a_backslash_is_followed(tmp_path):
+    (tmp_path / "rpc\\.inc").write_text("location /rpc { proxy_pass http://127.0.0.1:9945; }\n")
+    nginx = "events {}\nhttp { server { listen 8080; include rpc\\.inc; } }\n"
+    assert rpc_findings(tmp_path, [authority(UNSAFE_9945)], nginx, "val1") == BEHIND_PROXY
+
+
 def test_an_nginx_include_star_glob_reads_every_file_it_names(tmp_path):
     include_tree(tmp_path)
     (tmp_path / "conf.d" / "a.conf").write_text("location /rpc { proxy_pass http://127.0.0.1:9933; }\n")
@@ -1990,6 +1997,8 @@ class RpcEndpoint:
         self.methods = {"http": sorted(lp.SAFE_RPC_METHODS), "ws": sorted(lp.SAFE_RPC_METHODS)}
         self.answers = {"http": {}, "ws": {}}
         self.http_status, self.upgrade = 200, True
+        # Notifications a WebSocket carries before each answer.
+        self.ws_notifications = 0
         self.calls = []
         endpoint = self
 
@@ -2018,6 +2027,9 @@ class RpcEndpoint:
                 self.end_headers()
                 while (frame := _ws_frame(self.rfile)) is not None and frame[0] != 8:
                     reply = endpoint.answer(json.loads(frame[1]), "ws")
+                    notification = {"jsonrpc": "2.0", "method": "chain_newHead", "params": {"subscription": "s"}}
+                    for _ in range(endpoint.ws_notifications):
+                        self.wfile.write(_ws_text(json.dumps(notification).encode()))
                     self.wfile.write(_ws_text(json.dumps(reply).encode()))
                 self.wfile.write(b"\x88\x00")
                 self.close_connection = True
@@ -2118,6 +2130,10 @@ def test_every_public_rpc_url_must_be_declared():
     (lambda e: e.answers["ws"].update(system_peers={"error": {"code": -32999, "message": "rate limited"}}),
      "answered system_peers with error -32999: the preflight cannot resolve whether it serves unsafe methods"),
     (lambda e: e.answers["http"].update(system_peers={"error": "unsafe"}), "did not answer system_peers as JSON-RPC"),
+    (lambda e: e.answers["http"].update(system_peers={"error": {"message": "unsafe"}}),
+     "did not answer system_peers as JSON-RPC"),
+    (lambda e: e.answers["ws"].update(system_peers={"error": {"code": "-32601", "message": "unsafe"}}),
+     "did not answer system_peers as JSON-RPC"),
 ])
 def test_a_public_endpoint_the_preflight_cannot_read_is_an_input_error(endpoint, change, error):
     change(endpoint)
@@ -2125,11 +2141,43 @@ def test_a_public_endpoint_the_preflight_cannot_read_is_an_input_error(endpoint,
         public_findings(endpoint.url)
 
 
-def test_an_answer_to_another_call_is_an_input_error(endpoint, monkeypatch):
+@pytest.mark.parametrize("change", [
+    {"id": True}, {"id": 2}, {"id": "1"}, {"jsonrpc": "1.0"}, {"error": {"code": -32601, "message": "x"}},
+])
+def test_an_answer_that_is_not_a_json_rpc_answer_to_the_call_is_an_input_error(endpoint, monkeypatch, change):
     answer = endpoint.answer
-    monkeypatch.setattr(endpoint, "answer", lambda call, transport: dict(answer(call, transport), id=True))
+    monkeypatch.setattr(endpoint, "answer", lambda call, transport: dict(answer(call, transport), **change))
     with pytest.raises(lp.InputError, match="did not answer rpc_methods as JSON-RPC 2.0"):
         public_findings(endpoint.url)
+
+
+def test_a_websocket_answer_after_notifications_is_read(endpoint):
+    endpoint.ws_notifications = lp.PUBLIC_RPC_MESSAGES - 1
+    assert public_findings(endpoint.url) == []
+
+
+def test_a_websocket_that_sends_no_answer_is_an_input_error(endpoint):
+    endpoint.ws_notifications = lp.PUBLIC_RPC_MESSAGES
+    with pytest.raises(lp.InputError, match=f"sent no answer to rpc_methods in {lp.PUBLIC_RPC_MESSAGES} messages"):
+        public_findings(endpoint.url)
+
+
+@pytest.mark.parametrize("transport", ["http", "ws"])
+def test_an_answer_over_the_size_limit_is_an_input_error(endpoint, monkeypatch, transport):
+    monkeypatch.setattr(lp, "PUBLIC_RPC_LIMIT", 256)
+    if transport == "ws":
+        endpoint.methods["http"] = ["rpc_methods"]
+    with pytest.raises(lp.InputError, match=f"public RPC {transport}://.*rpc_methods.* 256 bytes"):
+        public_findings(endpoint.url)
+
+
+# A proxy the environment names would stand between the probe and the URL.
+def test_the_probe_reaches_each_url_directly_whatever_proxy_the_environment_names(endpoint, monkeypatch):
+    for name in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.delenv("no_proxy", raising=False)
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    assert public_findings(endpoint.url) == []
 
 
 def test_an_unreachable_public_rpc_url_is_an_input_error():
