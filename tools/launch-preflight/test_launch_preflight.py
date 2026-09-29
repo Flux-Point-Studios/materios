@@ -2510,10 +2510,9 @@ def test_preprod_genesis_sets_only_storage_a_mainnet_genesis_may_set(spec, meta)
 
 @pytest.fixture
 def spec239() -> tuple[lp.Spec, lp.Metadata]:
-    """The preprod genesis that spec 239, the first runtime with the Root
-    timelock, builds (`materios-node build-spec --chain preprod --raw` at
-    ca1b4be, less its :code), and that code's metadata as subwasm prints it,
-    trimmed to what the preflight reads."""
+    """The preprod genesis spec 239 builds, less its :code, and that code's
+    metadata trimmed to what the preflight reads. The README's Tests section
+    gives the commands that build both."""
     v14 = json.loads((FIXTURES / "spec239-metadata.json").read_text())["V14"]
     return lp.load_spec(str(FIXTURES / "preprod-spec239-raw.json")), lp.Metadata.from_v14(v14)
 

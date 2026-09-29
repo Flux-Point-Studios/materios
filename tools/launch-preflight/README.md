@@ -218,8 +218,8 @@ more than 300 slots behind its node.
   backslash apart from the preflight (`[^x]` negates, `?` matches one byte),
   so a pattern with one of them refuses as unreadable. `nginx-dump` is what `nginx -T` prints on stdout,
   every file nginx read under its `# configuration file <name>:` line, and
-  each include it names must be there. The kind is declared, not guessed: in
-  a config file such a line is a comment like any other. nginx is read token
+  each include it names must be there. The manifest declares the kind, since
+  in a config file such a line is a comment like any other. nginx is read token
   by token as nginx reads it: quotes and backslash escapes, a `#` that
   starts a comment only at the start of a token, outside quotes and not
   escaped (so `a#b` and `"#"` are values), and a `}` or a `${` that ends
@@ -334,6 +334,26 @@ The CLI tests run the real subwasm, a local server that answers like Kupo, and
 one that answers JSON-RPC over HTTP and a WebSocket like a node or a filter.
 The preprod v6 fixture is the published preprod raw chain spec, and the
 genesis-hash test checks the computed hash against the one the live network
-reports. The spec 239 fixtures are the preprod genesis the first runtime with the
-Root timelock builds, without its code, and that runtime's metadata, trimmed to
-what the preflight reads.
+reports.
+
+The spec 239 fixtures are the preprod genesis that spec 239 (transaction version
+5, the Root timelock, no PerpEngine) builds, without its code, and that
+runtime's metadata, trimmed to what the preflight reads. They come from a
+`materios-node` built at 9ca67a3, which is main at 7b8fd07 with the timelock's
+`DefaultDelays` and `MaxDelay` declared as metadata constants; a build of
+7b8fd07 itself gives the same genesis byte for byte, and metadata without those
+two constants. From `partnerchain/`, with subwasm v0.21.3 and jq:
+
+```
+materios-node build-spec --chain preprod --raw > raw.json
+jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec239-raw.json
+jq -r '.genesis.raw.top["0x3a636f6465"][2:]' raw.json | xxd -r -p > runtime.wasm
+subwasm metadata runtime.wasm --format json | jq -jcS '{V14: {pallets: [.V14.pallets[]
+  | {name, constants: [.constants[] | {name, value}], storage: (.storage | if . == null
+  then null else {prefix, entries: [.entries[] | {name}]} end)}], types: {types:
+  [.V14.types.types[] | select(.type.path | length > 0) | {id, type: {path: .type.path}}]}}}' \
+  > fixtures/spec239-metadata.json
+```
+
+The same trim of the preprod v6 runtime's metadata gives
+`fixtures/preprod-v6-metadata.json` byte for byte.
