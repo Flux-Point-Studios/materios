@@ -268,8 +268,8 @@ WebSocket at the same address (`https://` and `wss://`, `http://` and
   its `rpc_methods` less each method whose handler calls `check_if_safe`. A
   node lists every method it registers, the unsafe ones included, even under
   `--rpc-methods safe`, so a URL that reaches a node directly refuses: serve
-  it through a filter that lists only what it serves, as rpc-safe-filter
-  does. A method the set does not name refuses too, until it is classified.
+  it through a deny-by-default filter that lists only what it serves. A
+  method the set does not name refuses too, until it is classified.
 - `system_peers`, whose handler calls `check_if_safe` and then only reads the
   peer list. An answer with a result refuses; a JSON-RPC error `-32601` is
   the refusal expected (sc-rpc answers an unsafe call with it where unsafe
