@@ -222,7 +222,7 @@ METHOD_NOT_FOUND = -32601
 RPC_TRANSPORTS = {"http": "ws", "https": "wss", "ws": "http", "wss": "https"}
 PUBLIC_RPC_TIMEOUT = 30
 PUBLIC_RPC_LIMIT = 1024 * 1024
-# The probe subscribes to nothing, so a WebSocket carries only answers.
+# The messages read over a WebSocket for one answer: the probe subscribes to nothing, so any other is a stray.
 PUBLIC_RPC_MESSAGES = 16
 USER_AGENT = "materios-launch-preflight"
 # Forwarding schemes nginx and cloudflared accept, with the port each implies; tcp names its own.
