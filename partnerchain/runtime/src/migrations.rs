@@ -20,7 +20,7 @@ use frame_support::{
     traits::{
         fungible::Inspect,
         tokens::{Fortitude, Preservation},
-        Currency, ExistenceRequirement, Get, OnRuntimeUpgrade, ReservableCurrency,
+        Currency, ExistenceRequirement, OnRuntimeUpgrade, ReservableCurrency,
     },
     weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight},
     Blake2_128Concat, PalletId,
@@ -360,8 +360,7 @@ impl InitRootTimelock {
 
 impl OnRuntimeUpgrade for InitRootTimelock {
     fn on_runtime_upgrade() -> Weight {
-        let db: frame_support::weights::RuntimeDbWeight =
-            <Runtime as frame_system::Config>::DbWeight::get();
+        let db = db_weight();
         if pallet_root_timelock::Delays::<Runtime>::exists() {
             return db.reads(1);
         }
