@@ -32,6 +32,15 @@ pub mod pallet {
 
         /// Weight information for extrinsics in this pallet.
         type WeightInfo: WeightInfo;
+
+        /// (signer, call) pairs whose transaction is taken into a block ahead
+        /// of every fee-paying one, however large the fee, and held to one per
+        /// signer in the pool. The runtime maps the guardian's veto here, so a
+        /// block full of fee-paying traffic cannot keep it out.
+        type TakenFirst: frame_support::traits::ContainsPair<
+            Self::AccountId,
+            <Self as frame_system::Config>::RuntimeCall,
+        >;
     }
 
     /// MOTRA balance per account.

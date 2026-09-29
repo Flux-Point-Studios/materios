@@ -284,7 +284,15 @@ fn treasury_spend_approves_even_when_over_balance_then_stalls_payout() {
     // because the spend queue `spend_funds` sees insufficient budget.
     new_test_ext().execute_with(|| {
         let beneficiary = sp_keyring::Sr25519Keyring::Charlie.to_account_id();
-        let over = INITIAL_TREASURY_BALANCE + 1;
+        // Hold the treasury below MaxSpend, so the approval can exceed the
+        // balance while staying within the cap.
+        let held = MaxSpend::get() - 1;
+        assert_ok!(pallet_balances::Pallet::<Runtime>::force_set_balance(
+            RuntimeOrigin::root(),
+            sp_runtime::MultiAddress::Id(treasury_account()),
+            held,
+        ));
+        let over = held + 1;
         assert_ok!(pallet_treasury::Pallet::<Runtime>::spend_local(
             RuntimeOrigin::root(),
             over,

@@ -13,6 +13,7 @@ mod seating_model_check;
 pub mod committee_liveness;
 pub mod input_sanity;
 pub mod migrations;
+pub mod root_gate;
 
 #[cfg(feature = "std")]
 include!(concat!(env!("OUT_DIR"), "/wasm_binary.rs"));
@@ -27,7 +28,7 @@ use frame_support::{
         constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         Weight,
     },
-    genesis_builder_helper::{build_state, get_preset},
+    genesis_builder_helper::get_preset,
     BoundedVec, PalletId,
 };
 use frame_system::{EnsureRoot, EnsureRootWithSuccess};
@@ -262,6 +263,7 @@ impl frame_system::Config for Runtime {
     type AccountId = AccountId;
     type AccountData = pallet_balances::AccountData<Balance>;
     type Version = Version;
+    type BaseCallFilter = root_gate::SudoRootGate;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +345,10 @@ parameter_types! {
     pub const SpendPeriod: BlockNumber = 100_800;
     pub const TreasuryBurn: Permill = Permill::from_percent(0);
     pub const MaxApprovals: u32 = 100;
-    /// Upper bound on a single `spend_local` approval. Even Root cannot
-    /// approve more than this in one call.
-    pub const MaxSpend: Balance = 1_000_000_000_000_000; // 1e15 base units (~1B MATRA @ 6 dec)
+    /// Upper bound on the treasury spends Root approves in one extrinsic:
+    /// 15,000 MATRA. Larger moves take several timelock tasks, each public
+    /// for the whole delay and each vetoable on its own.
+    pub const MaxSpend: Balance = 15_000 * 1_000_000;
     pub const PayoutPeriod: BlockNumber = 30 * DAYS;
 }
 
@@ -502,6 +505,41 @@ impl pallet_recovery::Config for Runtime {
     type MaxFriends = ConstU32<9>;
     type RecoveryDeposit = RecoveryDeposit;
     type WeightInfo = pallet_recovery::weights::SubstrateWeight<Runtime>;
+}
+
+// ---------------------------------------------------------------------------
+// Root timelock
+// ---------------------------------------------------------------------------
+//
+// The sudo key reaches Root at once only for `root_gate::SudoRootGate`'s
+// exempt calls. Every other Root call is scheduled here and waits its class's
+// delay, during which the guardian can veto it.
+
+parameter_types! {
+    /// Mainnet delays. Preprod and dev chains store `TESTNET_TIMELOCK_DELAYS`.
+    pub const RootTimelockDefaultDelays: pallet_root_timelock::DelayTable<BlockNumber> =
+        pallet_root_timelock::DelayTable { recovery: DAYS, standard: 7 * DAYS, long: 30 * DAYS };
+    pub const RootTimelockMaxDelay: BlockNumber = 90 * DAYS;
+    pub const RootTimelockEnactmentWindow: BlockNumber = 7 * DAYS;
+    pub const RootTimelockMaxPendingTasks: u32 = 64;
+}
+
+/// Short delays for preprod and dev chains: 3 minutes, 30 minutes, 2 hours.
+pub const TESTNET_TIMELOCK_DELAYS: pallet_root_timelock::DelayTable<BlockNumber> =
+    pallet_root_timelock::DelayTable {
+        recovery: 30,
+        standard: 300,
+        long: 1_200,
+    };
+
+impl pallet_root_timelock::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type RuntimeCall = RuntimeCall;
+    type Classifier = root_gate::TimelockClassifier;
+    type DefaultDelays = RootTimelockDefaultDelays;
+    type MaxDelay = RootTimelockMaxDelay;
+    type EnactmentWindow = RootTimelockEnactmentWindow;
+    type MaxPendingTasks = RootTimelockMaxPendingTasks;
 }
 
 // ---------------------------------------------------------------------------
@@ -694,6 +732,7 @@ impl pallet_intent_settlement::BenchmarkHelper<AccountId>
 impl pallet_motra::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = pallet_motra::weights::SubstrateWeight;
+    type TakenFirst = root_gate::GuardianVeto;
 }
 
 // ---------------------------------------------------------------------------
@@ -1359,6 +1398,7 @@ construct_runtime! {
         // index 23 reserved (vacant)
         // Second, independent path to Root (mainnet-resilience #492).
         Recovery: pallet_recovery = 24,
+        RootTimelock: pallet_root_timelock = 25,
     }
 }
 
@@ -1393,6 +1433,7 @@ pub type Executive = frame_executive::Executive<
     AllPalletsWithSystem,
     (
         migrations::SweepFeeRouterPotsIntoTreasury,
+        migrations::InitRootTimelock,
         migrations::RemovePerpEngine,
     ),
 >;
@@ -1687,21 +1728,22 @@ impl_runtime_apis! {
 
     impl sp_genesis_builder::GenesisBuilder<Block> for Runtime {
         fn build_state(config: Vec<u8>) -> sp_genesis_builder::Result {
-            build_state::<RuntimeGenesisConfig>(config)
+            let genesis = serde_json::from_slice::<RuntimeGenesisConfig>(&config)
+                .map_err(|e| sp_runtime::format_runtime_string!("Invalid JSON blob: {}", e))?;
+            root_gate::ensure_guarded_genesis(&genesis)?;
+            <RuntimeGenesisConfig as frame_support::traits::BuildGenesisConfig>::build(&genesis);
+            Ok(())
         }
 
         fn get_preset(id: &Option<sp_genesis_builder::PresetId>) -> Option<Vec<u8>> {
             get_preset::<RuntimeGenesisConfig>(id, |preset_id| {
                 // The `development` preset exists only to satisfy
-                // frame-omni-bencher's default `--genesis-builder-preset=development`.
-                // Returning `{}` lets `build_state` apply each pallet's genesis
-                // defaults in isolation — several IOG partner-chains pallets ship
-                // `#[derive(DefaultNoBound)]` GenesisConfigs whose serialized form
-                // omits a `_marker: PhantomData<T>` field that the deserializer
-                // demands, so serializing the default config round-trips into a
-                // deserialize error.
+                // frame-omni-bencher's default `--genesis-builder-preset=development`,
+                // which applies it as a patch over every pallet's genesis
+                // defaults. A benchmarking genesis has no guardian and has to
+                // say so, or `build_state` refuses it.
                 if preset_id.as_ref() == sp_genesis_builder::DEV_RUNTIME_PRESET.as_bytes() {
-                    Some(b"{}".to_vec())
+                    Some(br#"{"rootTimelock":{"unguarded":true}}"#.to_vec())
                 } else {
                     None
                 }
@@ -1721,7 +1763,7 @@ impl_runtime_apis! {
     impl frame_try_runtime::TryRuntime<Block> for Runtime {
         fn on_runtime_upgrade(checks: frame_try_runtime::UpgradeCheckSelect) -> (Weight, Weight) {
             let weight = Executive::try_runtime_upgrade(checks)
-                .unwrap_or_else(|e| panic!("runtime upgrade checks failed: {e:?}"));
+                .expect("runtime upgrade checks failed");
             (weight, RuntimeBlockWeights::get().max_block)
         }
 
@@ -1732,7 +1774,7 @@ impl_runtime_apis! {
             select: frame_try_runtime::TryStateSelect,
         ) -> Weight {
             Executive::try_execute_block(block, state_root_check, signature_check, select)
-                .unwrap_or_else(|e| panic!("block execution checks failed: {e:?}"))
+                .expect("try_execute_block failed")
         }
     }
 

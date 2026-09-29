@@ -19,6 +19,7 @@ use sp_runtime::{traits::AccountIdConversion, BuildStorage, StateVersion};
 
 use crate::migrations::{
     db_weight as db, perp_engine_key_count, RemovePerpEngine, PERP_ENGINE_KEYS_PER_UPGRADE,
+    PREPROD_GENESIS_HASH,
 };
 
 const FUND: Balance = 1_000_000_000_000;
@@ -171,6 +172,7 @@ fn pallet_indices_are_pinned_and_23_stays_vacant() {
             ("Billing", 21),
             ("Oracle", 22),
             ("Recovery", 24),
+            ("RootTimelock", 25),
         ],
     );
 }
@@ -229,11 +231,21 @@ fn removal_releases_bonds_sweeps_the_pot_and_clears_every_key() {
     });
 }
 
+/// The upgrade that enacts this runtime on preprod both removes the perp
+/// engine and stores the root-timelock delays the chain has never held.
 #[test]
-fn the_runtime_upgrade_path_runs_the_removal() {
+fn the_runtime_upgrade_path_runs_the_removal_and_the_timelock_init() {
     let (mut ext, _) = new_seeded_ext();
     ext.execute_with(|| {
+        frame_system::BlockHash::<Runtime>::insert(0, PREPROD_GENESIS_HASH);
+        assert!(!pallet_root_timelock::Delays::<Runtime>::exists());
+
         Executive::execute_on_runtime_upgrade();
+
+        assert_eq!(
+            pallet_root_timelock::Delays::<Runtime>::get(),
+            TESTNET_TIMELOCK_DELAYS
+        );
         assert_eq!(perp_engine_key_count(), 0);
         assert_eq!(Balances::reserved_balance(&acct(Alice)), 0);
         assert_eq!(Balances::free_balance(&perp_pot()), 0);

@@ -10,6 +10,9 @@
 //!
 //! `RemovePerpEngine` deletes the retired perp engine (formerly pallet index 23)
 //! from state.
+//!
+//! `InitRootTimelock` stores the root-timelock delays on a chain that was
+//! running before the pallet existed.
 
 use alloc::vec::Vec;
 use frame_support::{
@@ -17,15 +20,27 @@ use frame_support::{
     traits::{
         fungible::Inspect,
         tokens::{Fortitude, Preservation},
-        Currency, ExistenceRequirement, OnRuntimeUpgrade, ReservableCurrency,
+        Currency, ExistenceRequirement, Get, OnRuntimeUpgrade, ReservableCurrency,
     },
     weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight},
     Blake2_128Concat, PalletId,
 };
+use pallet_root_timelock::DelayTable;
+use sp_core::H256;
 use sp_io::hashing::twox_128;
 use sp_runtime::traits::AccountIdConversion;
+#[cfg(feature = "try-runtime")]
+use {
+    crate::RootTimelockMaxDelay,
+    frame_support::ensure,
+    parity_scale_codec::{Decode, Encode},
+    sp_runtime::TryRuntimeError,
+};
 
-use crate::{AccountId, AttestorReservePalletId, Balance, Balances, TreasuryPalletId};
+use crate::{
+    AccountId, AttestorReservePalletId, Balance, Balances, BlockNumber, RootTimelockDefaultDelays,
+    Runtime, TreasuryPalletId, TESTNET_TIMELOCK_DELAYS,
+};
 
 /// `frame_system::Config::DbWeight` is `()` in this runtime, which prices
 /// storage access at zero; migrations charge RocksDB costs instead.
@@ -242,9 +257,8 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
     }
 
     #[cfg(feature = "try-runtime")]
-    fn pre_upgrade() -> Result<Vec<u8>, sp_runtime::TryRuntimeError> {
+    fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
         use alloc::collections::btree_map::BTreeMap;
-        use parity_scale_codec::Encode;
 
         let mut bond_entries: u32 = 0;
         let mut bonds: BTreeMap<AccountId, Balance> = BTreeMap::new();
@@ -254,14 +268,14 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
             *total = total.saturating_add(bond);
         }
         let keys = perp_engine_key_count();
-        frame_support::ensure!(
+        ensure!(
             keys + bond_entries <= PERP_ENGINE_KEYS_PER_UPGRADE,
             "perp-engine state exceeds what one upgrade deletes",
         );
         let mut reserved_after: Vec<(AccountId, Balance)> = Vec::with_capacity(bonds.len());
         for (keeper, bond) in bonds {
             let reserved = Balances::reserved_balance(&keeper);
-            frame_support::ensure!(
+            ensure!(
                 reserved >= bond,
                 "a keeper holds less in reserve than its bond"
             );
@@ -286,9 +300,7 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
     }
 
     #[cfg(feature = "try-runtime")]
-    fn post_upgrade(state: Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
-        use parity_scale_codec::Decode;
-
+    fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
         let (reserved_after, pot_after, treasury_after): (
             Vec<(AccountId, Balance)>,
             Balance,
@@ -296,21 +308,21 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
         ) = Decode::decode(&mut &state[..])
             .map_err(|_| "RemovePerpEngine pre_upgrade state does not decode")?;
 
-        frame_support::ensure!(
+        ensure!(
             !unhashed::contains_prefixed_key(&perp_engine_prefix()),
             "perp-engine keys survived the upgrade",
         );
         for (keeper, reserved) in &reserved_after {
-            frame_support::ensure!(
+            ensure!(
                 Balances::reserved_balance(keeper) == *reserved,
                 "a keeper bond was not released exactly",
             );
         }
-        frame_support::ensure!(
+        ensure!(
             Balances::free_balance(&PERP_ENGINE_POT_ID.into_account_truncating()) == pot_after,
             "the perp-engine margin pot was not swept",
         );
-        frame_support::ensure!(
+        ensure!(
             Balances::free_balance(&TreasuryPalletId::get().into_account_truncating())
                 == treasury_after,
             "the treasury did not receive exactly what the margin pot could move",
@@ -320,6 +332,79 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
             "RemovePerpEngine post_upgrade: prefix empty, {} keepers released, pot swept",
             reserved_after.len(),
         );
+        Ok(())
+    }
+}
+
+/// Genesis hash of the Materios preprod chain.
+pub const PREPROD_GENESIS_HASH: H256 = H256([
+    0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc, 0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
+    0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07, 0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
+]);
+
+/// Stores the root-timelock delays on a chain that was running before the
+/// pallet existed: the testnet delays on preprod, the mainnet defaults on any
+/// other chain. A chain whose genesis built the pallet already stores its
+/// delays and is left alone, so this is a no-op on every later upgrade.
+pub struct InitRootTimelock;
+
+impl InitRootTimelock {
+    fn delays_for_this_chain() -> DelayTable<BlockNumber> {
+        if frame_system::BlockHash::<Runtime>::get(0) == PREPROD_GENESIS_HASH {
+            TESTNET_TIMELOCK_DELAYS
+        } else {
+            RootTimelockDefaultDelays::get()
+        }
+    }
+}
+
+impl OnRuntimeUpgrade for InitRootTimelock {
+    fn on_runtime_upgrade() -> Weight {
+        let db: frame_support::weights::RuntimeDbWeight =
+            <Runtime as frame_system::Config>::DbWeight::get();
+        if pallet_root_timelock::Delays::<Runtime>::exists() {
+            return db.reads(1);
+        }
+        let delays = Self::delays_for_this_chain();
+        pallet_root_timelock::Delays::<Runtime>::put(delays);
+        log::info!("root-timelock: stored delays {:?}", delays);
+        db.reads_writes(2, 1)
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn pre_upgrade() -> Result<Vec<u8>, TryRuntimeError> {
+        Ok(pallet_root_timelock::Delays::<Runtime>::exists().encode())
+    }
+
+    #[cfg(feature = "try-runtime")]
+    fn post_upgrade(state: Vec<u8>) -> Result<(), TryRuntimeError> {
+        let existed =
+            bool::decode(&mut &state[..]).map_err(|_| "pre_upgrade state does not decode")?;
+        ensure!(
+            pallet_root_timelock::Delays::<Runtime>::exists(),
+            "delays are not stored"
+        );
+        let delays = pallet_root_timelock::Delays::<Runtime>::get();
+        ensure!(
+            delays.is_valid(RootTimelockMaxDelay::get()),
+            "stored delays are invalid"
+        );
+        if !existed {
+            ensure!(
+                delays == Self::delays_for_this_chain(),
+                "stored delays are not this chain's"
+            );
+            ensure!(
+                pallet_root_timelock::Tasks::<Runtime>::iter()
+                    .next()
+                    .is_none(),
+                "a task predates the pallet"
+            );
+            ensure!(
+                pallet_root_timelock::Guardian::<Runtime>::get().is_none(),
+                "a guardian predates the pallet"
+            );
+        }
         Ok(())
     }
 }
