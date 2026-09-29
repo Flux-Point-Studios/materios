@@ -15,6 +15,8 @@ It reads:
   first rotation;
 - **each public RPC URL, live**: the methods it lists and whether it answers
   an unsafe one, over HTTP and over a WebSocket;
+- **each authority's running node argv**: a copy of its
+  `/proc/<pid>/cmdline`;
 - a **launch manifest**: who holds each role, the economics, where the genesis
   lock is, each node's launch command, the RPC proxy configs and the public RPC
   URLs;
@@ -52,6 +54,11 @@ python3 launch_preflight.py check --spec mainnet-raw.json --launch launch.json \
     --kupo http://<mainnet kupo>:1442 --subwasm ./subwasm \
     --extra-well-known ~/exposed-keys.json
 ```
+
+`sign` reads only the spec and the manifest, so the manifest can be signed
+before the nodes start. `check` also reads each authority's `cmdline`
+capture and calls each URL in `public_rpc`, so it runs once the launch's
+nodes and proxies are up.
 
 The signature must verify under a key `launch_keys.json` pins (`{"keys":
 ["0x<ed25519 public key>"]}`), committed with the launch key holder's review.
@@ -323,7 +330,8 @@ to dev-phrase paths, numeric ones included, checked against @polkadot/keyring.
 SUBWASM=./subwasm python3 -m pytest test_launch_preflight.py
 ```
 
-The CLI tests run the real subwasm and a local server that answers like Kupo.
+The CLI tests run the real subwasm, a local server that answers like Kupo, and
+one that answers JSON-RPC over HTTP and a WebSocket like a node or a filter.
 The preprod v6 fixture is the published preprod raw chain spec, and the
 genesis-hash test checks the computed hash against the one the live network
 reports.
