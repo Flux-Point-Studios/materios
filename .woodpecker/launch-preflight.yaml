@@ -1,0 +1,19 @@
+when:
+  - event: [push, pull_request]
+    branch: main
+
+# Same agent as the rust workflow, selected by the same label.
+labels:
+  arm64-emu: "true"
+
+steps:
+  - name: test
+    image: python:3.12-slim-bookworm
+    directory: tools/launch-preflight
+    commands:
+      - pip install --no-cache-dir -r requirements.txt
+      # subwasm v0.21.3, the metadata extractor the tool runs; the CLI tests need it.
+      - python3 -c "import urllib.request; urllib.request.urlretrieve('https://github.com/chevdor/subwasm/releases/download/v0.21.3/subwasm_linux_amd64_v0.21.3.deb', '/tmp/subwasm.deb')"
+      - echo "0560d1b8785be9a0d04cb0bf939feaaa621c2d0809f818225698d5c44198550c  /tmp/subwasm.deb" | sha256sum -c -
+      - dpkg-deb -x /tmp/subwasm.deb /tmp/subwasm
+      - SUBWASM=/tmp/subwasm/usr/bin/subwasm python3 -m pytest -q -p no:cacheprovider test_launch_preflight.py

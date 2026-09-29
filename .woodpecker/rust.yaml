@@ -2,11 +2,10 @@ when:
   - event: [push, pull_request]
     branch: main
 
-# Pinned to the Node-2 agent. The other agent, sat230, shares a disk with the
-# SaturnSwap production node and caps steps at 8 GB, which this cold build does
-# not fit. The pin uses the one custom label only Node-2 carries: the agent's
-# hostname label is its container id, which changes whenever the container is
-# recreated and then leaves every pipeline pinned to it pending.
+# Pinned by a custom label that only the agent with room for this cold build
+# carries. The agent's hostname label is its container id, which changes
+# whenever the container is recreated and would leave a pinned pipeline
+# pending.
 labels:
   arm64-emu: "true"
 
@@ -26,8 +25,8 @@ steps:
     image: rust:1.85.0-bookworm
     directory: partnerchain
     environment:
-      # Node-2 also runs a validator and two cardano-nodes; one rustc per
-      # physical core keeps the build clear of the OOM killer.
+      # The agent's host runs other services; one rustc per physical core
+      # keeps the build clear of the OOM killer.
       CARGO_BUILD_JOBS: "8"
     commands:
       - cat rust-toolchain.toml
