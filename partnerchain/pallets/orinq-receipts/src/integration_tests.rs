@@ -96,6 +96,7 @@ impl pallet_balances::Config for Test {
 impl pallet_motra::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = pallet_motra::weights::SubstrateWeight;
+    type TakenFirst = frame_support::traits::Nothing;
 }
 
 parameter_types! {

@@ -8,11 +8,12 @@ use scale_info::TypeInfo;
 use sp_runtime::{
     traits::{DispatchInfoOf, Dispatchable, SignedExtension},
     transaction_validity::{
-        InvalidTransaction, TransactionValidity, TransactionValidityError, ValidTransaction,
+        InvalidTransaction, TransactionPriority, TransactionValidity, TransactionValidityError,
+        ValidTransaction,
     },
 };
 
-use frame_support::dispatch::PostDispatchInfo;
+use frame_support::{dispatch::PostDispatchInfo, traits::ContainsPair};
 
 use crate::pallet::Config;
 
@@ -53,7 +54,7 @@ where
     fn validate(
         &self,
         who: &Self::AccountId,
-        _call: &Self::Call,
+        call: &Self::Call,
         info: &DispatchInfoOf<Self::Call>,
         len: usize,
     ) -> TransactionValidity {
@@ -68,7 +69,22 @@ where
             return Err(InvalidTransaction::Payment.into());
         }
 
-        let priority = fee.min(u64::MAX as u128) as u64;
+        // The guardian's veto is taken ahead of everything: its priority is
+        // the ceiling, and fee-paying transactions are capped one below it, so
+        // no fee, however large, can outbid it.
+        if T::TakenFirst::contains(who, call) {
+            let mut tag = who.encode();
+            tag.extend_from_slice(b"MotraTakenFirst");
+            return Ok(ValidTransaction {
+                priority: TransactionPriority::MAX,
+                // One tag per signer: the pool keeps a signer to one
+                // taken-first transaction, so this priority cannot fill blocks.
+                provides: alloc::vec![tag],
+                ..Default::default()
+            });
+        }
+
+        let priority = fee.min(u128::from(TransactionPriority::MAX - 1)) as u64;
         Ok(ValidTransaction {
             priority,
             ..Default::default()
