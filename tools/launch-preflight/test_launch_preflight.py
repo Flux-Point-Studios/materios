@@ -657,6 +657,106 @@ def test_sudo_multisig_that_one_member_can_use_alone_is_refused(spec, meta, know
     assert "[1 dev-keys] roles.sudo[0] has threshold 1: any one member alone holds Root" in found
 
 
+SUDO_POWER = "holds Root"
+
+
+def lone_holder(rule: str, where: str, key: bytes, paths: list[str], power: str) -> str:
+    return (f"[{rule}] {where}: {ss58(key)}, the member at {' and '.join(f'{where}.{p}' for p in paths)}, meets its "
+            f"threshold alone by also signing as a nested multisig, so one keyholder alone {power}")
+
+
+def too_many_signatories(rule: str, where: str, count: int, limit: int = 10) -> str:
+    return (f"[{rule}] {where} has {count} members, more than the runtime's Multisig.MaxSignatories {limit}: "
+            "pallet_multisig refuses every call signed through it")
+
+
+def unknown_max_signatories(rule: str, where: str) -> str:
+    return (f"[{rule}] {where}: the runtime metadata declares no Multisig.MaxSignatories the preflight can read: "
+            "whether pallet_multisig lets this multisig sign is unknown here")
+
+
+def repeated_member():
+    c, d = fresh_account(), fresh_account()
+    return {"threshold": 2, "members": [ss58(c), msig(1, c, d)]}, [(c, ["members[0]", "members[1].members[0]"])]
+
+
+def member_of_two_nested_multisigs():
+    c, d, e = fresh_account(), fresh_account(), fresh_account()
+    return ({"threshold": 2, "members": [msig(1, c, d), msig(1, c, e)]},
+            [(c, ["members[0].members[0]", "members[1].members[0]"])])
+
+
+def flat_address_of_a_nested_multisig():
+    """Either key of the first 1-of-2 signs as it, and so as the flat member of the second."""
+    c, d, e = fresh_account(), fresh_account(), fresh_account()
+    alias = lp.multisig_account([c, d], 1)
+    return ({"threshold": 2, "members": [msig(1, c, d), msig(1, alias, e)]},
+            [(c, ["members[0].members[0]"]), (d, ["members[0].members[1]"]), (alias, ["members[1].members[0]"])])
+
+
+# Multisigs of threshold 2 that one key meets alone, with each such key and where it is a member.
+ONE_HOLDER_MULTISIGS = [repeated_member, member_of_two_nested_multisigs, flat_address_of_a_nested_multisig]
+
+
+def needs_two_through_a_nested_multisig():
+    c, d, e = fresh_account(), fresh_account(), fresh_account()
+    return {"threshold": 2, "members": [ss58(c), msig(2, d, e)]}
+
+
+def needs_two_of_three_with_a_nested_1_of_2():
+    c, d, e, f = (fresh_account() for _ in range(4))
+    return {"threshold": 3, "members": [ss58(c), ss58(d), msig(1, e, f)]}
+
+
+def needs_one_from_each_of_two_nested_multisigs():
+    c, d, e, f = (fresh_account() for _ in range(4))
+    return {"threshold": 2, "members": [msig(1, c, d), msig(1, e, f)]}
+
+
+TWO_HOLDER_MULTISIGS = [needs_two_through_a_nested_multisig, needs_two_of_three_with_a_nested_1_of_2,
+                        needs_one_from_each_of_two_nested_multisigs]
+
+
+def sudo_findings(spec, meta, known, entry) -> list[str]:
+    """Rule 1's findings on `entry` as roles.sudo, stored in genesis as the sudo key."""
+    put(spec, "Sudo", "Key", lp.role_account(entry))
+    return [m for m in dev_key_findings(spec, meta, known, sudo_launch(entry)) if "roles.sudo" in m or "Sudo" in m]
+
+
+@pytest.mark.parametrize("build", ONE_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
+def test_sudo_multisig_one_key_meets_alone_through_a_nested_multisig_is_refused(spec, meta, known, build):
+    entry, holders = build()
+    assert sudo_findings(spec, meta, known, entry) == [
+        lone_holder("1 dev-keys", "roles.sudo[0]", key, paths, SUDO_POWER) for key, paths in sorted(holders)]
+
+
+@pytest.mark.parametrize("build", TWO_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
+def test_sudo_multisig_that_needs_two_keyholders_through_nested_multisigs_passes(spec, meta, known, build):
+    assert sudo_findings(spec, meta, known, build()) == []
+
+
+def test_sudo_multisig_with_more_signatories_than_the_runtime_allows_is_refused(spec, meta, known):
+    assert sudo_findings(spec, meta, known, msig(2, *(fresh_account() for _ in range(11)))) == [
+        too_many_signatories("1 dev-keys", "roles.sudo[0]", 11)]
+    nested = {"threshold": 2, "members": [ss58(fresh_account()), msig(2, *(fresh_account() for _ in range(11)))]}
+    assert sudo_findings(spec, meta, known, nested) == [
+        too_many_signatories("1 dev-keys", "roles.sudo[0].members[1]", 11)]
+
+
+def test_sudo_multisig_of_max_signatories_passes(spec, meta, known):
+    assert sudo_findings(spec, meta, known, msig(2, *(fresh_account() for _ in range(10)))) == []
+
+
+@pytest.mark.parametrize("value", [None, b"", bytes(8)], ids=["absent", "empty", "8 bytes"])
+def test_sudo_multisig_under_a_runtime_that_hides_max_signatories_is_refused(spec, meta, known, value):
+    if value is None:
+        del meta.constants[("Multisig", "MaxSignatories")]
+    else:
+        meta.constants[("Multisig", "MaxSignatories")] = value
+    assert sudo_findings(spec, meta, known, msig(2, *(fresh_account() for _ in range(3)))) == [
+        unknown_max_signatories("1 dev-keys", "roles.sudo[0]")]
+
+
 def test_sudo_key_that_is_not_the_declared_multisig_is_refused(spec, meta, known):
     m1, m2, m3 = fresh_account(), fresh_account(), fresh_account()
     hidden = lp.multisig_account([ALICE, m1, m2], 2)
@@ -2760,6 +2860,14 @@ NO_GUARDIAN = ("[7 timelock] genesis sets no RootTimelock.Guardian: nothing apar
                "calls it queues")
 HIDDEN_BOUNDS = ("[7 timelock] the runtime metadata declares no RootTimelock.DefaultDelays and RootTimelock.MaxDelay "
                  "the preflight can read: how long mainnet must hold Root's calls is unknown here")
+GUARDIAN_POWER = "can veto Root's queued calls or co-sign them early"
+
+
+def nested_members(entry) -> list[str]:
+    return [f"[7 timelock] roles.guardian[0].members[{i}] is a multisig: the runtime takes the guardian's veto ahead "
+            "of fee-paying calls only when a member key signs it through one as_multi, so a veto through a nested "
+            "multisig can be crowded out of blocks"
+            for i, member in enumerate(entry["members"]) if isinstance(member, dict)]
 
 
 def delays(*blocks: int) -> bytes:
@@ -2783,10 +2891,10 @@ def guarded(spec239):
     return spec, meta, sudo, guardian
 
 
-def guardian_findings(spec, sudo, entry) -> list[str]:
+def guardian_findings(spec, meta, sudo, entry) -> list[str]:
     """Rule 7's guardian check, with `entry` stored in genesis as the guardian and declared as roles.guardian."""
     put(spec, "RootTimelock", "Guardian", lp.role_account(entry))
-    return messages(lp.check_guardian(spec, timelock_launch(sudo, entry)))
+    return messages(lp.check_guardian(spec, meta, timelock_launch(sudo, entry)))
 
 
 def delay_findings(spec, meta, *blocks: int) -> list[str]:
@@ -2802,7 +2910,7 @@ def test_the_spec239_metadata_declares_the_mainnet_delays_and_their_ceiling(spec
 
 def test_a_guardian_apart_from_the_sudo_key_at_the_mainnet_delays_passes(guarded):
     spec, meta, sudo, guardian = guarded
-    assert lp.check_guardian(spec, timelock_launch(sudo, msig(2, *guardian))) == []
+    assert lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian))) == []
     assert lp.check_delays(spec, meta) == []
 
 
@@ -2810,7 +2918,7 @@ def test_the_spec239_preprod_timelock_is_refused_on_mainnet(spec239):
     spec, meta = spec239
     assert spec.value("Sudo", "Key") == lp.multisig_account(PREPROD_KEYHOLDERS, 2)
     launch = timelock_launch(PREPROD_KEYHOLDERS, msig(3, *PREPROD_KEYHOLDERS))
-    assert messages(lp.check_guardian(spec, launch)) == [
+    assert messages(lp.check_guardian(spec, meta, launch)) == [
         f"[7 timelock] roles.guardian[0].members[{i}] {ss58(key)} is also roles.sudo[0].members[{i}]{SHARED}"
         for i, key in enumerate(PREPROD_KEYHOLDERS)]
     assert messages(lp.check_delays(spec, meta)) == [
@@ -2820,41 +2928,108 @@ def test_the_spec239_preprod_timelock_is_refused_on_mainnet(spec239):
 
 def test_a_genesis_with_no_guardian_is_refused(guarded):
     """The runtime's genesis builder lets a dev sudo key go unguarded; a mainnet launch has no dev key to excuse it."""
-    spec, _, sudo, guardian = guarded
+    spec, meta, sudo, guardian = guarded
     del spec.storage[lp.storage_key("RootTimelock", "Guardian")]
-    assert messages(lp.check_guardian(spec, timelock_launch(sudo, msig(2, *guardian)))) == [NO_GUARDIAN]
+    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian)))) == [NO_GUARDIAN]
 
 
 @pytest.mark.parametrize("count", [None, 0, 2])
 def test_a_guardian_not_declared_as_one_entry_is_refused(guarded, count):
-    spec, _, sudo, guardian = guarded
+    spec, meta, sudo, guardian = guarded
     launch = timelock_launch(sudo, msig(2, *guardian))
     if count is None:
         del launch["roles"]["guardian"]
     else:
         launch["roles"]["guardian"] = [msig(2, *guardian)] * count
-    assert messages(lp.check_guardian(spec, launch)) == [UNDECLARED_GUARDIAN]
+    assert messages(lp.check_guardian(spec, meta, launch)) == [UNDECLARED_GUARDIAN]
 
 
 def test_a_guardian_declared_by_its_flat_address_is_refused(guarded):
     """A wallet shows a multisig as one address; declared that way its members go unchecked."""
-    spec, _, sudo, guardian = guarded
-    assert guardian_findings(spec, sudo, ss58(lp.multisig_account(guardian, 2))) == [GUARDIAN_FLAT]
+    spec, meta, sudo, guardian = guarded
+    assert guardian_findings(spec, meta, sudo, ss58(lp.multisig_account(guardian, 2))) == [GUARDIAN_FLAT]
 
 
 def test_a_guardian_one_member_can_use_alone_is_refused(guarded):
-    spec, _, sudo, guardian = guarded
-    assert guardian_findings(spec, sudo, msig(1, *guardian)) == [
+    spec, meta, sudo, guardian = guarded
+    assert guardian_findings(spec, meta, sudo, msig(1, *guardian)) == [
         "[7 timelock] roles.guardian[0] has threshold 1: any one member alone can veto Root's queued calls or "
         "co-sign them early"]
 
 
+@pytest.mark.parametrize("build", ONE_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
+def test_a_guardian_one_key_meets_alone_through_a_nested_multisig_is_refused(guarded, build):
+    """One keyholder signs as_multi as itself and again as the nested multisig, so its
+    threshold of 2 is nominal."""
+    spec, meta, sudo, _ = guarded
+    entry, holders = build()
+    assert guardian_findings(spec, meta, sudo, entry) == [
+        lone_holder("7 timelock", "roles.guardian[0]", key, paths, GUARDIAN_POWER) for key, paths in sorted(holders)
+    ] + nested_members(entry)
+
+
+@pytest.mark.parametrize("build", TWO_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
+def test_a_guardian_that_needs_two_keyholders_through_nested_multisigs_is_refused_for_its_nesting(guarded, build):
+    spec, meta, sudo, _ = guarded
+    entry = build()
+    assert guardian_findings(spec, meta, sudo, entry) == nested_members(entry)
+
+
+def test_a_guardian_with_a_nested_multisig_member_is_refused(guarded):
+    """A nested member's veto wraps one as_multi in another, which the runtime does not take first: the runtime
+    test a_veto_through_a_nested_multisig_member_is_not_taken_first shows it."""
+    spec, meta, sudo, guardian = guarded
+    entry = {"threshold": 2, "members": [ss58(guardian[0]), ss58(guardian[1]), msig(2, guardian[2], fresh_account())]}
+    assert guardian_findings(spec, meta, sudo, entry) == [
+        "[7 timelock] roles.guardian[0].members[2] is a multisig: the runtime takes the guardian's veto ahead of "
+        "fee-paying calls only when a member key signs it through one as_multi, so a veto through a nested multisig "
+        "can be crowded out of blocks"]
+
+
+def test_a_guardian_with_more_signatories_than_the_runtime_allows_is_refused(guarded):
+    """pallet_multisig refuses as_multi from a multisig of more than MaxSignatories: such a guardian never vetoes."""
+    spec, meta, sudo, guardian = guarded
+    assert guardian_findings(spec, meta, sudo, msig(2, *(fresh_account() for _ in range(11)))) == [
+        too_many_signatories("7 timelock", "roles.guardian[0]", 11)]
+    nested = {"threshold": 2, "members": [ss58(guardian[0]), msig(2, *(fresh_account() for _ in range(11)))]}
+    assert guardian_findings(spec, meta, sudo, nested) == [
+        too_many_signatories("7 timelock", "roles.guardian[0].members[1]", 11), *nested_members(nested)]
+    assert guardian_findings(spec, meta, sudo, msig(1, *(fresh_account() for _ in range(11)))) == [
+        too_many_signatories("7 timelock", "roles.guardian[0]", 11),
+        f"[7 timelock] roles.guardian[0] has threshold 1: any one member alone {GUARDIAN_POWER}"]
+
+
+def test_a_guardian_of_max_signatories_passes(guarded):
+    spec, meta, sudo, _ = guarded
+    assert guardian_findings(spec, meta, sudo, msig(2, *(fresh_account() for _ in range(10)))) == []
+
+
+def test_the_signatory_bound_is_the_runtime_constant(guarded):
+    spec, meta, sudo, _ = guarded
+    assert meta.constants[("Multisig", "MaxSignatories")] == (10).to_bytes(4, "little")
+    meta.constants[("Multisig", "MaxSignatories")] = (3).to_bytes(4, "little")
+    assert guardian_findings(spec, meta, sudo, msig(2, *(fresh_account() for _ in range(3)))) == []
+    assert guardian_findings(spec, meta, sudo, msig(2, *(fresh_account() for _ in range(4)))) == [
+        too_many_signatories("7 timelock", "roles.guardian[0]", 4, 3)]
+
+
+@pytest.mark.parametrize("value", [None, b"", bytes(8)], ids=["absent", "empty", "8 bytes"])
+def test_a_guardian_under_a_runtime_that_hides_max_signatories_is_refused(guarded, value):
+    spec, meta, sudo, guardian = guarded
+    if value is None:
+        del meta.constants[("Multisig", "MaxSignatories")]
+    else:
+        meta.constants[("Multisig", "MaxSignatories")] = value
+    assert guardian_findings(spec, meta, sudo, msig(2, *guardian)) == [
+        unknown_max_signatories("7 timelock", "roles.guardian[0]")]
+
+
 def test_a_guardian_that_is_not_the_declared_multisig_is_refused(guarded):
     """A multisig holding //Alice, declared as a multisig of fresh keys."""
-    spec, _, sudo, guardian = guarded
+    spec, meta, sudo, guardian = guarded
     hidden = lp.multisig_account([ALICE, *guardian[:2]], 2)
     put(spec, "RootTimelock", "Guardian", hidden)
-    assert messages(lp.check_guardian(spec, timelock_launch(sudo, msig(2, *guardian)))) == [
+    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian)))) == [
         f"[7 timelock] RootTimelock.Guardian {ss58(hidden)} is not the account roles.guardian declares: "
         "who can veto Root is unchecked"]
 
@@ -2863,7 +3038,7 @@ def test_a_guardian_multisig_with_a_dev_member_is_refused(guarded, known):
     """Genesis holds only the multisig's account, a hash; rule 1 finds the dev key among the declared members."""
     spec, meta, sudo, guardian = guarded
     entry = msig(2, ALICE, *guardian[:2])
-    assert guardian_findings(spec, sudo, entry) == []
+    assert guardian_findings(spec, meta, sudo, entry) == []
     spec.storage[lp.CODE_KEY] = b""
     found = messages(lp.check_dev_keys(spec, meta, timelock_launch(sudo, entry), NO_CARDANO, [], known))
     assert "[1 dev-keys] roles.guardian[0].members[0]: //Alice (sr25519)" in found
@@ -2871,8 +3046,8 @@ def test_a_guardian_multisig_with_a_dev_member_is_refused(guarded, known):
 
 
 def test_a_guardian_that_is_the_sudo_key_is_refused(guarded):
-    spec, _, sudo, _ = guarded
-    found = guardian_findings(spec, sudo, msig(2, *sudo))
+    spec, meta, sudo, _ = guarded
+    found = guardian_findings(spec, meta, sudo, msig(2, *sudo))
     assert found[0] == "[7 timelock] RootTimelock.Guardian is Sudo.Key: the sudo key would veto and co-sign its own " \
                        "Root calls"
     account = ss58(lp.multisig_account(sudo, 2))
@@ -2880,56 +3055,70 @@ def test_a_guardian_that_is_the_sudo_key_is_refused(guarded):
 
 
 def test_a_guardian_of_the_sudo_keyholders_under_another_threshold_is_refused(guarded):
-    spec, _, sudo, _ = guarded
-    assert guardian_findings(spec, sudo, msig(3, *sudo)) == [
+    spec, meta, sudo, _ = guarded
+    assert guardian_findings(spec, meta, sudo, msig(3, *sudo)) == [
         f"[7 timelock] roles.guardian[0].members[{i}] {ss58(key)} is also roles.sudo[0].members[{i}]{SHARED}"
         for i, key in enumerate(sudo)]
 
 
 def test_a_guardian_sharing_one_keyholder_with_the_sudo_key_is_refused(guarded):
-    spec, _, sudo, guardian = guarded
-    assert guardian_findings(spec, sudo, msig(2, sudo[1], *guardian[:2])) == [
+    spec, meta, sudo, guardian = guarded
+    assert guardian_findings(spec, meta, sudo, msig(2, sudo[1], *guardian[:2])) == [
         f"[7 timelock] roles.guardian[0].members[0] {ss58(sudo[1])} is also roles.sudo[0].members[1]{SHARED}"]
 
 
 def test_a_guardian_with_the_sudo_account_as_a_member_is_refused(guarded):
-    spec, _, sudo, guardian = guarded
+    spec, meta, sudo, guardian = guarded
     account = lp.multisig_account(sudo, 2)
-    assert guardian_findings(spec, sudo, msig(2, account, guardian[0])) == [
+    assert guardian_findings(spec, meta, sudo, msig(2, account, guardian[0])) == [
         f"[7 timelock] roles.guardian[0].members[0] {ss58(account)} is also roles.sudo[0]{SHARED}"]
 
 
 def test_a_sudo_keyholder_nested_inside_the_guardian_is_refused(guarded):
-    spec, _, sudo, guardian = guarded
+    spec, meta, sudo, guardian = guarded
     entry = {"threshold": 2, "members": [msig(2, sudo[2], guardian[0]), ss58(guardian[1])]}
-    assert guardian_findings(spec, sudo, entry) == [
-        f"[7 timelock] roles.guardian[0].members[0].members[0] {ss58(sudo[2])} is also "
+    assert guardian_findings(spec, meta, sudo, entry) == [
+        *nested_members(entry), f"[7 timelock] roles.guardian[0].members[0].members[0] {ss58(sudo[2])} is also "
         f"roles.sudo[0].members[2]{SHARED}"]
 
 
 def test_a_guardian_member_that_is_the_genesis_sudo_key_is_refused_when_roles_sudo_does_not_say_so(guarded):
-    spec, _, _, guardian = guarded
+    spec, meta, _, guardian = guarded
     key = fresh_account()
     put(spec, "Sudo", "Key", key)
     entry = msig(2, key, *guardian[:2])
     put(spec, "RootTimelock", "Guardian", lp.role_account(entry))
-    assert messages(lp.check_guardian(spec, {"roles": {"guardian": [entry]}})) == [
+    assert messages(lp.check_guardian(spec, meta, {"roles": {"guardian": [entry]}})) == [
         f"[7 timelock] roles.guardian[0].members[0] {ss58(key)} is also Sudo.Key{SHARED}"]
 
 
 def test_a_guardian_key_that_does_not_decode_leaves_its_refusal_to_rule_1(guarded):
-    spec, _, sudo, guardian = guarded
+    spec, meta, sudo, guardian = guarded
     entry = {"threshold": 2, "members": ["//Bob", ss58(guardian[0])]}
-    assert lp.check_guardian(spec, timelock_launch(sudo, entry)) == []
+    assert lp.check_guardian(spec, meta, timelock_launch(sudo, entry)) == []
+
+
+def test_a_guardian_key_that_does_not_decode_leaves_the_rest_of_rule_7_standing(guarded):
+    spec, meta, sudo, guardian = guarded
+    entry = {"threshold": 2, "members": ["//Bob", ss58(guardian[0])]}
+    launch = timelock_launch(sudo, entry)
+    put(spec, "RootTimelock", "Guardian", spec.value("Sudo", "Key"))
+    assert messages(lp.check_guardian(spec, meta, launch)) == [
+        "[7 timelock] RootTimelock.Guardian is Sudo.Key: the sudo key would veto and co-sign its own Root calls"]
+    del spec.storage[lp.storage_key("RootTimelock", "Guardian")]
+    assert messages(lp.check_guardian(spec, meta, launch)) == [NO_GUARDIAN]
+    oversized = {"threshold": 2, "members": ["//Bob", *(ss58(fresh_account()) for _ in range(10))]}
+    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, oversized))) == [
+        NO_GUARDIAN, too_many_signatories("7 timelock", "roles.guardian[0]", 11)]
 
 
 def test_a_sudo_key_that_does_not_decode_leaves_the_guardian_checked(guarded):
-    spec, _, sudo, guardian = guarded
+    spec, meta, sudo, guardian = guarded
     hidden = lp.multisig_account([ALICE, *guardian[:2]], 2)
     put(spec, "RootTimelock", "Guardian", hidden)
     launch = {"roles": {"sudo": [{"threshold": 2, "members": ["//Alice", ss58(sudo[0])]}],
                         "guardian": [msig(2, *guardian)]}}
-    assert messages(lp.check_guardian(spec, launch)) == [
+    assert messages(lp.check_guardian(spec, meta, launch)) == [
         f"[7 timelock] RootTimelock.Guardian {ss58(hidden)} is not the account roles.guardian declares: "
         "who can veto Root is unchecked"]
 
@@ -3001,7 +3190,7 @@ def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec239, constants)
 
 def test_a_runtime_with_no_root_timelock_is_refused(spec, meta):
     assert messages(lp.check_delays(spec, meta)) == [HIDDEN_BOUNDS]
-    assert NO_GUARDIAN in messages(lp.check_guardian(spec, {"roles": {}}))
+    assert NO_GUARDIAN in messages(lp.check_guardian(spec, meta, {"roles": {}}))
 
 
 @pytest.mark.parametrize("raw", [b"", bytes(11), bytes(13), bytes(24)], ids=lambda raw: f"{len(raw)} bytes")
@@ -3200,6 +3389,36 @@ def test_cli_refuses_the_testnet_timelock_delays(clean, capsys):
     assert code == 1
     assert "[7 timelock] RootTimelock.Delays holds standard calls 300 blocks, below the 100800 the runtime sets " \
            "for mainnet" in out
+
+
+def set_guardian(clean, entry) -> None:
+    put(clean.spec, "RootTimelock", "Guardian", lp.role_account(entry))
+    clean.launch["roles"]["guardian"] = [entry]
+
+
+def test_cli_refuses_a_guardian_one_keyholder_runs_through_a_nested_multisig(clean, capsys):
+    entry, [(key, paths)] = repeated_member()
+    set_guardian(clean, entry)
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert lone_holder("7 timelock", "roles.guardian[0]", key, paths, GUARDIAN_POWER) in out
+
+
+def test_cli_refuses_root_one_keyholder_runs_through_a_nested_multisig(clean, capsys):
+    entry, [(key, paths)] = repeated_member()
+    put(clean.spec, "Sudo", "Key", lp.role_account(entry))
+    clean.launch["roles"]["sudo"] = [entry]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert lone_holder("1 dev-keys", "roles.sudo[0]", key, paths, SUDO_POWER) in out
+
+
+@pytest.mark.parametrize("count, code", [(10, 0), (11, 1)])
+def test_cli_bounds_the_guardian_by_the_runtime_max_signatories(clean, capsys, count, code):
+    set_guardian(clean, msig(2, *(fresh_account() for _ in range(count))))
+    exit_code, out = clean.run(capsys)
+    assert exit_code == code, out
+    assert (too_many_signatories("7 timelock", "roles.guardian[0]", count) in out) == (code == 1)
 
 
 @pytest.mark.parametrize("threshold", [1, 2])

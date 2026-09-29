@@ -28,13 +28,13 @@ It reads:
 
 | Rule | Refuses when |
 |---|---|
-| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` is not a multisig with a threshold of at least 2, or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
+| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` does not need two keyholders to act (see [Multisig roles](#multisig-roles)), or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
 | 3 rpc | A public RPC URL, probed live, lists in `rpc_methods` a method outside the safe set or answers `system_peers`, an unsafe method that changes nothing (see [Public RPC probe](#public-rpc-probe)); the launch does not declare `public_rpc`; an authority's running node process, read from its `cmdline` capture, serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`, including every value one `--experimental-rpc-endpoint` takes up to the next option, with each option trimmed as the node trims it. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. |
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
 | 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
-| 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian, as a multisig with a threshold of at least 2, whose account is the genesis guardian; or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
+| 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian whose account is the genesis guardian, or that guardian does not need two keyholders to act or has a multisig as a member (see [Multisig roles](#multisig-roles)); or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including a proxy
@@ -133,10 +133,9 @@ more than 300 slots behind its node.
   multisig by its members. `sudo`, `anchor_signer`, `attestors` and `oracle`
   must be present; an empty `oracle` states that no oracle signer runs.
   `roles.sudo` must name exactly the genesis `Sudo.Key` (or be empty when
-  genesis sets none), as a multisig with a threshold of at least 2.
-  `roles.guardian` must name exactly the genesis `RootTimelock.Guardian`, as
-  one multisig with a threshold of at least 2, in which no account at any
-  depth is also in `roles.sudo` or is `Sudo.Key`. Every
+  genesis sets none), and `roles.guardian` exactly the genesis
+  `RootTimelock.Guardian`, each as a multisig role (below); no account in
+  the guardian, at any depth, may also be in `roles.sudo` or be `Sudo.Key`. Every
   genesis account must be the account of some entry; `endowed` holds the ones
   no other role names. `attestors` are the accounts that bond at genesis and
   get the endowment floor check.
@@ -262,6 +261,40 @@ more than 300 slots behind its node.
   as `http`, `https`, `ws` or `wss` with no user, password or fragment, or
   is `[]` when the launch serves none. Leaving it out refuses.
 
+## Multisig roles
+
+`roles.sudo` holds Root and `roles.guardian` can veto it, so each must need
+two keyholders to act, and pallet_multisig must let it sign. Rule 1 refuses a
+sudo entry, and rule 7 the guardian, that:
+
+- is a single key, a multisig's flat address included, whose members would
+  go unchecked;
+- has threshold 1;
+- has a key that meets its threshold alone. A key signs as itself and, through
+  pallet_multisig, as every nested multisig whose threshold the accounts it
+  signs as meet, wherever that multisig's account is a member. So
+  `{"threshold": 2, "members": [C, {"threshold": 1, "members": [C, D]}]}` is
+  C's alone, as is a 2-of-2 of two 1-of-2 multisigs that share C, or one whose
+  member is the flat address of another multisig declared in it;
+- has, at any depth, a multisig with more members than the runtime's
+  `Multisig.MaxSignatories` (10): pallet_multisig refuses every call signed
+  through it. The bound is read from the metadata of the genesis code, and a
+  runtime that does not declare it is refused.
+
+Rule 7 also refuses a guardian with a multisig among its members. The runtime
+takes the guardian's veto ahead of every fee-paying call only when the
+guardian signs it, or a member key through one `as_multi`; a nested member
+wraps one `as_multi` in another, so its veto competes on fees and a stolen
+sudo key could crowd it out of blocks. The runtime test
+`a_veto_through_a_nested_multisig_member_is_not_taken_first` pins that.
+
+The preflight cannot see inside a flat member address: one that is the account
+of a multisig not declared in the role (of the other role's keyholders, of
+well-known keys, or of the role's own members) reads as one more key, as does
+a key its holder shares with another member's, and as a guardian member its
+veto goes unprioritized unseen. The manifest's word on who holds each key is
+trusted.
+
 ## Public RPC probe
 
 For each URL in `public_rpc` the preflight calls, over HTTP POST and over a
@@ -347,10 +380,11 @@ runtime's metadata, trimmed to what the preflight reads. They come from a
 `materios-node` built at 9ca67a3, which is main at 7b8fd07 with the timelock's
 `DefaultDelays` and `MaxDelay` declared as metadata constants; a build of
 7b8fd07 itself gives the same genesis byte for byte, and metadata without those
-two constants. From `partnerchain/`, with subwasm v0.21.3 and jq:
+two constants. From `partnerchain/`, with subwasm v0.21.3 and jq (`build-spec` runs
+offline, and the scratch base path takes the network key it writes):
 
 ```
-materios-node build-spec --chain preprod --raw > raw.json
+materios-node build-spec --chain preprod --raw --disable-default-bootnode --base-path "$(mktemp -d)" > raw.json
 jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec239-raw.json
 jq -r '.genesis.raw.top["0x3a636f6465"][2:]' raw.json | xxd -r -p > runtime.wasm
 subwasm metadata runtime.wasm --format json | jq -jcS '{V14: {pallets: [.V14.pallets[]

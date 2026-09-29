@@ -713,6 +713,72 @@ def role_accounts(entry, where: str):
             yield from role_accounts(member, f"{where}.members[{i}]")
 
 
+def role_multisigs(entry, where: str):
+    """(where, multisig) for a role entry's multisig and each one nested in it."""
+    if isinstance(entry, dict):
+        yield where, entry
+        for i, member in enumerate(entry["members"]):
+            yield from role_multisigs(member, f"{where}.members[{i}]")
+
+
+def lone_holders(entry) -> list[bytes]:
+    """The keys of a role entry whose holder alone can act as its account. A key
+    signs as itself and, through pallet_multisig, as every nested multisig whose
+    threshold the accounts it signs as meet, wherever that multisig's account is
+    a member, a flat address included. Raises ValueError when a key does not
+    decode."""
+    multisigs = [(role_account(multisig), {role_account(member) for member in multisig["members"]},
+                  multisig["threshold"]) for _, multisig in role_multisigs(entry, "")]
+    target = role_account(entry)
+
+    def acts_alone(key: bytes) -> bool:
+        signs_as, grown = {key}, True
+        while grown:
+            grown = False
+            for account, members, threshold in multisigs:
+                if account not in signs_as and len(members & signs_as) >= threshold:
+                    signs_as.add(account)
+                    grown = True
+        return target in signs_as
+
+    return sorted(key for key in {role_account(text) for _, text in role_leaves(entry, "")} if acts_alone(key))
+
+
+def max_signatories(meta: Metadata) -> int | None:
+    raw = meta.constants.get(("Multisig", "MaxSignatories"), b"")
+    return int.from_bytes(raw, "little") if len(raw) == 4 else None
+
+
+def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, prefix: int) -> list[str]:
+    """Why a role entry that must need two keyholders to act does not: it is a
+    single key, one key meets its threshold alone, or pallet_multisig refuses
+    to sign through it or through a multisig nested in it, since it has more
+    members than the runtime's MaxSignatories."""
+    if not isinstance(entry, dict):
+        return [f"{where} is a single key: {name} must be a multisig with a threshold of at least 2, declared by its "
+                "members so each one is checked"]
+    limit = max_signatories(meta)
+    if limit is None:
+        faults = [f"{where}: the runtime metadata declares no Multisig.MaxSignatories the preflight can read: "
+                  "whether pallet_multisig lets this multisig sign is unknown here"]
+    else:
+        faults = [f"{path} has {len(multisig['members'])} members, more than the runtime's Multisig.MaxSignatories "
+                  f"{limit}: pallet_multisig refuses every call signed through it"
+                  for path, multisig in role_multisigs(entry, where) if len(multisig["members"]) > limit]
+    if entry["threshold"] < 2:
+        return faults + [f"{where} has threshold 1: any one member alone {power}"]
+    try:
+        holders = lone_holders(entry)
+    except ValueError:
+        return faults  # rule 1 refuses a key that does not decode and a multisig that lists a member twice
+    paths: dict[bytes, list[str]] = {}
+    for path, text in role_leaves(entry, where):
+        paths.setdefault(role_account(text), []).append(path)
+    return faults + [f"{where}: {ss58(key, prefix)}, the member at {' and '.join(paths[key])}, meets its threshold "
+                     f"alone by also signing as a nested multisig, so one keyholder alone {power}"
+                     for key in holders]
+
+
 # ---------------------------------------------------------------------------
 # Cardano, through Kupo
 # ---------------------------------------------------------------------------
@@ -1028,11 +1094,8 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                     findings.append(Finding(KEYS, f"{where}: {e}"))
             accounts.setdefault(role, []).append(account)
     for i, entry in enumerate(roles.get("sudo", [])):
-        if not isinstance(entry, dict):
-            findings.append(Finding(KEYS, f"roles.sudo[{i}] is a single key: Root must be a multisig with a "
-                                          "threshold of at least 2, declared by its members so each one is checked"))
-        elif entry["threshold"] < 2:
-            findings.append(Finding(KEYS, f"roles.sudo[{i}] has threshold 1: any one member alone holds Root"))
+        findings += [Finding(KEYS, fault) for fault in multisig_faults(entry, f"roles.sudo[{i}]", "Root", "holds Root",
+                                                                        meta, spec.ss58_prefix)]
     sudo_key, sudo = spec.value("Sudo", "Key"), accounts.get("sudo", [])
     if sudo_key is None:
         if sudo:
@@ -2078,12 +2141,14 @@ def check_checkpoint(spec: Spec, launch: dict, signed: dict, launch_keys: list[b
     return findings
 
 
-def check_guardian(spec: Spec, launch: dict) -> list[Finding]:
+def check_guardian(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     """The Root timelock's guardian, who can veto the Root calls the sudo key
     queues and co-sign them early. The runtime refuses a genesis whose guardian
     is the sudo key, or that has none unless the sudo key is a dev key; on
-    mainnet genesis must name the multisig roles.guardian declares, and no
-    account in it, down to each member, may be one the sudo key's holders hold."""
+    mainnet genesis must name the multisig roles.guardian declares: one of keys,
+    whose veto the runtime takes first, that needs two keyholders and that
+    pallet_multisig signs through. No account in it, down to each member, may
+    be one the sudo key's holders hold."""
     findings = []
     stored, sudo_key = spec.value("RootTimelock", "Guardian"), spec.value("Sudo", "Key")
     if stored is None:
@@ -2097,12 +2162,15 @@ def check_guardian(spec: Spec, launch: dict) -> list[Finding]:
     if len(entries) != 1:
         return findings + [Finding(TIMELOCK, "roles.guardian must declare the one guardian genesis names: who can "
                                              "veto Root is unchecked")]
-    if not isinstance(entries[0], dict):
-        findings.append(Finding(TIMELOCK, "roles.guardian[0] is a single key: the guardian must be a multisig with a "
-                                          "threshold of at least 2, declared by its members so each one is checked"))
-    elif entries[0]["threshold"] < 2:
-        findings.append(Finding(TIMELOCK, "roles.guardian[0] has threshold 1: any one member alone can veto Root's "
-                                          "queued calls or co-sign them early"))
+    findings += [Finding(TIMELOCK, fault) for fault in multisig_faults(
+        entries[0], "roles.guardian[0]", "the guardian", "can veto Root's queued calls or co-sign them early", meta,
+        spec.ss58_prefix)]
+    if isinstance(entries[0], dict):
+        findings += [Finding(TIMELOCK, f"roles.guardian[0].members[{i}] is a multisig: the runtime takes the "
+                                       "guardian's veto ahead of fee-paying calls only when a member key signs it "
+                                       "through one as_multi, so a veto through a nested multisig can be crowded out "
+                                       "of blocks")
+                     for i, member in enumerate(entries[0]["members"]) if isinstance(member, dict)]
     try:
         guardian = list(role_accounts(entries[0], "roles.guardian[0]"))
     except ValueError:
@@ -2353,7 +2421,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_checkpoint(spec, launch, signed, keys)
             + check_code_overrides(launch)
             + check_observation(spec)
-            + check_guardian(spec, launch)
+            + check_guardian(spec, meta, launch)
             + check_delays(spec, meta))
 
 

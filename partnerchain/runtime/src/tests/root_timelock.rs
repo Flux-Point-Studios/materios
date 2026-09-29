@@ -2040,6 +2040,43 @@ fn a_multisig_guardian_wrapper_is_taken_first_and_bounded() {
     });
 }
 
+/// The launch preflight refuses a guardian with a nested multisig member
+/// because of this: such a member's veto competes with fee-paying calls.
+#[test]
+fn a_veto_through_a_nested_multisig_member_is_not_taken_first() {
+    let sorted = |mut accounts: Vec<AccountId>| {
+        accounts.sort();
+        accounts
+    };
+    let inner = pallet_multisig::Pallet::<Runtime>::multi_account_id(
+        &sorted(vec![acct(Dave), acct(Eve)]),
+        2,
+    );
+    let guardian = pallet_multisig::Pallet::<Runtime>::multi_account_id(
+        &sorted(vec![acct(Charlie), inner.clone()]),
+        2,
+    );
+    let as_multi = |others: Vec<AccountId>, call: RuntimeCall| {
+        let max_weight = call.get_dispatch_info().weight;
+        RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
+            threshold: 2,
+            other_signatories: others,
+            maybe_timepoint: None,
+            max_weight,
+            call: Box::new(call),
+        })
+    };
+    ext_with(acct(SUDO), Some(guardian)).execute_with(|| {
+        put_fee_params();
+        let direct = as_multi(vec![inner.clone()], cancel_all());
+        assert_eq!(pool_priority(Charlie, &direct), TransactionPriority::MAX);
+
+        let nested = as_multi(vec![acct(Eve)], direct);
+        assert!(pool_priority(Dave, &nested) < TransactionPriority::MAX);
+        assert!(pool_validity(Dave, &nested).provides.is_empty());
+    });
+}
+
 #[test]
 fn one_extrinsic_cannot_freeze_governance_past_the_rotation() {
     new_test_ext().execute_with(|| {
