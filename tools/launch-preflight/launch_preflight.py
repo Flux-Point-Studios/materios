@@ -129,11 +129,16 @@ VALIDATOR_REWARD_CONSTANTS = (
     ("validator_reward_per_era", "ValidatorRewardPerEra"),
     ("treasury_emission_share_perbill", "TreasuryEmissionShare"),
 )
+# The runtime's Balance is a u128.
+BALANCE = 16
 REWARD_ITEMS = (
-    ("attestation_reward_per_signer", "AttestationRewardPerSigner", 16),
-    ("era_cap_base", "EraCapBase", 16),
+    ("attestation_reward_per_signer", "AttestationRewardPerSigner", BALANCE),
+    ("era_cap_base", "EraCapBase", BALANCE),
     ("era_cap_baseline_attestor_count", "EraCapBaselineAttestorCount", 4),
 )
+# System.Account's AccountInfo<Nonce = u32, AccountData<Balance>>: nonce, consumers, providers and sufficients, then
+# free, reserved, frozen and flags.
+ACCOUNT_INFO = (4, 4, 4, 4, BALANCE, BALANCE, BALANCE, BALANCE)
 ECONOMICS_FIELDS = {"fee_buffer", *(field for field, _ in VALIDATOR_REWARD_CONSTANTS),
                     *(field for field, _, _ in REWARD_ITEMS)}
 # Every launch names who holds these; the ones that always run must name a key.
@@ -321,6 +326,11 @@ def storage_key(pallet: str, item: str) -> bytes:
     return twox_128(pallet.encode()) + twox_128(item.encode())
 
 
+def account_key(account: bytes) -> bytes:
+    """Where System.Account files an account: blake2_128 of it, then the account."""
+    return storage_key("System", "Account") + hashlib.blake2b(account, digest_size=16).digest() + account
+
+
 def compact(n: int) -> bytes:
     if n < 1 << 6:
         return bytes([n << 2])
@@ -342,6 +352,14 @@ def read_compact(data: bytes, pos: int) -> tuple[int, int]:
         return int.from_bytes(data[pos:pos + 4], "little") >> 2, pos + 4
     size = (data[pos] >> 2) + 4
     return int.from_bytes(data[pos + 1:pos + 1 + size], "little"), pos + 1 + size
+
+
+def scale_uints(raw: bytes, widths: tuple[int, ...]) -> tuple[int, ...] | None:
+    """The little-endian unsigned fields of a value of these widths, or None unless it is exactly that long."""
+    if len(raw) != sum(widths):
+        return None
+    return tuple(int.from_bytes(raw[end - width:end], "little")
+                 for end, width in zip(itertools.accumulate(widths), widths))
 
 
 def canonical_json_hash(doc) -> bytes:
@@ -461,13 +479,40 @@ class Spec:
     def value(self, pallet: str, item: str) -> bytes | None:
         return self.storage.get(storage_key(pallet, item))
 
+    def uints(self, key: bytes, widths: tuple[int, ...], where: str) -> tuple[int, ...] | None:
+        """The unsigned fields genesis stores at `key`, or None if it stores
+        nothing there. FRAME reads a value too short for its type as the item's
+        default and ignores bytes past its type, so a value of any other length
+        launches other numbers than the ones read here."""
+        raw = self.storage.get(key)
+        if raw is None:
+            return None
+        fields = scale_uints(raw, widths)
+        if fields is None:
+            raise InputError(f"chain spec raw storage: {where} is {len(raw)} byte{'s' * (len(raw) != 1)}, not the "
+                             f"{sum(widths)} its type encodes to: the node reads a shorter value as its default, "
+                             "zero, and only the first bytes of a longer one")
+        return fields
+
+    def uint(self, pallet: str, item: str, width: int) -> int | None:
+        fields = self.uints(storage_key(pallet, item), (width,), f"{pallet}.{item}")
+        return None if fields is None else fields[0]
+
     def accounts(self) -> list[bytes]:
         """Every account System.Account holds at genesis."""
         prefix = storage_key("System", "Account")
-        accounts = [key[len(prefix) + 16:] for key in sorted(self.storage) if key.startswith(prefix)]
-        if any(len(account) != 32 for account in accounts):
-            raise InputError("a System.Account key does not end in a 32-byte account")
-        return accounts
+        keys = [key for key in sorted(self.storage) if key.startswith(prefix)]
+        for key in keys:
+            if key != account_key(key[-32:]):
+                raise InputError(f"chain spec raw storage: the System.Account key 0x{key.hex()} is not blake2_128 of "
+                                 "a 32-byte account followed by that account, the one key the runtime reads it at")
+        return [key[-32:] for key in keys]
+
+    def balance(self, account: bytes) -> tuple[int, int]:
+        """An account's free and reserved balance at genesis, none if genesis does not endow it."""
+        key = account_key(account)
+        info = self.uints(key, ACCOUNT_INFO, f"System.Account value at 0x{key.hex()}")
+        return (0, 0) if info is None else info[4:6]
 
 
 def load_spec(path: str) -> Spec:
@@ -1162,13 +1207,12 @@ def check_rewards(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
             findings.append(Finding(REWARDS, f"economics.{field} is not declared as an integer; "
                                              "attestor rewards must be explicit"))
             continue
-        stored = spec.value("OrinqReceipts", item)
+        stored = spec.uint("OrinqReceipts", item, width)
         if stored is None:
             findings.append(Finding(REWARDS, f"OrinqReceipts.{item} is not set in genesis "
                                              f"(declared {want})"))
-        elif int.from_bytes(stored[:width], "little") != want:
-            findings.append(Finding(REWARDS, f"OrinqReceipts.{item} stores "
-                                             f"{int.from_bytes(stored[:width], 'little')}, declared {want}"))
+        elif stored != want:
+            findings.append(Finding(REWARDS, f"OrinqReceipts.{item} stores {stored}, declared {want}"))
     if declared.get("era_cap_baseline_attestor_count") == 0:
         findings.append(Finding(REWARDS, "economics.era_cap_baseline_attestor_count is zero"))
     return findings
@@ -1936,42 +1980,33 @@ def check_public_rpc(launch: dict) -> list[Finding]:
     return findings
 
 
-def free_balance(spec: Spec, account: bytes) -> int:
-    key = storage_key("System", "Account") + hashlib.blake2b(account, digest_size=16).digest() + account
-    info = spec.storage.get(key)
-    return int.from_bytes(info[16:32], "little") if info else 0
-
-
 def check_supply(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView) -> list[Finding]:
     findings = []
     economics = launch.get("economics", {})
     attestors = launch.get("roles", {}).get("attestors", [])
-    bond_raw = spec.value("OrinqReceipts", "BondRequirement")
+    bond = spec.uint("OrinqReceipts", "BondRequirement", BALANCE)
     ed_raw = meta.constants.get(("Balances", "ExistentialDeposit"))
     fee_buffer = economics.get("fee_buffer")
     if not attestors:
         findings.append(Finding(SUPPLY, "roles.attestors names no account: the endowment floor "
                                         "has nothing to check"))
-    if bond_raw is None or ed_raw is None or not isinstance(fee_buffer, int):
+    if bond is None or ed_raw is None or not isinstance(fee_buffer, int):
         findings.append(Finding(SUPPLY, "cannot size attestor endowments: needs OrinqReceipts."
                                         "BondRequirement in genesis, Balances.ExistentialDeposit "
                                         "in metadata and economics.fee_buffer declared"))
     else:
-        floor = int.from_bytes(bond_raw, "little") + int.from_bytes(ed_raw, "little") + fee_buffer
+        floor = bond + int.from_bytes(ed_raw, "little") + fee_buffer
         for i, entry in enumerate(attestors):
             try:
                 account = role_account(entry)
             except ValueError:
                 continue  # rule 1 already refuses a role key that does not decode
-            balance = free_balance(spec, account)
+            balance, _ = spec.balance(account)
             if balance < floor:
                 findings.append(Finding(SUPPLY, f"roles.attestors[{i}] is endowed {balance}, below "
                                                 f"bond + existential deposit + fee buffer = {floor}"))
-    issuance_raw = spec.value("Balances", "TotalIssuance")
-    stored = int.from_bytes(issuance_raw, "little") if issuance_raw else 0
-    prefix = storage_key("System", "Account")
-    held = sum(int.from_bytes(info[16:32], "little") + int.from_bytes(info[32:48], "little")
-               for key, info in spec.storage.items() if key.startswith(prefix))
+    stored = spec.uint("Balances", "TotalIssuance", BALANCE) or 0
+    held = sum(sum(spec.balance(account)) for account in spec.accounts())
     if stored != held:
         findings.append(Finding(SUPPLY, f"Balances.TotalIssuance stores {stored}, but genesis accounts "
                                         f"hold {held}"))
@@ -2202,9 +2237,7 @@ def check_guardian(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
 
 def block_counts(raw: bytes, width: int) -> tuple[int, ...] | None:
     """A DelayTable's three delays, or None unless it is three block counts of this width."""
-    if not width or len(raw) != 3 * width:
-        return None
-    return tuple(int.from_bytes(raw[i:i + width], "little") for i in range(0, len(raw), width))
+    return scale_uints(raw, (width,) * 3) if width else None
 
 
 def check_delays(spec: Spec, meta: Metadata) -> list[Finding]:

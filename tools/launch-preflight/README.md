@@ -37,7 +37,9 @@ It reads:
 | 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian whose account is the genesis guardian, or that guardian does not need two keyholders to act or has a multisig as a member (see [Multisig roles](#multisig-roles)); or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
-refused, 2 means an input could not be read (also a refusal), including a proxy
+refused, 2 means an input could not be read (also a refusal), including hex in
+another spelling (see [Hex](#hex)), a number genesis stores at another width
+than its type (see [Stored numbers](#stored-numbers)), a proxy
 config with no route the preflight can read, a Kupo that is unreachable,
 behind its node or does not index the permissioned candidates token, and a
 public RPC URL whose answers the probe cannot resolve.
@@ -105,6 +107,21 @@ left over. So a value written `0x 1122...` loads as `0x0112...`, one with no
 by two spaces loads as that key and a zero byte: a guardian, a delay or a
 balance read one way would launch as another, or not at all. build-spec writes
 the one spelling, so its output loads unchanged.
+
+## Stored numbers
+
+Each number the preflight reads from genesis must be exactly as long as its
+type: `OrinqReceipts.AttestationRewardPerSigner`, `OrinqReceipts.EraCapBase`,
+`OrinqReceipts.BondRequirement` and `Balances.TotalIssuance` 16 bytes (u128),
+`OrinqReceipts.EraCapBaselineAttestorCount` 4 (u32), and every `System.Account`
+value 80 (`AccountInfo`: four u32 counters, then free, reserved, frozen and
+flags as u128), filed under blake2_128 of its account followed by the account.
+FRAME reads a value too short for its type as the item's default, zero, and
+ignores the bytes past its type, and the runtime reads an account at that one
+key only. So a baseline of 32 written as the single byte `0x20` would read as
+32 here and launch as 0, which lifts the per-era attestor reward cap to the
+whole `EraCapBase`. build-spec writes each at its width and key; anything else
+refuses as unreadable.
 
 ## Launch manifest
 

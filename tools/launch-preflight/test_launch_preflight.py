@@ -444,6 +444,19 @@ def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
     assert spec.storage == {bytes.fromhex(key[2:]): bytes.fromhex(value[2:]) for key, value in top.items()}
 
 
+def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_of_its_type(spec, spec239):
+    """Every account is an 80-byte AccountInfo filed under its own key, and
+    what the accounts hold, free plus reserved, is TotalIssuance."""
+    for genesis in (spec, spec239[0]):
+        numbers = [("OrinqReceipts", item, width) for _, item, width in REWARD_WIDTHS]
+        numbers += [("OrinqReceipts", "BondRequirement", 16), ("Balances", "TotalIssuance", 16)]
+        for pallet, item, width in numbers:
+            assert len(genesis.value(pallet, item)) == width
+        accounts = genesis.accounts()
+        assert {len(genesis.storage[account_key(account)]) for account in accounts} == {80}
+        assert sum(sum(genesis.balance(account)) for account in accounts) == issuance_of(genesis)
+
+
 @spelled(HEX_KEY_MISSPELLINGS)
 def test_a_role_key_in_another_spelling_of_hex_is_an_input_error(misspell):
     launch = {"roles": {"sudo": [msig(2, fresh_account(), fresh_account())]}, "supply": VALID_LOCK}
@@ -1230,6 +1243,27 @@ def test_zero_baseline_is_refused(spec, runtime_meta):
     economics = dict(TUNED, era_cap_baseline_attestor_count=0)
     found = messages(lp.check_rewards(spec, runtime_meta, {"economics": economics}))
     assert "[2 rewards] economics.era_cap_baseline_attestor_count is zero" in found
+
+
+# Each attestor reward item and the width of its type in the runtime: u128, u128, u32.
+REWARD_WIDTHS = [("attestation_reward_per_signer", "AttestationRewardPerSigner", 16),
+                 ("era_cap_base", "EraCapBase", 16),
+                 ("era_cap_baseline_attestor_count", "EraCapBaselineAttestorCount", 4)]
+A_BYTE_OFF = pytest.mark.parametrize("change", [-1, 1], ids=["a byte short", "a byte long"])
+
+
+def mis_sized(where: str, size: int, width: int) -> str:
+    return f"chain spec raw storage: {where} is {size} byte{'s' * (size != 1)}, not the {width} its type encodes to"
+
+
+@A_BYTE_OFF
+@pytest.mark.parametrize("field, item, width", REWARD_WIDTHS, ids=[item for _, item, _ in REWARD_WIDTHS])
+def test_a_reward_stored_at_another_width_is_an_input_error(spec, runtime_meta, field, item, width, change):
+    """FRAME reads a value too short for its type as the item's default, zero,
+    and ignores the bytes past its type; the declared number fits either way."""
+    put(spec, "OrinqReceipts", item, TUNED[field].to_bytes(width + change, "little"))
+    with pytest.raises(lp.InputError, match="^" + re.escape(mis_sized(f"OrinqReceipts.{item}", width + change, width))):
+        lp.check_rewards(spec, runtime_meta, {"economics": TUNED})
 
 
 # ---------------------------------------------------------------------------
@@ -2828,6 +2862,48 @@ def test_reserved_balances_count_toward_issuance(spec, runtime_meta):
     assert f"[4 supply] Balances.TotalIssuance stores {held - 5 * MATRA}, but genesis accounts hold {held}" in found
 
 
+@A_BYTE_OFF
+@pytest.mark.parametrize("pallet, item", [("OrinqReceipts", "BondRequirement"), ("Balances", "TotalIssuance")])
+def test_a_supply_number_stored_at_another_width_is_an_input_error(spec, runtime_meta, pallet, item, change):
+    """Both are u128: 16 bytes."""
+    attestors = roster(spec)
+    stored = int.from_bytes(spec.value(pallet, item), "little")
+    put(spec, pallet, item, stored.to_bytes(16 + change, "little"))
+    with pytest.raises(lp.InputError, match="^" + re.escape(mis_sized(f"{pallet}.{item}", 16 + change, 16))):
+        supply_findings(spec, runtime_meta, attestors, 100 * MATRA)
+
+
+@pytest.mark.parametrize("size", [48, 79, 81])
+@pytest.mark.parametrize("whose", ["an attestor", "another account"])
+def test_an_account_stored_at_another_width_is_an_input_error(spec, runtime_meta, whose, size):
+    """An account is AccountInfo<u32, AccountData<u128>>, 80 bytes: FRAME
+    reads a shorter one as an empty account."""
+    attestor = fresh_account()
+    endow(spec, attestor, FLOOR)
+    key = account_key(attestor if whose == "an attestor" else PREPROD_ATTESTOR)
+    spec.storage[key] = (spec.storage[key] + bytes(1))[:size]
+    error = mis_sized(f"System.Account value at 0x{key.hex()}", size, 80)
+    with pytest.raises(lp.InputError, match="^" + re.escape(error)):
+        supply_findings(spec, runtime_meta, [ss58(attestor)], 100 * MATRA)
+
+
+@pytest.mark.parametrize("misfile", [lambda key: key[:32] + bytes(16) + key[48:], lambda key: key[:-1],
+                                     lambda key: key + bytes(1)],
+                         ids=["under another hash", "a byte short", "a byte long"])
+def test_an_account_filed_under_another_key_is_an_input_error(spec, meta, runtime_meta, known, misfile):
+    """The runtime finds an account under blake2_128 of it followed by its 32
+    bytes; what genesis files under any other key no account holds."""
+    key = account_key(PREPROD_ATTESTOR)
+    wrong = misfile(key)
+    spec.storage[wrong] = spec.storage.pop(key)
+    error = "^" + re.escape(f"chain spec raw storage: the System.Account key 0x{wrong.hex()} is not blake2_128 of a "
+                            "32-byte account followed by that account")
+    with pytest.raises(lp.InputError, match=error):
+        lp.check_dev_keys(spec, meta, {}, NO_CARDANO, [], known)
+    with pytest.raises(lp.InputError, match=error):
+        supply_findings(spec, runtime_meta, [], 0)
+
+
 def test_empty_attestor_roster_is_refused(spec, runtime_meta):
     found = supply_findings(spec, runtime_meta, [], 0)
     assert "[4 supply] roles.attestors names no account: the endowment floor has nothing to check" in found
@@ -3696,6 +3772,48 @@ def test_cli_refuses_a_balance_the_node_would_load_4096_times_larger(clean, caps
     signing_code, code, out = clean.run_respelled(capsys, lambda top: top.update({key: "0x " + top[key][2:]}))
     assert (signing_code, code) == (2, 2), out
     assert f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) chain spec raw storage value at {key} {MISSPELLED}" in out
+
+
+def cut(pallet: str, item: str, size: int):
+    def edit(clean) -> tuple[str, int, int]:
+        raw = clean.spec.value(pallet, item)
+        put(clean.spec, pallet, item, raw[:size])
+        return f"{pallet}.{item}", size, len(raw)
+    return edit
+
+
+def cut_attestor(size: int):
+    def edit(clean) -> tuple[str, int, int]:
+        key = account_key(clean.attestor)
+        clean.spec.storage[key] = clean.spec.storage[key][:size]
+        return f"System.Account value at 0x{key.hex()}", size, 80
+    return edit
+
+
+# The red team's rules 2 and 4 exploit: numbers cut to the bytes that hold them, which the preflight read as the
+# declared values and FRAME, which cannot decode them as their types, reads as zero.
+SHORT_SCALE = {
+    "the era cap baseline in 1 byte": cut("OrinqReceipts", "EraCapBaselineAttestorCount", 1),
+    "the reward per signer in 3 bytes": cut("OrinqReceipts", "AttestationRewardPerSigner", 3),
+    "the issuance in 15 bytes": cut("Balances", "TotalIssuance", 15),
+    "the attestor's account in 48 bytes": cut_attestor(48),
+}
+
+
+@pytest.mark.parametrize("edit", SHORT_SCALE.values(), ids=SHORT_SCALE.keys())
+def test_cli_refuses_a_number_the_node_would_read_as_zero(clean, capsys, edit):
+    where, size, width = edit(clean)
+    code, out = clean.run(capsys)
+    assert code == 2, out
+    assert f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) {mis_sized(where, size, width)}" in out
+
+
+def test_cli_refuses_the_red_teams_short_scale_genesis(clean, capsys):
+    for edit in SHORT_SCALE.values():
+        edit(clean)
+    code, out = clean.run(capsys)
+    assert code == 2, out
+    assert "MAINNET LAUNCH PREFLIGHT: REFUSE (input) chain spec raw storage: " in out
 
 
 def set_guardian(clean, entry) -> None:
