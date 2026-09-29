@@ -88,11 +88,26 @@ pub mod pallet {
         #[pallet::constant]
         type TreasuryPotId: Get<PalletId>;
 
-        /// Fraction of each era's `REWARD_PER_ERA` routed to the treasury;
+        /// Fraction of each era's `ValidatorRewardPerEra` routed to the treasury;
         /// complement goes to block-authoring validators pro-rata. Rounding
         /// residue is always routed to treasury.
         #[pallet::constant]
         type TreasuryEmissionShare: Get<Perbill>;
+
+        /// MATRA minted per era (14400 blocks) and split between the
+        /// block-authoring validators and the treasury, in base units.
+        #[pallet::constant]
+        type ValidatorRewardPerEra: Get<u128>;
+
+        /// Lifetime ceiling on MATRA minted by the era emission (validators
+        /// and treasury together), in base units.
+        #[pallet::constant]
+        type ValidatorEmissionReserve: Get<u128>;
+
+        /// Lifetime ceiling on MATRA minted as attestation rewards, in base
+        /// units.
+        #[pallet::constant]
+        type AttestationRewardReserve: Get<u128>;
     }
 
     // ── Storage ──────────────────────────────────────────────────────────
@@ -216,7 +231,7 @@ pub mod pallet {
     // linearly with `CommitteeMembers::len() / EraCapBaselineAttestorCount`.
 
     /// Reward paid to each signer per certified receipt, in MATRA base units
-    /// (6 decimals). Default: 10 MATRA per signer per cert.
+    /// (6 decimals). Set at genesis; governance-tunable after.
     #[pallet::storage]
     #[pallet::getter(fn attestation_reward_per_signer)]
     pub type AttestationRewardPerSigner<T: Config> = StorageValue<_, u128, ValueQuery>;
@@ -224,15 +239,14 @@ pub mod pallet {
     /// Base cap on total attestation rewards paid out per era, in MATRA base
     /// units (6 decimals). The effective cap scales linearly with the number
     /// of active attestors relative to `EraCapBaselineAttestorCount`.
-    /// Default: 50,000 MATRA (=50_000_000_000 base units).
     #[pallet::storage]
     #[pallet::getter(fn era_cap_base)]
     pub type EraCapBase<T: Config> = StorageValue<_, u128, ValueQuery>;
 
     /// The attestor-count at which `effective_era_cap()` equals `era_cap_base`.
-    /// Defaults to 16 (the original `MaxCommitteeSize`). Raising this widens
-    /// the committee without increasing total per-era reward emission; at
-    /// `active_count == baseline`, the effective cap equals the base.
+    /// Raising this widens the committee without increasing total per-era
+    /// reward emission; at `active_count == baseline`, the effective cap
+    /// equals the base.
     #[pallet::storage]
     #[pallet::getter(fn era_cap_baseline_attestor_count)]
     pub type EraCapBaselineAttestorCount<T: Config> = StorageValue<_, u32, ValueQuery>;
@@ -670,19 +684,17 @@ pub mod pallet {
 
     // ── Genesis ──────────────────────────────────────────────────────────
     //
-    // Genesis config exists to seed the Component-5 dynamic storage on
-    // *new* chains. On existing chains (v3/v4/v5 preprod), the values
-    // come from the runtime-upgrade migration (see `on_runtime_upgrade`).
+    // Genesis config seeds the Component-5 dynamic storage on new chains.
 
     #[pallet::genesis_config]
     #[derive(frame_support::DefaultNoBound)]
     pub struct GenesisConfig<T: Config> {
         /// Initial reward per signer, in MATRA base units (6 decimals).
-        pub attestation_reward_per_signer: u128,
+        pub attestation_reward_per_signer: Option<u128>,
         /// Initial base cap on attestation rewards per era.
-        pub era_cap_base: u128,
-        /// Initial baseline attestor count for cap auto-scaling.
-        pub era_cap_baseline_attestor_count: u32,
+        pub era_cap_base: Option<u128>,
+        /// Initial baseline attestor count for cap auto-scaling; non-zero.
+        pub era_cap_baseline_attestor_count: Option<u32>,
         /// Initial bond requirement for joining the committee
         /// (Component 8). Defaults to 1K MATRA.
         pub bond_requirement: u128,
@@ -702,23 +714,30 @@ pub mod pallet {
     #[pallet::genesis_build]
     impl<T: Config> BuildGenesisConfig for GenesisConfig<T> {
         fn build(&self) {
-            // Respect explicit genesis values; otherwise fall back to the
-            // documented defaults that match the prior const values.
-            let reward = if self.attestation_reward_per_signer == 0 {
-                10_000_000u128 // 10 MATRA
-            } else {
-                self.attestation_reward_per_signer
-            };
-            let cap = if self.era_cap_base == 0 {
-                50_000_000_000u128 // 50K MATRA
-            } else {
-                self.era_cap_base
-            };
-            let baseline = if self.era_cap_baseline_attestor_count == 0 {
-                16u32
-            } else {
-                self.era_cap_baseline_attestor_count
-            };
+            // Reward and subsidy values have no default. A spec sets all three
+            // or none: none stays unset and pays nothing, while a partial set
+            // would pay without the committee-size scaling (an unset baseline
+            // makes `effective_era_cap` return the whole base). The mainnet
+            // launch preflight refuses a genesis that does not store all three.
+            match (
+                self.attestation_reward_per_signer,
+                self.era_cap_base,
+                self.era_cap_baseline_attestor_count,
+            ) {
+                (Some(reward), Some(cap), Some(baseline)) => {
+                    assert!(
+                        baseline > 0,
+                        "era_cap_baseline_attestor_count must be non-zero"
+                    );
+                    AttestationRewardPerSigner::<T>::put(reward);
+                    EraCapBase::<T>::put(cap);
+                    EraCapBaselineAttestorCount::<T>::put(baseline);
+                }
+                (None, None, None) => {}
+                _ => panic!(
+                    "attestation reward, era cap base and era cap baseline must be set together"
+                ),
+            }
             let bond_req = if self.bond_requirement == 0 {
                 1_000_000_000u128 // 1K MATRA (6 decimals)
             } else {
@@ -739,9 +758,6 @@ pub mod pallet {
             } else {
                 self.receipt_expiry_blocks
             };
-            AttestationRewardPerSigner::<T>::put(reward);
-            EraCapBase::<T>::put(cap);
-            EraCapBaselineAttestorCount::<T>::put(baseline);
             BondRequirement::<T>::put(bond_req);
             ReceiptSubmissionFee::<T>::put(fee);
             ReceiptSubmissionFeeFloor::<T>::put(floor);
@@ -794,12 +810,10 @@ pub mod pallet {
             }
 
             // ── Validator rewards: era distribution ──────────────────────
-            // Era length: 14400 blocks (~24h at 6s block time)
-            // Reward pool: 150,000,000 MATRA (6 decimals = 150_000_000_000_000 base units)
-            // Over ~4 years (1460 days) = ~102.74 MATRA/era at 14400 blocks/era
+            // Era length: 14400 blocks (~24h at 6s block time), minting until
+            // `T::ValidatorEmissionReserve` has been paid out in total.
             const ERA_LENGTH: u32 = 14400;
-            const REWARD_PER_ERA: u128 = 102_739_726; // ~102.74 MATRA/era (6 decimals)
-            const VALIDATOR_RESERVE: u128 = 150_000_000_000_000; // 150M MATRA (6 decimals)
+            let validator_reserve = T::ValidatorEmissionReserve::get();
 
             let block_num: u32 = n.into();
             let era_start: u32 = EraStartBlock::<T>::get().into();
@@ -807,9 +821,9 @@ pub mod pallet {
             if block_num > 0 && block_num.saturating_sub(era_start) >= ERA_LENGTH {
                 // Distribute rewards for this era
                 let total_distributed = TotalRewardsDistributed::<T>::get();
-                if total_distributed < VALIDATOR_RESERVE {
-                    let remaining = VALIDATOR_RESERVE.saturating_sub(total_distributed);
-                    let era_reward = core::cmp::min(REWARD_PER_ERA, remaining);
+                if total_distributed < validator_reserve {
+                    let remaining = validator_reserve.saturating_sub(total_distributed);
+                    let era_reward = core::cmp::min(T::ValidatorRewardPerEra::get(), remaining);
 
                     // Sum total blocks authored this era
                     let mut authored: Vec<(T::AccountId, u32)> = Vec::new();
@@ -840,7 +854,7 @@ pub mod pallet {
                         // and `ValidatorRewards` tracked the lifetime-paid validator figure only.
                         // With the split, BOTH go through the pool: validators track their share,
                         // treasury emission is accounted under `TotalRewardsDistributed` as well
-                        // so the VALIDATOR_RESERVE cap still gates the full emission envelope.
+                        // so `ValidatorEmissionReserve` still gates the full emission envelope.
                         let treasury_share: Perbill = T::TreasuryEmissionShare::get();
                         // Validator gets the complement of the treasury share, computed via
                         // `Perbill::saturating_sub` to stay in the Perbill domain. At
@@ -931,29 +945,15 @@ pub mod pallet {
             weight.saturating_add(Weight::from_parts(10_000_000, 0))
         }
 
-        /// Populate Component-5 storage values on existing chains that did
-        /// not run `build_genesis` (everything >= preprod v3). Idempotent:
-        /// only writes when a key is missing so a re-run is a no-op.
-        ///
-        /// Safe to leave in place across future upgrades — after the first
-        /// upgrade the three storage values are all populated and the
-        /// migration short-circuits with three reads.
+        /// Seed the bond, fee and expiry values on chains that predate their
+        /// genesis fields. Idempotent: only writes when a key is missing, so
+        /// a re-run is a no-op. The attestation reward and era cap are never
+        /// seeded here: they have no default, and an upgrade must not invent
+        /// one for a genesis that left them unset.
         fn on_runtime_upgrade() -> Weight {
             let mut writes = 0u64;
-            let reads = 8u64;
+            let reads = 5u64;
 
-            if !AttestationRewardPerSigner::<T>::exists() {
-                AttestationRewardPerSigner::<T>::put(10_000_000u128);
-                writes += 1;
-            }
-            if !EraCapBase::<T>::exists() {
-                EraCapBase::<T>::put(50_000_000_000u128);
-                writes += 1;
-            }
-            if !EraCapBaselineAttestorCount::<T>::exists() {
-                EraCapBaselineAttestorCount::<T>::put(16u32);
-                writes += 1;
-            }
             // Component 8: seed the default bond requirement. 1K MATRA at
             // 6 decimals = 1_000_000_000 base units. Preprod can override
             // via `set_bond_requirement` after the upgrade lands.
@@ -1629,25 +1629,20 @@ pub mod pallet {
                 // Pay attestation rewards BEFORE removing the attestation record.
                 // Each signer gets an equal share of the per-receipt reward.
                 //
-                // Attestation reward pool: 50M MATRA over ~4 years
-                // = ~34,246,575 base units per day = ~34.2 MATRA/day
-                // Per receipt: daily_pool / avg_receipts_per_day (dynamic)
-                //
-                // The per-signer reward and the per-era cap are now
+                // The per-signer reward and the per-era cap are
                 // governance-tunable via `set_attestation_reward_per_signer`
                 // and `set_era_cap_base` (see Component 5). The effective
                 // cap auto-scales linearly with active committee size via
-                // `effective_era_cap()`. ATTESTATION_RESERVE remains a
-                // constant — it is the 4-year pool ceiling, not a per-era
-                // knob, and resizing it is a conscious economic decision
-                // that belongs to a runtime upgrade.
-                const ATTESTATION_RESERVE: u128 = 50_000_000_000_000; // 50M MATRA (6 decimals)
+                // `effective_era_cap()`. `T::AttestationRewardReserve` is the
+                // lifetime pool ceiling, not a per-era knob: resizing it is
+                // an economic decision that belongs to a runtime upgrade.
+                let attestation_reserve = T::AttestationRewardReserve::get();
                 let reward_per_signer = AttestationRewardPerSigner::<T>::get();
                 let era_cap = Self::effective_era_cap();
 
                 let total_att_paid = TotalAttestationRewards::<T>::get();
                 let era_att_paid = AttestationRewardsPaidInEra::<T>::get();
-                if total_att_paid < ATTESTATION_RESERVE && era_att_paid < era_cap {
+                if total_att_paid < attestation_reserve && era_att_paid < era_cap {
                     // Get signers before we remove the attestation
                     if let Some((_, ref signers)) = Attestations::<T>::get(receipt_id) {
                         for signer in signers.iter() {

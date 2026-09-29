@@ -1,0 +1,4 @@
+{
+ "chain_types": ["Development", "Local"],
+ "name_pattern": "\\b(preprod|testnet|devnet|development|local)\\b"
+}

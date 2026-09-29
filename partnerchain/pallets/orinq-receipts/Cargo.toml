@@ -29,6 +29,7 @@ hex-literal = "0.4"
 sp-consensus-aura = { workspace = true }
 pallet-balances = { workspace = true, features = ["std"] }
 pallet-motra = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]

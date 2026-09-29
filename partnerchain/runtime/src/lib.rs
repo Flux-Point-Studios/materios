@@ -395,6 +395,13 @@ parameter_types! {
     /// block-authoring validators pro-rata. Rounding residue lands in
     /// treasury.
     pub const TreasuryEmissionShare: Perbill = Perbill::from_percent(15);
+    /// MATRA the era emission mints per era: ~102.74 (6 decimals), which
+    /// pays out `ValidatorEmissionReserve` over ~4 years.
+    pub const ValidatorRewardPerEra: u128 = 102_739_726;
+    /// Lifetime MATRA the era emission mints: 150M (6 decimals).
+    pub const ValidatorEmissionReserve: u128 = 150_000_000_000_000;
+    /// Lifetime MATRA attestation rewards mint: 50M (6 decimals).
+    pub const AttestationRewardReserve: u128 = 50_000_000_000_000;
 }
 
 pub fn attestor_reserve_account() -> AccountId {
@@ -549,6 +556,9 @@ impl pallet_orinq_receipts::pallet::Config for Runtime {
     type AttestorReservePotId = AttestorReservePalletId;
     type TreasuryPotId = TreasuryPalletId;
     type TreasuryEmissionShare = TreasuryEmissionShare;
+    type ValidatorRewardPerEra = ValidatorRewardPerEra;
+    type ValidatorEmissionReserve = ValidatorEmissionReserve;
+    type AttestationRewardReserve = AttestationRewardReserve;
 }
 
 // ---------------------------------------------------------------------------
