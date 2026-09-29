@@ -393,6 +393,24 @@ def test_a_spec_that_repeats_any_key_is_an_input_error(tmp_path):
         lp.load_spec(str(path))
 
 
+def test_a_launch_key_table_that_repeats_a_key_is_an_input_error(monkeypatch, tmp_path):
+    """A reviewer would read the first list of pinned keys; the preflight would read the last."""
+    path = tmp_path / "launch_keys.json"
+    path.write_text('{"keys": ["0x' + "11" * 32 + '"], "keys": ["0x' + DIGITS + '"]}')
+    monkeypatch.setattr(lp, "LAUNCH_KEYS", path)
+    with pytest.raises(lp.InputError, match="launch_keys.json: an object holds the key 'keys' twice"):
+        lp.pinned_launch_keys()
+
+
+def test_a_key_table_that_repeats_a_key_is_an_input_error(tmp_path):
+    """A reviewer would read //Alice in the table; the preflight and the anchor worker would read the last key."""
+    path = tmp_path / "exposed.json"
+    path.write_text('{"keys": [{"label": "x", "scheme": "sr25519", "public": "' + ALICE.hex() + '", "public": "'
+                    + DIGITS + '"}]}')
+    with pytest.raises(lp.InputError, match="an object holds the key 'public' twice"):
+        lp.load_well_known([path])
+
+
 @pytest.mark.parametrize("doc", [[], {"genesis": []}, {"genesis": {"raw": []}}, {"genesis": {"raw": {"top": []}}}])
 def test_a_spec_with_no_raw_storage_map_is_an_input_error(tmp_path, doc):
     path = tmp_path / "raw.json"

@@ -94,7 +94,8 @@ launch manifest's hex keys and `native_script`, the signed manifest,
 `0x`, as build-spec and `sign` write it. The key tables and Kupo's datums have
 no `0x`, as `gen_well_known_keys.py` writes a table and the anchor worker reads
 it. Any other spelling refuses as unreadable, and so does a JSON object in the
-spec or a manifest that names a key twice, in any JSON escape.
+spec, a manifest, `launch_keys.json` or a key table that names a key twice, in
+any JSON escape.
 
 The node reads a raw spec with impl-serde's `from_hex`, which also takes upper
 case and hex with no `0x`, and skips a space, tab, CR or LF while still

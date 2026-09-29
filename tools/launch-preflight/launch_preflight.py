@@ -610,7 +610,7 @@ def load_well_known(extra: list[Path] = ()) -> WellKnown:
     keys = []
     for path in (base, *extra):
         try:
-            entries = json.loads(Path(path).read_text())["keys"]
+            entries = json.loads(Path(path).read_text(), object_pairs_hook=unique_keys)["keys"]
         except (OSError, ValueError, KeyError, TypeError) as e:
             raise InputError(f"cannot read key table {path}: {e}") from e
         for i, entry in enumerate(entries):
@@ -2252,7 +2252,7 @@ def signature_verifies(key: bytes, payload: bytes, signature: bytes) -> bool:
 
 def pinned_launch_keys() -> list[bytes]:
     try:
-        entries = json.loads(LAUNCH_KEYS.read_text())["keys"]
+        entries = json.loads(LAUNCH_KEYS.read_text(), object_pairs_hook=unique_keys)["keys"]
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise InputError(f"cannot read the pinned keys in launch_keys.json: {e}") from e
     shape = "launch_keys.json must list 32-byte ed25519 public keys in 0x-hex"
