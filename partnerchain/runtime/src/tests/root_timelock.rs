@@ -1581,6 +1581,22 @@ fn stored_delays_are_never_overwritten() {
     });
 }
 
+/// `frame_system::Config::DbWeight` is `()` here and prices storage at zero.
+#[test]
+fn storing_the_delays_is_charged_at_rocksdb_cost() {
+    bare_ext().execute_with(|| {
+        frame_system::BlockHash::<Runtime>::insert(0, PREPROD_GENESIS_HASH);
+        assert_eq!(
+            InitRootTimelock::on_runtime_upgrade(),
+            RuntimeDbWeight::get().reads_writes(2, 1)
+        );
+        assert_eq!(
+            InitRootTimelock::on_runtime_upgrade(),
+            RuntimeDbWeight::get().reads(1)
+        );
+    });
+}
+
 #[test]
 fn the_sudo_key_cannot_declare_the_weight_of_an_exempt_call() {
     new_test_ext().execute_with(|| {

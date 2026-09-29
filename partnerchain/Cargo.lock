@@ -4712,7 +4712,6 @@ dependencies = [
  "pallet-oracle",
  "pallet-orinq-receipts",
  "pallet-partner-chains-session",
- "pallet-perp-engine",
  "pallet-recovery",
  "pallet-root-timelock",
  "pallet-session",
@@ -5820,23 +5819,6 @@ dependencies = [
  "sp-core",
  "sp-runtime",
  "sp-staking",
- "sp-std",
-]
-
-[[package]]
-name = "pallet-perp-engine"
-version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=c60b98f6bcbb99b1745447fe7a74be321c72bd51#c60b98f6bcbb99b1745447fe7a74be321c72bd51"
-dependencies = [
- "frame-benchmarking",
- "frame-support",
- "frame-system",
- "log",
- "parity-scale-codec",
- "scale-info",
- "sp-core",
- "sp-io",
- "sp-runtime",
  "sp-std",
 ]
 
