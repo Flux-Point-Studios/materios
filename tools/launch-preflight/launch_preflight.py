@@ -91,6 +91,9 @@ KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK = (
 CODE_KEY = b":code"
 ZSTD_PREFIX = bytes.fromhex("52bc537646db8e05")
 CODE_BOMB_LIMIT = 50 * 1024 * 1024
+# Compressed bytes decoded at a time. A zstd block of up to 128 KiB takes as few as 4 bytes, so a step decodes at
+# most 8 MiB and a bomb stops within that of the limit.
+ZSTD_STEP = 256
 DOMAIN = b"materios-launch-manifest-v1"
 DOMAIN_32 = DOMAIN.ljust(32, b"\0")
 HASH_FIELDS = ("genesis_hash", "code_hash", "chain_spec_hash", "launch_manifest_hash")
@@ -530,13 +533,25 @@ def load_spec(path: str) -> Spec:
 
 
 def decompressed_code(code: bytes) -> bytes:
+    """The runtime WASM. Compressed code must be one whole zstd frame, as the
+    runtime's build writes it: the node's decoder also reads any frame after
+    the first and refuses one cut short, where zstandard's readers stop at the
+    end of the first frame or of the input."""
     if not code.startswith(ZSTD_PREFIX):
         return code
-    reader = zstandard.ZstdDecompressor().stream_reader(code[len(ZSTD_PREFIX):])
-    out = reader.read(CODE_BOMB_LIMIT + 1)
-    if len(out) > CODE_BOMB_LIMIT:
-        raise InputError("runtime code decompresses past the 50 MiB bomb limit")
-    return out
+    compressed, frame, out = code[len(ZSTD_PREFIX):], zstandard.ZstdDecompressor().decompressobj(), bytearray()
+    pos = 0
+    try:
+        while pos < len(compressed) and not frame.eof:
+            out += frame.decompress(compressed[pos:pos + ZSTD_STEP])
+            pos += ZSTD_STEP
+            if len(out) > CODE_BOMB_LIMIT:
+                raise InputError("runtime code decompresses past the 50 MiB bomb limit")
+    except zstandard.ZstdError as e:
+        raise InputError(f"runtime code is not one whole zstd frame: {e}") from e
+    if not frame.eof or frame.unused_data or pos < len(compressed):
+        raise InputError("runtime code is not one whole zstd frame: it ends inside the frame or goes on after it")
+    return bytes(out)
 
 
 def _leb128(data: bytes, pos: int) -> tuple[int, int]:

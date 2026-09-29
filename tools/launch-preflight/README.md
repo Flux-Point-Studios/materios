@@ -123,6 +123,15 @@ key only. So a baseline of 32 written as the single byte `0x20` would read as
 whole `EraCapBase`. build-spec writes each at its width and key; anything else
 refuses as unreadable.
 
+## Runtime code
+
+`:code` is the runtime WASM, or that WASM compressed as one whole zstd frame
+after the 8-byte prefix `0x52bc537646db8e05`, as the runtime's build writes it.
+The node's decoder reads every frame, skips a skippable one, and refuses a
+frame cut short or bytes after the last frame, where zstandard's readers stop
+at the end of the first frame or of the input. So a dev key in a second frame
+would run on chain unscanned. Any other framing refuses as unreadable.
+
 ## Launch manifest
 
 ```json

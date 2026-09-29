@@ -865,6 +865,65 @@ def test_dev_key_embedded_in_runtime_code_is_named(spec, meta, known):
     assert "[1 dev-keys] :code (runtime WASM): //Dave (sr25519) is in genesis" in found
 
 
+def leb128(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte, n = n & 0x7F, n >> 7
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def custom_section(name: bytes, payload: bytes) -> bytes:
+    body = leb128(len(name)) + name + payload
+    return b"\0" + leb128(len(body)) + body
+
+
+def zstd_frame(data: bytes) -> bytes:
+    return zstandard.ZstdCompressor().compress(data)
+
+
+SKIPPABLE_FRAME = (0x184D2A50).to_bytes(4, "little") + (3).to_bytes(4, "little") + b"abc"
+# Compressed runtime code other than the one zstd frame the runtime's build writes behind the prefix.
+CODE_FRAMINGS = {
+    "a second frame": lambda wasm: zstd_frame(wasm) + zstd_frame(custom_section(b"x", ALICE)),
+    "a skippable frame after": lambda wasm: zstd_frame(wasm) + SKIPPABLE_FRAME,
+    "a skippable frame before": lambda wasm: SKIPPABLE_FRAME + zstd_frame(wasm),
+    "bytes after the frame": lambda wasm: zstd_frame(wasm) + bytes(4),
+    "the frame cut by a byte": lambda wasm: zstd_frame(wasm)[:-1],
+    "the frame cut in half": lambda wasm: zstd_frame(wasm)[:len(zstd_frame(wasm)) // 2],
+    "no frame": lambda wasm: b"",
+    "not zstd": lambda wasm: b"\0asm" + bytes(12),
+}
+NOT_ONE_FRAME = "^runtime code is not one whole zstd frame"
+
+
+@pytest.mark.parametrize("framing", CODE_FRAMINGS.values(), ids=CODE_FRAMINGS.keys())
+def test_runtime_code_in_any_zstd_framing_but_one_whole_frame_is_an_input_error(spec, framing):
+    """The node's decoder reads every frame and refuses one cut short, where
+    zstandard's readers stop at the end of the first frame or of the input."""
+    spec.storage[lp.CODE_KEY] = lp.ZSTD_PREFIX + framing(lp.decompressed_code(spec.code))
+    with pytest.raises(lp.InputError, match=NOT_ONE_FRAME):
+        lp.spec_genesis_hash(spec)
+
+
+def test_a_frame_after_one_that_ends_where_a_step_ends_is_an_input_error(spec, monkeypatch):
+    """Then the decoder holds no unused input, and only what is left to feed it shows the second frame."""
+    first = zstd_frame(lp.decompressed_code(spec.code))
+    monkeypatch.setattr(lp, "ZSTD_STEP", len(first))
+    spec.storage[lp.CODE_KEY] = lp.ZSTD_PREFIX + first + zstd_frame(custom_section(b"x", ALICE))
+    with pytest.raises(lp.InputError, match=NOT_ONE_FRAME):
+        lp.spec_genesis_hash(spec)
+
+
+def test_a_dev_key_in_a_second_zstd_frame_of_the_runtime_code_is_refused(spec, meta, known):
+    """The red team's case: the node runs the second frame too, and the dev-key
+    scan saw only the first."""
+    spec.storage[lp.CODE_KEY] = lp.ZSTD_PREFIX + CODE_FRAMINGS["a second frame"](lp.decompressed_code(spec.code))
+    with pytest.raises(lp.InputError, match=NOT_ONE_FRAME):
+        dev_key_findings(spec, meta, known)
+
+
 # Multisig accounts. The vector is @polkadot/util-crypto createKeyMulti([//Alice, //Bob,
 # //Charlie], 2), the address Polkadot's documentation gives for that multisig.
 ALICE_BOB_CHARLIE_2 = "5DjYJStmdZ2rcqXbXGX7TW85JsrW6uG4y9MUcLq2BoPMpRA7"
@@ -4228,6 +4287,14 @@ def test_decompression_bomb_is_an_input_error(monkeypatch):
     bomb = lp.ZSTD_PREFIX + zstandard.ZstdCompressor().compress(bytes(4096))
     with pytest.raises(lp.InputError, match="bomb limit"):
         lp.decompressed_code(bomb)
+
+
+def test_runtime_code_at_the_bomb_limit_decompresses(monkeypatch):
+    monkeypatch.setattr(lp, "CODE_BOMB_LIMIT", 1024)
+    code = bytes(range(256)) * 4
+    assert lp.decompressed_code(lp.ZSTD_PREFIX + zstd_frame(code)) == code
+    with pytest.raises(lp.InputError, match="bomb limit"):
+        lp.decompressed_code(lp.ZSTD_PREFIX + zstd_frame(code + b"\0"))
 
 
 def test_unreadable_signing_key_is_an_input_error_that_does_not_echo_it(preprod_path, tmp_path, capsys):
