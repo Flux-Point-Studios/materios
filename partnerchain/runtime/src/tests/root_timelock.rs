@@ -1538,6 +1538,32 @@ fn mainnet_defaults() {
     assert!(TESTNET_TIMELOCK_DELAYS.is_valid(RootTimelockMaxDelay::get()));
 }
 
+/// The launch preflight reads the mainnet delays and their ceiling from the
+/// runtime metadata, which is all it has of the runtime.
+#[test]
+fn metadata_declares_the_mainnet_delays_and_their_ceiling() {
+    let pallet = Runtime::metadata_ir()
+        .pallets
+        .into_iter()
+        .find(|pallet| pallet.name == "RootTimelock")
+        .expect("RootTimelock is in the metadata");
+    let constant = |name: &str| {
+        pallet
+            .constants
+            .iter()
+            .find(|constant| constant.name == name)
+            .map(|constant| constant.value.clone())
+    };
+    assert_eq!(
+        constant("DefaultDelays"),
+        Some(RootTimelockDefaultDelays::get().encode())
+    );
+    assert_eq!(
+        constant("MaxDelay"),
+        Some(RootTimelockMaxDelay::get().encode())
+    );
+}
+
 fn bare_ext() -> TestExternalities {
     frame_system::GenesisConfig::<Runtime>::default()
         .build_storage()
