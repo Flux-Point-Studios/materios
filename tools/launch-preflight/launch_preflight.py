@@ -109,6 +109,13 @@ GENESIS_STORAGE = frozenset({
     "NativeTokenManagement.MainChainScriptsConfiguration", "Vesting.StorageVersion",
     "IntentSettlement.IntentTTL", "IntentSettlement.ClaimTTL", "IntentSettlement.MinSignerThreshold",
     "IntentSettlement.PoolUtilization",
+    # The Root timelock stores its delay per call class, in blocks, and the
+    # guardian who can veto or co-sign Root's queued calls: neither holds MATRA,
+    # and rule 1 scans the guardian like every genesis key. Its queue (Tasks,
+    # CounterForTasks, NextTaskId, PendingGuardianChange, Approval) stays out: a
+    # new chain has queued nothing, and a call queued or approved at genesis
+    # could run as Root without waiting out its delay in public.
+    "RootTimelock.Delays", "RootTimelock.Guardian",
 })
 GENESIS_WELL_KNOWN_KEYS = {CODE_KEY, b":extrinsic_index"}
 STORAGE_VERSION_KEY = b":__STORAGE_VERSION__:"

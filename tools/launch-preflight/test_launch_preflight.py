@@ -2508,6 +2508,37 @@ def test_preprod_genesis_sets_only_storage_a_mainnet_genesis_may_set(spec, meta)
     assert lp.check_genesis_storage(spec, meta) == []
 
 
+@pytest.fixture
+def spec239() -> tuple[lp.Spec, lp.Metadata]:
+    """The preprod genesis that spec 239, the first runtime with the Root
+    timelock, builds (`materios-node build-spec --chain preprod --raw` at
+    ca1b4be, less its :code), and that code's metadata as subwasm prints it,
+    trimmed to what the preflight reads."""
+    v14 = json.loads((FIXTURES / "spec239-metadata.json").read_text())["V14"]
+    return lp.load_spec(str(FIXTURES / "preprod-spec239-raw.json")), lp.Metadata.from_v14(v14)
+
+
+def test_root_timelock_genesis_sets_only_storage_a_mainnet_genesis_may_set(spec239):
+    assert lp.check_genesis_storage(*spec239) == []
+
+
+@pytest.mark.parametrize("item", ["Tasks", "CounterForTasks", "NextTaskId", "PendingGuardianChange", "Approval"])
+def test_a_genesis_that_starts_the_root_timelock_queue_is_refused(spec239, item):
+    spec, meta = spec239
+    put(spec, "RootTimelock", item, bytes(36))
+    assert messages(lp.check_genesis_storage(spec, meta)) == [
+        f"[4 supply] genesis sets RootTimelock.{item} (1 entry), which a mainnet genesis may not set: "
+        "storage outside the genesis allowlist can hold a claim on MATRA that the supply check does not count"]
+
+
+def test_a_well_known_root_timelock_guardian_is_refused(spec239, known):
+    spec, meta = spec239
+    spec.storage[lp.CODE_KEY] = b""
+    put(spec, "RootTimelock", "Guardian", BOB)
+    found = messages(lp.check_dev_keys(spec, meta, {}, NO_CARDANO, [], known))
+    assert "[1 dev-keys] RootTimelock.Guardian: //Bob (sr25519) is in genesis" in found
+
+
 def test_a_mint_claim_planted_in_raw_genesis_is_refused(spec, metadata_v14):
     claim = (10**30).to_bytes(16, "little") + bytes(4)
     spec.storage[map_key("Billing", "PendingWithdrawals", fresh_account())] = claim
@@ -2808,8 +2839,9 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
 
 @pytest.fixture
 def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch, metadata_v14):
-    """No built runtime passes yet (PerpEngine, undeclared emission reserves), so
-    the extractor returns the fixture metadata with the reserves declared."""
+    """The spec's code is the preprod v6 runtime, which declares neither its
+    emission reserves nor its validator reward per era, so the extractor
+    returns its metadata with both declared."""
     monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
     launch = Launch(preprod_path, tmp_path, kupo, endpoint)
     pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))

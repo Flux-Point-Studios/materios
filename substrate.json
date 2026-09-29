@@ -85,7 +85,8 @@
         "tools/launch-preflight"
       ],
       "consumes": [
-        "orinq-receipts-pallet"
+        "orinq-receipts-pallet",
+        "root-timelock"
       ],
       "status": "experimental"
     },

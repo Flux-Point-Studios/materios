@@ -334,4 +334,6 @@ The CLI tests run the real subwasm, a local server that answers like Kupo, and
 one that answers JSON-RPC over HTTP and a WebSocket like a node or a filter.
 The preprod v6 fixture is the published preprod raw chain spec, and the
 genesis-hash test checks the computed hash against the one the live network
-reports.
+reports. The spec 239 fixtures are the preprod genesis the first runtime with the
+Root timelock builds, without its code, and that runtime's metadata, trimmed to
+what the preflight reads.
