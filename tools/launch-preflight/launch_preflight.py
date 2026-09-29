@@ -38,6 +38,11 @@ Rules, each of which refuses on its own:
                  launch key signed it; the spec carries code substitutes, an
                  authority loads a local runtime override, or genesis turns on
                  a Cardano deposit observation that has no checkpoint
+  7 timelock     the Root timelock's guardian missing from genesis, not the
+                 multisig of threshold 2 or more roles.guardian declares, the
+                 sudo key, or sharing any account or member with it; its delays
+                 missing, below the runtime's mainnet delays, above its
+                 MaxDelay or out of the runtime's order
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -81,8 +86,8 @@ from websockets.sync.client import connect as ws_connect
 HERE = Path(__file__).resolve().parent
 # The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
 LAUNCH_KEYS = HERE / "launch_keys.json"
-KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT = (
-    "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint")
+KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK = (
+    "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock")
 CODE_KEY = b":code"
 ZSTD_PREFIX = bytes.fromhex("52bc537646db8e05")
 CODE_BOMB_LIMIT = 50 * 1024 * 1024
@@ -109,12 +114,11 @@ GENESIS_STORAGE = frozenset({
     "NativeTokenManagement.MainChainScriptsConfiguration", "Vesting.StorageVersion",
     "IntentSettlement.IntentTTL", "IntentSettlement.ClaimTTL", "IntentSettlement.MinSignerThreshold",
     "IntentSettlement.PoolUtilization",
-    # The Root timelock stores its delay per call class, in blocks, and the
-    # guardian who can veto or co-sign Root's queued calls: neither holds MATRA,
-    # and rule 1 scans the guardian like every genesis key. Its queue (Tasks,
-    # CounterForTasks, NextTaskId, PendingGuardianChange, Approval) stays out: a
-    # new chain has queued nothing, and a call queued or approved at genesis
-    # could run as Root without waiting out its delay in public.
+    # The Root timelock's delay per call class and its guardian hold no MATRA;
+    # rule 7 checks what they hold. Its queue (Tasks, CounterForTasks,
+    # NextTaskId, PendingGuardianChange, Approval) stays out: a new chain has
+    # queued nothing, and a call queued or approved at genesis could run as Root
+    # without waiting out its delay in public.
     "RootTimelock.Delays", "RootTimelock.Guardian",
 })
 GENESIS_WELL_KNOWN_KEYS = {CODE_KEY, b":extrinsic_index"}
@@ -136,6 +140,8 @@ ECONOMICS_FIELDS = {"fee_buffer", *(field for field, _ in VALIDATOR_REWARD_CONST
 REQUIRED_ROLES = ("sudo", "anchor_signer", "attestors", "oracle")
 RUNNING_ROLES = ("anchor_signer", "attestors")
 MULTISIG_ENTROPY = b"modlpy/utilisuba"
+# The Root timelock's call classes, in the order its DelayTable stores their delays.
+DELAY_CLASSES = ("recovery", "standard", "long")
 DEV_KEYRING_FLAGS = {"--alice", "--bob", "--charlie", "--dave", "--eve", "--ferdie",
                      "--one", "--two", "--dev"}
 # A path with no phrase, which Substrate derives from the dev phrase, and an
@@ -696,6 +702,15 @@ def role_account(entry) -> bytes:
         return multisig_account(members, entry["threshold"])
     raw = decode_public_key(entry)
     return blake2_256(raw) if len(raw) == 33 else raw
+
+
+def role_accounts(entry, where: str):
+    """(where, account) for a role entry and each member of its multisig, at any
+    depth. Raises ValueError when a key does not decode."""
+    yield where, role_account(entry)
+    if isinstance(entry, dict):
+        for i, member in enumerate(entry["members"]):
+            yield from role_accounts(member, f"{where}.members[{i}]")
 
 
 # ---------------------------------------------------------------------------
@@ -2063,6 +2078,94 @@ def check_checkpoint(spec: Spec, launch: dict, signed: dict, launch_keys: list[b
     return findings
 
 
+def check_guardian(spec: Spec, launch: dict) -> list[Finding]:
+    """The Root timelock's guardian, who can veto the Root calls the sudo key
+    queues and co-sign them early. The runtime refuses a genesis whose guardian
+    is the sudo key, or that has none unless the sudo key is a dev key; on
+    mainnet genesis must name the multisig roles.guardian declares, and no
+    account in it, down to each member, may be one the sudo key's holders hold."""
+    findings = []
+    stored, sudo_key = spec.value("RootTimelock", "Guardian"), spec.value("Sudo", "Key")
+    if stored is None:
+        findings.append(Finding(TIMELOCK, "genesis sets no RootTimelock.Guardian: nothing apart from the sudo key "
+                                          "can veto the Root calls it queues"))
+    elif stored == sudo_key:
+        findings.append(Finding(TIMELOCK, "RootTimelock.Guardian is Sudo.Key: the sudo key would veto and co-sign "
+                                          "its own Root calls"))
+    roles = launch.get("roles", {})
+    entries = roles.get("guardian", [])
+    if len(entries) != 1:
+        return findings + [Finding(TIMELOCK, "roles.guardian must declare the one guardian genesis names: who can "
+                                             "veto Root is unchecked")]
+    if not isinstance(entries[0], dict):
+        findings.append(Finding(TIMELOCK, "roles.guardian[0] is a single key: the guardian must be a multisig with a "
+                                          "threshold of at least 2, declared by its members so each one is checked"))
+    elif entries[0]["threshold"] < 2:
+        findings.append(Finding(TIMELOCK, "roles.guardian[0] has threshold 1: any one member alone can veto Root's "
+                                          "queued calls or co-sign them early"))
+    try:
+        guardian = list(role_accounts(entries[0], "roles.guardian[0]"))
+    except ValueError:
+        return findings  # rule 1 already refuses a role key that does not decode
+    sudo = {} if sudo_key is None else {sudo_key: "Sudo.Key"}
+    for i, entry in enumerate(roles.get("sudo", [])):
+        try:
+            sudo.update((account, where) for where, account in role_accounts(entry, f"roles.sudo[{i}]"))
+        except ValueError:
+            continue  # rule 1 already refuses a role key that does not decode
+    if stored is not None and stored != guardian[0][1]:
+        findings.append(Finding(TIMELOCK, f"RootTimelock.Guardian {ss58(stored, spec.ss58_prefix)} is not the "
+                                          "account roles.guardian declares: who can veto Root is unchecked"))
+    for where, account in guardian:
+        if account in sudo:
+            findings.append(Finding(TIMELOCK, f"{where} {ss58(account, spec.ss58_prefix)} is also {sudo[account]}: "
+                                              "the guardian must be held by keyholders apart from the sudo key's, or "
+                                              "whoever takes Root also holds its veto"))
+    return findings
+
+
+def block_counts(raw: bytes, width: int) -> tuple[int, ...] | None:
+    """A DelayTable's three delays, or None unless it is three block counts of this width."""
+    if not width or len(raw) != 3 * width:
+        return None
+    return tuple(int.from_bytes(raw[i:i + width], "little") for i in range(0, len(raw), width))
+
+
+def check_delays(spec: Spec, meta: Metadata) -> list[Finding]:
+    """How long the Root timelock holds each class of Root call, in blocks: no
+    shorter than the runtime's mainnet delays, DefaultDelays, and within the
+    runtime's own bounds, non-zero, recovery <= standard <= long, and long at
+    most MaxDelay. Both constants are read from the runtime metadata."""
+    ceiling = meta.constants.get(("RootTimelock", "MaxDelay"), b"")
+    floor = block_counts(meta.constants.get(("RootTimelock", "DefaultDelays"), b""), len(ceiling))
+    if floor is None:
+        return [Finding(TIMELOCK, "the runtime metadata declares no RootTimelock.DefaultDelays and "
+                                  "RootTimelock.MaxDelay the preflight can read: how long mainnet must hold Root's "
+                                  "calls is unknown here")]
+    raw = spec.value("RootTimelock", "Delays")
+    if raw is None:
+        return [Finding(TIMELOCK, "genesis sets no RootTimelock.Delays, which every genesis the runtime builds sets: "
+                                  "how long Root's calls wait is unchecked")]
+    held = block_counts(raw, len(ceiling))
+    if held is None:
+        return [Finding(TIMELOCK, f"RootTimelock.Delays is {len(raw)} bytes, not three {len(ceiling)}-byte block "
+                                  "counts")]
+    findings = [Finding(TIMELOCK, f"RootTimelock.Delays holds {name} calls {blocks} blocks, below the {least} the "
+                                  "runtime sets for mainnet")
+                for name, blocks, least in zip(DELAY_CLASSES, held, floor) if blocks < least]
+    recovery, standard, long = held
+    maximum = int.from_bytes(ceiling, "little")
+    if long > maximum:
+        findings.append(Finding(TIMELOCK, f"RootTimelock.Delays holds long calls {long} blocks, above the runtime's "
+                                          f"MaxDelay {maximum}: a guardian change, or a cut to the long delay itself, "
+                                          "would wait longer than the runtime lets any delay be"))
+    if not 0 < recovery <= standard <= long:
+        findings.append(Finding(TIMELOCK, f"RootTimelock.Delays (recovery {recovery}, standard {standard}, long {long} "
+                                          "blocks) breaks the order 0 < recovery <= standard <= long that the "
+                                          "runtime's genesis builder asserts"))
+    return findings
+
+
 def signature_verifies(key: bytes, payload: bytes, signature: bytes) -> bool:
     try:
         signing.VerifyKey(key).verify(payload, signature)
@@ -2249,7 +2352,9 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + key_findings
             + check_checkpoint(spec, launch, signed, keys)
             + check_code_overrides(launch)
-            + check_observation(spec))
+            + check_observation(spec)
+            + check_guardian(spec, launch)
+            + check_delays(spec, meta))
 
 
 def read_json(path: str, what: str):

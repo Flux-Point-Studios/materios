@@ -34,6 +34,7 @@ It reads:
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. |
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
 | 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
+| 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian, as a multisig with a threshold of at least 2, whose account is the genesis guardian; or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including a proxy
@@ -89,6 +90,7 @@ more than 300 slots behind its node.
 {
   "roles": {
     "sudo": [{"threshold": 2, "members": ["5D...", "5H...", "5C..."]}],
+    "guardian": [{"threshold": 2, "members": ["5E...", "5F...", "5G..."]}],
     "anchor_signer": ["5F..."],
     "attestors": ["5G..."],
     "oracle": [],
@@ -131,7 +133,10 @@ more than 300 slots behind its node.
   multisig by its members. `sudo`, `anchor_signer`, `attestors` and `oracle`
   must be present; an empty `oracle` states that no oracle signer runs.
   `roles.sudo` must name exactly the genesis `Sudo.Key` (or be empty when
-  genesis sets none), as a multisig with a threshold of at least 2. Every
+  genesis sets none), as a multisig with a threshold of at least 2.
+  `roles.guardian` must name exactly the genesis `RootTimelock.Guardian`, as
+  one multisig with a threshold of at least 2, in which no account at any
+  depth is also in `roles.sudo` or is `Sudo.Key`. Every
   genesis account must be the account of some entry; `endowed` holds the ones
   no other role names. `attestors` are the accounts that bond at genesis and
   get the endowment floor check.

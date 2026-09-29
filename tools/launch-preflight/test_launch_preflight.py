@@ -2504,7 +2504,8 @@ def map_key(pallet: str, item: str, account: bytes) -> bytes:
     return lp.storage_key(pallet, item) + hashlib.blake2b(account, digest_size=16).digest() + account
 
 
-def test_preprod_genesis_sets_only_storage_a_mainnet_genesis_may_set(spec, meta):
+def test_every_item_the_preprod_v6_genesis_sets_is_on_the_allowlist(spec, meta):
+    """Rule 4 reads which items genesis sets, not what they hold."""
     assert lp.check_genesis_storage(spec, meta) == []
 
 
@@ -2517,7 +2518,9 @@ def spec239() -> tuple[lp.Spec, lp.Metadata]:
     return lp.load_spec(str(FIXTURES / "preprod-spec239-raw.json")), lp.Metadata.from_v14(v14)
 
 
-def test_root_timelock_genesis_sets_only_storage_a_mainnet_genesis_may_set(spec239):
+def test_every_item_the_spec239_preprod_genesis_sets_is_on_the_allowlist(spec239):
+    """Rule 4 reads which items genesis sets, not what they hold: rule 7
+    refuses this genesis's Root timelock delays and guardian."""
     assert lp.check_genesis_storage(*spec239) == []
 
 
@@ -2733,6 +2736,291 @@ def test_metadata_without_types_is_an_input_error(metadata_v14):
 
 
 # ---------------------------------------------------------------------------
+# Rule 7: the Root timelock's guardian and delays
+# ---------------------------------------------------------------------------
+
+# The runtime's mainnet delays and MaxDelay, in 6-second blocks, and the delays preprod stores.
+DAYS = 14_400
+MAINNET_DELAYS = (DAYS, 7 * DAYS, 30 * DAYS)
+MAX_DELAY = 90 * DAYS
+TESTNET_DELAYS = (30, 300, 1_200)
+# The keyholders of node/src/chain_spec_preprod.rs: preprod's sudo key is their 2-of-3
+# multisig and its guardian their 3-of-3.
+PREPROD_KEYHOLDERS = [bytes.fromhex(key) for key in (
+    "5678cd421ed824dd2f8860b54da0e44b41acfd646fd813644722efd65aa65b5b",
+    "44d1c084f7a17e2beb080cd51c85bc2e214cfce1914b0ad384bb4eed99e79776",
+    "ea7ea02ece50453978981b20bef4ec39181349122996534d8aceb01da22f4400")]
+SHARED = (": the guardian must be held by keyholders apart from the sudo key's, or whoever takes Root also holds "
+          "its veto")
+GUARDIAN_FLAT = ("[7 timelock] roles.guardian[0] is a single key: the guardian must be a multisig with a threshold "
+                 "of at least 2, declared by its members so each one is checked")
+UNDECLARED_GUARDIAN = ("[7 timelock] roles.guardian must declare the one guardian genesis names: who can veto Root "
+                       "is unchecked")
+NO_GUARDIAN = ("[7 timelock] genesis sets no RootTimelock.Guardian: nothing apart from the sudo key can veto the Root "
+               "calls it queues")
+HIDDEN_BOUNDS = ("[7 timelock] the runtime metadata declares no RootTimelock.DefaultDelays and RootTimelock.MaxDelay "
+                 "the preflight can read: how long mainnet must hold Root's calls is unknown here")
+
+
+def delays(*blocks: int) -> bytes:
+    return b"".join(block.to_bytes(4, "little") for block in blocks)
+
+
+def timelock_launch(sudo_members, guardian) -> dict:
+    return {"roles": {"sudo": [msig(2, *sudo_members)], "guardian": [guardian]}}
+
+
+@pytest.fixture
+def guarded(spec239):
+    """The spec 239 preprod genesis with Root held by a 2-of-3 multisig of fresh
+    keys, and the timelock guarded by a 2-of-3 multisig of other fresh keys at
+    the mainnet delays."""
+    spec, meta = spec239
+    sudo, guardian = [fresh_account() for _ in range(3)], [fresh_account() for _ in range(3)]
+    put(spec, "Sudo", "Key", lp.multisig_account(sudo, 2))
+    put(spec, "RootTimelock", "Guardian", lp.multisig_account(guardian, 2))
+    put(spec, "RootTimelock", "Delays", delays(*MAINNET_DELAYS))
+    return spec, meta, sudo, guardian
+
+
+def guardian_findings(spec, sudo, entry) -> list[str]:
+    """Rule 7's guardian check, with `entry` stored in genesis as the guardian and declared as roles.guardian."""
+    put(spec, "RootTimelock", "Guardian", lp.role_account(entry))
+    return messages(lp.check_guardian(spec, timelock_launch(sudo, entry)))
+
+
+def delay_findings(spec, meta, *blocks: int) -> list[str]:
+    put(spec, "RootTimelock", "Delays", delays(*blocks))
+    return messages(lp.check_delays(spec, meta))
+
+
+def test_the_spec239_metadata_declares_the_mainnet_delays_and_their_ceiling(spec239):
+    _, meta = spec239
+    assert meta.constants[("RootTimelock", "DefaultDelays")] == delays(*MAINNET_DELAYS)
+    assert meta.constants[("RootTimelock", "MaxDelay")] == MAX_DELAY.to_bytes(4, "little")
+
+
+def test_a_guardian_apart_from_the_sudo_key_at_the_mainnet_delays_passes(guarded):
+    spec, meta, sudo, guardian = guarded
+    assert lp.check_guardian(spec, timelock_launch(sudo, msig(2, *guardian))) == []
+    assert lp.check_delays(spec, meta) == []
+
+
+def test_the_spec239_preprod_timelock_is_refused_on_mainnet(spec239):
+    spec, meta = spec239
+    assert spec.value("Sudo", "Key") == lp.multisig_account(PREPROD_KEYHOLDERS, 2)
+    launch = timelock_launch(PREPROD_KEYHOLDERS, msig(3, *PREPROD_KEYHOLDERS))
+    assert messages(lp.check_guardian(spec, launch)) == [
+        f"[7 timelock] roles.guardian[0].members[{i}] {ss58(key)} is also roles.sudo[0].members[{i}]{SHARED}"
+        for i, key in enumerate(PREPROD_KEYHOLDERS)]
+    assert messages(lp.check_delays(spec, meta)) == [
+        f"[7 timelock] RootTimelock.Delays holds {name} calls {blocks} blocks, below the {least} the runtime sets "
+        "for mainnet" for name, blocks, least in zip(("recovery", "standard", "long"), TESTNET_DELAYS, MAINNET_DELAYS)]
+
+
+def test_a_genesis_with_no_guardian_is_refused(guarded):
+    """The runtime's genesis builder lets a dev sudo key go unguarded; a mainnet launch has no dev key to excuse it."""
+    spec, _, sudo, guardian = guarded
+    del spec.storage[lp.storage_key("RootTimelock", "Guardian")]
+    assert messages(lp.check_guardian(spec, timelock_launch(sudo, msig(2, *guardian)))) == [NO_GUARDIAN]
+
+
+@pytest.mark.parametrize("count", [None, 0, 2])
+def test_a_guardian_not_declared_as_one_entry_is_refused(guarded, count):
+    spec, _, sudo, guardian = guarded
+    launch = timelock_launch(sudo, msig(2, *guardian))
+    if count is None:
+        del launch["roles"]["guardian"]
+    else:
+        launch["roles"]["guardian"] = [msig(2, *guardian)] * count
+    assert messages(lp.check_guardian(spec, launch)) == [UNDECLARED_GUARDIAN]
+
+
+def test_a_guardian_declared_by_its_flat_address_is_refused(guarded):
+    """A wallet shows a multisig as one address; declared that way its members go unchecked."""
+    spec, _, sudo, guardian = guarded
+    assert guardian_findings(spec, sudo, ss58(lp.multisig_account(guardian, 2))) == [GUARDIAN_FLAT]
+
+
+def test_a_guardian_one_member_can_use_alone_is_refused(guarded):
+    spec, _, sudo, guardian = guarded
+    assert guardian_findings(spec, sudo, msig(1, *guardian)) == [
+        "[7 timelock] roles.guardian[0] has threshold 1: any one member alone can veto Root's queued calls or "
+        "co-sign them early"]
+
+
+def test_a_guardian_that_is_not_the_declared_multisig_is_refused(guarded):
+    """A multisig holding //Alice, declared as a multisig of fresh keys."""
+    spec, _, sudo, guardian = guarded
+    hidden = lp.multisig_account([ALICE, *guardian[:2]], 2)
+    put(spec, "RootTimelock", "Guardian", hidden)
+    assert messages(lp.check_guardian(spec, timelock_launch(sudo, msig(2, *guardian)))) == [
+        f"[7 timelock] RootTimelock.Guardian {ss58(hidden)} is not the account roles.guardian declares: "
+        "who can veto Root is unchecked"]
+
+
+def test_a_guardian_multisig_with_a_dev_member_is_refused(guarded, known):
+    """Genesis holds only the multisig's account, a hash; rule 1 finds the dev key among the declared members."""
+    spec, meta, sudo, guardian = guarded
+    entry = msig(2, ALICE, *guardian[:2])
+    assert guardian_findings(spec, sudo, entry) == []
+    spec.storage[lp.CODE_KEY] = b""
+    found = messages(lp.check_dev_keys(spec, meta, timelock_launch(sudo, entry), NO_CARDANO, [], known))
+    assert "[1 dev-keys] roles.guardian[0].members[0]: //Alice (sr25519)" in found
+    assert not any("RootTimelock.Guardian" in m for m in found)
+
+
+def test_a_guardian_that_is_the_sudo_key_is_refused(guarded):
+    spec, _, sudo, _ = guarded
+    found = guardian_findings(spec, sudo, msig(2, *sudo))
+    assert found[0] == "[7 timelock] RootTimelock.Guardian is Sudo.Key: the sudo key would veto and co-sign its own " \
+                       "Root calls"
+    account = ss58(lp.multisig_account(sudo, 2))
+    assert found[1] == f"[7 timelock] roles.guardian[0] {account} is also roles.sudo[0]{SHARED}"
+
+
+def test_a_guardian_of_the_sudo_keyholders_under_another_threshold_is_refused(guarded):
+    spec, _, sudo, _ = guarded
+    assert guardian_findings(spec, sudo, msig(3, *sudo)) == [
+        f"[7 timelock] roles.guardian[0].members[{i}] {ss58(key)} is also roles.sudo[0].members[{i}]{SHARED}"
+        for i, key in enumerate(sudo)]
+
+
+def test_a_guardian_sharing_one_keyholder_with_the_sudo_key_is_refused(guarded):
+    spec, _, sudo, guardian = guarded
+    assert guardian_findings(spec, sudo, msig(2, sudo[1], *guardian[:2])) == [
+        f"[7 timelock] roles.guardian[0].members[0] {ss58(sudo[1])} is also roles.sudo[0].members[1]{SHARED}"]
+
+
+def test_a_guardian_with_the_sudo_account_as_a_member_is_refused(guarded):
+    spec, _, sudo, guardian = guarded
+    account = lp.multisig_account(sudo, 2)
+    assert guardian_findings(spec, sudo, msig(2, account, guardian[0])) == [
+        f"[7 timelock] roles.guardian[0].members[0] {ss58(account)} is also roles.sudo[0]{SHARED}"]
+
+
+def test_a_sudo_keyholder_nested_inside_the_guardian_is_refused(guarded):
+    spec, _, sudo, guardian = guarded
+    entry = {"threshold": 2, "members": [msig(2, sudo[2], guardian[0]), ss58(guardian[1])]}
+    assert guardian_findings(spec, sudo, entry) == [
+        f"[7 timelock] roles.guardian[0].members[0].members[0] {ss58(sudo[2])} is also "
+        f"roles.sudo[0].members[2]{SHARED}"]
+
+
+def test_a_guardian_member_that_is_the_genesis_sudo_key_is_refused_when_roles_sudo_does_not_say_so(guarded):
+    spec, _, _, guardian = guarded
+    key = fresh_account()
+    put(spec, "Sudo", "Key", key)
+    entry = msig(2, key, *guardian[:2])
+    put(spec, "RootTimelock", "Guardian", lp.role_account(entry))
+    assert messages(lp.check_guardian(spec, {"roles": {"guardian": [entry]}})) == [
+        f"[7 timelock] roles.guardian[0].members[0] {ss58(key)} is also Sudo.Key{SHARED}"]
+
+
+def test_a_guardian_key_that_does_not_decode_leaves_its_refusal_to_rule_1(guarded):
+    spec, _, sudo, guardian = guarded
+    entry = {"threshold": 2, "members": ["//Bob", ss58(guardian[0])]}
+    assert lp.check_guardian(spec, timelock_launch(sudo, entry)) == []
+
+
+def test_a_sudo_key_that_does_not_decode_leaves_the_guardian_checked(guarded):
+    spec, _, sudo, guardian = guarded
+    hidden = lp.multisig_account([ALICE, *guardian[:2]], 2)
+    put(spec, "RootTimelock", "Guardian", hidden)
+    launch = {"roles": {"sudo": [{"threshold": 2, "members": ["//Alice", ss58(sudo[0])]}],
+                        "guardian": [msig(2, *guardian)]}}
+    assert messages(lp.check_guardian(spec, launch)) == [
+        f"[7 timelock] RootTimelock.Guardian {ss58(hidden)} is not the account roles.guardian declares: "
+        "who can veto Root is unchecked"]
+
+
+def test_the_mainnet_delays_and_delays_up_to_max_delay_pass(spec239):
+    spec, meta = spec239
+    assert delay_findings(spec, meta, *MAINNET_DELAYS) == []
+    assert delay_findings(spec, meta, MAX_DELAY, MAX_DELAY, MAX_DELAY) == []
+
+
+@pytest.mark.parametrize("index, name", enumerate(("recovery", "standard", "long")))
+def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec239, index, name):
+    spec, meta = spec239
+    blocks = [*MAINNET_DELAYS]
+    blocks[index] -= 1
+    assert delay_findings(spec, meta, *blocks) == [
+        f"[7 timelock] RootTimelock.Delays holds {name} calls {blocks[index]} blocks, below the "
+        f"{MAINNET_DELAYS[index]} the runtime sets for mainnet"]
+
+
+@pytest.mark.parametrize("long", [MAX_DELAY + 1, 2**32 - 1])
+def test_a_long_delay_above_max_delay_is_refused(spec239, long):
+    spec, meta = spec239
+    assert delay_findings(spec, meta, DAYS, 7 * DAYS, long) == [
+        f"[7 timelock] RootTimelock.Delays holds long calls {long} blocks, above the runtime's MaxDelay {MAX_DELAY}: "
+        "a guardian change, or a cut to the long delay itself, would wait longer than the runtime lets any delay be"]
+
+
+def test_delays_out_of_the_runtime_order_are_refused(spec239):
+    spec, meta = spec239
+    assert delay_findings(spec, meta, 20 * DAYS, 7 * DAYS, 30 * DAYS) == [
+        f"[7 timelock] RootTimelock.Delays (recovery {20 * DAYS}, standard {7 * DAYS}, long {30 * DAYS} blocks) "
+        "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
+
+
+def test_zero_delays_are_refused(spec239):
+    spec, meta = spec239
+    found = delay_findings(spec, meta, 0, 0, 0)
+    assert len(found) == 4
+    assert "[7 timelock] RootTimelock.Delays holds recovery calls 0 blocks, below the 14400 the runtime sets for " \
+           "mainnet" in found
+    assert found[-1].startswith("[7 timelock] RootTimelock.Delays (recovery 0, standard 0, long 0 blocks) breaks")
+
+
+def test_the_bounds_are_the_runtime_constants(spec239):
+    spec, meta = spec239
+    meta.constants[("RootTimelock", "DefaultDelays")] = delays(10, 20, 30)
+    meta.constants[("RootTimelock", "MaxDelay")] = (40).to_bytes(4, "little")
+    assert delay_findings(spec, meta, 10, 20, 40) == []
+    assert delay_findings(spec, meta, 10, 19, 41) == [
+        "[7 timelock] RootTimelock.Delays holds standard calls 19 blocks, below the 20 the runtime sets for mainnet",
+        "[7 timelock] RootTimelock.Delays holds long calls 41 blocks, above the runtime's MaxDelay 40: a guardian "
+        "change, or a cut to the long delay itself, would wait longer than the runtime lets any delay be"]
+
+
+@pytest.mark.parametrize("constants", [
+    {"DefaultDelays": None}, {"MaxDelay": None}, {"DefaultDelays": None, "MaxDelay": None},
+    {"DefaultDelays": bytes(11)}, {"MaxDelay": b""},
+])
+def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec239, constants):
+    spec, meta = spec239
+    for name, value in constants.items():
+        if value is None:
+            del meta.constants[("RootTimelock", name)]
+        else:
+            meta.constants[("RootTimelock", name)] = value
+    assert messages(lp.check_delays(spec, meta)) == [HIDDEN_BOUNDS]
+
+
+def test_a_runtime_with_no_root_timelock_is_refused(spec, meta):
+    assert messages(lp.check_delays(spec, meta)) == [HIDDEN_BOUNDS]
+    assert NO_GUARDIAN in messages(lp.check_guardian(spec, {"roles": {}}))
+
+
+@pytest.mark.parametrize("raw", [b"", bytes(11), bytes(13), bytes(24)], ids=lambda raw: f"{len(raw)} bytes")
+def test_delays_that_do_not_decode_are_refused(spec239, raw):
+    spec, meta = spec239
+    put(spec, "RootTimelock", "Delays", raw)
+    assert messages(lp.check_delays(spec, meta)) == [
+        f"[7 timelock] RootTimelock.Delays is {len(raw)} bytes, not three 4-byte block counts"]
+
+
+def test_a_genesis_that_stores_no_delays_is_refused(spec239):
+    spec, meta = spec239
+    del spec.storage[lp.storage_key("RootTimelock", "Delays")]
+    assert messages(lp.check_delays(spec, meta)) == [
+        "[7 timelock] genesis sets no RootTimelock.Delays, which every genesis the runtime builds sets: how long "
+        "Root's calls wait is unchecked"]
+
+
+# ---------------------------------------------------------------------------
 # End to end through the CLI, with the real subwasm
 # ---------------------------------------------------------------------------
 
@@ -2744,8 +3032,9 @@ def subwasm() -> str:
 
 class Launch:
     """A clean launch: the preprod genesis with //Alice removed, Root held by a
-    multisig of fresh keys, the tuned rewards stored, one attestor endowed at the
-    floor, the chain renamed, every account and authority declared, Cardano
+    multisig of fresh keys and its timelock guarded by a multisig of other fresh
+    keys at the mainnet delays, the tuned rewards stored, one attestor endowed at
+    the floor, the chain renamed, every account and authority declared, Cardano
     holding the lock and the candidates, and a public RPC URL that serves only
     safe methods. Every rule accepts it."""
 
@@ -2757,6 +3046,9 @@ class Launch:
         put(spec, "OrinqReceipts", "EraCapBaselineAttestorCount", (32).to_bytes(4, "little"))
         self.sudo_members = [fresh_account() for _ in range(3)]
         put(spec, "Sudo", "Key", lp.multisig_account(self.sudo_members, 2))
+        guardian_members = [fresh_account() for _ in range(3)]
+        put(spec, "RootTimelock", "Guardian", lp.multisig_account(guardian_members, 2))
+        put(spec, "RootTimelock", "Delays", delays(*MAINNET_DELAYS))
         self.attestor = fresh_account()
         endow(spec, self.attestor, FLOOR)
         prefix = lp.storage_key("System", "Account")
@@ -2768,7 +3060,8 @@ class Launch:
         conf.write_text("location / { proxy_pass http://rpc-node:9944; }")
         sudo = lp.multisig_account(self.sudo_members, 2)
         self.launch = {
-            "roles": {"sudo": [msig(2, *self.sudo_members)], "anchor_signer": [ss58(fresh_account())],
+            "roles": {"sudo": [msig(2, *self.sudo_members)], "guardian": [msig(2, *guardian_members)],
+                      "anchor_signer": [ss58(fresh_account())],
                       "attestors": [ss58(self.attestor)], "oracle": [],
                       "endowed": [ss58(a) for a in genesis_accounts(spec) if a not in (self.attestor, sudo)]},
             "economics": dict(TUNED, fee_buffer=100 * MATRA),
@@ -2836,12 +3129,22 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
     return code, captured.out + captured.err
 
 
+def with_timelock(metadata_v14: dict) -> dict:
+    """The fixture metadata plus spec 239's RootTimelock pallet: its storage
+    and the delay constants rule 7 reads."""
+    v14 = copy.deepcopy(metadata_v14)
+    spec239 = json.loads((FIXTURES / "spec239-metadata.json").read_text())["V14"]
+    v14["pallets"].append(next(p for p in spec239["pallets"] if p["name"] == "RootTimelock"))
+    return v14
+
+
 @pytest.fixture
 def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch, metadata_v14):
     """The spec's code is the preprod v6 runtime, which declares neither its
-    emission reserves nor its validator reward per era, so the extractor
-    returns its metadata with both declared."""
-    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_constants(metadata_v14))
+    emission reserves nor its validator reward per era and has no Root
+    timelock, so the extractor returns its metadata with both declared and
+    spec 239's timelock added."""
+    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_timelock(with_constants(metadata_v14)))
     launch = Launch(preprod_path, tmp_path, kupo, endpoint)
     pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))
     return launch
@@ -2865,12 +3168,38 @@ def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path,
     assert "[3 rpc] genesis Aura.Authorities[0]" in out
     assert "[4 supply] roles.attestors[0] is endowed 100000000" in out
     assert "[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve" in out
+    assert NO_GUARDIAN in out
+    assert HIDDEN_BOUNDS in out
 
 
 def test_cli_passes_a_clean_launch(clean, capsys):
     code, out = clean.run(capsys)
     assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
+
+
+def test_cli_refuses_a_guardian_held_by_the_sudo_keyholders(clean, capsys):
+    put(clean.spec, "RootTimelock", "Guardian", lp.multisig_account(clean.sudo_members, 3))
+    clean.launch["roles"]["guardian"] = [msig(3, *clean.sudo_members)]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert f"[7 timelock] roles.guardian[0].members[0] {ss58(clean.sudo_members[0])} is also " \
+           f"roles.sudo[0].members[0]{SHARED}" in out
+
+
+def test_cli_refuses_a_genesis_with_no_guardian(clean, capsys):
+    del clean.spec.storage[lp.storage_key("RootTimelock", "Guardian")]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert NO_GUARDIAN in out
+
+
+def test_cli_refuses_the_testnet_timelock_delays(clean, capsys):
+    put(clean.spec, "RootTimelock", "Delays", delays(*TESTNET_DELAYS))
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[7 timelock] RootTimelock.Delays holds standard calls 300 blocks, below the 100800 the runtime sets " \
+           "for mainnet" in out
 
 
 @pytest.mark.parametrize("threshold", [1, 2])
