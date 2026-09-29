@@ -3377,6 +3377,14 @@ def test_delays_out_of_the_runtime_order_are_refused(spec239):
         "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
 
 
+def test_a_standard_delay_above_the_long_delay_is_refused_within_every_other_bound(spec239):
+    """Each delay at least its mainnet delay and long at most MaxDelay: only the order refuses."""
+    spec, meta = spec239
+    assert delay_findings(spec, meta, DAYS, 60 * DAYS, 30 * DAYS) == [
+        f"[7 timelock] RootTimelock.Delays (recovery {DAYS}, standard {60 * DAYS}, long {30 * DAYS} blocks) "
+        "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
+
+
 def test_zero_delays_are_refused(spec239):
     spec, meta = spec239
     found = delay_findings(spec, meta, 0, 0, 0)
