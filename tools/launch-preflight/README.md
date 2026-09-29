@@ -132,6 +132,12 @@ frame cut short or bytes after the last frame, where zstandard's readers stop
 at the end of the first frame or of the input. So a dev key in a second frame
 would run on chain unscanned. Any other framing refuses as unreadable.
 
+The genesis hash takes the trie layout from the code as the node does. The
+node decodes the `runtime_version` custom section with the Core API version
+that the first `runtime_apis` section declares, or else the one the version
+lists itself. It reads a state version only from Core 4 on and takes any
+state version but 0 as V1. A version section the node cannot decode refuses.
+
 ## Launch manifest
 
 ```json

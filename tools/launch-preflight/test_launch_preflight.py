@@ -151,6 +151,24 @@ def msig(threshold, *members) -> dict:
 NO_CARDANO = lp.CardanoView(lock=None, candidates=[])
 
 
+def leb128(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte, n = n & 0x7F, n >> 7
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def custom_section(name: bytes, payload: bytes) -> bytes:
+    body = leb128(len(name)) + name + payload
+    return b"\0" + leb128(len(body)) + body
+
+
+def zstd_frame(data: bytes) -> bytes:
+    return zstandard.ZstdCompressor().compress(data)
+
+
 # ---------------------------------------------------------------------------
 # The well-known key table
 # ---------------------------------------------------------------------------
@@ -553,6 +571,100 @@ def test_genesis_hash_matches_the_live_preprod_genesis(spec):
     assert lp.genesis_hash(spec.storage, 1).hex() == PREPROD_GENESIS
 
 
+# sp_api's id of the Core API, blake2_64 of its name, and one whose version the node does not read.
+CORE_API = hashlib.blake2b(b"Core", digest_size=8).digest()
+OTHER_API = hashlib.blake2b(b"Metadata", digest_size=8).digest()
+TRANSACTION_VERSION = (5).to_bytes(4, "little")
+
+
+def api(version: int, api_id: bytes = CORE_API) -> bytes:
+    return api_id + version.to_bytes(4, "little")
+
+
+def runtime_version(tail: bytes, apis: bytes = b"") -> bytes:
+    """A runtime_version section: spec and impl name, the authoring, spec and
+    impl versions, a list of APIs, then `tail`."""
+    return (lp.compact(8) + b"materios") * 2 + bytes(12) + lp.compact(len(apis) // 12) + apis + tail
+
+
+def version_wasm(*sections: tuple[bytes, bytes]) -> bytes:
+    return b"\0asm\x01\0\0\0" + b"".join(custom_section(name, payload) for name, payload in sections)
+
+
+def core(version: int, state: bytes) -> bytes:
+    """Code whose runtime_apis section declares Core at `version`, with this state version byte."""
+    return version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + state)),
+                        (b"runtime_apis", api(version)))
+
+
+# What sc-executor's read_embedded_version and sp-version's state_version() make of each: the Core version comes from
+# the first runtime_apis section, else from the version's own list; a state byte is read from Core 4 on, and any
+# but 0 is V1.
+STATE_VERSIONS = {
+    "Core 5 and state 1": (core(5, b"\x01"), 1),
+    "Core 5 and state 0": (core(5, b"\x00"), 0),
+    "Core 5 and state 2": (core(5, b"\x02"), 1),
+    "Core 5 and state 255": (core(5, b"\xff"), 1),
+    "Core 4 and state 1": (core(4, b"\x01"), 1),
+    "Core 3 and a byte after the transaction version": (core(3, b"\x01"), 0),
+    "Core 2 and a byte where Core 4 keeps state": (core(2, b"\x01"), 0),
+    "Core 3 and nothing after the transaction version": (core(3, b""), 0),
+    "Core 2 and nothing after the API list": (
+        version_wasm((b"runtime_version", runtime_version(b"")), (b"runtime_apis", api(2))), 0),
+    "Core 4 only in the version's list": (
+        version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01", api(4)))), 1),
+    "no Core API": (version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01"))), 0),
+    "runtime_apis over the version's list": (
+        version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01", api(5))),
+                     (b"runtime_apis", api(3))), 0),
+    "Core after another API": (
+        version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01")),
+                     (b"runtime_apis", api(9, OTHER_API) + api(5))), 1),
+    "the first Core of two": (
+        version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01")),
+                     (b"runtime_apis", api(3) + api(5))), 0),
+    "the first runtime_apis section of two": (
+        version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01")),
+                     (b"runtime_apis", api(3)), (b"runtime_apis", api(5))), 0),
+    "the first runtime_version section of two": (
+        version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x00")),
+                     (b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01")),
+                     (b"runtime_apis", api(5))), 0),
+}
+
+
+@pytest.mark.parametrize("wasm, state_version", STATE_VERSIONS.values(), ids=STATE_VERSIONS.keys())
+def test_state_version_is_the_one_the_node_builds_genesis_with(wasm, state_version):
+    assert lp.runtime_state_version(wasm) == state_version
+
+
+# Version sections the node cannot decode, so it builds no genesis from the code.
+UNDECODABLE_VERSIONS = {
+    "a clipped API entry": (version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION + b"\x01")),
+                                         (b"runtime_apis", api(5) + b"\x00")), "runtime_apis"),
+    "Core 4 and no state byte": (version_wasm((b"runtime_version", runtime_version(TRANSACTION_VERSION)),
+                                              (b"runtime_apis", api(4))), "runtime_version"),
+    "Core 3 and a clipped transaction version": (
+        version_wasm((b"runtime_version", runtime_version(b"\x05\x00")), (b"runtime_apis", api(3))),
+        "runtime_version"),
+    "a clipped name": (version_wasm((b"runtime_version", lp.compact(8) + b"mat")), "runtime_version"),
+    "a clipped API list": (version_wasm((b"runtime_version", runtime_version(b"")[:-1] + lp.compact(2) + api(4))),
+                           "runtime_version"),
+}
+
+
+@pytest.mark.parametrize("wasm, section", UNDECODABLE_VERSIONS.values(), ids=UNDECODABLE_VERSIONS.keys())
+def test_a_version_section_the_node_cannot_decode_is_an_input_error(wasm, section):
+    with pytest.raises(lp.InputError, match=f"^runtime code's {section} section does not decode"):
+        lp.runtime_state_version(wasm)
+
+
+def test_genesis_hash_uses_the_trie_layout_the_node_builds_genesis_with(spec):
+    """State 2 is V1 to the node, which puts a value of 33 bytes or more in the trie by its hash."""
+    spec.storage[lp.CODE_KEY] = core(5, b"\x02")
+    assert lp.spec_genesis_hash(spec) == lp.genesis_hash(spec.storage, 1) != lp.genesis_hash(spec.storage, 0)
+
+
 def pub(key: signing.SigningKey) -> bytes:
     return key.verify_key.encode()
 
@@ -863,24 +975,6 @@ def test_dev_key_embedded_in_runtime_code_is_named(spec, meta, known):
         b"\0asm" + bytes(4) + bytes.fromhex(SP_KEYRING["sr25519"]["//Dave"]))
     found = dev_key_findings(spec, meta, known)
     assert "[1 dev-keys] :code (runtime WASM): //Dave (sr25519) is in genesis" in found
-
-
-def leb128(n: int) -> bytes:
-    out = bytearray()
-    while True:
-        byte, n = n & 0x7F, n >> 7
-        out.append(byte | (0x80 if n else 0))
-        if not n:
-            return bytes(out)
-
-
-def custom_section(name: bytes, payload: bytes) -> bytes:
-    body = leb128(len(name)) + name + payload
-    return b"\0" + leb128(len(body)) + body
-
-
-def zstd_frame(data: bytes) -> bytes:
-    return zstandard.ZstdCompressor().compress(data)
 
 
 SKIPPABLE_FRAME = (0x184D2A50).to_bytes(4, "little") + (3).to_bytes(4, "little") + b"abc"

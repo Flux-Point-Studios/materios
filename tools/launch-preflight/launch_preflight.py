@@ -89,6 +89,9 @@ LAUNCH_KEYS = HERE / "launch_keys.json"
 KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK = (
     "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock")
 CODE_KEY = b":code"
+# sp_api's id of the Core API, blake2_64 of its name; an API entry is the 8-byte id and a u32 version.
+CORE_API = hashlib.blake2b(b"Core", digest_size=8).digest()
+API_ENTRY = 12
 ZSTD_PREFIX = bytes.fromhex("52bc537646db8e05")
 CODE_BOMB_LIMIT = 50 * 1024 * 1024
 # Compressed bytes decoded at a time. A zstd block of up to 128 KiB takes as few as 4 bytes, so a step decodes at
@@ -565,31 +568,61 @@ def _leb128(data: bytes, pos: int) -> tuple[int, int]:
             return result, pos
 
 
-def runtime_state_version(wasm: bytes) -> int:
-    """state_version from the `runtime_version` custom section, which is what
-    the node reads when it builds genesis from this code."""
+def custom_sections(wasm: bytes) -> dict[bytes, bytes]:
+    """Each custom section's payload by name, the first of a name as the node's RuntimeBlob finds it."""
     if wasm[:4] != b"\0asm":
         raise InputError("runtime code is not a WASM module")
-    pos = 8
-    while pos < len(wasm):
-        section_id = wasm[pos]
-        size, body = _leb128(wasm, pos + 1)
-        pos = body + size
-        if section_id != 0:
-            continue
-        name_len, name_start = _leb128(wasm, body)
-        if wasm[name_start:name_start + name_len] != b"runtime_version":
-            continue
-        payload = wasm[name_start + name_len:pos]
+    sections, pos = {}, 8
+    try:
+        while pos < len(wasm):
+            section_id = wasm[pos]
+            size, body = _leb128(wasm, pos + 1)
+            pos = body + size
+            if section_id == 0:
+                name_len, name_start = _leb128(wasm, body)
+                sections.setdefault(wasm[name_start:name_start + name_len], wasm[name_start + name_len:pos])
+    except IndexError as e:
+        raise InputError("runtime code is not a WASM module the preflight can read") from e
+    return sections
+
+
+def core_api_version(apis: bytes) -> int | None:
+    """The version of the first Core API in a list of API entries."""
+    for entry in range(0, len(apis), API_ENTRY):
+        if apis[entry:entry + 8] == CORE_API:
+            return int.from_bytes(apis[entry + 8:entry + API_ENTRY], "little")
+    return None
+
+
+def runtime_state_version(wasm: bytes) -> int:
+    """The trie layout the node builds genesis from this code with. sc-executor
+    decodes the `runtime_version` section with the Core API version that the
+    `runtime_apis` section declares, else the one the version lists itself; it
+    reads a transaction version from Core 3 on and a state version from Core 4
+    on, and sp-version takes any state version but 0 as V1."""
+    sections = custom_sections(wasm)
+    version, apis = sections.get(b"runtime_version"), sections.get(b"runtime_apis")
+    if version is None:
+        raise InputError("runtime code has no runtime_version section")
+    if apis is not None and len(apis) % API_ENTRY:
+        raise InputError("runtime code's runtime_apis section does not decode as whole API entries, so the node "
+                         "builds no genesis from it")
+    undecodable = InputError("runtime code's runtime_version section does not decode, so the node builds no genesis "
+                             "from it")
+    try:
         cursor = 0
-        for _ in range(2):
-            length, cursor = read_compact(payload, cursor)
+        for _ in range(2):  # spec and impl name
+            length, cursor = read_compact(version, cursor)
             cursor += length
-        cursor += 12
-        apis, cursor = read_compact(payload, cursor)
-        cursor += apis * 12 + 4
-        return payload[cursor] if cursor < len(payload) else 0
-    raise InputError("runtime code has no runtime_version section")
+        count, cursor = read_compact(version, cursor + 12)  # past the authoring, spec and impl versions
+    except IndexError as e:
+        raise undecodable from e
+    listed, cursor = version[cursor:cursor + API_ENTRY * count], cursor + API_ENTRY * count
+    core = core_api_version(listed if apis is None else apis) or 0
+    state = cursor + 4  # past the transaction version
+    if cursor + 4 * (core >= 3) + (core >= 4) > len(version):
+        raise undecodable
+    return 1 if core >= 4 and version[state] else 0
 
 
 def subwasm_metadata(code: bytes, subwasm: str) -> dict:
