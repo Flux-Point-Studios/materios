@@ -273,10 +273,30 @@ KUPO_TIMEOUT = 30
 KUPO_LIMIT = 16 * 1024 * 1024
 # Five minutes of slots: a synced Kupo trails its node by a block or two.
 KUPO_MAX_LAG_SLOTS = 300
+# Hex is read in the one spelling its writer writes: lowercase digits, two a byte, after 0x in the raw spec (as
+# build-spec writes it), the manifests and the launch keys, and with no 0x in the key tables (as
+# gen_well_known_keys.py writes them and the anchor worker reads them) and from Kupo. The node reads a raw spec with
+# impl-serde's from_hex, which also takes upper case and no 0x, and skips a space, tab, CR or LF while still counting
+# it toward nibble alignment; FRAME then ignores the bytes a value has left over. So `0x 11..` loads as 0x0111.., and
+# a key with two trailing spaces as that key and a zero byte: any other spelling could launch other bytes than the
+# preflight checked.
+LOWER_HEX = re.compile(r"[0-9a-f]*")
 
 
 class InputError(Exception):
     """An input the preflight cannot read. Refuses like a failed rule."""
+
+
+def hex_bytes(value, where: str, prefix: str = "0x") -> bytes:
+    """The bytes `value` spells as `prefix` and lowercase hex of whole bytes,
+    and nothing else. The error names `where`, never the value: a seed is one."""
+    digits = value[len(prefix):] if isinstance(value, str) and value.startswith(prefix) else None
+    if digits is None or len(digits) % 2 or not LOWER_HEX.fullmatch(digits):
+        spelling = f"{prefix}-prefixed lowercase hex of whole bytes" if prefix else \
+            "lowercase hex of whole bytes with no 0x"
+        raise InputError(f"{where} is not {spelling}, the one spelling the preflight reads: another reader can take "
+                         "any other (whitespace, upper case, a missing or extra prefix, an odd digit) as other bytes")
+    return bytes.fromhex(digits)
 
 
 @dataclass(frozen=True)
@@ -451,20 +471,17 @@ class Spec:
 
 
 def load_spec(path: str) -> Spec:
-    try:
-        doc = json.loads(Path(path).read_text())
-    except (OSError, ValueError) as e:
-        raise InputError(f"cannot read chain spec {path}: {e}") from e
-    raw = doc.get("genesis", {}).get("raw")
-    if not raw:
+    doc = read_json(path, "chain spec")
+    genesis = doc.get("genesis") if isinstance(doc, dict) else None
+    raw = genesis.get("raw") if isinstance(genesis, dict) else None
+    if not isinstance(raw, dict) or not isinstance(raw.get("top"), dict):
         raise InputError("the preflight needs the raw chain spec (build-spec --raw): "
                          "raw storage is what every node loads")
     if raw.get("childrenDefault"):
         raise InputError("chain spec has child tries; the genesis hash here covers top storage only")
-    try:
-        return Spec(doc, {bytes.fromhex(k[2:]): bytes.fromhex(v[2:]) for k, v in raw["top"].items()})
-    except (ValueError, AttributeError) as e:
-        raise InputError(f"chain spec raw storage is not 0x-hex: {e}") from e
+    return Spec(doc, {hex_bytes(key, f"chain spec raw storage key {key[:80]!r}"):
+                      hex_bytes(value, f"chain spec raw storage value at {key}")
+                      for key, value in raw["top"].items()})
 
 
 def decompressed_code(code: bytes) -> bytes:
@@ -581,8 +598,8 @@ class KnownKey:
 @dataclass(frozen=True)
 class WellKnown:
     keys: list[KnownKey]
-    phrase_hash: str
-    seed_hash: str
+    phrase_hash: bytes
+    seed_hash: bytes
 
 
 def load_well_known(extra: list[Path] = ()) -> WellKnown:
@@ -599,26 +616,22 @@ def load_well_known(extra: list[Path] = ()) -> WellKnown:
         for i, entry in enumerate(entries):
             if not all(isinstance(entry.get(f), str) for f in ("label", "scheme", "public")):
                 raise InputError(f"key table {path}: keys[{i}] needs a label, a scheme and a public key")
-            try:
-                public = bytes.fromhex(entry["public"].removeprefix("0x"))
-            except ValueError as e:
-                raise InputError(f"key table {path}: keys[{i}] public is not hex") from e
+            public = hex_bytes(entry["public"], f"key table {path}: keys[{i}] public", prefix="")
             if len(public) not in (32, 33):
                 raise InputError(f"key table {path}: keys[{i}] public is {len(public)} bytes; expected 32 or 33")
             for needle in (public, blake2_256(public)) if len(public) == 33 else (public,):
                 if not any(k.needle == needle for k in keys):
                     keys.append(KnownKey(entry["label"], entry["scheme"], needle))
     table = json.loads(base.read_text())
-    return WellKnown(keys, table["dev_phrase_blake2_256"], table["dev_seed_blake2_256"])
+    phrase_hash, seed_hash = (hex_bytes(table.get(field), f"key table {base}: {field}", prefix="")
+                              for field in ("dev_phrase_blake2_256", "dev_seed_blake2_256"))
+    return WellKnown(keys, phrase_hash, seed_hash)
 
 
 def decode_public_key(text: str) -> bytes:
     """A role key as SS58 or 0x-hex (32-byte account or 33-byte ECDSA key)."""
     if text.startswith("0x"):
-        try:
-            raw = bytes.fromhex(text[2:])
-        except ValueError as e:
-            raise ValueError("not hex") from e
+        raw = hex_bytes(text, "a public key")
         if len(raw) not in (32, 33):
             raise ValueError(f"{len(raw)} bytes; expected 32 or 33")
         return raw
@@ -667,10 +680,9 @@ def dev_uri(text: str) -> str | None:
     return match.group(1) if match else None
 
 
-def contains_phrase(text: str, phrase_hash: str) -> bool:
+def contains_phrase(text: str, phrase_hash: bytes) -> bool:
     words = re.findall(r"[a-z]+", text)
-    return any(blake2_256(" ".join(words[i:i + 12]).encode()).hex() == phrase_hash
-               for i in range(len(words) - 11))
+    return any(blake2_256(" ".join(words[i:i + 12]).encode()) == phrase_hash for i in range(len(words) - 11))
 
 
 def match_known(data: bytes, known: list[KnownKey]) -> list[KnownKey]:
@@ -916,10 +928,7 @@ def kupo_datum(kupo: str, datum_hash, what: str) -> bytes:
     datum = kupo_get(kupo, f"/datums/{datum_hash}")
     if not isinstance(datum, dict) or not isinstance(datum.get("datum"), str):
         raise InputError(f"{what} has no datum Kupo can serve")
-    try:
-        raw = bytes.fromhex(datum["datum"])
-    except ValueError as e:
-        raise InputError(f"the datum of {what} is not hex") from e
+    raw = hex_bytes(datum["datum"], f"the datum Kupo serves for {what}", prefix="")
     if hashlib.blake2b(raw, digest_size=32).hexdigest() != datum_hash:
         raise InputError(f"Kupo served a datum for {what} that does not hash to {datum_hash}")
     return raw
@@ -1124,7 +1133,7 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
         for text in texts:
             if contains_phrase(text, well_known.phrase_hash):
                 node_findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev mnemonic"))
-            if any(blake2_256(bytes.fromhex(seed)).hex() == well_known.seed_hash for seed in HEX_SEED.findall(text)):
+            if any(blake2_256(bytes.fromhex(seed)) == well_known.seed_hash for seed in HEX_SEED.findall(text)):
                 node_findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev seed"))
         findings += dict.fromkeys(node_findings)
     for launch_key in launch_keys:
@@ -1999,7 +2008,7 @@ def check_genesis_lock(spec: Spec, launch: dict, cardano: CardanoView, well_know
         findings.append(Finding(SUPPLY, f"the genesis lock address {lock['address']} {e}"))
         paid_to = None
     if paid_to is not None:
-        raw = bytes.fromhex(lock["native_script"])
+        raw = hex_bytes(lock["native_script"], "supply.genesis_lock.native_script")
         declared = hashlib.blake2b(NATIVE_SCRIPT_TAG + raw, digest_size=28).digest()
         if declared != paid_to:
             findings.append(Finding(SUPPLY, f"the genesis lock address {lock['address']} pays to script "
@@ -2125,10 +2134,9 @@ def check_checkpoint(spec: Spec, launch: dict, signed: dict, launch_keys: list[b
     findings = []
     if spec.doc.get("codeSubstitutes"):
         findings.append(Finding(CHECKPOINT, "chain spec carries codeSubstitutes"))
-    try:
-        claimed = {k: bytes.fromhex(signed[k].removeprefix("0x")) for k in (*HASH_FIELDS, "signature")}
-    except (KeyError, ValueError, AttributeError) as e:
-        return findings + [Finding(CHECKPOINT, f"signed manifest is malformed: {e}")]
+    if not isinstance(signed, dict):
+        raise InputError("signed manifest must be a JSON object")
+    claimed = {k: hex_bytes(signed.get(k), f"signed manifest {k}") for k in (*HASH_FIELDS, "signature")}
     if signed.get("domain") != DOMAIN.decode():
         findings.append(Finding(CHECKPOINT, "signed manifest has the wrong domain"))
     for name, actual in launch_hashes(spec, launch).items():
@@ -2245,11 +2253,14 @@ def signature_verifies(key: bytes, payload: bytes, signature: bytes) -> bool:
 def pinned_launch_keys() -> list[bytes]:
     try:
         entries = json.loads(LAUNCH_KEYS.read_text())["keys"]
-        keys = [bytes.fromhex(entry.removeprefix("0x")) for entry in entries]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
         raise InputError(f"cannot read the pinned keys in launch_keys.json: {e}") from e
-    if not isinstance(entries, list) or any(len(key) != 32 for key in keys):
-        raise InputError("launch_keys.json must list 32-byte ed25519 public keys in 0x-hex")
+    shape = "launch_keys.json must list 32-byte ed25519 public keys in 0x-hex"
+    if not isinstance(entries, list):
+        raise InputError(shape)
+    keys = [hex_bytes(entry, f"launch_keys.json keys[{i}]") for i, entry in enumerate(entries)]
+    if any(len(key) != 32 for key in keys):
+        raise InputError(shape)
     return keys
 
 
@@ -2268,17 +2279,22 @@ def launch_keys(given: str | None) -> tuple[list[bytes], list[Finding]]:
 
 
 def parse_launch_key(text: str) -> bytes:
-    try:
-        key = bytes.fromhex(text.removeprefix("0x"))
-    except ValueError as e:
-        raise InputError(f"--manifest-key is not hex: {e}") from e
+    key = hex_bytes(text, "--manifest-key")
     if len(key) != 32:
         raise InputError("--manifest-key must be a 32-byte ed25519 public key")
     return key
 
 
+def validate_key_text(text: str, where: str) -> None:
+    """A key given in hex is spelled as hex_bytes reads it; any other string is
+    read as SS58, and rule 1 refuses one that does not decode."""
+    if text.startswith(("0x", "0X")):
+        hex_bytes(text, where)
+
+
 def validate_role_entry(entry, where: str) -> None:
     if isinstance(entry, str):
+        validate_key_text(entry, where)
         return
     if not isinstance(entry, dict):
         raise InputError(f"{where} must be a public key string or a multisig")
@@ -2316,8 +2332,10 @@ def validate_node(node, where: str) -> None:
         raise InputError(f"{where} cmdline must be the path of a /proc/<pid>/cmdline capture")
     launch_commands(node)
     if node["authority"]:
+        text = node["aura"] if isinstance(node.get("aura"), str) else ""
+        validate_key_text(text, f"{where} aura")
         try:
-            aura = decode_public_key(node["aura"]) if isinstance(node.get("aura"), str) else b""
+            aura = decode_public_key(text)
         except ValueError:
             aura = b""
         if len(aura) != 32:
@@ -2360,8 +2378,7 @@ def validate_launch(launch) -> None:
                          "lock that backs genesis")
     if not UTXO.fullmatch(lock["utxo"]):
         raise InputError("supply.genesis_lock.utxo must be <64 hex>#<index>")
-    if not re.fullmatch(r"(?:[0-9a-fA-F]{2})+", lock["native_script"]):
-        raise InputError("supply.genesis_lock.native_script must be the script's CBOR in hex")
+    hex_bytes(lock["native_script"], "supply.genesis_lock.native_script")
     nodes = launch.get("nodes", [])
     if not isinstance(nodes, list):
         raise InputError("nodes must be a list")
@@ -2425,9 +2442,21 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_delays(spec, meta))
 
 
+def unique_keys(pairs: list[tuple[str, object]]) -> dict:
+    """A JSON object that names each key once. serde keeps the last of a key a
+    map repeats and refuses a field given twice, and a JSON escape makes two
+    keys that read apart in the file one key, so a repeated key is not read."""
+    seen = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise ValueError(f"an object holds the key {key[:80]!r} twice")
+        seen.add(key)
+    return dict(pairs)
+
+
 def read_json(path: str, what: str):
     try:
-        return json.loads(Path(path).read_text())
+        return json.loads(Path(path).read_text(), object_pairs_hook=unique_keys)
     except (OSError, ValueError, RecursionError) as e:
         raise InputError(f"cannot read {what} {path}: {e}") from e
 
@@ -2456,10 +2485,11 @@ def signed_manifest(spec: Spec, launch: dict, key: signing.SigningKey) -> dict:
 
 
 def cmd_sign(args) -> int:
+    where = f"cannot load the launch signing key from {args.key}"
     try:
-        key = signing.SigningKey(bytes.fromhex(Path(args.key).read_text().strip().removeprefix("0x")))
-    except (OSError, ValueError, TypeError) as e:
-        raise InputError(f"cannot load the launch signing key from {args.key}: {type(e).__name__}") from e
+        key = signing.SigningKey(hex_bytes(Path(args.key).read_text().removesuffix("\n"), f"{where}: its seed"))
+    except (OSError, ValueError) as e:
+        raise InputError(f"{where}: {type(e).__name__}") from e
     launch = read_json(args.launch, "launch manifest")
     validate_launch(launch)
     manifest = signed_manifest(load_spec(args.spec), launch, key)
@@ -2486,7 +2516,7 @@ def main(argv: list[str] | None = None) -> int:
     sign = sub.add_parser("sign", help="sign the launch hashes of a raw chain spec and a launch manifest")
     sign.add_argument("--spec", required=True)
     sign.add_argument("--launch", required=True, help="launch manifest JSON")
-    sign.add_argument("--key", required=True, help="file holding the ed25519 seed, hex")
+    sign.add_argument("--key", required=True, help="file holding the 32-byte ed25519 seed as 0x-hex")
     sign.add_argument("--out", required=True)
     sign.set_defaults(func=cmd_sign)
     args = parser.parse_args(argv)

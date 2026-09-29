@@ -286,12 +286,230 @@ def test_extra_well_known_keys_are_named_with_their_label(spec, meta, tmp_path):
 
 @pytest.mark.parametrize("entries, error", [
     ([{"label": "x", "scheme": "sr25519"}], "keys\\[0\\] needs"),
-    ([{"label": "x", "scheme": "sr25519", "public": "zz"}], "keys\\[0\\] public is not hex"),
+    ([{"label": "x", "scheme": "sr25519", "public": "zz"}], "keys\\[0\\] public is not lowercase hex"),
     ([{"label": "x", "scheme": "sr25519", "public": "00" * 31}], "keys\\[0\\] public is 31 bytes"),
 ])
 def test_malformed_extra_table_is_an_input_error(tmp_path, entries, error):
     with pytest.raises(lp.InputError, match=error):
         lp.load_well_known([extra_table(tmp_path, entries)])
+
+
+# ---------------------------------------------------------------------------
+# Hex: each input in the one spelling its writer writes
+# ---------------------------------------------------------------------------
+
+SPEC239_RAW = FIXTURES / "preprod-spec239-raw.json"
+GUARDIAN_KEY = "0x" + lp.storage_key("RootTimelock", "Guardian").hex()
+DELAYS_KEY = "0x" + lp.storage_key("RootTimelock", "Delays").hex()
+# 32 bytes whose digits hold letters, so an upper-case spelling differs from it.
+DIGITS = "ab" * 32
+# Spellings of 0x-hex other than 0x and lower case. impl-serde, which reads a raw spec in the node, reads most as
+# other bytes than bytes.fromhex after the first two characters (whitespace or an odd digit shifts every nibble, two
+# trailing spaces add a zero byte, a missing 0x keeps two more digits), upper case alike, and 0X or a vertical tab
+# not at all.
+MISSPELLINGS = {
+    "a space after 0x": lambda digits: "0x " + digits,
+    "a tab after 0x": lambda digits: "0x\t" + digits,
+    "a vertical tab after 0x": lambda digits: "0x\v" + digits,
+    "a space inside": lambda digits: "0x" + digits[:4] + " " + digits[4:],
+    "spaces at the end": lambda digits: "0x" + digits + "  ",
+    "a newline at the end": lambda digits: "0x" + digits + "\n",
+    "no 0x": lambda digits: digits,
+    "no 0x and a leading byte": lambda digits: "ab" + digits,
+    "0X": lambda digits: "0X" + digits,
+    "upper case": lambda digits: "0x" + digits.upper(),
+    "an odd digit": lambda digits: "0x" + digits + "a",
+}
+# The same for a key in hex: a key string without 0x is read as SS58, and rule 1 refuses one that does not decode.
+HEX_KEY_MISSPELLINGS = {name: spell for name, spell in MISSPELLINGS.items() if spell("").startswith(("0x", "0X"))}
+# Spellings of bare hex other than lower case with no 0x: what the key tables and Kupo write.
+BARE_MISSPELLINGS = {
+    "a 0x prefix": lambda digits: "0x" + digits,
+    "a leading space": lambda digits: " " + digits,
+    "a space inside": lambda digits: digits[:4] + " " + digits[4:],
+    "a newline at the end": lambda digits: digits + "\n",
+    "upper case": lambda digits: digits.upper(),
+    "an odd digit": lambda digits: digits + "a",
+}
+MISSPELLED = "is not 0x-prefixed lowercase hex of whole bytes"
+BARE_MISSPELLED = "is not lowercase hex of whole bytes with no 0x"
+
+
+def spelled(spellings: dict):
+    return pytest.mark.parametrize("misspell", spellings.values(), ids=spellings.keys())
+
+
+def raw_spec(tmp_path, edit) -> str:
+    """The spec 239 raw spec as a file, its raw storage edited by `edit`."""
+    doc = json.loads(SPEC239_RAW.read_text())
+    edit(doc["genesis"]["raw"]["top"])
+    path = tmp_path / "raw.json"
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+@spelled(MISSPELLINGS)
+def test_a_raw_storage_value_in_another_spelling_is_an_input_error(tmp_path, misspell):
+    path = raw_spec(tmp_path, lambda top: top.update({GUARDIAN_KEY: misspell(DIGITS)}))
+    with pytest.raises(lp.InputError, match=f"^chain spec raw storage value at {GUARDIAN_KEY} {MISSPELLED}"):
+        lp.load_spec(path)
+
+
+@spelled(MISSPELLINGS)
+def test_a_raw_storage_key_in_another_spelling_is_an_input_error(tmp_path, misspell):
+    path = raw_spec(tmp_path, lambda top: top.update({misspell(GUARDIAN_KEY[2:]): top.pop(GUARDIAN_KEY)}))
+    with pytest.raises(lp.InputError, match=f"^chain spec raw storage key '.*' {MISSPELLED}"):
+        lp.load_spec(path)
+
+
+@pytest.mark.parametrize("value", [7, None, [171, 205], {"0x": "ab"}])
+def test_a_raw_storage_value_that_is_not_a_string_is_an_input_error(tmp_path, value):
+    path = raw_spec(tmp_path, lambda top: top.update({GUARDIAN_KEY: value}))
+    with pytest.raises(lp.InputError, match=f"^chain spec raw storage value at {GUARDIAN_KEY} {MISSPELLED}"):
+        lp.load_spec(path)
+
+
+@pytest.mark.parametrize("entries, error", [
+    (f'"{GUARDIAN_KEY}": "0x00", "{GUARDIAN_KEY}": "0x01"', f"an object holds the key '{GUARDIAN_KEY}' twice"),
+    (f'"{GUARDIAN_KEY}": "0x00", "{GUARDIAN_KEY[:-1]}\\u{ord(GUARDIAN_KEY[-1]):04x}": "0x01"',
+     f"an object holds the key '{GUARDIAN_KEY}' twice"),
+    (f'"{GUARDIAN_KEY}": "0x00", "0x{GUARDIAN_KEY[2:].upper()}": "0x01"',
+     f"chain spec raw storage key '0x{GUARDIAN_KEY[2:].upper()}' {MISSPELLED}"),
+], ids=["twice", "once with a JSON escape", "once in upper case"])
+def test_a_raw_storage_key_given_twice_in_any_spelling_is_an_input_error(tmp_path, entries, error):
+    doc = json.loads(SPEC239_RAW.read_text())
+    doc["genesis"]["raw"]["top"] = {"@": ""}
+    path = tmp_path / "raw.json"
+    path.write_text(json.dumps(doc).replace('{"@": ""}', "{" + entries + "}"))
+    with pytest.raises(lp.InputError, match=re.escape(error)):
+        lp.load_spec(str(path))
+
+
+def test_a_spec_that_repeats_any_key_is_an_input_error(tmp_path):
+    """The node refuses a field given twice; the preflight would read the last."""
+    path = tmp_path / "raw.json"
+    path.write_text(SPEC239_RAW.read_text().replace('"chainType": "Live"', '"chainType": "Local", "chainType": "Live"'))
+    with pytest.raises(lp.InputError, match="an object holds the key 'chainType' twice"):
+        lp.load_spec(str(path))
+
+
+@pytest.mark.parametrize("doc", [[], {"genesis": []}, {"genesis": {"raw": []}}, {"genesis": {"raw": {"top": []}}}])
+def test_a_spec_with_no_raw_storage_map_is_an_input_error(tmp_path, doc):
+    path = tmp_path / "raw.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(lp.InputError, match="needs the raw chain spec"):
+        lp.load_spec(str(path))
+
+
+def test_a_spec_with_child_tries_is_an_input_error(tmp_path):
+    doc = json.loads(SPEC239_RAW.read_text())
+    child = "0x" + b":child_storage:default:a".hex()
+    doc["genesis"]["raw"]["childrenDefault"] = {child: {"0x00 ": "0x 01"}}
+    path = tmp_path / "raw.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(lp.InputError, match="chain spec has child tries"):
+        lp.load_spec(str(path))
+
+
+@pytest.mark.parametrize("name", ["preprod-v6-raw.json.gz", "preprod-spec239-raw.json"])
+def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
+    """build-spec writes each raw storage key and value as 0x and lower case, so its output loads unchanged."""
+    data = (FIXTURES / name).read_bytes()
+    text = (gzip.decompress(data) if name.endswith(".gz") else data).decode()
+    path = tmp_path / "raw.json"
+    path.write_text(text)
+    doc = json.loads(text)
+    top = doc["genesis"]["raw"]["top"]
+    assert all(re.fullmatch(r"0x(?:[0-9a-f]{2})*", spelling) for entry in top.items() for spelling in entry)
+    spec = lp.load_spec(str(path))
+    assert spec.doc == doc
+    assert spec.storage == {bytes.fromhex(key[2:]): bytes.fromhex(value[2:]) for key, value in top.items()}
+
+
+@spelled(HEX_KEY_MISSPELLINGS)
+def test_a_role_key_in_another_spelling_of_hex_is_an_input_error(misspell):
+    launch = {"roles": {"sudo": [msig(2, fresh_account(), fresh_account())]}, "supply": VALID_LOCK}
+    launch["roles"]["sudo"][0]["members"].append({"threshold": 2, "members": [ss58(fresh_account()), misspell(DIGITS)]})
+    with pytest.raises(lp.InputError, match=rf"^roles\.sudo\[0\]\.members\[2\]\.members\[1\] {MISSPELLED}"):
+        lp.validate_launch(launch)
+
+
+@spelled(HEX_KEY_MISSPELLINGS)
+def test_an_aura_key_in_another_spelling_of_hex_is_an_input_error(misspell):
+    launch = {"roles": {}, "supply": VALID_LOCK, "nodes": [dict(authority(["materios-node"]), aura=misspell(DIGITS))]}
+    with pytest.raises(lp.InputError, match=rf"^nodes\[0\] aura {MISSPELLED}"):
+        lp.validate_launch(launch)
+
+
+@spelled(MISSPELLINGS)
+def test_a_lock_script_in_another_spelling_is_an_input_error(misspell):
+    launch = {"roles": {}, "supply": {"genesis_lock": dict(LOCK, native_script=misspell(LOCK_SCRIPT))}}
+    with pytest.raises(lp.InputError, match=f"^supply.genesis_lock.native_script {MISSPELLED}"):
+        lp.validate_launch(launch)
+
+
+@spelled(MISSPELLINGS)
+def test_a_signed_manifest_hash_in_another_spelling_is_an_input_error(spec, misspell):
+    key = signing.SigningKey.generate()
+    signed = lp.signed_manifest(spec, LAUNCH, key)
+    signed["genesis_hash"] = misspell(signed["genesis_hash"][2:])
+    with pytest.raises(lp.InputError, match=f"^signed manifest genesis_hash {MISSPELLED}"):
+        lp.check_checkpoint(spec, LAUNCH, signed, [pub(key)])
+
+
+@spelled(MISSPELLINGS)
+def test_a_pinned_launch_key_in_another_spelling_is_an_input_error(monkeypatch, tmp_path, misspell):
+    path = tmp_path / "launch_keys.json"
+    path.write_text(json.dumps({"keys": [misspell(DIGITS)]}))
+    monkeypatch.setattr(lp, "LAUNCH_KEYS", path)
+    with pytest.raises(lp.InputError, match=rf"^launch_keys.json keys\[0\] {MISSPELLED}"):
+        lp.pinned_launch_keys()
+
+
+@spelled(MISSPELLINGS)
+def test_a_manifest_key_in_another_spelling_is_an_input_error(misspell):
+    with pytest.raises(lp.InputError, match=f"^--manifest-key {MISSPELLED}"):
+        lp.parse_launch_key(misspell(DIGITS))
+
+
+@spelled({name: spell for name, spell in MISSPELLINGS.items() if name != "a newline at the end"})
+def test_a_seed_in_another_spelling_is_an_input_error_that_does_not_echo_it(preprod_path, tmp_path, capsys, misspell):
+    """The seed file holds 0x-hex and at most the newline that ends its line."""
+    key = tmp_path / "launch.key"
+    key.write_text(misspell(DIGITS))
+    launch = tmp_path / "launch.json"
+    launch.write_text(json.dumps({"roles": {}, "supply": VALID_LOCK}))
+    assert lp.main(["sign", "--spec", str(preprod_path), "--launch", str(launch), "--key", str(key),
+                    "--out", str(tmp_path / "o")]) == 2
+    err = capsys.readouterr().err
+    assert f"cannot load the launch signing key from {key}: its seed {MISSPELLED}" in err
+    assert "abab" not in err.lower()
+
+
+@spelled(BARE_MISSPELLINGS)
+def test_a_key_table_key_in_another_spelling_is_an_input_error(tmp_path, misspell):
+    """The table's spelling is gen_well_known_keys.py's, the one the anchor worker reads."""
+    path = extra_table(tmp_path, [{"label": "x", "scheme": "sr25519", "public": misspell(DIGITS)}])
+    with pytest.raises(lp.InputError, match=rf"keys\[0\] public {BARE_MISSPELLED}"):
+        lp.load_well_known([path])
+
+
+@pytest.mark.parametrize("field", ["dev_phrase_blake2_256", "dev_seed_blake2_256"])
+def test_a_dev_hash_in_another_spelling_is_an_input_error(monkeypatch, tmp_path, field):
+    table = json.loads((lp.HERE / "well_known_keys.json").read_text())
+    table[field] = table[field].upper()
+    (tmp_path / "well_known_keys.json").write_text(json.dumps(table))
+    monkeypatch.setattr(lp, "HERE", tmp_path)
+    with pytest.raises(lp.InputError, match=f"{field} {BARE_MISSPELLED}"):
+        lp.load_well_known()
+
+
+@spelled(BARE_MISSPELLINGS)
+def test_a_datum_kupo_serves_in_another_spelling_is_an_input_error(monkeypatch, misspell):
+    datum = cbor2.dumps(bytes.fromhex(DIGITS))
+    monkeypatch.setattr(lp, "kupo_get", lambda base, path: {"datum": misspell(datum.hex())})
+    with pytest.raises(lp.InputError, match=f"^the datum Kupo serves for the genesis lock {BARE_MISSPELLED}"):
+        lp.kupo_datum("http://kupo", hashlib.blake2b(datum, digest_size=32).hexdigest(), "the genesis lock")
 
 
 # ---------------------------------------------------------------------------
@@ -397,10 +615,13 @@ def test_truncated_observation_config_is_an_input_error(spec):
         lp.check_observation(spec)
 
 
-def test_malformed_manifest_is_refused(spec):
-    found = messages(lp.check_checkpoint(spec, LAUNCH, {"genesis_hash": "0x00"},
-                                         [pub(signing.SigningKey.generate())]))
-    assert len(found) == 1 and "signed manifest is malformed" in found[0]
+@pytest.mark.parametrize("signed, error", [
+    ({"genesis_hash": "0x00"}, f"signed manifest code_hash {MISSPELLED}"),
+    ([], "signed manifest must be a JSON object"),
+])
+def test_malformed_manifest_is_an_input_error(spec, signed, error):
+    with pytest.raises(lp.InputError, match=f"^{error}"):
+        lp.check_checkpoint(spec, LAUNCH, signed, [pub(signing.SigningKey.generate())])
 
 
 @pytest.mark.parametrize("argv", [
@@ -546,7 +767,7 @@ def test_dev_phrase_uri_with_a_password_is_named_without_the_password(spec, meta
 
 def test_dev_mnemonic_in_a_launch_config_is_detected_by_hash(spec, meta, known):
     phrase = "one two three four five six seven eight nine ten eleven twelve"
-    known = dataclasses.replace(known, phrase_hash=lp.blake2_256(phrase.encode()).hex())
+    known = dataclasses.replace(known, phrase_hash=lp.blake2_256(phrase.encode()))
     launch = {"roles": {}, "nodes": [{"name": "v1", "host": "h1", "argv": [],
                                       "env": {"SEED": f"  {phrase.replace(' ', '   ')}//Alice"}}]}
     found = dev_key_findings(spec, meta, known, launch)
@@ -558,7 +779,7 @@ DEV_SEED = "0xfac7959dbfe72f052e5a0c3c8d6530f202b02fd8f9f5ca3580ec8deb7797479e"
 
 
 def test_table_holds_the_dev_seed_by_its_hash(known):
-    assert known.seed_hash == lp.blake2_256(bytes.fromhex(DEV_SEED[2:])).hex()
+    assert known.seed_hash == lp.blake2_256(bytes.fromhex(DEV_SEED[2:]))
 
 
 def sidecar(argv=(), **env) -> dict:
@@ -2322,7 +2543,7 @@ ONE_KEY_SCRIPT_ADDRESS = "addr1wx9xkldmpy849sj5y7ezg2w98gm3y0qd2pq2f8l2hxf2u7c4x
 KEY_ADDRESS = "addr1v9w9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqshlgld"
 TEST_SCRIPT_ADDRESS = "addr_test1wpw9chzut3w9chzut3w9chzut3w9chzut3w9chzut3w9chqzhh58g"
 LOCK_TX = "5a" * 32
-LOCK = {"utxo": f"{LOCK_TX}#1", "address": SCRIPT_ADDRESS, "native_script": LOCK_SCRIPT}
+LOCK = {"utxo": f"{LOCK_TX}#1", "address": SCRIPT_ADDRESS, "native_script": "0x" + LOCK_SCRIPT}
 
 
 def script_address(script) -> str:
@@ -2470,7 +2691,7 @@ def test_the_test_address_encoder_matches_pycardano():
 
 @pytest.mark.parametrize("script, address", [(LOCK_SCRIPT, SCRIPT_ADDRESS), (TIMED_LOCK_SCRIPT, TIMED_SCRIPT_ADDRESS)])
 def test_a_lock_two_key_holders_must_sign_for_with_this_genesis_datum_passes(spec, script, address):
-    assert lock_findings(spec, {"utxo": f"{LOCK_TX}#1", "address": address, "native_script": script}) == []
+    assert lock_findings(spec, {"utxo": f"{LOCK_TX}#1", "address": address, "native_script": "0x" + script}) == []
 
 
 ALICE_CARDANO_KEY = hashlib.blake2b(bytes.fromhex(SP_KEYRING["ed25519"]["//Alice"]), digest_size=28).digest()
@@ -2488,7 +2709,8 @@ K1, K2, K3 = (bytes([i]) * 28 for i in (1, 2, 3))
     ([3, 0, [[0, K1], [0, K2]]], 0),
 ])
 def test_a_lock_fewer_than_two_key_holders_can_spend_is_refused(spec, script, holders):
-    lock = {"utxo": f"{LOCK_TX}#1", "address": script_address(script), "native_script": cbor2.dumps(script).hex()}
+    lock = {"utxo": f"{LOCK_TX}#1", "address": script_address(script),
+            "native_script": "0x" + cbor2.dumps(script).hex()}
     assert lock_findings(spec, lock) == [
         f"[4 supply] the genesis lock's native script can be spent by {holders} key holder"
         f"{'' if holders == 1 else 's'} (a well-known key counts as anyone's): fewer than two can move the backing"]
@@ -2496,12 +2718,13 @@ def test_a_lock_fewer_than_two_key_holders_can_spend_is_refused(spec, script, ho
 
 def test_a_lock_no_signature_can_satisfy_passes_the_signer_count(spec):
     script = [2, []]
-    lock = {"utxo": f"{LOCK_TX}#1", "address": script_address(script), "native_script": cbor2.dumps(script).hex()}
+    lock = {"utxo": f"{LOCK_TX}#1", "address": script_address(script),
+            "native_script": "0x" + cbor2.dumps(script).hex()}
     assert lock_findings(spec, lock) == []
 
 
 def test_a_lock_at_another_script_than_declared_is_refused(spec):
-    lock = dict(LOCK, native_script=ONE_KEY_SCRIPT)
+    lock = dict(LOCK, native_script="0x" + ONE_KEY_SCRIPT)
     assert lock_findings(spec, lock) == [
         f"[4 supply] the genesis lock address {SCRIPT_ADDRESS} pays to script "
         f"{hashlib.blake2b(bytes.fromhex('00' + LOCK_SCRIPT), digest_size=28).hexdigest()}, not the declared "
@@ -2539,7 +2762,7 @@ def test_a_lock_address_that_is_not_a_mainnet_address_is_refused(spec, address, 
 @pytest.mark.parametrize("raw", ["ff", cbor2.dumps([0, b"short"]).hex(), cbor2.dumps([9, 1]).hex(),
                                  cbor2.dumps([3, True, []]).hex(), cbor2.dumps({"k": 1}).hex()])
 def test_an_undecodable_lock_script_is_an_input_error(spec, raw):
-    lock = dict(LOCK, address=script_address(raw), native_script=raw)
+    lock = dict(LOCK, address=script_address(raw), native_script="0x" + raw)
     with pytest.raises(lp.InputError, match="the genesis lock native script does not decode"):
         lock_findings(spec, lock)
 
@@ -3280,7 +3503,8 @@ class Launch:
         path.write_text(json.dumps(self.spec.doc))
         return path
 
-    def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
+    def prepare(self) -> Path:
+        """Write each authority's cmdline capture and the spec, serve Cardano for that spec, and return its path."""
         for node in self.launch["nodes"]:
             if node["authority"] and isinstance(node.get("argv"), list) and "cmdline" in node:
                 capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
@@ -3288,8 +3512,19 @@ class Launch:
         spec = lp.load_spec(str(spec_path))
         datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
         self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum)
-        return run_cli(self.tmp_path, spec_path, self.launch, capsys, self.kupo.url, key or self.launch_key,
+        return spec_path
+
+    def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
+        return run_cli(self.tmp_path, self.prepare(), self.launch, capsys, self.kupo.url, key or self.launch_key,
                        manifest_key, extra, signed_launch)
+
+    def run_respelled(self, capsys, respell) -> tuple[int, int, str]:
+        """`sign`, then `check`, on this launch's spec with its raw storage then rewritten by `respell`."""
+        spec_path = self.prepare()
+        doc = json.loads(spec_path.read_text())
+        respell(doc["genesis"]["raw"]["top"])
+        spec_path.write_text(json.dumps(doc))
+        return sign_and_check(self.tmp_path, spec_path, self.launch, capsys, self.kupo.url, self.launch_key)
 
 
 def pin_launch_keys(monkeypatch, tmp_path, *keys: bytes) -> None:
@@ -3298,24 +3533,33 @@ def pin_launch_keys(monkeypatch, tmp_path, *keys: bytes) -> None:
     monkeypatch.setattr(lp, "LAUNCH_KEYS", path)
 
 
-def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=None, manifest_key=None,
-            extra=(), signed_launch=None) -> tuple[int, str]:
+def sign_and_check(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=None, manifest_key=None,
+                   extra=(), signed_launch=None) -> tuple[int, int, str]:
     """Sign with `key`, then check against the pinned launch keys, or against
-    `manifest_key` given on the command line."""
+    `manifest_key` given on the command line. Returns both exit codes and what
+    the check printed."""
     key = key or signing.SigningKey.generate()
     seed = tmp_path / "launch.key"
-    seed.write_text(key.encode().hex())
+    seed.write_text("0x" + key.encode().hex() + "\n")
     signed, launch_path = tmp_path / "signed.json", tmp_path / "launch.json"
     launch_path.write_text(json.dumps(signed_launch or launch))
-    assert lp.main(["sign", "--spec", str(spec_path), "--launch", str(launch_path), "--key", str(seed),
-                    "--out", str(signed)]) == 0
+    signing_code = lp.main(["sign", "--spec", str(spec_path), "--launch", str(launch_path), "--key", str(seed),
+                            "--out", str(signed)])
     launch_path.write_text(json.dumps(launch))
     capsys.readouterr()
     given = [] if manifest_key is None else ["--manifest-key", "0x" + manifest_key.hex()]
     code = lp.main(["check", "--spec", str(spec_path), "--launch", str(launch_path),
                     "--signed-manifest", str(signed), *given, "--kupo", kupo_url, "--subwasm", subwasm(), *extra])
     captured = capsys.readouterr()
-    return code, captured.out + captured.err
+    return signing_code, code, captured.out + captured.err
+
+
+def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=None, manifest_key=None,
+            extra=(), signed_launch=None) -> tuple[int, str]:
+    signing_code, code, out = sign_and_check(tmp_path, spec_path, launch, capsys, kupo_url, key, manifest_key,
+                                             extra, signed_launch)
+    assert signing_code == 0
+    return code, out
 
 
 def with_timelock(metadata_v14: dict) -> dict:
@@ -3389,6 +3633,43 @@ def test_cli_refuses_the_testnet_timelock_delays(clean, capsys):
     assert code == 1
     assert "[7 timelock] RootTimelock.Delays holds standard calls 300 blocks, below the 100800 the runtime sets " \
            "for mainnet" in out
+
+
+def respell_timelock(misspell):
+    return lambda top: top.update({key: misspell(top[key][2:]) for key in (GUARDIAN_KEY, DELAYS_KEY)})
+
+
+# The red team's rule 7 exploits: raw storage the preflight read as the declared guardian and the mainnet delays,
+# which the node loads as another guardian and delays past MaxDelay (a space after 0x, or no 0x and a leading byte),
+# or as no guardian at all (trailing spaces make the node file it under the key followed by a zero byte).
+TIMELOCK_EXPLOITS = {
+    "a space after 0x": (respell_timelock(MISSPELLINGS["a space after 0x"]), f"value at {GUARDIAN_KEY}"),
+    "no 0x and a leading byte": (respell_timelock(MISSPELLINGS["no 0x and a leading byte"]),
+                                 f"value at {GUARDIAN_KEY}"),
+    "spaces after the guardian key": (lambda top: top.update({GUARDIAN_KEY + "  ": top.pop(GUARDIAN_KEY)}),
+                                      f"key '{GUARDIAN_KEY}  '"),
+}
+
+
+@pytest.mark.parametrize("respell, entry", TIMELOCK_EXPLOITS.values(), ids=TIMELOCK_EXPLOITS.keys())
+def test_cli_refuses_a_timelock_the_node_would_load_as_other_bytes(clean, capsys, respell, entry):
+    signing_code, code, out = clean.run_respelled(capsys, respell)
+    assert (signing_code, code) == (2, 2), out
+    assert f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) chain spec raw storage {entry} {MISSPELLED}" in out
+
+
+def test_cli_refuses_a_balance_the_node_would_load_4096_times_larger(clean, capsys):
+    """The red team's rule 4 exploit: a space after 0x shifts every nibble of an
+    account's balance, which the preflight read as within the lock."""
+    extra = fresh_account()
+    endow(clean.spec, extra, int.from_bytes(bytes([0x0F] * 9), "little"))
+    clean.launch["roles"]["endowed"].append(ss58(extra))
+    issuance = int.from_bytes(clean.spec.value("Balances", "TotalIssuance"), "little")
+    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + sum(RESERVES.values())})
+    key = "0x" + account_key(extra).hex()
+    signing_code, code, out = clean.run_respelled(capsys, lambda top: top.update({key: "0x " + top[key][2:]}))
+    assert (signing_code, code) == (2, 2), out
+    assert f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) chain spec raw storage value at {key} {MISSPELLED}" in out
 
 
 def set_guardian(clean, entry) -> None:
@@ -3583,7 +3864,8 @@ def test_cli_refuses_unsafe_rpc_in_a_self_contained_unit(clean, capsys):
 
 
 def test_cli_refuses_a_lock_one_key_holder_can_spend(clean, capsys):
-    clean.launch["supply"]["genesis_lock"] = dict(LOCK, address=ONE_KEY_SCRIPT_ADDRESS, native_script=ONE_KEY_SCRIPT)
+    clean.launch["supply"]["genesis_lock"] = dict(LOCK, address=ONE_KEY_SCRIPT_ADDRESS,
+                                                  native_script="0x" + ONE_KEY_SCRIPT)
     clean.lock_output = dict(clean.lock_output, address=ONE_KEY_SCRIPT_ADDRESS)
     code, out = clean.run(capsys)
     assert code == 1
@@ -3754,8 +4036,8 @@ VALID_LOCK = {"genesis_lock": LOCK}
      "supply.genesis_lock.utxo must be <64 hex>#<index>"),
     ({"roles": {}, "supply": {"genesis_lock": {"utxo": LOCK["utxo"], "address": SCRIPT_ADDRESS}}},
      "supply.genesis_lock is required"),
-    ({"roles": {}, "supply": {"genesis_lock": dict(LOCK, native_script="zz")}},
-     "supply.genesis_lock.native_script must be the script's CBOR in hex"),
+    ({"roles": {}, "supply": {"genesis_lock": dict(LOCK, native_script="0xzz")}},
+     f"supply.genesis_lock.native_script {MISSPELLED}"),
     ({"roles": {}, "supply": {"genesis_lock": dict(LOCK, datum="00")}}, "unknown supply.genesis_lock field datum"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": {"a": 1}}, "nodes must be a list"),
     ({"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": "v1"}]}, "nodes\\[0\\] needs a name and a host"),

@@ -57,9 +57,10 @@ python3 launch_preflight.py check --spec mainnet-raw.json --launch launch.json \
 ```
 
 `sign` reads only the spec and the manifest, so the manifest can be signed
-before the nodes start. `check` also reads each authority's `cmdline`
-capture and calls each URL in `public_rpc`, so it runs once the launch's
-nodes and proxies are up.
+before the nodes start. Its `--key` file holds the 32-byte ed25519 seed as
+0x-hex, and at most the newline that ends its line. `check` also reads each
+authority's `cmdline` capture and calls each URL in `public_rpc`, so it runs
+once the launch's nodes and proxies are up.
 
 The signature must verify under a key `launch_keys.json` pins (`{"keys":
 ["0x<ed25519 public key>"]}`), committed with the launch key holder's review.
@@ -84,6 +85,26 @@ kupo --match <lock address> --match '<permissioned candidates policy>.*' ...
 The preflight trusts that Kupo for what Cardano holds, and refuses when it is
 more than 300 slots behind its node.
 
+## Hex
+
+Every hex value is read in one spelling: lowercase digits, two a byte, and
+nothing else. The raw spec's storage keys and values (`:code` included), the
+launch manifest's hex keys and `native_script`, the signed manifest,
+`launch_keys.json`, `--manifest-key` and the `sign --key` file start it with
+`0x`, as build-spec and `sign` write it. The key tables and Kupo's datums have
+no `0x`, as `gen_well_known_keys.py` writes a table and the anchor worker reads
+it. Any other spelling refuses as unreadable, and so does a JSON object in the
+spec or a manifest that names a key twice, in any JSON escape.
+
+The node reads a raw spec with impl-serde's `from_hex`, which also takes upper
+case and hex with no `0x`, and skips a space, tab, CR or LF while still
+counting it toward nibble alignment; FRAME then ignores the bytes a value has
+left over. So a value written `0x 1122...` loads as `0x0112...`, one with no
+`0x` loads the two digits a reader that strips `0x` drops, and a key followed
+by two spaces loads as that key and a zero byte: a guardian, a delay or a
+balance read one way would launch as another, or not at all. build-spec writes
+the one spelling, so its output loads unchanged.
+
 ## Launch manifest
 
 ```json
@@ -105,7 +126,7 @@ more than 300 slots behind its node.
     "fee_buffer": 100000000
   },
   "supply": {
-    "genesis_lock": {"utxo": "<tx id>#<index>", "address": "addr1w...", "native_script": "8303..."}
+    "genesis_lock": {"utxo": "<tx id>#<index>", "address": "addr1w...", "native_script": "0x8303..."}
   },
   "nodes": [
     {"name": "val-1", "host": "val-1", "addresses": ["10.0.0.11"], "authority": true,
@@ -142,9 +163,9 @@ more than 300 slots behind its node.
 - Every `economics` value is a non-negative integer in the smallest unit; an
   unknown field or any other value refuses as unreadable.
 - `supply.genesis_lock` is the Cardano output holding the cMATRA that backs
-  Materios issuance, and `native_script` the CBOR (hex) of the native script
-  its address pays to. The backing is the cMATRA amount Kupo reports at that
-  output; the manifest carries no backing figure. Create the lock after
+  Materios issuance, and `native_script` the CBOR of the native script its
+  address pays to, as 0x-hex. The backing is the cMATRA amount Kupo reports at
+  that output; the manifest carries no backing figure. Create the lock after
   building the raw spec, with the genesis hash as its inline datum: a Plutus
   bytestring, CBOR `5820` followed by the 32 bytes.
 - `nodes` lists every machine that runs a launch process or a proxy. Each
@@ -333,10 +354,11 @@ so rule 1 refuses exactly the chain names that would let it sign with a dev key.
 a public repo commits, and retired keys whose secret was published. A key whose
 exposure is not yet public knowledge must not be named here; list it in an
 operator table kept outside the repo and pass it with `--extra-well-known`
-(repeatable). That table has the same shape:
+(repeatable). That table has the same shape, each key in lowercase hex with no
+`0x`:
 
 ```json
-{"keys": [{"label": "exposed multisig member", "scheme": "sr25519", "public": "0x..."}]}
+{"keys": [{"label": "exposed multisig member", "scheme": "sr25519", "public": "<32 or 33 bytes of hex>"}]}
 ```
 
 A 33-byte ECDSA key also matches the blake2-256 account it maps to. Regenerate
