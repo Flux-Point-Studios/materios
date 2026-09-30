@@ -39,6 +39,10 @@ where
 /// live-quorum floor, as it does at block 1 unless one author alone is a
 /// quorum, block 1 proposes this committee again, so a spec without one
 /// schedules an empty GRANDPA set at its first rotation and halts.
+///
+/// List each authority once, in ascending cross-chain-key order, which is
+/// the order Ariadne seats a committee in. A duplicate carries double weight
+/// in GRANDPA, and any other order is re-seated by the first draw.
 pub type Authority = (CrossChainPublic, SessionKeys);
 
 /// The authority a development seed derives.
@@ -446,6 +450,27 @@ pub(crate) mod tests {
                 ..seated_now()
             }
         })
+    }
+
+    /// Every builder's genesis committee names each authority once, in the
+    /// order Ariadne seats a committee: ascending by cross-chain key.
+    #[test]
+    fn every_builder_seats_each_authority_once_in_ascending_cross_chain_key_order() {
+        for (name, spec) in [
+            ("development", super::development_config()),
+            ("local", super::local_testnet_config()),
+            ("preprod", crate::chain_spec_preprod::preprod_config()),
+        ] {
+            let committee = seated_at_genesis(&spec.unwrap()).committee;
+            assert!(
+                committee.windows(2).all(|pair| pair[0].0 < pair[1].0),
+                "{name}: {:?}",
+                committee
+                    .iter()
+                    .map(|(cross_chain, _)| cross_chain)
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
