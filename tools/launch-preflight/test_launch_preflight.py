@@ -2583,6 +2583,22 @@ def test_an_outsider_in_the_genesis_committee_is_refused(seated, meta):
         left_out(i, aura, gran) for i, (_, aura, gran) in enumerate(members)] + [NOT_THE_SESSION]
 
 
+def at_epoch(epoch: int) -> str:
+    return (f"[9 committee] {COMMITTEE} serves epoch {epoch}, not the 0 build-spec writes: the node takes only an "
+            "epoch-0 committee as the genesis one, and otherwise asks Cardano at block 1 for the committee of the "
+            "epoch after it instead of the current one's, which it cannot derive for an epoch that began before "
+            "Cardano's first, so the chain never authors block 1")
+
+
+# The red team's PoC: the declared committee at another epoch than build-spec's passed every rule, and the node's
+# Ariadne data provider then fails block 1's inherent data at every slot (u64::MAX wraps to epoch 0 in the runtime).
+@pytest.mark.parametrize("epoch", [1, 2, 1000, 2**64 - 1])
+def test_a_genesis_committee_at_an_epoch_other_than_zero_is_refused(seated, meta, epoch):
+    spec, members, launch = seated
+    put(spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value(members, epoch))
+    assert committee_findings(spec, meta, launch) == [at_epoch(epoch)]
+
+
 def test_every_declared_authority_must_sit_in_the_genesis_committee(seated, meta):
     spec, members, launch = seated
     seat(spec, members[:3])
@@ -5352,6 +5368,12 @@ def test_cli_refuses_a_genesis_committee_no_authority_declares(clean, capsys):
     assert f"[9 committee] {COMMITTEE}[0] {pair(*outsider[1:])} is not a declared authority's aura and grandpa key " \
            "pair" in out, out
     assert f"[9 committee] the permissioned candidates datum holds 1 candidate the runtime can seat, {NO_DRAW}" in out
+
+
+def test_cli_refuses_a_genesis_committee_at_another_epoch(clean, capsys):
+    put(clean.spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value(clean.members, epoch=1))
+    code, out = clean.run(capsys)
+    assert code == 1 and at_epoch(1) in out, out
 
 
 def test_cli_refuses_a_d_parameter_that_seats_registered_candidates(clean, capsys):

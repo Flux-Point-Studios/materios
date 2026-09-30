@@ -55,7 +55,8 @@ Rules, each of which refuses on its own:
                  changed less than a second before its node process started
   9 committee    the genesis committee, which the runtime seats at every
                  rotation whose Cardano draw fails, not exactly the declared
-                 authorities, each once, or past the runtime's MaxValidators;
+                 authorities, each once, or past the runtime's MaxValidators,
+                 or serving an epoch other than 0;
                  genesis Aura or GRANDPA authorities, session validators or
                  pallet_session keys other than theirs; two authorities that
                  declare one key; a Cardano permissioned candidate's gran key
@@ -2113,17 +2114,19 @@ def check_cardano_committee(meta: Metadata, cardano: CardanoView) -> list[Findin
     return findings
 
 
-def genesis_committee(spec: Spec) -> list[tuple[bytes, bytes, bytes]] | None:
-    """(cross-chain key, aura key, grandpa key) of each member of the genesis
-    SessionCommitteeManagement.CurrentCommittee, or None if genesis sets none."""
+def genesis_committee(spec: Spec) -> tuple[int, list[tuple[bytes, bytes, bytes]]] | None:
+    """The epoch the genesis SessionCommitteeManagement.CurrentCommittee serves,
+    and (cross-chain key, aura key, grandpa key) of each of its members, or None
+    if genesis sets none."""
     raw = spec.value("SessionCommitteeManagement", "CurrentCommittee")
     if raw is None:
         return None
     undecodable = ("SessionCommitteeManagement.CurrentCommittee does not decode as a u64 epoch and a list of "
                    f"{COMMITTEE_MEMBER}-byte members (a {CROSS_CHAIN_KEY}-byte cross-chain key, then 32-byte aura and "
                    "grandpa keys)")
-    return [(entry[:CROSS_CHAIN_KEY], entry[CROSS_CHAIN_KEY:-32], entry[-32:])
-            for entry in fixed_list(raw[EPOCH_NUMBER:], COMMITTEE_MEMBER, undecodable)]
+    members = [(entry[:CROSS_CHAIN_KEY], entry[CROSS_CHAIN_KEY:-32], entry[-32:])
+               for entry in fixed_list(raw[EPOCH_NUMBER:], COMMITTEE_MEMBER, undecodable)]
+    return int.from_bytes(raw[:EPOCH_NUMBER], "little"), members
 
 
 def seated_once(listed: list[tuple[bytes, str]], declared: dict[bytes, tuple[str, str]], item: str, kind: str,
@@ -2147,7 +2150,8 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     counts no candidate that has not authored), so the committee must be exactly
     the declared authorities' aura and grandpa key pairs, each once, and no
     longer than the runtime's MaxValidators, past which the runtime reads it as
-    empty. Aura.Authorities and Grandpa.Authorities must seat the same
+    empty. It must serve epoch 0, the one epoch the node's first committee draw
+    takes as genesis. Aura.Authorities and Grandpa.Authorities must seat the same
     authorities, each once, a voter at weight 1; Session.ValidatorsAndKeys must
     be the committee as the session genesis writes it, and PalletSession's
     session keys, which nothing rotates, empty as build-spec leaves them."""
@@ -2161,7 +2165,14 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
         findings.append(Finding(COMMITTEE, "genesis sets no SessionCommitteeManagement.CurrentCommittee, which "
                                            f"build-spec always writes: the runtime reads an empty one, and "
                                            f"{EMPTY_COMMITTEE}"))
-    members = committee or []
+    epoch, members = committee or (0, [])
+    if epoch:
+        findings.append(Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee serves epoch {epoch}, "
+                                           "not the 0 build-spec writes: the node takes only an epoch-0 committee as "
+                                           "the genesis one, and otherwise asks Cardano at block 1 for the committee "
+                                           "of the epoch after it instead of the current one's, which it cannot "
+                                           "derive for an epoch that began before Cardano's first, so the chain never "
+                                           "authors block 1"))
     bound = u32_constant(meta, "SessionCommitteeManagement", "MaxValidators")
     if bound is None:
         findings.append(Finding(COMMITTEE, "the runtime metadata declares no SessionCommitteeManagement.MaxValidators "
@@ -2172,7 +2183,7 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                                            "members, more than the runtime's SessionCommitteeManagement.MaxValidators "
                                            f"{bound}: the runtime cannot decode it and reads an empty committee, and "
                                            f"{EMPTY_COMMITTEE}"))
-    if committee == []:
+    if committee is not None and not members:
         findings.append(Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee is empty: "
                                            f"{EMPTY_COMMITTEE}"))
     findings += [Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee[{i}] repeats member {j}'s "
