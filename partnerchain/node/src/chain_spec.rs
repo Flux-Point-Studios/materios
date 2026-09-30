@@ -1,8 +1,11 @@
-use materios_runtime::{AccountId, Balance, Signature, TESTNET_TIMELOCK_DELAYS, WASM_BINARY};
+use materios_runtime::{
+    opaque::SessionKeys, AccountId, Balance, CrossChainPublic, Signature, TESTNET_TIMELOCK_DELAYS,
+    WASM_BINARY,
+};
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
-use sp_core::{sr25519, Pair, Public};
+use sp_core::{ecdsa, sr25519, Pair, Public};
 use sp_runtime::traits::{IdentifyAccount, Verify};
 
 /// Specialized `ChainSpec` for the Materios network.
@@ -25,11 +28,27 @@ where
     AccountPublic::from(get_from_seed::<TPublic>(seed)).into_account()
 }
 
-/// Helper to build an authority key set (Aura + Grandpa) from a seed.
-pub fn authority_keys_from_seed(s: &str) -> (AuraId, GrandpaId) {
+/// A genesis authority: the cross-chain key that names it in the committee,
+/// and the session keys it authors and votes with.
+///
+/// A chain spec seats its authorities only through
+/// `sessionCommitteeManagement.initialAuthorities`: the session pallet's
+/// genesis initialises Aura and GRANDPA from that committee, and panics with
+/// "Authorities are already initialized!" if `aura` or `grandpa` is set too.
+/// The committee also outlasts genesis. While Cardano's draw fails the
+/// live-quorum floor, as it does at block 1 unless one author alone is a
+/// quorum, block 1 proposes this committee again, so a spec without one
+/// schedules an empty GRANDPA set at its first rotation and halts.
+pub type Authority = (CrossChainPublic, SessionKeys);
+
+/// The authority a development seed derives.
+pub fn authority_keys_from_seed(s: &str) -> Authority {
     (
-        get_from_seed::<AuraId>(s),
-        get_from_seed::<GrandpaId>(s),
+        get_from_seed::<ecdsa::Public>(s).into(),
+        SessionKeys {
+            aura: get_from_seed::<AuraId>(s),
+            grandpa: get_from_seed::<GrandpaId>(s),
+        },
     )
 }
 
@@ -106,7 +125,7 @@ const ENDOWMENT: Balance = 1_000_000_000_000; // 1M MATRA (6 decimals)
 ///
 /// Includes configuration for the 6 IOG partner-chain pallets:
 ///   1. pallet_sidechain        -- sidechain params (genesis_utxo, slots_per_epoch)
-///   2. pallet_partner_chains_session (Session) -- initial validator set
+///   2. pallet_partner_chains_session (Session) -- seats the genesis committee
 ///   3. pallet_session_validator_management (SessionCommitteeManagement) -- committee + scripts
 ///   4. pallet_session (PalletSession) -- substrate session stub (default)
 ///   5. pallet_block_rewards (BlockRewards) -- no genesis storage needed
@@ -116,38 +135,11 @@ const ENDOWMENT: Balance = 1_000_000_000_000; // 1M MATRA (6 decimals)
 /// The `genesis_utxo` and `main_chain_scripts` fields use placeholder/default values
 /// that will be replaced when the Cardano bridge is activated.
 fn testnet_genesis(
-    initial_authorities: Vec<(AuraId, GrandpaId)>,
+    initial_authorities: Vec<Authority>,
     root_key: AccountId,
     endowed_accounts: Vec<AccountId>,
     _enable_println: bool,
 ) -> serde_json::Value {
-    // Build the initial_validators list for Session pallet.
-    // In permissioned-only mode, the cross-chain key is derived from the Aura
-    // key bytes (placeholder; real ECDSA cross-chain keys come later).
-    // Format: [(AccountId, SessionKeys), ...]
-    // For the JSON genesis patch, the Session pallet expects the validator account
-    // to be derived from the cross-chain public key.  In permissioned mode we use
-    // the Aura sr25519 key as the validator account ID.
-    let session_initial_validators: Vec<serde_json::Value> = initial_authorities
-        .iter()
-        .map(|(aura, grandpa)| {
-            // The session keys structure matches the runtime's SessionKeys { aura, grandpa }
-            serde_json::json!([
-                // Validator account ID (derived from aura key in dev/test)
-                aura,
-                {
-                    "aura": aura,
-                    "grandpa": grandpa,
-                }
-            ])
-        })
-        .collect();
-
-    // For SessionCommitteeManagement, initial_authorities maps
-    // (AuthorityId, AuthorityKeys) pairs.  In permissioned-only mode the
-    // AuthorityId (cross-chain public key) is unused, so we pass an empty list.
-    // The committee will be bootstrapped from the Session pallet's initial set.
-
     serde_json::json!({
         "balances": {
             "balances": endowed_accounts
@@ -156,11 +148,9 @@ fn testnet_genesis(
                 .collect::<Vec<_>>(),
         },
         "aura": {
-            // Left empty; validators are now managed by the Session pallet.
             "authorities": [],
         },
         "grandpa": {
-            // Left empty; validators are now managed by the Session pallet.
             "authorities": [],
         },
         "sudo": {
@@ -178,16 +168,11 @@ fn testnet_genesis(
             "genesisUtxo": "0x0000000000000000000000000000000000000000000000000000000000000000#0",
             "slotsPerEpoch": SLOTS_PER_EPOCH,
         },
-        // 2. Session pallet (pallet_partner_chains_session): initial validator set.
-        "session": {
-            "initialValidators": session_initial_validators,
-        },
         // 3. SessionCommitteeManagement (pallet_session_validator_management):
-        //    In permissioned-only mode we start with an empty authority list here.
-        //    The committee is bootstrapped from the Session pallet's initial validators.
+        //    the genesis committee, which the Session pallet (2) seats.
         //    main_chain_scripts use placeholder values (not needed until D < 1.0).
         "sessionCommitteeManagement": {
-            "initialAuthorities": [],
+            "initialAuthorities": initial_authorities,
             "mainChainScripts": {
                 "committeeCandidateAddress": "",
                 "dParameterPolicyId": "0x0000000000000000000000000000000000000000000000000000000000000000",
@@ -215,7 +200,205 @@ fn testnet_genesis(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use sp_runtime::{BuildStorage, Storage};
+    use super::{authority_keys_from_seed, AuraId, Authority, ChainSpec, GrandpaId};
+    use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
+    use materios_runtime::{
+        Block, Header, Runtime, SessionCommitteeManagement, Sidechain, SLOT_DURATION,
+    };
+    use sidechain_domain::{
+        byte_string::SizedByteString, AuraPublicKey, DParameter, EpochNonce, GrandpaPublicKey,
+        PermissionedCandidateData, SidechainPublicKey,
+    };
+    use sp_api::runtime_decl_for_core::Core;
+    use sp_block_builder::runtime_decl_for_block_builder::BlockBuilder;
+    use sp_consensus_aura::{runtime_decl_for_aura_api::AuraApi, Slot, AURA_ENGINE_ID};
+    use sp_consensus_grandpa::runtime_decl_for_grandpa_api::GrandpaApi;
+    use sp_core::Encode;
+    use sp_runtime::{traits::Header as _, BuildStorage, Digest, DigestItem, Storage};
+
+    /// Who a chain seats: its committee, the keys Aura takes authors from,
+    /// and the keys GRANDPA votes with.
+    #[derive(Debug, PartialEq)]
+    pub(crate) struct Seated {
+        pub(crate) committee: Vec<Authority>,
+        pub(crate) aura: Vec<AuraId>,
+        pub(crate) grandpa: Vec<GrandpaId>,
+    }
+
+    impl Seated {
+        /// A committee of `authorities`, each authoring and voting with its
+        /// own session keys.
+        pub(crate) fn by(authorities: &[Authority]) -> Self {
+            Seated {
+                committee: authorities.to_vec(),
+                aura: authorities
+                    .iter()
+                    .map(|(_, keys)| keys.aura.clone())
+                    .collect(),
+                grandpa: authorities
+                    .iter()
+                    .map(|(_, keys)| keys.grandpa.clone())
+                    .collect(),
+            }
+        }
+    }
+
+    /// A chain started from `spec`. The runtime's genesis builder builds its
+    /// state from the spec's own code, as `build-spec` and a starting node do.
+    fn start(spec: &ChainSpec) -> sp_io::TestExternalities {
+        sp_io::TestExternalities::new(spec.build_storage().expect("the genesis builds"))
+    }
+
+    fn seated_now() -> Seated {
+        Seated {
+            committee: SessionCommitteeManagement::current_committee_storage()
+                .committee
+                .to_vec(),
+            aura: <Runtime as AuraApi<Block, AuraId>>::authorities(),
+            grandpa: <Runtime as GrandpaApi<Block>>::grandpa_authorities()
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn seated_at_genesis(spec: &ChainSpec) -> Seated {
+        start(spec).execute_with(seated_now)
+    }
+
+    /// Cardano's committee selection inputs: `candidates` as the permissioned
+    /// candidates, one seat each, and no registered seats.
+    fn cardano(candidates: &[Authority]) -> AuthoritySelectionInputs {
+        AuthoritySelectionInputs {
+            d_parameter: DParameter {
+                num_permissioned_candidates: candidates.len() as u16,
+                num_registered_candidates: 0,
+            },
+            permissioned_candidates: candidates
+                .iter()
+                .map(|(cross_chain, keys)| PermissionedCandidateData {
+                    sidechain_public_key: SidechainPublicKey(cross_chain.encode()),
+                    aura_public_key: AuraPublicKey(keys.aura.encode()),
+                    grandpa_public_key: GrandpaPublicKey(keys.grandpa.encode()),
+                })
+                .collect(),
+            registered_candidates: Vec::new(),
+            epoch_nonce: EpochNonce(vec![7; 32]),
+        }
+    }
+
+    /// Authors the block after `parent` at `slot` as the node's proposer
+    /// does: initialise it, apply the inherents the runtime makes from the
+    /// slot's timestamp and Cardano's selection inputs, finalise it.
+    fn author(parent: &Header, slot: u64, cardano: &AuthoritySelectionInputs) -> Header {
+        let digest = Digest {
+            logs: vec![DigestItem::PreRuntime(
+                AURA_ENGINE_ID,
+                Slot::from(slot).encode(),
+            )],
+        };
+        <Runtime as Core<Block>>::initialize_block(&Header::new(
+            parent.number + 1,
+            Default::default(),
+            Default::default(),
+            parent.hash(),
+            digest,
+        ));
+        let mut inherents = sp_inherents::InherentData::new();
+        inherents
+            .put_data(sp_timestamp::INHERENT_IDENTIFIER, &(slot * SLOT_DURATION))
+            .unwrap();
+        inherents
+            .put_data(
+                sp_session_validator_management::INHERENT_IDENTIFIER,
+                cardano,
+            )
+            .unwrap();
+        inherents
+            .put_data(
+                sp_block_rewards::INHERENT_IDENTIFIER,
+                &SizedByteString([0; 32]),
+            )
+            .unwrap();
+        for inherent in <Runtime as BlockBuilder<Block>>::inherent_extrinsics(inherents) {
+            <Runtime as BlockBuilder<Block>>::apply_extrinsic(inherent)
+                .expect("the inherent is valid")
+                .expect("the inherent dispatches");
+        }
+        <Runtime as BlockBuilder<Block>>::finalize_block()
+    }
+
+    /// Who a chain started from `spec` seats after its first committee
+    /// rotation, while Cardano lists `candidates`. Block 1 proposes the next
+    /// committee, and block 2, the first of the next epoch, rotates to it.
+    /// GRANDPA's set is the one block 2's header schedules, read as the
+    /// node's block import reads it.
+    pub(crate) fn seated_after_first_rotation(
+        spec: &ChainSpec,
+        candidates: &[Authority],
+    ) -> Seated {
+        start(spec).execute_with(|| {
+            let cardano = cardano(candidates);
+            let epoch_length = u64::from(Sidechain::slots_per_epoch().0);
+            let genesis = Header::new(
+                0,
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+            );
+            let block_1 = author(&genesis, 1_000 * epoch_length + 1, &cardano);
+            let block_2 = author(&block_1, 1_001 * epoch_length, &cardano);
+            let scheduled = sc_consensus_grandpa::find_scheduled_change::<Block>(&block_2)
+                .expect("block 2 rotates the committee and schedules a GRANDPA set");
+            Seated {
+                grandpa: scheduled
+                    .next_authorities
+                    .into_iter()
+                    .map(|(key, _)| key)
+                    .collect(),
+                ..seated_now()
+            }
+        })
+    }
+
+    #[test]
+    fn fresh_development_and_local_chains_keep_their_authorities_through_the_first_rotation() {
+        for (spec, seeds) in [
+            (super::development_config(), &["Alice"][..]),
+            (super::local_testnet_config(), &["Alice", "Bob"][..]),
+        ] {
+            let spec = spec.unwrap();
+            let authorities: Vec<_> = seeds
+                .iter()
+                .copied()
+                .map(authority_keys_from_seed)
+                .collect();
+            assert_eq!(
+                seated_at_genesis(&spec),
+                Seated::by(&authorities),
+                "{seeds:?}"
+            );
+            assert_eq!(
+                seated_after_first_rotation(&spec, &authorities),
+                Seated::by(&authorities),
+                "{seeds:?}"
+            );
+        }
+    }
+
+    /// Block 1's draw fails the live-quorum floor, so the first rotation
+    /// seats the genesis committee rather than candidates that have never
+    /// authored a block.
+    #[test]
+    fn a_fresh_chain_keeps_its_genesis_committee_over_cardano_candidates_that_have_not_authored() {
+        let genesis = ["Alice", "Bob"].map(authority_keys_from_seed);
+        let cardano = ["Charlie", "Dave", "Eve"].map(authority_keys_from_seed);
+        assert_eq!(
+            seated_after_first_rotation(&super::local_testnet_config().unwrap(), &cardano),
+            Seated::by(&genesis)
+        );
+    }
 
     /// (reward per signer, era cap base, era cap baseline) as genesis stored
     /// them, read back through the runtime's own getters.

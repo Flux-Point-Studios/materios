@@ -1,6 +1,9 @@
 //! Chain specification for Materios Preprod — clean genesis, no overrides.
 
-use materios_runtime::{Multisig, TESTNET_TIMELOCK_DELAYS, WASM_BINARY};
+use crate::chain_spec::Authority;
+use materios_runtime::{
+    opaque::SessionKeys, CrossChainPublic, Multisig, TESTNET_TIMELOCK_DELAYS, WASM_BINARY,
+};
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
@@ -163,6 +166,45 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         0xe6, 0xfc, 0x6f, 0x67, 0x3c, 0x7a, 0x2b, 0x5b,
         0x50, 0x0a, 0x2b, 0x7f, 0x2a, 0x68, 0x45, 0x8e,
     ]));
+    // Cross-chain keys: each authority's sidechain key in the Cardano
+    // permissioned candidates datum, so the genesis committee names the same
+    // validators Cardano's draw does.
+    let macbook_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x02, 0xec, 0x64, 0x82, 0x23, 0x00, 0x71, 0x35,
+        0x85, 0xd9, 0xb0, 0xc3, 0xeb, 0x14, 0x56, 0xbb,
+        0x99, 0xc3, 0xcc, 0x42, 0xd7, 0x9f, 0x4a, 0xb8,
+        0xe5, 0x35, 0x38, 0xe5, 0x0c, 0x9b, 0xed, 0x0a,
+        0x61,
+    ]));
+    let gemtek_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x03, 0x47, 0x7f, 0xc2, 0xa5, 0xb7, 0xb2, 0x87,
+        0xed, 0x89, 0xec, 0x47, 0x55, 0x6e, 0x00, 0x02,
+        0xaa, 0x0d, 0x7c, 0xf8, 0x8b, 0x1f, 0xbd, 0x6f,
+        0xbe, 0x17, 0x22, 0xeb, 0x1e, 0xf7, 0x87, 0x35,
+        0x99,
+    ]));
+    let node2_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x03, 0x4f, 0x29, 0x3c, 0x28, 0x1c, 0x59, 0xb8,
+        0x20, 0x0e, 0xa3, 0x16, 0xd1, 0xc8, 0xd7, 0x15,
+        0x4c, 0x1b, 0x06, 0xa9, 0xed, 0x26, 0x03, 0x25,
+        0x10, 0x49, 0xb9, 0xfd, 0xa6, 0x3f, 0x2e, 0xd6,
+        0xce,
+    ]));
+    let node3_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x03, 0xf2, 0xc1, 0xc5, 0x0d, 0x62, 0xf0, 0x23,
+        0xc6, 0x37, 0xaf, 0xe7, 0x99, 0x96, 0x84, 0x31,
+        0x57, 0xc6, 0x91, 0x4e, 0x92, 0x96, 0x05, 0xcd,
+        0xe3, 0xc5, 0x3d, 0xe4, 0x7a, 0x68, 0x96, 0xfc,
+        0x0e,
+    ]));
+    let authority =
+        |cross_chain, aura, grandpa| -> Authority { (cross_chain, SessionKeys { aura, grandpa }) };
+    let authorities = vec![
+        authority(macbook_cross_chain, macbook_aura, macbook_grandpa),
+        authority(gemtek_cross_chain, gemtek_aura, gemtek_grandpa),
+        authority(node2_cross_chain, node2_aura, node2_grandpa),
+        authority(node3_cross_chain, node3_aura, node3_grandpa),
+    ];
 
     Ok(ChainSpec::builder(
         WASM_BINARY.ok_or("WASM binary not available")?,
@@ -219,10 +261,10 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "guardian": keyholders_3_of_3,
         },
         "aura": {
-            "authorities": [macbook_aura, gemtek_aura, node2_aura, node3_aura],
+            "authorities": [],
         },
         "grandpa": {
-            "authorities": [[macbook_grandpa, 1], [gemtek_grandpa, 1], [node2_grandpa, 1], [node3_grandpa, 1]],
+            "authorities": [],
         },
         "motra": {
             // MUST mirror `MotraParams::default()` in pallets/motra/src/types.rs
@@ -269,16 +311,8 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "genesisUtxo": "13313ea0119e0c4330f64f1809159064a371a1bbf2050b1fe13d5492280dca50#0",
             "slotsPerEpoch": PREPROD_SLOTS_PER_EPOCH,
         },
-        "session": {
-            "initialValidators": [
-                [macbook_aura, { "aura": macbook_aura, "grandpa": macbook_grandpa }],
-                [gemtek_aura,  { "aura": gemtek_aura,  "grandpa": gemtek_grandpa  }],
-                [node2_aura,   { "aura": node2_aura,   "grandpa": node2_grandpa   }],
-                [node3_aura,   { "aura": node3_aura,   "grandpa": node3_grandpa   }],
-            ],
-        },
         "sessionCommitteeManagement": {
-            "initialAuthorities": [],
+            "initialAuthorities": authorities,
             "mainChainScripts": {
                 // MainchainAddress serializes as hex of UTF-8 bytes of the
                 // bech32 string (the follower queries db-sync for the literal
@@ -300,8 +334,104 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::chain_spec::tests::stored_attestor_rewards;
+    use super::{preprod_config, Authority, ChainSpec, CrossChainPublic, SessionKeys};
+    use crate::chain_spec::tests::{
+        seated_after_first_rotation, seated_at_genesis, stored_attestor_rewards, Seated,
+    };
     use sp_runtime::BuildStorage;
+
+    /// The permissioned candidates on Cardano preprod: each authority's
+    /// cross-chain, aura and grandpa keys, in the order genesis seats them
+    /// (MacBook, Gemtek, Node-2, Node-3).
+    const CARDANO_CANDIDATES: [(&str, &str, &str); 4] = [
+        (
+            "02ec64822300713585d9b0c3eb1456bb99c3cc42d79f4ab8e53538e50c9bed0a61",
+            "20cdba0a5d368c5eb0ee119d25f440f8c261ebd50f2363dae4eb3ed607f64c08",
+            "c05b56dab7a8701871a8be75aed6e2ad8c5eb5ff935ddd2b00eeca7299af35b1",
+        ),
+        (
+            "03477fc2a5b7b287ed89ec47556e0002aa0d7cf88b1fbd6fbe1722eb1ef7873599",
+            "44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9480a517a97f189964b",
+            "4558853422164939eca690f21f76a614f7957352e01a448a4986ca3d55d98f23",
+        ),
+        (
+            "034f293c281c59b8200ea316d1c8d7154c1b06a9ed2603251049b9fda63f2ed6ce",
+            "8ed446c7114fbeb751866e6752dedf36fba9b3d2832a9fc50a005e00ed0ab124",
+            "4dc9c8f9bd37df2bb9223458c897b000fe4362958da6eeb6413b93dcfbabe2ba",
+        ),
+        (
+            "03f2c1c50d62f023c637afe79996843157c6914e929605cde3c53de47a6896fc0e",
+            "925fe8605fe32a53a7b391498fc1b0ab91d3af7319607bd70b850b4f5fa9d255",
+            "750d4ba2a831a30d419009f2d8bc1ef1e6fc6f673c7a2b5b500a2b7f2a68458e",
+        ),
+    ];
+
+    fn cardano_candidates() -> Vec<Authority> {
+        let bytes = |hex: &str| sp_core::bytes::from_hex(hex).unwrap();
+        CARDANO_CANDIDATES
+            .iter()
+            .map(|(cross_chain, aura, grandpa)| {
+                (
+                    CrossChainPublic::try_from(&bytes(cross_chain)[..]).unwrap(),
+                    SessionKeys {
+                        aura: TryFrom::try_from(&bytes(aura)[..]).unwrap(),
+                        grandpa: TryFrom::try_from(&bytes(grandpa)[..]).unwrap(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// `spec` with `authorities` seeded into Aura and GRANDPA directly, and
+    /// no genesis committee.
+    fn without_committee(spec: &ChainSpec, authorities: &[Authority]) -> ChainSpec {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&spec.as_json(false).unwrap()).unwrap();
+        let patch = &mut json["genesis"]["runtimeGenesis"]["patch"];
+        patch["aura"] = serde_json::json!({
+            "authorities": authorities.iter().map(|(_, keys)| &keys.aura).collect::<Vec<_>>(),
+        });
+        patch["grandpa"] = serde_json::json!({
+            "authorities": authorities.iter().map(|(_, keys)| (&keys.grandpa, 1)).collect::<Vec<_>>(),
+        });
+        patch["sessionCommitteeManagement"]["initialAuthorities"] = serde_json::json!([]);
+        ChainSpec::from_json_bytes(json.to_string().into_bytes()).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_preprod_chain_keeps_its_authorities_through_the_first_rotation() {
+        let spec = preprod_config().unwrap();
+        let authorities = cardano_candidates();
+        assert_eq!(
+            seated_after_first_rotation(&spec, &authorities),
+            Seated::by(&authorities)
+        );
+        assert_eq!(seated_at_genesis(&spec), Seated::by(&authorities));
+    }
+
+    /// The harness sees the halt: without a genesis committee, block 1
+    /// proposes an empty one, and the rotation schedules an empty GRANDPA
+    /// set, which the node's block import refuses.
+    #[test]
+    fn a_preprod_genesis_without_a_committee_schedules_an_empty_grandpa_set() {
+        let authorities = cardano_candidates();
+        let spec = without_committee(&preprod_config().unwrap(), &authorities);
+        assert_eq!(
+            seated_at_genesis(&spec),
+            Seated {
+                committee: Vec::new(),
+                ..Seated::by(&authorities)
+            }
+        );
+        assert_eq!(
+            seated_after_first_rotation(&spec, &authorities),
+            Seated {
+                committee: Vec::new(),
+                grandpa: Vec::new(),
+                ..Seated::by(&authorities)
+            }
+        );
+    }
 
     #[test]
     fn preprod_genesis_stores_its_tuned_attestor_rewards() {

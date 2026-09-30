@@ -50,7 +50,7 @@
     {
       "id": "committee-seating-gate",
       "name": "Committee seating gate",
-      "desc": "Composed authority-selection gate: input sanitizer, dead-registered and dead-core liveness filters, seat-ramp clamp, live-quorum floor, growth-slack invariant, break-glass floor and pinned-committee override; refuses (keep-current) rather than seat a committee that cannot finalize.",
+      "desc": "Composed authority-selection gate: input sanitizer, dead-registered and dead-core liveness filters, seat-ramp clamp, live-quorum floor, growth-slack invariant, break-glass floor and pinned-committee override; refuses (keep-current) rather than seat a committee that cannot finalize, so a fresh chain keeps the genesis committee its chain spec declares until a quorum of Cardano's draw has authored.",
       "kind": "engine",
       "paths": [
         "partnerchain/runtime/src/committee_liveness.rs",
