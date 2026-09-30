@@ -2759,13 +2759,15 @@ def test_a_genesis_grandpa_voter_no_authority_declares_is_refused(seated, meta):
         "not vote on finality" for i, (_, _, gran) in enumerate(members)]
 
 
-def test_a_genesis_grandpa_voter_of_weight_other_than_one_is_refused(seated, meta):
+# Weight 0 drops a voter and 2 counts one twice; the test covers both sides of 1 and the u64 ends.
+@pytest.mark.parametrize("weight", [0, 2, 3, 2**64 - 1])
+def test_a_genesis_grandpa_voter_of_weight_other_than_one_is_refused(seated, meta, weight):
     spec, members, launch = seated
     keys = [gran for _, _, gran in members]
-    put(spec, "Grandpa", "Authorities", grandpa_list((keys[0], 3), *((key, 1) for key in keys[1:])))
+    put(spec, "Grandpa", "Authorities", grandpa_list((keys[0], weight), *((key, 1) for key in keys[1:])))
     assert committee_findings(spec, meta, launch) == [
-        f"[9 committee] genesis Grandpa.Authorities[0] 0x{keys[0].hex()} has weight 3, not the 1 build-spec writes: it "
-        "counts as 3 voters toward finality"]
+        f"[9 committee] genesis Grandpa.Authorities[0] 0x{keys[0].hex()} has weight {weight}, not the 1 build-spec "
+        f"writes: it counts as {weight} voters toward finality"]
 
 
 def test_a_genesis_grandpa_voter_listed_twice_is_refused(seated, meta):
