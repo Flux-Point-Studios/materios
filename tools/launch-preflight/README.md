@@ -279,8 +279,9 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   epoch settings, `MITHRIL_AGGREGATOR_ENDPOINT`,
   `MITHRIL_GENESIS_VERIFICATION_KEY`); any other setting could run code or
   change the node beyond its argv, such as a module path or the mock
-  follower. The preflight takes a program to be what its name says; it does
-  not read binaries or anything else on the machine. For a node that is not
+  follower. The preflight takes a program to be what its name says; it reads
+  no binary but each authority's node binary (rule 8), and nothing else on
+  the machine. For a node that is not
   an authority, that trust covers what its programs and the shell's other
   builtins do with their arguments: `printf -v NAME` under `set -a`, for
   one, exports a setting that no word names. An authority's launch runs only
@@ -432,6 +433,13 @@ does not list, a word no option takes, a repeated `--chain` or `--dev` with
 follower, which connects to nothing, and Cardano mainnet's epoch layout: no
 other setting, no network option, no keystore. A spec that names
 `telemetryEndpoints` refuses, since the node would connect to them.
+
+The attestation builds genesis on a fresh base path. A node whose base path
+already holds a database for the spec's chain `id` starts from the genesis in
+that database, whatever its `--chain` names: given a spec with another
+genesis and the same `id`, the node exports the old genesis. The preflight
+does not read the authorities' databases, so start each authority on an
+empty base path.
 
 `check` cannot pass without running every authority's binary: a missing or
 unreadable capture, a binary this host cannot run, or a node that builds no
