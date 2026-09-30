@@ -2478,8 +2478,8 @@ def voter_launch(spec: lp.Spec, grandpas=None, extra=()) -> dict:
                        for i, (aura, gran) in enumerate(zip(aura_keys(spec), grandpas))] + list(extra))
 
 
-def voter_findings(spec: lp.Spec, launch: dict) -> list[str]:
-    return messages(lp.check_grandpa(spec, launch))
+def voter_findings(spec: lp.Spec, launch: dict, cardano: lp.CardanoView = NO_CARDANO) -> list[str]:
+    return messages(lp.check_grandpa(spec, launch, cardano))
 
 
 def test_genesis_grandpa_voters_that_are_the_authorities_that_author_at_genesis_pass(spec):
@@ -2541,7 +2541,66 @@ def test_grandpa_voters_that_do_not_decode_are_an_input_error(spec, raw):
     put(spec, "Grandpa", "Authorities", raw)
     with pytest.raises(lp.InputError, match="Grandpa.Authorities does not decode as a list of 32-byte keys and "
                                             "u64 weights"):
-        lp.check_grandpa(spec, launch)
+        voter_findings(spec, launch)
+
+
+# ---------------------------------------------------------------------------
+# Rule 1: who finalizes from the first committee rotation
+# ---------------------------------------------------------------------------
+
+def genesis_authors_on_cardano(spec: lp.Spec, grans=None) -> lp.CardanoView:
+    """The authors genesis names as Cardano's permissioned candidates, each with the genesis GRANDPA key at its
+    index unless the test gives other gran keys."""
+    grans = grandpa_keys(spec) if grans is None else grans
+    return lp.CardanoView(lock=None, candidates=[candidate(aura, gran) for aura, gran in zip(aura_keys(spec), grans)])
+
+
+def test_cardano_candidates_that_vote_with_their_authorities_grandpa_keys_pass(spec):
+    assert voter_findings(spec, voter_launch(spec), genesis_authors_on_cardano(spec)) == []
+
+
+# The red team's PoC: the committee Cardano seats from the first rotation votes with the candidates' gran keys, and
+# an outsider's key in one of them finalized unchecked.
+def test_a_cardano_candidate_whose_gran_key_is_not_its_authoritys_grandpa_key_is_refused(spec):
+    keys, outsider = grandpa_keys(spec), fresh_account()
+    cardano = genesis_authors_on_cardano(spec, [outsider, *keys[1:]])
+    assert voter_findings(spec, voter_launch(spec), cardano) == [
+        f"[1 dev-keys] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key authority val0 "
+        "declares with its aura key: from the first committee rotation it votes on finality unchecked"]
+
+
+# Each candidate's key must be its own authority's: one authority's key on two candidates would count twice.
+def test_a_cardano_candidate_that_carries_another_authoritys_grandpa_key_is_refused(spec):
+    keys = grandpa_keys(spec)
+    cardano = genesis_authors_on_cardano(spec, [keys[1], keys[0], *keys[2:]])
+    assert voter_findings(spec, voter_launch(spec), cardano) == [
+        f"[1 dev-keys] Cardano permissioned candidate {i} gran 0x{keys[1 - i].hex()} is not the grandpa key authority "
+        f"val{i} declares with its aura key: from the first committee rotation it votes on finality unchecked"
+        for i in (0, 1)]
+
+
+def test_a_cardano_candidate_with_no_gran_key_is_refused(spec):
+    cardano = genesis_authors_on_cardano(spec)
+    cardano.candidates[1] = lp.Candidate(cardano.candidates[1].partner_chains_key, {"aura": aura_keys(spec)[1]})
+    assert voter_findings(spec, voter_launch(spec), cardano) == [
+        "[1 dev-keys] Cardano permissioned candidate 1 carries no gran key, where authority val1 declares a grandpa "
+        "key with its aura key: from the first committee rotation it does not vote on finality as declared"]
+
+
+def test_a_cardano_candidates_gran_key_is_checked_when_genesis_sets_no_grandpa_voters(spec):
+    launch, outsider = voter_launch(spec), fresh_account()
+    cardano = lp.CardanoView(lock=None, candidates=[candidate(aura_keys(spec)[0], outsider)])
+    del spec.storage[lp.storage_key("Grandpa", "Authorities")]
+    assert voter_findings(spec, launch, cardano) == [
+        f"[1 dev-keys] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key authority val0 "
+        "declares with its aura key: from the first committee rotation it votes on finality unchecked",
+        "[1 dev-keys] genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes is unchecked"]
+
+
+# Rule 3 refuses a candidate whose aura key no authority declares; it has no declared grandpa key to hold here.
+def test_a_cardano_candidate_no_authority_declares_is_left_to_rule_3(spec):
+    cardano = lp.CardanoView(lock=None, candidates=[candidate(fresh_account())])
+    assert voter_findings(spec, voter_launch(spec), cardano) == []
 
 
 @pytest.mark.parametrize("grandpa", [None, "0x" + "ab" * 31, "not a key"])
@@ -4551,6 +4610,17 @@ def test_cli_refuses_a_launch_that_primes_the_base_path_with_a_node_subcommand(c
                                              clean.launch_key)
     assert (signing_code, code) == (2, 2), out
     assert f"authority val0: its launch runs the node subcommand {setup.split()[1]!r} before its last command" in out
+
+
+# The red team's PoC: an outsider's gran key in the permissioned candidates datum passed every rule.
+def test_cli_refuses_a_cardano_candidate_that_votes_with_a_key_no_authority_declares(clean, capsys):
+    outsider = fresh_account()
+    clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), aura, outsider if i == 0 else gran)
+                                     for i, (aura, gran) in enumerate(zip(aura_keys(clean.spec),
+                                                                          grandpa_keys(clean.spec)))])
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert f"[1 dev-keys] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key" in out
 
 
 def test_cli_refuses_an_authority_whose_node_builds_another_genesis(clean, capsys):

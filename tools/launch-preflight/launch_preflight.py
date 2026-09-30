@@ -20,7 +20,9 @@ Rules, each of which refuses on its own:
                  for, or Root not a multisig of threshold 2 or more; an
                  off-chain role left undeclared; a chain spec the anchor worker
                  would read as a test network; a genesis GRANDPA voter that is
-                 not a genesis author's declared grandpa key, once, weight 1
+                 not a genesis author's declared grandpa key, once, weight 1,
+                 or a Cardano permissioned candidate's gran key that is not the
+                 grandpa key the authority with its aura key declares
   2 rewards      attestor reward and subsidy values or validator reward
                  parameters not declared, or genesis and the runtime do not
                  hold exactly the declared values
@@ -1947,14 +1949,36 @@ def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
             + [(f"Cardano permissioned candidate {i}", cand.keys["aura"]) for i, cand in enumerate(cardano.candidates)])
 
 
-def check_grandpa(spec: Spec, launch: dict) -> list[Finding]:
-    """Who finalizes from genesis: Grandpa.Authorities must list the grandpa key of
-    each authority that authors at genesis (its aura key is in Aura.Authorities),
-    once and with weight 1 as build-spec writes them, and no other key."""
+def check_grandpa(spec: Spec, launch: dict, cardano: CardanoView) -> list[Finding]:
+    """Who finalizes. From the first committee rotation the Cardano permissioned
+    candidates vote with their gran keys, so each must carry the grandpa key that
+    the authority with its aura key declares; rule 3 refuses a candidate no
+    authority declares. From genesis Grandpa.Authorities must list the grandpa key
+    of each authority that authors at genesis (its aura key is in
+    Aura.Authorities), once and with weight 1 as build-spec writes them, and no
+    other key."""
+    findings, grandpa_by_aura = [], {}
+    for node in launch.get("nodes", []):
+        if node["authority"]:
+            aura, grandpa = decode_public_key(node["aura"]), decode_public_key(node["grandpa"])
+            grandpa_by_aura.setdefault(aura, {})[grandpa] = node["name"]
+    for i, cand in enumerate(cardano.candidates):
+        grandpas = grandpa_by_aura.get(cand.keys["aura"])
+        gran = cand.keys.get("gran")
+        if grandpas is None or gran in grandpas:
+            continue
+        names = ", ".join(sorted(grandpas.values()))
+        if gran is None:
+            message = (f"carries no gran key, where authority {names} declares a grandpa key with its aura key: from "
+                       "the first committee rotation it does not vote on finality as declared")
+        else:
+            message = (f"gran 0x{gran.hex()} is not the grandpa key authority {names} declares with its aura key: "
+                       "from the first committee rotation it votes on finality unchecked")
+        findings.append(Finding(KEYS, f"Cardano permissioned candidate {i} {message}"))
     raw = spec.value("Grandpa", "Authorities")
     if raw is None:
-        return [Finding(KEYS, "genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes is "
-                              "unchecked")]
+        return findings + [Finding(KEYS, "genesis sets no Grandpa.Authorities, which build-spec always writes: who "
+                                         "finalizes is unchecked")]
     undecodable = InputError("Grandpa.Authorities does not decode as a list of 32-byte keys and u64 weights")
     try:
         count, pos = read_compact(raw, 0)
@@ -1965,7 +1989,7 @@ def check_grandpa(spec: Spec, launch: dict) -> list[Finding]:
     authors = set(genesis_aura(spec))
     declared = {decode_public_key(node["grandpa"]): node["name"] for node in launch.get("nodes", [])
                 if node["authority"] and decode_public_key(node["aura"]) in authors}
-    findings, voted = [], set()
+    voted = set()
     for i, start in enumerate(range(pos, len(raw), 40)):
         key, weight = raw[start:start + 32], int.from_bytes(raw[start + 32:start + 40], "little")
         where = f"genesis Grandpa.Authorities[{i}] 0x{key.hex()}"
@@ -2883,7 +2907,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
     well_known = load_well_known(extra_well_known)
     return (check_chain_identity(spec)
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
-            + check_grandpa(spec, launch)
+            + check_grandpa(spec, launch, cardano)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_public_rpc(launch)
