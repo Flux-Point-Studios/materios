@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1446,7 +1447,15 @@ BEHIND_PROXY = ["[3 rpc] authority val1 serves unsafe RPC methods behind proxy p
 
 def authority(argv, host="val1", name="val1", aura=None):
     return {"name": name, "host": host, "authority": True, "aura": "0x" + (aura or fresh_account()).hex(),
-            "argv": argv}
+            "argv": argv, "exe_sha256": "0x" + hashlib.sha256(b"materios-node").hexdigest()}
+
+
+def declared(argv, is_authority: bool, **fields) -> dict:
+    """A node that runs `argv`, declared an authority, which pins its node binary, or not."""
+    node = dict(authority(argv), authority=is_authority, **fields)
+    if not is_authority:
+        del node["exe_sha256"]
+    return node
 
 
 UNSAFE_9945 = ["materios-node", "--validator", "--rpc-methods", "unsafe", "--rpc-port", "9945"]
@@ -2021,7 +2030,7 @@ def test_an_authority_launch_the_preflight_cannot_read_is_an_input_error(tmp_pat
     "materios-node --validator --rpc-methods safe",
 ])
 def test_a_command_line_string_is_an_input_error(argv, is_authority):
-    node = dict(authority(["materios-node"]), authority=is_authority, argv=argv)
+    node = declared(argv, is_authority)
     with pytest.raises(lp.InputError, match="argv must be a list of strings: the words the process receives"):
         lp.validate_node(node, "nodes[0]")
 
@@ -2212,7 +2221,7 @@ def loader_error(name: str) -> str:
 @pytest.mark.parametrize("is_authority", [True, False])
 @pytest.mark.parametrize("name", LOADER_SETTINGS)
 def test_an_environment_that_changes_what_the_shell_or_loader_runs_is_an_input_error(name, is_authority):
-    node = dict(authority(["bash", "--norc", "-c", SAFE_NODE]), authority=is_authority, env={name: "/srv/x"})
+    node = declared(["bash", "--norc", "-c", SAFE_NODE], is_authority, env={name: "/srv/x"})
     with pytest.raises(lp.InputError, match=loader_error(name)):
         lp.validate_node(node, "nodes[0]")
 
@@ -2230,7 +2239,7 @@ def test_an_environment_that_changes_what_the_shell_or_loader_runs_is_an_input_e
     ("LD_AUDIT", "exec env LD_AUDIT=/srv/x.so materios-node --validator"),
 ])
 def test_a_script_setting_that_changes_what_the_shell_or_loader_runs_is_an_input_error(name, script, is_authority):
-    node = dict(authority(["bash", "--norc", "-c", script]), authority=is_authority)
+    node = declared(["bash", "--norc", "-c", script], is_authority)
     with pytest.raises(lp.InputError, match=loader_error(name)):
         lp.validate_node(node, "nodes[0]")
 
@@ -3688,6 +3697,393 @@ def test_a_genesis_that_stores_no_delays_is_refused(spec239):
 
 
 # ---------------------------------------------------------------------------
+# Rule 8: the genesis each authority's own node binary builds
+# ---------------------------------------------------------------------------
+
+# materios-node export-blocks, answering what the attestation asks: block 0 of the chain its --chain names, a raw
+# spec file or a chain built into the node, written as export-blocks --binary writes it. It builds a file's genesis
+# with the preflight's own computation, so these tests see the attestation's plumbing; test_node_attestation.py
+# runs the real node. KNOBS: tamper builds another state root, fail builds none from a file, built_in_panics none
+# from a built-in chain, export writes other bytes, log records each call.
+FAKE_NODE = '''#!@PYTHON@
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, @HERE@)
+import launch_preflight as lp
+
+KNOBS = @KNOBS@
+if "log" in KNOBS:
+    registrations = os.environ.get("MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE")
+    chain_file = next((Path(word.partition("=")[2] or sys.argv[i + 1]) for i, word in enumerate(sys.argv)
+                       if word.partition("=")[0] == "--chain"), None)
+    with open(KNOBS["log"], "a") as log:
+        log.write(json.dumps({"argv": sys.argv, "cwd": os.getcwd(), "cwd_files": os.listdir("."),
+                              "env": dict(os.environ),
+                              "registrations": registrations and Path(registrations).read_text(),
+                              "chain_sha256": chain_file and chain_file.is_file()
+                              and hashlib.sha256(chain_file.read_bytes()).hexdigest()}) + "\\n")
+VALUED = {"--base-path", "--from", "--to", "--database", "--db", "--db-cache", "--state-pruning", "--pruning",
+          "--blocks-pruning", "--keep-blocks", "--tracing-targets", "--tracing-receiver"}
+FLAGS = {"--binary", "--detailed-log-output", "--disable-log-color", "--enable-log-reloading"}
+args, chain, dev, out, i = sys.argv[1:], None, False, None, 1
+assert args[0] == "export-blocks", args
+while i < len(args):
+    name, given, value = args[i].partition("=")
+    if name == "--chain":
+        chain, i = (value, i + 1) if given else (args[i + 1], i + 2)
+    elif name in VALUED:
+        i += 1 if given else 2
+    elif name in ("--log", "-l") or args[i].startswith("-l"):
+        i += 1
+        while not given and len(name) == 2 + 3 * (name == "--log") and i < len(args) and not args[i].startswith("-"):
+            i += 1
+    elif args[i] == "--dev":
+        dev, i = True, i + 1
+    elif args[i] in FLAGS:
+        i += 1
+    elif args[i].startswith("-"):
+        sys.exit(f"error: unexpected argument '{args[i]}' found")
+    else:
+        out, i = args[i], i + 1
+chain = chain if chain is not None else "dev" if dev else ""
+if chain in ("", "dev", "local", "preprod"):
+    if KNOBS.get("built_in_panics"):
+        sys.exit("Thread 'main' panicked at 'genesis authorities is non-empty; all weights are non-zero; qed.'")
+    root, version = lp.blake2_256(chain.encode()), 1
+elif not os.path.exists(chain):
+    sys.exit(f"Error: Input(\\"Error opening spec file `{chain}`: No such file or directory (os error 2)\\")")
+else:
+    try:
+        spec = lp.load_spec(chain)
+    except lp.InputError as e:
+        sys.exit(f"Error: Input(\\"Error parsing spec file: {e}\\")")
+    if KNOBS.get("fail"):
+        sys.exit("Error: Service(Other(\\"the fake node builds no genesis\\"))")
+    version = lp.runtime_state_version(lp.decompressed_code(spec.code))
+    root = lp.trie_root(spec.storage, version)
+if KNOBS.get("tamper"):
+    root = bytes([root[0] ^ 1]) + root[1:]
+header = bytes(32) + lp.compact(0) + root + lp.trie_root({}, version) + lp.compact(0)
+Path(out).write_bytes(bytes.fromhex(KNOBS["export"]) if "export" in KNOBS
+                      else (2).to_bytes(8, "little") + header + b"\\0\\0")
+'''
+
+
+def fake_node(tmp_path: Path, **knobs) -> Path:
+    path = tmp_path / ("fake-node-" + hashlib.sha256(repr(sorted(knobs.items())).encode()).hexdigest()[:12])
+    path.write_text(FAKE_NODE.replace("@PYTHON@", sys.executable).replace("@HERE@", repr(str(HERE)))
+                    .replace("@KNOBS@", repr(knobs)))
+    path.chmod(0o755)
+    return path
+
+
+def sha256_pin(path: Path) -> str:
+    return "0x" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def node_calls(log: Path) -> list[dict]:
+    return [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+
+
+# Where an authority's machine keeps the chain spec its node loads: no file of that name is on this host.
+def authority_chain(tmp_path: Path) -> str:
+    return str(tmp_path / "authority-fs" / "mainnet-raw.json")
+
+
+def attested(tmp_path, spec_path: Path, argv=None, exe=None, chain_spec: bytes | None = None, name="val0") -> dict:
+    """An authority whose node process runs `argv`, from the binary `exe` and pinned to it, and whose --chain file
+    is a copy of `spec_path` unless the test gives other bytes."""
+    exe = exe or fake_node(tmp_path)
+    argv = argv or ["materios-node", "--validator", "--chain", authority_chain(tmp_path), "--rpc-methods", "safe"]
+    copied = tmp_path / f"{name}.chain.json"
+    copied.write_bytes(spec_path.read_bytes() if chain_spec is None else chain_spec)
+    return dict(authority(argv, name, name), cmdline=capture(tmp_path, name, argv), exe=str(exe),
+                exe_sha256=sha256_pin(exe), chain_spec=str(copied))
+
+
+def node_findings(spec_path: Path, *nodes) -> list[str]:
+    return messages(lp.check_node_genesis(lp.load_spec(str(spec_path)), rpc_launch(list(nodes))))
+
+
+def preprod_genesis_hex(spec_path: Path) -> str:
+    return lp.spec_genesis_hash(lp.load_spec(str(spec_path))).hex()
+
+
+def test_an_authority_whose_node_builds_the_computed_genesis_passes(tmp_path, preprod_path):
+    assert node_findings(preprod_path, attested(tmp_path, preprod_path)) == []
+
+
+def test_an_authority_whose_node_builds_another_genesis_is_refused(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path, exe=fake_node(tmp_path, tamper=True))
+    found = node_findings(preprod_path, node)
+    assert len(found) == 1
+    assert found[0].startswith("[8 node] authority val0: its node builds genesis 0x")
+    assert found[0].endswith(f" from the checked chain spec, and the preflight computes 0x"
+                             f"{preprod_genesis_hex(preprod_path)}: the signed genesis hash and the lock's datum "
+                             "bind the preflight's, not the chain this authority starts")
+
+
+def test_an_authority_running_another_binary_than_its_pin_is_refused_and_that_binary_is_not_run(tmp_path,
+                                                                                                preprod_path):
+    log = tmp_path / "calls.jsonl"
+    node = attested(tmp_path, preprod_path, exe=fake_node(tmp_path, log=str(log)))
+    pinned = node["exe_sha256"]
+    node["exe_sha256"] = "0x" + hashlib.sha256(b"the release binary").hexdigest()
+    assert node_findings(preprod_path, node) == [
+        f"[8 node] authority val0 runs a node binary whose sha256 is {pinned}, not its pinned exe_sha256 "
+        f"{node['exe_sha256']}: only the pinned binary is run to attest its genesis"]
+    assert node_calls(log) == []
+
+
+def test_an_authority_whose_chain_spec_file_is_not_the_checked_spec_is_refused(tmp_path, preprod_path):
+    other = json.loads(preprod_path.read_text())
+    other["bootNodes"] = ["/dns/boot.example/tcp/30333/p2p/12D3KooWEyoppNCUx8Yx66oV9fJnriXwCcXwDDUA2kj6vnc6iDEp"]
+    other = json.dumps(other).encode()
+    found = node_findings(preprod_path, attested(tmp_path, preprod_path, chain_spec=other))
+    assert found == [
+        f"[8 node] authority val0: its --chain file, as captured, is not the checked chain spec (sha256 "
+        f"0x{hashlib.sha256(other).hexdigest()}, the spec's 0x{hashlib.sha256(preprod_path.read_bytes()).hexdigest()})"
+        ": its node loads another chain spec"]
+
+
+@pytest.mark.parametrize("chain, built_in", [([], "local"), (["--dev"], "dev")], ids=["no --chain", "--dev"])
+def test_an_authority_that_names_no_chain_spec_file_is_refused(tmp_path, preprod_path, chain, built_in):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--validator", *chain, "--rpc-methods", "safe"])
+    assert node_findings(preprod_path, node) == [
+        f"[8 node] authority val0 gives no --chain: its node loads the chain built into it as {built_in}, not the "
+        "checked chain spec"]
+
+
+@pytest.mark.parametrize("words, name", [
+    (["--chain", "local"], "local"), (["--chain", "dev"], "dev"), (["--chain=dev"], "dev"),
+    (["--chain", "preprod"], "preprod"), (["--chain", ""], ""), (["--chain="], ""),
+])
+def test_a_chain_built_into_the_node_is_refused(tmp_path, preprod_path, words, name):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--validator", *words, "--rpc-methods", "safe"])
+    found = node_findings(preprod_path, node)
+    assert len(found) == 1
+    assert re.fullmatch(rf"\[8 node\] authority val0: --chain {re.escape(repr(name))} builds genesis 0x[0-9a-f]{{64}} "
+                        rf"with no file of that name here: the node takes it as a chain built into it, not the "
+                        rf"checked chain spec", found[0]), found[0]
+
+
+# A chain built into the node can fail to build here (the node's local chain panics once it has built genesis), and
+# a node that fails is not one that read --chain as a file: only its own error for that missing file says it did.
+@pytest.mark.parametrize("words, name", [(["--chain", "local"], "local"), (["--chain="], "")])
+def test_a_node_that_fails_on_a_chain_name_without_missing_that_file_is_an_input_error(
+        tmp_path, preprod_path, words, name):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", *words],
+                    exe=fake_node(tmp_path, built_in_panics=True))
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val0: its node builds no genesis from --chain {name!r} here, and does not report it as a "
+            "missing file: the preflight cannot tell whether the node reads it as a file or as a chain built into it "
+            "(Thread 'main' panicked at")):
+        node_findings(preprod_path, node)
+
+
+def test_an_authority_that_loads_its_chain_spec_by_a_relative_path_is_attested(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", "raw.json", "--validator"])
+    assert node_findings(preprod_path, node) == []
+
+
+def test_a_chain_spec_path_that_names_the_checked_spec_on_this_host_is_attested(tmp_path, preprod_path):
+    here = tmp_path / "here-raw.json"
+    here.write_bytes(preprod_path.read_bytes())
+    log = tmp_path / "calls.jsonl"
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", str(here)],
+                    exe=fake_node(tmp_path, log=str(log)))
+    assert node_findings(preprod_path, node) == []
+    assert [call["argv"][call["argv"].index("--chain") + 1] == str(here) for call in node_calls(log)] == [True, False]
+
+
+def test_a_chain_spec_path_that_names_another_file_on_this_host_is_an_input_error(tmp_path, preprod_path):
+    here = tmp_path / "here-raw.json"
+    here.write_text("{}")
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", str(here)])
+    with pytest.raises(lp.InputError, match=f"authority val0: --chain {re.escape(repr(str(here)))} names a file on "
+                                            "this host that is not the checked chain spec"):
+        node_findings(preprod_path, node)
+
+
+def test_the_node_runs_offline_on_a_fresh_base_path_with_only_the_options_export_blocks_reads(tmp_path, preprod_path):
+    log = tmp_path / "calls.jsonl"
+    argv = ["/usr/local/bin/materios-node", "--chain", authority_chain(tmp_path), "--base-path", "/data/materios",
+            "--validator", "--name", "val0", "--port", "30333", "--bootnodes", "/ip4/10.0.0.1/tcp/30333/p2p/12D3Koo",
+            "/ip4/10.0.0.2/tcp/30333/p2p/12D3Koo", "--rpc-port", "9945", "--rpc-cors", "all", "--rpc-methods", "safe",
+            "--rpc-max-connections", "5000", "--pool-limit", "32768", "--pool-kbytes", "65536",
+            "--keystore-path", "/data/keys", "--password-filename", "/run/pw", "--node-key-file", "/data/node-key",
+            "--state-pruning", "archive", "--db", "rocksdb", "--db-cache", "1024", "-lsync=debug",
+            "--telemetry-url", "wss://telemetry.example/submit 0", "--no-mdns", "--prometheus-external"]
+    node = attested(tmp_path, preprod_path, argv=argv, exe=fake_node(tmp_path, log=str(log)))
+    assert node_findings(preprod_path, node) == []
+    calls = node_calls(log)
+    assert len(calls) == 2
+    for call in calls:
+        base = call["argv"][call["argv"].index("--base-path") + 1]
+        assert not base.startswith("/data") and "/data/materios" not in call["argv"]
+        assert call["cwd_files"] == [] and base != call["cwd"]
+        assert call["argv"][1:4] == ["export-blocks", "--chain", call["argv"][3]]
+        assert call["argv"][4:] == ["--state-pruning", "archive", "--db", "rocksdb", "--db-cache", "1024",
+                                    "-lsync=debug", "--base-path", base, "--from", "0", "--to", "0", "--binary",
+                                    call["argv"][-1]]
+        # Python itself adds LC_CTYPE when it coerces the C locale (PEP 538).
+        assert set(call["env"]) - {"LC_CTYPE"} == {
+            "USE_MAIN_CHAIN_FOLLOWER_MOCK", "MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE",
+            "MC__FIRST_EPOCH_TIMESTAMP_MILLIS", "MC__EPOCH_DURATION_MILLIS", "MC__FIRST_EPOCH_NUMBER",
+            "MC__FIRST_SLOT_NUMBER"}
+        assert json.loads(call["registrations"]) == []
+    as_launched, on_its_spec = calls
+    assert as_launched["argv"][3] == authority_chain(tmp_path) and as_launched["chain_sha256"] is False
+    assert on_its_spec["argv"][3] != authority_chain(tmp_path)
+    assert on_its_spec["chain_sha256"] == hashlib.sha256(preprod_path.read_bytes()).hexdigest()
+
+
+def test_authorities_that_give_their_node_the_same_options_share_its_runs(tmp_path, preprod_path):
+    log = tmp_path / "calls.jsonl"
+    exe = fake_node(tmp_path, log=str(log))
+    chain = ["--chain", authority_chain(tmp_path)]
+    nodes = [attested(tmp_path, preprod_path, argv=["materios-node", *chain, "--name", name], exe=exe, name=name)
+             for name in ("val0", "val1", "val2")]
+    assert node_findings(preprod_path, *nodes) == []
+    assert len(node_calls(log)) == 2
+
+
+NOT_GENESIS = "authority val0: its node's export of block 0 is not one genesis block"
+COUNT, ROOTS = (2).to_bytes(8, "little").hex(), "33" * 64
+
+
+# A block 0 export that differs from genesis in one field only: its parent, its number, its digest, what follows it.
+@pytest.mark.parametrize("knobs, error", [
+    ({"fail": True}, "authority val0: its node builds no genesis from the checked chain spec: Error: Service"),
+    ({"export": "00"}, NOT_GENESIS),
+    ({"export": COUNT + "22" * 32 + "00" + ROOTS + "00" + "0000"}, NOT_GENESIS),
+    ({"export": COUNT + "00" * 32 + "04" + ROOTS + "00" + "0000"}, NOT_GENESIS),
+    ({"export": COUNT + "00" * 32 + "00" + ROOTS + "04" + "0000"}, NOT_GENESIS),
+    ({"export": COUNT + "00" * 32 + "00" + ROOTS + "00" + "0400"}, NOT_GENESIS),
+    ({"export": COUNT + "00" * 32 + "00" + ROOTS + "00" + "000000"}, NOT_GENESIS),
+], ids=["no genesis", "one byte", "a parent", "number 1", "a digest item", "an extrinsic", "a trailing byte"])
+def test_a_node_that_exports_no_genesis_block_is_an_input_error(tmp_path, preprod_path, knobs, error):
+    node = attested(tmp_path, preprod_path, exe=fake_node(tmp_path, **knobs))
+    with pytest.raises(lp.InputError, match=re.escape(error)):
+        node_findings(preprod_path, node)
+
+
+def test_a_binary_this_host_cannot_run_is_an_input_error(tmp_path, preprod_path):
+    exe = tmp_path / "arm64-node"
+    exe.write_bytes(b"\x7fELF\x02\x01\x01" + bytes(9) + b"\x02\x00\xb7\x00")
+    exe.chmod(0o755)
+    with pytest.raises(lp.InputError, match="authority val0: cannot run its node binary on this host"):
+        node_findings(preprod_path, attested(tmp_path, preprod_path, exe=exe))
+
+
+@pytest.mark.parametrize("field, error", [
+    ("exe", "authority val0: give a copy of its running node process's /proc/<pid>/exe as exe"),
+    ("chain_spec", "authority val0: give a copy of the file its node's --chain names, taken on its machine, as "
+                   "chain_spec"),
+])
+def test_an_authority_with_no_captured_binary_or_chain_spec_is_an_input_error(tmp_path, preprod_path, field, error):
+    node = attested(tmp_path, preprod_path)
+    del node[field]
+    with pytest.raises(lp.InputError, match=re.escape(error)):
+        node_findings(preprod_path, node)
+
+
+@pytest.mark.parametrize("field", ["exe", "chain_spec"])
+def test_an_unreadable_capture_is_an_input_error(tmp_path, preprod_path, field):
+    node = dict(attested(tmp_path, preprod_path), **{field: str(tmp_path / "missing")})
+    with pytest.raises(lp.InputError, match=f"authority val0: cannot read {field} "):
+        node_findings(preprod_path, node)
+
+
+def test_a_spec_that_names_telemetry_endpoints_is_an_input_error(tmp_path, preprod_path):
+    doc = json.loads(preprod_path.read_text())
+    doc["telemetryEndpoints"] = [["wss://telemetry.example/submit", 0]]
+    path = tmp_path / "telemetry-raw.json"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(lp.InputError, match="the chain spec names telemetryEndpoints"):
+        node_findings(path, attested(tmp_path, path))
+
+
+def test_a_launch_with_no_authority_runs_no_node(preprod_path):
+    assert lp.check_node_genesis(lp.load_spec(str(preprod_path)), rpc_launch([])) == []
+
+
+# How export-blocks is given an authority's node options: as the node reads them, each with its values.
+@pytest.mark.parametrize("argv, words", [
+    (["materios-node", "--chain", "a.json", "--validator"], ["--chain", "a.json"]),
+    (["materios-node", "--chain=a.json", "--name", "v", "--detailed-log-output"],
+     ["--chain=a.json", "--detailed-log-output"]),
+    (["materios-node", "--dev", "--validator"], ["--dev"]),
+    (["materios-node", "--bootnodes", "/ip4/1", "/ip4/2", "--chain", "a.json"], ["--chain", "a.json"]),
+    (["materios-node", "--log", "info", "sync=debug", "--rpc-methods", "safe"], ["--log", "info", "sync=debug"]),
+    (["materios-node", "--log=info", "-l", "a", "b", "-lc", "-l=d"], ["--log=info", "-l", "a", "b", "-lc", "-l=d"]),
+    (["materios-node", "-d", "/data", "-d/data", "--base-path=/d", "--tmp", "--chain", "x"], ["--chain", "x"]),
+    (["materios-node", "--experimental-rpc-endpoint", "listen-addr=0.0.0.0:9944", "-", "--db", "paritydb"],
+     ["--db", "paritydb"]),
+    (["materios-node", "--pruning", "archive", "--keep-blocks", "archive", "--database=rocksdb"],
+     ["--pruning", "archive", "--keep-blocks", "archive", "--database=rocksdb"]),
+    (["materios-node", "--telemetry-url", "wss://t.example/submit 0", "--password", "hunter2"], []),
+])
+def test_export_blocks_gets_the_node_options_it_reads_as_the_node_reads_them(argv, words):
+    assert lp.attested_options(argv, "authority val0") == words
+
+
+@pytest.mark.parametrize("argv, error", [
+    (["materios-node", "--frobnicate"], "gives --frobnicate, an option the preflight does not know"),
+    (["materios-node", "--frobnicate=hunter2"], "gives --frobnicate, an option the preflight does not know"),
+    (["materios-node", "-x"], "gives -x, an option the preflight does not know"),
+    (["materios-node", "--help"], "gives --help, an option the preflight does not know"),
+    (["materios-node", "--", "--chain", "x"], "gives --, an option the preflight does not know"),
+    (["materios-node", "export-blocks", "--chain", "x"], "word 1 of its node argv is not an option"),
+    (["materios-node", "--chain", "x", "stray"], "word 3 of its node argv is not an option"),
+    (["materios-node", "--chain"], "--chain takes a value its node argv does not give"),
+    (["materios-node", "--name", "--chain", "x"], "--name takes a value its node argv does not give"),
+    (["materios-node", "--bootnodes", "--chain", "x"], "--bootnodes takes a value its node argv does not give"),
+    (["materios-node", "--validator=true"], "--validator takes no value"),
+    (["materios-node", "--chain", "a", "--chain=b"], "gives --chain 2 times, which the node refuses"),
+    (["materios-node", "--dev", "--chain", "a"], "gives --dev with --chain, which the node refuses"),
+])
+def test_a_node_argv_the_preflight_cannot_read_as_the_node_does_is_an_input_error(argv, error):
+    with pytest.raises(lp.InputError, match=f"^authority val0: {re.escape(error)}"):
+        lp.attested_options(argv, "authority val0")
+
+
+def test_an_option_value_is_never_echoed(tmp_path):
+    with pytest.raises(lp.InputError) as raised:
+        lp.attested_options(["materios-node", "--password", "hunter2", "hunter3"], "authority val0")
+    assert "hunter" not in str(raised.value)
+
+
+def test_an_authority_node_argv_is_read_when_the_manifest_is_validated():
+    node = dict(authority(["materios-node", "--chain", "x", "--frobnicate"]), exe_sha256="0x" + "ab" * 32)
+    with pytest.raises(lp.InputError, match="gives --frobnicate, an option the preflight does not know"):
+        lp.validate_node(node, "nodes[0]")
+
+
+@pytest.mark.parametrize("pin, error", [
+    (None, "nodes\\[0\\] is an authority and must pin the sha256 of its node binary as exe_sha256"),
+    ("0x" + "ab" * 31, "nodes\\[0\\] is an authority and must pin the sha256 of its node binary as exe_sha256"),
+    ("0x" + "AB" * 32, "nodes\\[0\\] exe_sha256 is not 0x-prefixed lowercase hex"),
+])
+def test_an_authority_must_pin_its_node_binary(pin, error):
+    node = {k: v for k, v in authority(["materios-node", "--chain", "x"]).items() if k != "exe_sha256"}
+    if pin is not None:
+        node["exe_sha256"] = pin
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_node(node, "nodes[0]")
+
+
+@pytest.mark.parametrize("field", ["exe", "chain_spec", "exe_sha256"])
+def test_node_attestation_fields_are_read_for_an_authority_only(field):
+    with pytest.raises(lp.InputError, match=f"nodes\\[0\\] {field} is read for an authority only"):
+        lp.validate_node({"name": "edge", "host": "edge", "authority": False, field: "x"}, "nodes[0]")
+
+
+# ---------------------------------------------------------------------------
 # End to end through the CLI, with the real subwasm
 # ---------------------------------------------------------------------------
 
@@ -3702,8 +4098,10 @@ class Launch:
     multisig of fresh keys and its timelock guarded by a multisig of other fresh
     keys at the mainnet delays, the tuned rewards stored, one attestor endowed at
     the floor, the chain renamed, every account and authority declared, Cardano
-    holding the lock and the candidates, and a public RPC URL that serves only
-    safe methods. Every rule accepts it."""
+    holding the lock and the candidates, a public RPC URL that serves only safe
+    methods, and authorities that load the spec from its own file, pinned to a
+    node binary that builds the genesis the preflight computes. Every rule
+    accepts it."""
 
     def __init__(self, preprod_path, tmp_path, kupo, endpoint):
         spec = lp.load_spec(str(preprod_path))
@@ -3733,9 +4131,7 @@ class Launch:
                       "endowed": [ss58(a) for a in genesis_accounts(spec) if a not in (self.attestor, sudo)]},
             "economics": dict(TUNED, fee_buffer=100 * MATRA),
             "supply": {"genesis_lock": LOCK},
-            "nodes": [authority(["materios-node", "--validator", "--rpc-methods", "safe"], f"val{i}", f"val{i}", aura)
-                      for i, aura in enumerate(aura_keys(spec))]
-            + [{"name": "edge", "host": "edge", "authority": False}],
+            "nodes": [{"name": "edge", "host": "edge", "authority": False}],
             "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
                              "other_targets": ["rpc-node:9944"]}],
             "public_rpc": [endpoint.url],
@@ -3744,13 +4140,21 @@ class Launch:
         self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
         # None serves this genesis hash as the lock's inline datum.
         self.lock_datum = None
-        for node in self.launch["nodes"]:
-            if node["authority"]:
-                node["cmdline"] = str(tmp_path / f"{node['name']}.cmdline")
+        self.node_exe = fake_node(tmp_path)
+        self.launch["nodes"][:0] = [self.authority(f"val{i}", aura) for i, aura in enumerate(aura_keys(spec))]
         # The argv each authority's node process runs with, where a test gives one other than its launch argv.
         self.running = {}
+        # The bytes of the file each authority's --chain names, where a test gives other than the checked spec.
+        self.chain_files = {}
         self.launch_key = signing.SigningKey.generate()
         self.candidates = genesis_candidates_datum(spec)
+
+    def authority(self, name: str, aura: bytes) -> dict:
+        """An authority that runs the fake node, pinned to it, on the spec from its own file."""
+        node = authority(["materios-node", "--validator", "--chain", authority_chain(self.tmp_path), "--rpc-methods",
+                          "safe"], name, name, aura)
+        return dict(node, cmdline=str(self.tmp_path / f"{name}.cmdline"), exe=str(self.node_exe),
+                    exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"))
 
     def spec_path(self) -> Path:
         self.spec.doc["genesis"]["raw"]["top"] = {"0x" + k.hex(): "0x" + v.hex() for k, v in self.spec.storage.items()}
@@ -3759,11 +4163,15 @@ class Launch:
         return path
 
     def prepare(self) -> Path:
-        """Write each authority's cmdline capture and the spec, serve Cardano for that spec, and return its path."""
+        """Write each authority's cmdline and chain spec captures and the spec, serve Cardano for that spec, and
+        return its path."""
         for node in self.launch["nodes"]:
             if node["authority"] and isinstance(node.get("argv"), list) and "cmdline" in node:
                 capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
         spec_path = self.spec_path()
+        for node in self.launch["nodes"]:
+            if node["authority"] and "chain_spec" in node:
+                Path(node["chain_spec"]).write_bytes(self.chain_files.get(node["name"], spec_path.read_bytes()))
         spec = lp.load_spec(str(spec_path))
         datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
         self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum)
@@ -3864,6 +4272,55 @@ def test_cli_passes_a_clean_launch(clean, capsys):
     code, out = clean.run(capsys)
     assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
+
+
+def with_node_argv(clean, words) -> None:
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node["argv"] = ["materios-node", "--validator", *words, "--rpc-methods", "safe"]
+
+
+# The red team's PoC: an authority whose node loads a chain built into it, or another file, passed every rule.
+@pytest.mark.parametrize("words, refusal", [
+    ([], "[8 node] authority val0 gives no --chain: its node loads the chain built into it as local"),
+    (["--chain", "local"], "[8 node] authority val0: --chain 'local' builds genesis 0x"),
+    (["--chain", "dev"], "[8 node] authority val0: --chain 'dev' builds genesis 0x"),
+    (["--chain=dev"], "[8 node] authority val0: --chain 'dev' builds genesis 0x"),
+    (["--chain", "preprod"], "[8 node] authority val0: --chain 'preprod' builds genesis 0x"),
+], ids=["no --chain (node loads local)", "--chain local", "--chain dev", "--chain=dev", "--chain preprod"])
+def test_cli_refuses_an_authority_that_loads_a_chain_built_into_its_node(clean, capsys, words, refusal):
+    with_node_argv(clean, words)
+    code, out = clean.run(capsys)
+    assert code == 1 and refusal in out, out
+
+
+def test_cli_refuses_an_authority_that_loads_another_chain_spec_file(clean, capsys):
+    with_node_argv(clean, ["--chain", str(clean.tmp_path / "authority-fs" / "other-raw.json")])
+    clean.chain_files["val1"] = b'{"name": "another chain"}'
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert "[8 node] authority val1: its --chain file, as captured, is not the checked chain spec" in out, out
+
+
+def test_cli_refuses_an_authority_whose_node_builds_another_genesis(clean, capsys):
+    exe = fake_node(clean.tmp_path, tamper=True)
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node.update(exe=str(exe), exe_sha256=sha256_pin(exe))
+    code, out = clean.run(capsys)
+    assert code == 1 and "[8 node] authority val0: its node builds genesis 0x" in out, out
+
+
+def test_cli_refuses_an_authority_running_another_binary_than_its_pin(clean, capsys):
+    clean.launch["nodes"][0]["exe"] = str(fake_node(clean.tmp_path, tamper=True))
+    code, out = clean.run(capsys)
+    assert code == 1 and "[8 node] authority val0 runs a node binary whose sha256 is 0x" in out, out
+
+
+def test_cli_refuses_an_authority_with_no_captured_binary_as_unreadable(clean, capsys):
+    del clean.launch["nodes"][0]["exe"]
+    code, out = clean.run(capsys)
+    assert code == 2 and "authority val0: give a copy of its running node process's /proc/<pid>/exe" in out, out
 
 
 def test_cli_refuses_a_guardian_held_by_the_sudo_keyholders(clean, capsys):
@@ -4090,7 +4547,7 @@ def test_cli_refuses_a_launch_that_does_not_declare_its_public_rpc(clean, capsys
 def test_cli_refuses_an_authority_whose_running_node_differs_from_its_launch(clean, capsys):
     clean.running["val0"] = UNSAFE_EXTERNAL.split()
     code, out = clean.run(capsys)
-    assert code == 2 and "authority val0: word 3 of its running node process differs from its launch" in out
+    assert code == 2 and "authority val0: word 2 of its running node process differs from its launch" in out
 
 
 def test_cli_refuses_an_upstream_whose_port_comes_from_dns_srv_as_unreadable(clean, capsys):
@@ -4241,8 +4698,7 @@ def test_cli_refuses_a_local_chain_type(clean, capsys):
 
 def test_cli_refuses_a_dev_key_in_the_cardano_committee(clean, capsys):
     clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), ALICE, fresh_account())])
-    clean.launch["nodes"].append(dict(authority(["materios-node", "--validator", "--rpc-methods", "safe"],
-                                                "val9", "val9", ALICE), cmdline=str(clean.tmp_path / "val9.cmdline")))
+    clean.launch["nodes"].append(clean.authority("val9", ALICE))
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] Cardano permissioned candidate 0 aura: //Alice (sr25519)" in out
