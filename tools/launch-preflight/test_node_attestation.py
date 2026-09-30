@@ -66,6 +66,12 @@ def test_the_node_builds_the_genesis_the_preflight_computes_for_a_fresh_preprod_
     assert findings(preprod, entry) == []
 
 
+def test_build_spec_stores_the_last_runtime_upgrade_the_preflight_derives_from_the_code(preprod):
+    spec = lp.load_spec(str(preprod))
+    assert spec.value("System", "LastRuntimeUpgrade") is not None
+    assert lp.check_last_runtime_upgrade(spec) == []
+
+
 def test_the_node_reads_a_relative_chain_path_as_a_file(tmp_path, node, pin, preprod):
     assert findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain", "mainnet-raw.json"])) == []
 

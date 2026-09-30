@@ -36,8 +36,9 @@ Rules, each of which refuses on its own:
   6 checkpoint   genesis hash, runtime code hash, chain-spec hash or launch
                  manifest differ from the signed launch manifest, or no pinned
                  launch key signed it; the spec carries code substitutes, an
-                 authority loads a local runtime override, or genesis turns on
-                 a Cardano deposit observation that has no checkpoint
+                 authority loads a local runtime override, genesis stores a
+                 LastRuntimeUpgrade build-spec would not write for its code, or
+                 turns on a Cardano deposit observation that has no checkpoint
   7 timelock     the Root timelock's guardian missing from genesis, not the
                  multisig of threshold 2 or more roles.guardian declares, the
                  sudo key, or sharing any account or member with it; its delays
@@ -652,12 +653,13 @@ def core_api_version(apis: bytes) -> int | None:
     return None
 
 
-def runtime_state_version(wasm: bytes) -> int:
-    """The trie layout the node builds genesis from this code with. sc-executor
-    decodes the `runtime_version` section with the Core API version that the
-    `runtime_apis` section declares, else the one the version lists itself; it
-    reads a transaction version from Core 3 on and a state version from Core 4
-    on, and sp-version takes any state version but 0 as V1."""
+def runtime_version(wasm: bytes) -> tuple[bytes, int, int]:
+    """The code's spec name, as SCALE encodes it, its spec version, and the trie
+    layout the node builds genesis from it with. sc-executor decodes the
+    `runtime_version` section with the Core API version that the `runtime_apis`
+    section declares, else the one the version lists itself; it reads a
+    transaction version from Core 3 on and a state version from Core 4 on, and
+    sp-version takes any state version but 0 as V1."""
     sections = custom_sections(wasm)
     version, apis = sections.get(b"runtime_version"), sections.get(b"runtime_apis")
     if version is None:
@@ -668,10 +670,11 @@ def runtime_state_version(wasm: bytes) -> int:
     undecodable = InputError("runtime code's runtime_version section does not decode, so the node builds no genesis "
                              "from it")
     try:
-        cursor = 0
-        for _ in range(2):  # spec and impl name
-            length, cursor = read_compact(version, cursor)
-            cursor += length
+        length, cursor = read_compact(version, 0)
+        spec_name = version[:cursor + length]
+        length, cursor = read_compact(version, cursor + length)  # the impl name
+        cursor += length
+        spec_version = int.from_bytes(version[cursor + 4:cursor + 8], "little")  # past the authoring version
         count, cursor = read_compact(version, cursor + 12)  # past the authoring, spec and impl versions
     except IndexError as e:
         raise undecodable from e
@@ -680,7 +683,12 @@ def runtime_state_version(wasm: bytes) -> int:
     state = cursor + 4  # past the transaction version
     if cursor + 4 * (core >= 3) + (core >= 4) > len(version):
         raise undecodable
-    return 1 if core >= 4 and version[state] else 0
+    return spec_name, spec_version, 1 if core >= 4 and version[state] else 0
+
+
+def runtime_state_version(wasm: bytes) -> int:
+    """The trie layout the node builds genesis from this code with."""
+    return runtime_version(wasm)[2]
 
 
 def subwasm_metadata(code: bytes, subwasm: str) -> dict:
@@ -2263,6 +2271,28 @@ def check_observation(spec: Spec) -> list[Finding]:
                                 "since Cardano genesis, the genesis lock included")]
 
 
+def check_last_runtime_upgrade(spec: Spec) -> list[Finding]:
+    """System.LastRuntimeUpgrade is the runtime frame-executive last ran: it runs
+    the code's migrations at the first block whose code has a higher spec
+    version or another spec name. build-spec stores this code's own, so genesis
+    may store that or nothing (the migrations then run at block 1); anything
+    else runs them at block 1 where build-spec would not, or skips them at a
+    later upgrade."""
+    stored = spec.value("System", "LastRuntimeUpgrade")
+    if stored is None:
+        return []
+    name, version, _ = runtime_version(decompressed_code(spec.code))
+    expected = compact(version) + name
+    if stored == expected:
+        return []
+    _, start = read_compact(name, 0)
+    return [Finding(CHECKPOINT, f"System.LastRuntimeUpgrade is 0x{stored.hex()}, not 0x{expected.hex()}, spec version "
+                                f"{version} of {name[start:].decode(errors='replace')!r} as build-spec writes it for "
+                                "this code: the runtime runs its migrations when its spec version is above the stored "
+                                "one or its name differs, so another value runs them at block 1 or skips them at an "
+                                "upgrade")]
+
+
 def check_code_overrides(launch: dict) -> list[Finding]:
     return [Finding(CHECKPOINT, f"authority {node['name']} runs {WASM_OVERRIDES_FLAG}: a local runtime would "
                                 "replace the signed runtime code")
@@ -2778,6 +2808,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + key_findings
             + check_checkpoint(spec, launch, signed, keys)
             + check_code_overrides(launch)
+            + check_last_runtime_upgrade(spec)
             + check_observation(spec)
             + check_guardian(spec, meta, launch)
             + check_delays(spec, meta)

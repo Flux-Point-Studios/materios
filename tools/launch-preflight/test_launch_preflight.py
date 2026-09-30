@@ -729,6 +729,41 @@ def test_code_substitutes_are_refused(spec):
     assert "[6 checkpoint] chain spec carries codeSubstitutes" in found
 
 
+LAST_RUNTIME_UPGRADE = lp.storage_key("System", "LastRuntimeUpgrade")
+# The preprod v6 code's version: spec_name "materios", spec_version 208.
+V6_SPEC_NAME, V6_SPEC_VERSION = b"\x20materios", 208
+
+
+def test_the_runtime_version_is_read_from_the_code(spec):
+    assert lp.runtime_version(lp.decompressed_code(spec.code)) == (V6_SPEC_NAME, V6_SPEC_VERSION, 1)
+
+
+def test_the_last_runtime_upgrade_build_spec_writes_passes(spec):
+    assert spec.storage[LAST_RUNTIME_UPGRADE] == lp.compact(V6_SPEC_VERSION) + V6_SPEC_NAME
+    assert lp.check_last_runtime_upgrade(spec) == []
+
+
+def test_a_genesis_that_stores_no_last_runtime_upgrade_passes(spec):
+    del spec.storage[LAST_RUNTIME_UPGRADE]
+    assert lp.check_last_runtime_upgrade(spec) == []
+
+
+# frame-executive runs the code's migrations when its spec version is above the stored one or its name differs:
+# u32::MAX skips every later upgrade's, one below runs them at block 1.
+@pytest.mark.parametrize("value", [
+    lp.compact(2**32 - 1) + V6_SPEC_NAME, lp.compact(V6_SPEC_VERSION + 1) + V6_SPEC_NAME,
+    lp.compact(V6_SPEC_VERSION - 1) + V6_SPEC_NAME, lp.compact(V6_SPEC_VERSION) + b"\x20materiox",
+    lp.compact(V6_SPEC_VERSION) + V6_SPEC_NAME + b"\x00", (V6_SPEC_VERSION).to_bytes(4, "little") + V6_SPEC_NAME,
+], ids=["u32::MAX", "one above", "one below", "another name", "a trailing byte", "a fixed-width version"])
+def test_a_last_runtime_upgrade_other_than_the_one_build_spec_writes_is_refused(spec, value):
+    spec.storage[LAST_RUNTIME_UPGRADE] = value
+    expected = lp.compact(V6_SPEC_VERSION) + V6_SPEC_NAME
+    assert messages(lp.check_last_runtime_upgrade(spec)) == [
+        f"[6 checkpoint] System.LastRuntimeUpgrade is 0x{value.hex()}, not 0x{expected.hex()}, spec version 208 of "
+        "'materios' as build-spec writes it for this code: the runtime runs its migrations when its spec version is "
+        "above the stored one or its name differs, so another value runs them at block 1 or skips them at an upgrade"]
+
+
 def ntm_scripts(address: bytes) -> bytes:
     return bytes(28) + lp.compact(0) + lp.compact(len(address)) + address
 
@@ -4672,6 +4707,15 @@ def test_cli_refuses_an_authority_that_overrides_the_signed_runtime(clean, capsy
     assert code == 1
     assert "[6 checkpoint] authority val1 runs --wasm-runtime-overrides: a local runtime would replace the signed " \
            "runtime code" in out
+
+
+# The red team's composition PoC: a spec version no upgrade reaches, so no later runtime runs its migrations.
+def test_cli_refuses_a_last_runtime_upgrade_that_no_upgrade_reaches(clean, capsys):
+    stored = clean.spec.storage[LAST_RUNTIME_UPGRADE]
+    _, name = lp.read_compact(stored, 0)
+    clean.spec.storage[LAST_RUNTIME_UPGRADE] = lp.compact(2**32 - 1) + stored[name:]
+    code, out = clean.run(capsys)
+    assert code == 1 and "[6 checkpoint] System.LastRuntimeUpgrade is 0x" in out, out
 
 
 def test_cli_refuses_a_genesis_that_turns_on_the_cardano_observation(clean, capsys):
