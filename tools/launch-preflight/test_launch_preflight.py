@@ -4187,6 +4187,25 @@ def test_a_chain_spec_path_that_names_another_file_on_this_host_is_an_input_erro
         node_findings(preprod_path, node)
 
 
+# A file here that cannot be read (/proc/self/mem is a regular file whose first page is unmapped, so reading it fails
+# for root too), and a path whose lookup fails (a name longer than a directory entry can hold).
+@pytest.mark.parametrize("path, error", [
+    ("/proc/self/mem", "Input/output error"),
+    ("/srv/" + "x" * 256 + "/mainnet-raw.json", "File name too long"),
+], ids=["an unreadable file", "a name too long"])
+def test_a_chain_spec_path_this_host_cannot_read_is_an_input_error(tmp_path, preprod_path, path, error):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", path])
+    with pytest.raises(lp.InputError, match=f"authority val0: cannot read --chain {re.escape(repr(path))} on this "
+                                            f"host: {error}"):
+        node_findings(preprod_path, node)
+
+
+def test_cli_refuses_an_authority_whose_chain_spec_path_this_host_cannot_read_as_unreadable(clean, capsys):
+    with_node_argv(clean, ["--chain", "/proc/self/mem"])
+    code, out = clean.run(capsys)
+    assert code == 2 and "authority val0: cannot read --chain '/proc/self/mem' on this host" in out, out
+
+
 def test_the_node_runs_offline_on_a_fresh_base_path_with_only_the_options_export_blocks_reads(tmp_path, preprod_path):
     log = tmp_path / "calls.jsonl"
     argv = ["/usr/local/bin/materios-node", "--chain", authority_chain(tmp_path), "--base-path", "/data/materios",

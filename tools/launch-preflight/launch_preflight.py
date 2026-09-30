@@ -2681,8 +2681,13 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
             split = options[chain] == "--chain"
             value = options[chain + 1] if split else options[chain].partition("=")[2]
             cwd = Path(tempfile.mkdtemp(dir=scratch))
-            here = (cwd / value).is_file()
-            if here and (cwd / value).read_bytes() != spec.source:
+            try:
+                here = (cwd / value).is_file()
+                other = here and (cwd / value).read_bytes() != spec.source
+            except OSError as e:
+                raise InputError(f"{where}: cannot read --chain {value!r} on this host: {e.strerror}; the node would "
+                                 "load that path here, so run check where it holds the checked spec, or nothing") from e
+            if other:
                 raise InputError(f"{where}: --chain {value!r} names a file on this host that is not the checked chain "
                                  "spec, and the node would load it here; run check where that path holds the checked "
                                  "spec, or nothing")

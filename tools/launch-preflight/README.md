@@ -431,7 +431,8 @@ hash). A file it takes to be one it fails to open, with sc-chain-spec's
 ``Error opening spec file `<path>`: No such file or directory``; any other
 failure refuses as unreadable, since it cannot say which. Where the value
 names a file here, it must be the checked spec, and the node must build the
-checked genesis from it.
+checked genesis from it. A path this host cannot look up or read refuses as
+unreadable.
 
 The node reads every option by sc-cli's definitions (polkadot-stable2409-4),
 which `NODE_OPTIONS` lists with the values each takes. export-blocks gets the
