@@ -21,6 +21,8 @@ It reads:
   `/proc/<pid>/exe` and of the file its `--chain` names, and that binary run
   offline to build the genesis it would start from (see
   [Node attestation](#node-attestation));
+- **the genesis each authority's running node serves**: its answer to
+  `chain_getBlockHash [0]`, saved from its local RPC;
 - a **launch manifest**: who holds each role, the economics, where the genesis
   lock is, each node's launch command, the RPC proxy configs and the public RPC
   URLs;
@@ -39,7 +41,7 @@ It reads:
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
 | 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Genesis may store `System.LastRuntimeUpgrade` only as build-spec writes it for its code, that code's spec version and spec name, or not at all: frame-executive runs a runtime's migrations when its spec version is above the stored one or its name differs, so another value runs them at block 1 or skips them at a later upgrade. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
 | 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian whose account is the genesis guardian, or that guardian does not need two keyholders to act or has a multisig as a member (see [Multisig roles](#multisig-roles)); or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
-| 8 node | An authority's own node binary, run offline on the options its node process runs with, builds another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. See [Node attestation](#node-attestation). |
+| 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. See [Node attestation](#node-attestation). |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including hex in
@@ -68,7 +70,7 @@ python3 launch_preflight.py check --spec mainnet-raw.json --launch launch.json \
 `sign` reads only the spec and the manifest, so the manifest can be signed
 before the nodes start, with each authority's node binary pinned by its sha256. Its `--key` file holds the 32-byte ed25519 seed as
 0x-hex, and at most the newline that ends its line. `check` also reads each
-authority's `cmdline`, `exe` and `chain_spec` captures, runs each authority's
+authority's `cmdline`, `exe`, `chain_spec` and `served_genesis` captures, runs each authority's
 node binary offline, and calls each URL in `public_rpc`, so it runs once the
 launch's nodes and proxies are up, on a machine that can run each authority's
 binary (the same architecture, or one with qemu-user binfmt for it).
@@ -176,7 +178,7 @@ state version but 0 as V1. A version section the node cannot decode refuses.
      "argv": ["materios-node", "--validator", "--chain", "/srv/materios/mainnet-raw.json", "--rpc-methods", "safe"],
      "exe_sha256": "0x<sha256 of the node binary>",
      "cmdline": "captures/val-1.cmdline", "exe": "captures/val-1.exe", "chain_spec": "captures/val-1.chain.json",
-     "env": {}},
+     "served_genesis": "captures/val-1.genesis.json", "env": {}},
     {"name": "edge-1", "host": "edge-1", "addresses": ["10.0.0.2"], "authority": false}
   ],
   "rpc_proxies": [
@@ -255,8 +257,15 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   0x-hex. `exe` is the path of a copy of its node process's
   `/proc/<pid>/exe`, and `chain_spec` of a copy of the file its `--chain`
   names, taken on its machine (`/proc/<pid>/root` followed by an absolute
-  path, `/proc/<pid>/cwd/` followed by a relative one). `check` reads both,
-  and `sign` neither. Only an authority takes them.
+  path, `/proc/<pid>/cwd/` followed by a relative one). `served_genesis`
+  is the path of its running node's answer to `chain_getBlockHash [0]` on
+  its local RPC, saved on its machine once the node runs:
+  `curl -s -H 'Content-Type: application/json' -d
+  '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[0]}'
+  http://127.0.0.1:9944 > val-1.genesis.json`, at the node's own RPC port.
+  It must be a JSON-RPC 2.0 answer whose result is the block hash in
+  0x-prefixed lowercase hex, as the node writes it. `check` reads all three,
+  and `sign` none. Only an authority takes them.
 - `env` holds the settings a node's unit or container definition gives it
   (`Environment=` and `EnvironmentFile=`, `docker run -e`, a compose file's
   `environment:`) as the process receives them: systemd decodes escapes and
@@ -438,16 +447,22 @@ follower, which connects to nothing, and Cardano mainnet's epoch layout: no
 other setting, no network option, no keystore. A spec that names
 `telemetryEndpoints` refuses, since the node would connect to them.
 
-The attestation builds genesis on a fresh base path. A node whose base path
-already holds a database for the spec's chain `id` starts from the genesis in
-that database, whatever its `--chain` names: given a spec with another
-genesis and the same `id`, the node exports the old genesis. The preflight
-does not read the authorities' databases, so start each authority on an
-empty base path.
+The attestation builds genesis on a fresh base path, which shows what a start
+from the authority's argv and spec builds, not what its node runs. A node
+whose base path already holds a database for the spec's chain `id` (a
+rehearsal's, or one a setup command wrote) starts from the genesis in that
+database, whatever its `--chain` names, and a node keeps the genesis it
+started from when its spec file is overwritten afterwards. So the genesis the
+running node serves as block 0, its `served_genesis` capture, must be the
+computed genesis too. The real-node tests start the node offline on a base
+path that holds another genesis, and on a spec file overwritten once it runs,
+and both refuse.
 
-`check` cannot pass without running every authority's binary: a missing or
-unreadable capture, a binary this host cannot run, or a node that builds no
-genesis from the checked spec refuses. The tests in `test_node_attestation.py`
+`check` cannot pass without running every authority's binary and reading
+what its running node serves: a missing or unreadable capture, a
+`served_genesis` that is not a JSON-RPC answer with a 32-byte block hash, a
+binary this host cannot run, or a node that builds no genesis from the
+checked spec refuses as unreadable. The tests in `test_node_attestation.py`
 run the real binary (`MATERIOS_NODE`), which CI builds from this tree, and
 check `NODE_OPTIONS` against its `--help`.
 

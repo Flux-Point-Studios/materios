@@ -1,10 +1,15 @@
 """Rule 8 against the real materios-node binary, which MATERIOS_NODE names; CI builds it from this tree. Every node
-run is offline, on a fresh base path. The spec is a fresh `build-spec --chain preprod --raw` from that binary."""
+run is offline, on a base path of its own, and a node started to serve its genesis listens on loopback only, with no
+peers. The spec is a fresh `build-spec --chain preprod --raw` from that binary."""
 import hashlib
 import json
 import os
 import re
+import signal
+import socket
 import subprocess
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -48,12 +53,16 @@ LIVE_LIKE = ["--base-path", "/data/materios", "--validator", "--name", "val0", "
              "--pool-kbytes", "65536", "--state-pruning", "archive", "--db", "rocksdb", "--db-cache", "256", "-lwarn"]
 
 
-def attested(tmp_path, node, pin, spec_path: Path, words, chain_spec: bytes | None = None) -> dict:
+def attested(tmp_path, node, pin, spec_path: Path, words, chain_spec: bytes | None = None,
+             served: str | None = None) -> dict:
+    """An authority whose running node serves the genesis the preflight computes, unless the test gives the path of
+    what a real node served."""
     argv = ["/usr/local/bin/materios-node", *words]
     copied = tmp_path / "val0.chain.json"
     copied.write_bytes(spec_path.read_bytes() if chain_spec is None else chain_spec)
+    served = served or base.served(tmp_path, "val0", lp.spec_genesis_hash(lp.load_spec(str(spec_path))))
     return dict(base.authority(argv, "val0", "val0"), cmdline=base.capture(tmp_path, "val0", argv), exe=str(node),
-                exe_sha256=pin, chain_spec=str(copied))
+                exe_sha256=pin, chain_spec=str(copied), served_genesis=served)
 
 
 def findings(spec_path: Path, entry: dict) -> list[str]:
@@ -186,6 +195,120 @@ def test_only_the_subcommands_a_launch_may_run_before_its_node_leave_the_base_pa
     run_node(node, "export-blocks", "--chain", str(preprod), "--base-path", str(base_path), "--from", "0", "--to", "0",
              str(tmp_path / "block-0"), cwd=tmp_path)
     assert chain_database(base_path, preprod).is_dir()
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def block_hash_answer(port: int) -> bytes:
+    call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "chain_getBlockHash", "params": [0]}).encode()
+    request = urllib.request.Request(f"http://127.0.0.1:{port}", call, {"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=10) as answer:
+        return answer.read()
+
+
+class RunningNode:
+    """The real node's run command, offline: listeners on loopback only, no peers, no discovery, no telemetry or
+    Prometheus, no keys, the mock follower, on a base path of the test's. Its chain spec names no boot node."""
+
+    def __init__(self, node: Path, spec_path: Path, base_path: Path, cwd: Path):
+        assert not json.loads(spec_path.read_text()).get("bootNodes")
+        (cwd / "registrations.json").write_text("[]")
+        self.port = free_port()
+        argv = [str(node), "--chain", str(spec_path), "--base-path", str(base_path), "--no-telemetry",
+                "--no-prometheus", "--no-mdns", "--reserved-only", "--in-peers", "0", "--out-peers", "0",
+                "--in-peers-light", "0", "--listen-addr", "/ip4/127.0.0.1/tcp/0", "--rpc-port", str(self.port),
+                "--rpc-methods", "safe"]
+        env = dict(lp.NODE_ENV, MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE=str(cwd / "registrations.json"))
+        self.log = cwd / "node.log"
+        with open(self.log, "wb") as log:
+            self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+
+    def served_genesis(self, path: Path) -> str:
+        """Its answer to chain_getBlockHash [0], saved as an operator saves it with curl."""
+        deadline = time.monotonic() + lp.NODE_TIMEOUT
+        while time.monotonic() < deadline:
+            assert self.process.poll() is None, self.log.read_text()[-2000:]
+            try:
+                path.write_bytes(block_hash_answer(self.port))
+                return str(path)
+            except OSError:
+                time.sleep(1)
+        raise AssertionError(f"the node answered nothing in {lp.NODE_TIMEOUT} seconds")
+
+    def stop(self) -> None:
+        self.process.send_signal(signal.SIGINT)
+        try:
+            self.process.wait(60)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+
+
+def served_by_running_node(node: Path, spec_path: Path, base_path: Path, tmp_path: Path, swap: bytes | None = None,
+                           name: str = "served") -> str:
+    """What the node serves as block 0, started on `spec_path` over `base_path`; with `swap`, the spec file is
+    overwritten with those bytes once the node runs, as a deployment tool syncing a final spec would."""
+    cwd = tmp_path / name
+    cwd.mkdir()
+    running = RunningNode(node, spec_path, base_path, cwd)
+    try:
+        served = running.served_genesis(cwd / "genesis.json")
+        if swap is not None:
+            spec_path.write_bytes(swap)
+            served = running.served_genesis(cwd / "genesis-after-swap.json")
+        return served
+    finally:
+        running.stop()
+
+
+def with_alice_as_root(preprod: Path, path: Path) -> Path:
+    """The preprod spec with //Alice holding Root: the same chain id, another genesis."""
+    doc = json.loads(preprod.read_text())
+    doc["genesis"]["raw"]["top"]["0x" + lp.storage_key("Sudo", "Key").hex()] = "0x" + base.ALICE.hex()
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def test_a_running_node_on_a_fresh_base_path_serves_the_genesis_the_preflight_computes(tmp_path, node, pin, preprod):
+    served = served_by_running_node(node, preprod, tmp_path / "base", tmp_path)
+    entry = attested(tmp_path, node, pin, preprod, ["--chain", "/srv/materios/mainnet-raw.json"], served=served)
+    assert findings(preprod, entry) == []
+
+
+def serves_other(genesis: bytes, preprod: Path) -> str:
+    return (f"[8 node] authority val0: its running node serves genesis 0x{genesis.hex()} as block 0, and the "
+            f"preflight computes 0x{lp.spec_genesis_hash(lp.load_spec(str(preprod))).hex()}: it started from another "
+            "chain spec, or from a database its base path already held, not the chain the signed genesis hash and "
+            "the lock's datum bind")
+
+
+# The red team's stale database: a base path that already holds another genesis for the chain id, here written by
+# the setup subcommand of their PoC, is what the node runs whatever its --chain names. A fresh start from its argv
+# builds the checked genesis, so only what the running node serves shows it.
+def test_a_running_node_whose_base_path_held_another_genesis_is_refused(tmp_path, node, pin, preprod):
+    rehearsal = with_alice_as_root(preprod, tmp_path / "rehearsal-raw.json")
+    base_path = tmp_path / "base"
+    run_node(node, "export-blocks", "--chain", str(rehearsal), "--base-path", str(base_path), "--from", "0", "--to",
+             "0", str(tmp_path / "block-0"), cwd=tmp_path)
+    served = served_by_running_node(node, preprod, base_path, tmp_path)
+    entry = attested(tmp_path, node, pin, preprod, ["--chain", "/srv/materios/mainnet-raw.json"], served=served)
+    assert findings(preprod, entry) == [serves_other(lp.spec_genesis_hash(lp.load_spec(str(rehearsal))), preprod)]
+
+
+# The red team's swap: a node started on another spec keeps its genesis when its --chain file is overwritten with
+# the checked spec, so every capture taken afterwards, but what it serves, is the checked launch's.
+def test_a_running_node_whose_chain_spec_file_was_overwritten_after_it_started_is_refused(
+        tmp_path, node, pin, preprod):
+    started_on = with_alice_as_root(preprod, tmp_path / "mainnet-raw.json")
+    rehearsal = lp.spec_genesis_hash(lp.load_spec(str(started_on)))
+    served = served_by_running_node(node, started_on, tmp_path / "base", tmp_path, swap=preprod.read_bytes())
+    assert started_on.read_bytes() == preprod.read_bytes()
+    entry = attested(tmp_path, node, pin, preprod, ["--chain", "/srv/materios/mainnet-raw.json"], served=served)
+    assert findings(preprod, entry) == [serves_other(rehearsal, preprod)]
 
 
 def test_cli_passes_a_clean_launch_its_real_node_attests(clean, capsys, node, pin):

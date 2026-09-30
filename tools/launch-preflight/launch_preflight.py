@@ -45,12 +45,13 @@ Rules, each of which refuses on its own:
                  sudo key, or sharing any account or member with it; its delays
                  missing, below the runtime's mainnet delays, above its
                  MaxDelay or out of the runtime's order
-  8 node         an authority's own node binary, run offline on the options
-                 its node process runs with, builds another genesis than the
+  8 node         an authority's running node serves another genesis than the
                  one the preflight computes, the manifest signs and the lock's
-                 datum binds; its --chain names a chain built into the node or
-                 a file that is not the checked spec; it runs another binary
-                 than the one the manifest pins
+                 datum binds, or its own node binary, run offline on the
+                 options its node process runs with, builds another; its
+                 --chain names a chain built into the node or a file that is
+                 not the checked spec; it runs another binary than the one the
+                 manifest pins
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -2565,13 +2566,40 @@ def pinned_binary(node: dict, scratch: Path, where: str) -> tuple[str, Path]:
     return "0x" + digest.hexdigest(), pinned
 
 
+def served_genesis(node: dict, where: str) -> bytes:
+    """The genesis hash an authority's running node serves: its answer to chain_getBlockHash [0], saved from its local
+    RPC. That is the genesis the node runs, which a database already in its base path decides over its --chain, and
+    which a spec file overwritten after it started no longer shows; a fresh start from its argv shows neither."""
+    path = node.get("served_genesis")
+    if path is None:
+        raise InputError(f"{where}: give its running node's answer to chain_getBlockHash [0], saved from its local "
+                         "RPC, as served_genesis; the preflight checks the genesis the node runs, which a database "
+                         "already in its base path decides whatever its --chain names")
+    try:
+        answer = json.loads(Path(path).read_bytes().decode("utf-8"), object_pairs_hook=unique_keys)
+    except OSError as e:
+        raise InputError(f"{where}: cannot read served_genesis {path}: {e.strerror}") from e
+    except (ValueError, RecursionError) as e:
+        raise InputError(f"{where}: served_genesis {path} is not JSON: {e}") from e
+    result = answer.get("result") if isinstance(answer, dict) else None
+    if not (isinstance(answer, dict) and answer.get("jsonrpc") == "2.0" and isinstance(result, str)):
+        raise InputError(f"{where}: served_genesis {path} is not a JSON-RPC 2.0 answer with a result, as the node "
+                         "answers chain_getBlockHash [0]")
+    block = hex_bytes(result, f"{where}: served_genesis {path}: its result")
+    if len(block) != 32:
+        raise InputError(f"{where}: served_genesis {path} holds no 32-byte block hash")
+    return block
+
+
 def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
-    """Each authority's own node binary, pinned by sha256, must build the genesis the preflight computes, which the
-    signed manifest and the lock's datum bind. It runs offline on export-blocks, which builds genesis as the node
-    does at startup, with the options its node process runs with: as launched, in an empty working directory, where
-    a --chain that names no file here can only be a chain built into the node, and on the checked spec, with its
-    --chain value swapped for that file. The file each authority's --chain names, as captured, must be the checked
-    spec, byte for byte. Wherever the node and the preflight read a spec apart, the hashes differ."""
+    """Each authority's running node must serve, and its own node binary, pinned by sha256, must build, the genesis
+    the preflight computes, which the signed manifest and the lock's datum bind. The binary runs offline on
+    export-blocks, which builds genesis as the node does at startup, with the options its node process runs with: as
+    launched, in an empty working directory, where a --chain that names no file here can only be a chain built into
+    the node, and on the checked spec, with its --chain value swapped for that file. The file each authority's
+    --chain names, as captured, must be the checked spec, byte for byte. Wherever the node and the preflight read a
+    spec apart, the hashes differ; wherever the running node started from other than its argv and spec, what it
+    serves differs."""
     authorities = [node for node in launch.get("nodes", []) if node["authority"]]
     if not authorities:
         return []
@@ -2604,6 +2632,12 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
                 chain_sha = hashlib.sha256(Path(node["chain_spec"]).read_bytes()).hexdigest()
             except OSError as e:
                 raise InputError(f"{where}: cannot read chain_spec {node['chain_spec']}: {e.strerror}") from e
+            running = served_genesis(node, where)
+            if running != genesis:
+                findings.append(Finding(NODE, f"{where}: its running node serves genesis 0x{running.hex()} as block 0, "
+                                              f"and the preflight computes 0x{genesis.hex()}: it started from another "
+                                              "chain spec, or from a database its base path already held, not the "
+                                              "chain the signed genesis hash and the lock's datum bind"))
             if sha != node["exe_sha256"]:
                 findings.append(Finding(NODE, f"{where} runs a node binary whose sha256 is {sha}, not its pinned "
                                               f"exe_sha256 {node['exe_sha256']}: only the pinned binary is run to "
@@ -2740,12 +2774,12 @@ def validate_node(node, where: str) -> None:
     env = node.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise InputError(f"{where} env must map names to strings")
-    for field in ("cmdline", "exe", "chain_spec", "exe_sha256"):
+    for field in ("cmdline", "exe", "chain_spec", "served_genesis", "exe_sha256"):
         if field in node and not node["authority"]:
             raise InputError(f"{where} {field} is read for an authority only")
     if not isinstance(node.get("cmdline", ""), str):
         raise InputError(f"{where} cmdline must be the path of a /proc/<pid>/cmdline capture")
-    for field in ("exe", "chain_spec"):
+    for field in ("exe", "chain_spec", "served_genesis"):
         if not isinstance(node.get(field, ""), str):
             raise InputError(f"{where} {field} must be the path of a capture")
     launch_commands(node)

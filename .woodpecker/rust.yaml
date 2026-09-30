@@ -50,7 +50,8 @@ steps:
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast
 
   # The launch preflight's rule 8 against the node built above: every run is
-  # offline, on a fresh base path.
+  # offline, on a base path of its own, and a node started to serve its
+  # genesis listens on loopback only, with no peers.
   - name: node-attestation
     image: python:3.12-slim-bookworm
     directory: tools/launch-preflight

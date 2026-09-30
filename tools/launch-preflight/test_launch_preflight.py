@@ -3954,15 +3954,24 @@ def authority_chain(tmp_path: Path) -> str:
     return str(tmp_path / "authority-fs" / "mainnet-raw.json")
 
 
+# An authority's running node's answer to chain_getBlockHash [0] on its local RPC, as curl saves it.
+def served(tmp_path: Path, name: str, genesis: bytes) -> str:
+    path = tmp_path / f"{name}.genesis.json"
+    path.write_text(json.dumps({"jsonrpc": "2.0", "result": "0x" + genesis.hex(), "id": 1}))
+    return str(path)
+
+
 def attested(tmp_path, spec_path: Path, argv=None, exe=None, chain_spec: bytes | None = None, name="val0") -> dict:
-    """An authority whose node process runs `argv`, from the binary `exe` and pinned to it, and whose --chain file
-    is a copy of `spec_path` unless the test gives other bytes."""
+    """An authority whose node process runs `argv`, from the binary `exe` and pinned to it, whose --chain file is a
+    copy of `spec_path` unless the test gives other bytes, and whose running node serves the genesis the preflight
+    computes from `spec_path`."""
     exe = exe or fake_node(tmp_path)
     argv = argv or ["materios-node", "--validator", "--chain", authority_chain(tmp_path), "--rpc-methods", "safe"]
     copied = tmp_path / f"{name}.chain.json"
     copied.write_bytes(spec_path.read_bytes() if chain_spec is None else chain_spec)
     return dict(authority(argv, name, name), cmdline=capture(tmp_path, name, argv), exe=str(exe),
-                exe_sha256=sha256_pin(exe), chain_spec=str(copied))
+                exe_sha256=sha256_pin(exe), chain_spec=str(copied),
+                served_genesis=served(tmp_path, name, lp.spec_genesis_hash(lp.load_spec(str(spec_path)))))
 
 
 def node_findings(spec_path: Path, *nodes) -> list[str]:
@@ -3985,6 +3994,56 @@ def test_an_authority_whose_node_builds_another_genesis_is_refused(tmp_path, pre
     assert found[0].endswith(f" from the checked chain spec, and the preflight computes 0x"
                              f"{preprod_genesis_hex(preprod_path)}: the signed genesis hash and the lock's datum "
                              "bind the preflight's, not the chain this authority starts")
+
+
+REHEARSAL_GENESIS = lp.blake2_256(b"a rehearsal's genesis")
+
+
+def serves_another_genesis(spec_path: Path) -> str:
+    return (f"[8 node] authority val0: its running node serves genesis 0x{REHEARSAL_GENESIS.hex()} as block 0, and "
+            f"the preflight computes 0x{preprod_genesis_hex(spec_path)}: it started from another chain spec, or from "
+            "a database its base path already held, not the chain the signed genesis hash and the lock's datum bind")
+
+
+# A fresh start from the node's argv and --chain file builds the checked genesis, and the node that runs does not:
+# its base path held a database of another genesis (a rehearsal's), or its --chain file was overwritten after it
+# started.
+def test_an_authority_whose_running_node_serves_another_genesis_is_refused(tmp_path, preprod_path):
+    node = dict(attested(tmp_path, preprod_path), served_genesis=served(tmp_path, "val0", REHEARSAL_GENESIS))
+    assert node_findings(preprod_path, node) == [serves_another_genesis(preprod_path)]
+
+
+def test_the_genesis_a_running_node_serves_is_checked_whatever_else_refuses(tmp_path, preprod_path):
+    node = dict(attested(tmp_path, preprod_path), served_genesis=served(tmp_path, "val0", REHEARSAL_GENESIS),
+                exe_sha256="0x" + hashlib.sha256(b"the release binary").hexdigest())
+    found = node_findings(preprod_path, node)
+    assert found[0] == serves_another_genesis(preprod_path)
+    assert found[1].startswith("[8 node] authority val0 runs a node binary whose sha256 is 0x") and len(found) == 2
+
+
+GENESIS_ANSWER = '{"jsonrpc": "2.0", "result": "0x%s", "id": 1}'
+
+
+@pytest.mark.parametrize("answer, error", [
+    (b"\xff not json", "is not JSON"),
+    (b'{"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": 1}', "is not a JSON-RPC"),
+    (b'{"jsonrpc": "2.0", "result": null, "id": 1}', "is not a JSON-RPC"),
+    (('{"result": "0x%s", "id": 1}' % ("ab" * 32)).encode(), "is not a JSON-RPC"),
+    (('["0x%s"]' % ("ab" * 32)).encode(), "is not a JSON-RPC"),
+    ((GENESIS_ANSWER % ("AB" * 32)).encode(), "result is not 0x-prefixed lowercase hex"),
+    ((GENESIS_ANSWER % ("ab" * 31)).encode(), "holds no 32-byte block hash"),
+    (('{"jsonrpc": "2.0", "result": "0x%s", "result": "0x%s", "id": 1}' % ("ab" * 32, "cd" * 32)).encode(),
+     "is not JSON: an object holds the key 'result' twice"),
+], ids=["not JSON", "an error", "a null result", "no jsonrpc", "not an object", "upper case", "31 bytes",
+        "two results"])
+def test_a_served_genesis_capture_that_is_not_a_block_hash_answer_is_an_input_error(tmp_path, preprod_path, answer,
+                                                                                    error):
+    path = tmp_path / "answer.json"
+    path.write_bytes(answer)
+    node = dict(attested(tmp_path, preprod_path), served_genesis=str(path))
+    where = re.escape(f"authority val0: served_genesis {path}")
+    with pytest.raises(lp.InputError, match=f"{where}.*{re.escape(error)}"):
+        node_findings(preprod_path, node)
 
 
 def test_an_authority_running_another_binary_than_its_pin_is_refused_and_that_binary_is_not_run(tmp_path,
@@ -4145,15 +4204,17 @@ def test_a_binary_this_host_cannot_run_is_an_input_error(tmp_path, preprod_path)
     ("exe", "authority val0: give a copy of its running node process's /proc/<pid>/exe as exe"),
     ("chain_spec", "authority val0: give a copy of the file its node's --chain names, taken on its machine, as "
                    "chain_spec"),
+    ("served_genesis", "authority val0: give its running node's answer to chain_getBlockHash [0], saved from its "
+                       "local RPC, as served_genesis"),
 ])
-def test_an_authority_with_no_captured_binary_or_chain_spec_is_an_input_error(tmp_path, preprod_path, field, error):
+def test_an_authority_with_a_capture_missing_is_an_input_error(tmp_path, preprod_path, field, error):
     node = attested(tmp_path, preprod_path)
     del node[field]
     with pytest.raises(lp.InputError, match=re.escape(error)):
         node_findings(preprod_path, node)
 
 
-@pytest.mark.parametrize("field", ["exe", "chain_spec"])
+@pytest.mark.parametrize("field", ["exe", "chain_spec", "served_genesis"])
 def test_an_unreadable_capture_is_an_input_error(tmp_path, preprod_path, field):
     node = dict(attested(tmp_path, preprod_path), **{field: str(tmp_path / "missing")})
     with pytest.raises(lp.InputError, match=f"authority val0: cannot read {field} "):
@@ -4238,10 +4299,16 @@ def test_an_authority_must_pin_its_node_binary(pin, error):
         lp.validate_node(node, "nodes[0]")
 
 
-@pytest.mark.parametrize("field", ["exe", "chain_spec", "exe_sha256"])
+@pytest.mark.parametrize("field", ["exe", "chain_spec", "served_genesis", "exe_sha256"])
 def test_node_attestation_fields_are_read_for_an_authority_only(field):
     with pytest.raises(lp.InputError, match=f"nodes\\[0\\] {field} is read for an authority only"):
         lp.validate_node({"name": "edge", "host": "edge", "authority": False, field: "x"}, "nodes[0]")
+
+
+@pytest.mark.parametrize("field", ["exe", "chain_spec", "served_genesis"])
+def test_a_capture_that_is_not_a_path_is_an_input_error(field):
+    with pytest.raises(lp.InputError, match=f"nodes\\[0\\] {field} must be the path of a capture"):
+        lp.validate_node(dict(authority(["materios-node", "--chain", "x"]), **{field: 7}), "nodes[0]")
 
 
 # ---------------------------------------------------------------------------
@@ -4308,6 +4375,8 @@ class Launch:
         self.running = {}
         # The bytes of the file each authority's --chain names, where a test gives other than the checked spec.
         self.chain_files = {}
+        # The genesis each authority's running node serves, where a test gives other than the computed one.
+        self.served = {}
         self.launch_key = signing.SigningKey.generate()
         self.candidates = genesis_candidates_datum(spec)
 
@@ -4317,7 +4386,8 @@ class Launch:
                           "safe"], name, name, aura)
         return dict(node, grandpa="0x" + grandpa.hex(), cmdline=str(self.tmp_path / f"{name}.cmdline"),
                     exe=str(self.node_exe),
-                    exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"))
+                    exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"),
+                    served_genesis=str(self.tmp_path / f"{name}.genesis.json"))
 
     def spec_path(self) -> Path:
         self.spec.doc["genesis"]["raw"]["top"] = {"0x" + k.hex(): "0x" + v.hex() for k, v in self.spec.storage.items()}
@@ -4326,8 +4396,8 @@ class Launch:
         return path
 
     def prepare(self) -> Path:
-        """Write each authority's cmdline and chain spec captures and the spec, serve Cardano for that spec, and
-        return its path."""
+        """Write each authority's cmdline, chain spec and served genesis captures and the spec, serve Cardano for
+        that spec, and return its path."""
         for node in self.launch["nodes"]:
             if node["authority"] and isinstance(node.get("argv"), list) and "cmdline" in node:
                 capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
@@ -4336,6 +4406,9 @@ class Launch:
             if node["authority"] and "chain_spec" in node:
                 Path(node["chain_spec"]).write_bytes(self.chain_files.get(node["name"], spec_path.read_bytes()))
         spec = lp.load_spec(str(spec_path))
+        for node in self.launch["nodes"]:
+            if node["authority"] and "served_genesis" in node:
+                served(self.tmp_path, node["name"], self.served.get(node["name"], lp.spec_genesis_hash(spec)))
         datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
         self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum)
         return spec_path
@@ -4493,6 +4566,19 @@ def test_cli_refuses_an_authority_running_another_binary_than_its_pin(clean, cap
     clean.launch["nodes"][0]["exe"] = str(fake_node(clean.tmp_path, tamper=True))
     code, out = clean.run(capsys)
     assert code == 1 and "[8 node] authority val0 runs a node binary whose sha256 is 0x" in out, out
+
+
+def test_cli_refuses_an_authority_whose_running_node_serves_another_genesis(clean, capsys):
+    clean.served["val1"] = REHEARSAL_GENESIS
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert f"[8 node] authority val1: its running node serves genesis 0x{REHEARSAL_GENESIS.hex()} as block 0" in out
+
+
+def test_cli_refuses_an_authority_with_no_served_genesis_as_unreadable(clean, capsys):
+    del clean.launch["nodes"][0]["served_genesis"]
+    code, out = clean.run(capsys)
+    assert code == 2 and "authority val0: give its running node's answer to chain_getBlockHash [0]" in out, out
 
 
 def test_cli_refuses_an_authority_with_no_captured_binary_as_unreadable(clean, capsys):
