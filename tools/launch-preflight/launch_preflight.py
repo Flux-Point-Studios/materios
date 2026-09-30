@@ -175,6 +175,10 @@ HEX_SEED = re.compile(r"0x([0-9a-fA-F]{64})")
 TEST_NETWORKS = json.loads((HERE / "test_networks.json").read_text())
 TEST_NETWORK_NAME = re.compile(TEST_NETWORKS["name_pattern"], re.IGNORECASE | re.ASCII)
 NODE_BINARIES = ("materios-node", "materios-node-spo")
+# The node subcommands a launch may run before its node: sc-cli's build-spec prints a spec and purge-chain removes
+# the chain database, and neither opens one. check-block, export-blocks, export-state, import-blocks and revert build
+# the genesis of their own --chain into the base path, and a node started on a database starts from its genesis.
+NODE_TOOLS = ("build-spec", "purge-chain")
 # Shells whose `-c` script is opened. zsh is not one: it runs its zshenv files before any script.
 SHELLS = {"sh", "bash", "dash", "ash"}
 SHELL_OPERATORS = ";&|()<>\n"
@@ -1524,8 +1528,9 @@ def launch_pieces(node: dict) -> list[str]:
 def node_process(node: dict) -> list[str]:
     """The argv an authority's node process receives: the last command its
     launch runs, which must start a node binary with one argument per word.
-    An earlier command may only set up the shell or run a node subcommand:
-    any other program can start a node whose listeners go unchecked."""
+    An earlier command may only set up the shell or run a node subcommand in
+    NODE_TOOLS: any other program can start a node whose listeners go
+    unchecked, and any other subcommand can write the genesis it starts from."""
     where = f"authority {node['name']}"
     commands = launch_commands(node)
     argv = _program(commands[-1]) if commands else []
@@ -1540,10 +1545,14 @@ def node_process(node: dict) -> list[str]:
             raise InputError(f"{where}: its launch runs {earlier[0]} before its last command; the preflight reads "
                              f"only {', '.join(SETUP_COMMANDS)} or a node subcommand there, since any other "
                              "program can start a node it never checks")
-        # A node binary with a subcommand (`build-spec`, `purge-chain`) is a tool run, not a node.
         if len(earlier) == 1 or earlier[1].startswith("-"):
             raise InputError(f"{where}: its launch starts a node before its last command; the preflight "
                              "checks the last command as the one node process")
+        if earlier[1] not in NODE_TOOLS:
+            raise InputError(f"{where}: its launch runs the node subcommand {earlier[1]!r} before its last command; "
+                             f"the preflight reads only {' and '.join(NODE_TOOLS)} there, which open no chain "
+                             "database: another subcommand can write a genesis into the base path the node then "
+                             "starts from, whatever its --chain names")
     for i, word in enumerate(argv):
         if re.search(r"\s-", word):
             raise InputError(f"{where}: argument {i} holds several arguments; give one per word")

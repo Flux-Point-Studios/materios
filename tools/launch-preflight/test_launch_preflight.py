@@ -2082,12 +2082,40 @@ def test_a_launch_that_starts_a_node_before_its_last_command_is_an_input_error(a
         lp.validate_node(authority(argv), "nodes[0]")
 
 
-def test_a_node_subcommand_before_the_node_process_is_not_a_node(tmp_path):
-    argv = ["bash", "--norc", "-c",
-            "materios-node key generate-node-key --file /data/node-key; exec " + UNSAFE_EXTERNAL]
+@pytest.mark.parametrize("earlier", [
+    "materios-node build-spec --chain /srv/chain/raw.json --raw --disable-default-bootnode",
+    "materios-node purge-chain -y --chain /srv/chain/raw.json --base-path /data",
+])
+def test_a_node_subcommand_that_opens_no_chain_database_before_the_node_process_is_not_a_node(tmp_path, earlier):
+    argv = ["bash", "--norc", "-c", f"{earlier}; exec {UNSAFE_EXTERNAL}"]
     node = dict(authority(argv), cmdline=capture(tmp_path, "val1", UNSAFE_EXTERNAL.split()))
     assert rpc_findings(tmp_path, [node]) == [
         "[3 rpc] authority val1 serves unsafe RPC methods on an external listener"]
+
+
+# The red team's PoC: a subcommand that opens the chain database (export-blocks, check-block, export-state) writes
+# the genesis of its own --chain into the base path, and the node then starts from that database whatever its
+# --chain names. The node takes no other subcommand, and clap refuses an unknown one only once the node binary runs.
+PRIMING_SUBCOMMANDS = [
+    "materios-node export-blocks --chain raw.json --base-path /data --from 0 --to 0",
+    "materios-node check-block --chain raw.json --base-path /data 0",
+    "materios-node export-state --chain raw.json --base-path /data 0",
+    "materios-node import-blocks --chain raw.json --base-path /data --binary /srv/blocks.bin",
+    "materios-node revert --chain raw.json --base-path /data 0",
+    "materios-node-spo key generate-node-key --file /data/node-key",
+    "materios-node help",
+]
+
+
+@pytest.mark.parametrize("earlier", PRIMING_SUBCOMMANDS)
+def test_a_node_subcommand_that_can_open_the_chain_database_before_the_node_is_an_input_error(earlier):
+    node = authority(["sh", "-c", f"{earlier}; cd /srv/materios; {SAFE_NODE} --chain raw.json --base-path /data"])
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val1: its launch runs the node subcommand {earlier.split()[1]!r} before its last command; the "
+            "preflight reads only build-spec and purge-chain there, which open no chain database: another "
+            "subcommand can write a genesis into the base path the node then starts from, whatever its --chain "
+            "names")):
+        lp.validate_node(node, "nodes[0]")
 
 
 # Any program before the node can start one the preflight never reads: a launcher prefix, eval,
@@ -4435,6 +4463,21 @@ def test_cli_refuses_an_authority_that_loads_another_chain_spec_file(clean, caps
     code, out = clean.run(capsys)
     assert code == 1
     assert "[8 node] authority val1: its --chain file, as captured, is not the checked chain spec" in out, out
+
+
+# The red team's PoC: every capture truthful, the setup command's `--chain raw.json` resolved in the unit's working
+# directory and the node's in /srv/materios, so the node starts from the genesis the setup command wrote.
+@pytest.mark.parametrize("setup", PRIMING_SUBCOMMANDS[:3])
+def test_cli_refuses_a_launch_that_primes_the_base_path_with_a_node_subcommand(clean, capsys, setup):
+    running = ["materios-node", "--validator", "--chain", "raw.json", "--base-path", "/data", "--rpc-methods", "safe"]
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node["argv"] = ["sh", "-c", f"{setup}; cd /srv/materios; exec {' '.join(running)}"]
+            clean.running[node["name"]] = running
+    signing_code, code, out = sign_and_check(clean.tmp_path, clean.prepare(), clean.launch, capsys, clean.kupo.url,
+                                             clean.launch_key)
+    assert (signing_code, code) == (2, 2), out
+    assert f"authority val0: its launch runs the node subcommand {setup.split()[1]!r} before its last command" in out
 
 
 def test_cli_refuses_an_authority_whose_node_builds_another_genesis(clean, capsys):

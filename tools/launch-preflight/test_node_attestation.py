@@ -163,6 +163,31 @@ def test_export_blocks_is_given_exactly_the_options_it_shares_with_the_run_comma
     assert shared - {"--base-path", "-d"} == passed - ALIASES
 
 
+def chain_database(base_path: Path, spec_path: Path) -> Path:
+    return base_path / "chains" / json.loads(spec_path.read_text())["id"] / "db"
+
+
+def run_node(node: Path, *words: str, cwd: Path) -> None:
+    env = dict(lp.NODE_ENV, MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE=str(cwd / "registrations.json"))
+    (cwd / "registrations.json").write_text("[]")
+    subprocess.run([str(node), *words], cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                   timeout=lp.NODE_TIMEOUT, check=True)
+
+
+# The subcommands a launch may run before its node open no chain database, and one it may not writes one.
+def test_only_the_subcommands_a_launch_may_run_before_its_node_leave_the_base_path_without_a_database(
+        tmp_path, node, preprod):
+    tools = {"build-spec": ["--raw", "--disable-default-bootnode"], "purge-chain": ["-y"]}
+    assert tuple(tools) == lp.NODE_TOOLS
+    base_path = tmp_path / "base"
+    for tool, words in tools.items():
+        run_node(node, tool, "--chain", str(preprod), "--base-path", str(base_path), *words, cwd=tmp_path)
+        assert not chain_database(base_path, preprod).exists(), tool
+    run_node(node, "export-blocks", "--chain", str(preprod), "--base-path", str(base_path), "--from", "0", "--to", "0",
+             str(tmp_path / "block-0"), cwd=tmp_path)
+    assert chain_database(base_path, preprod).is_dir()
+
+
 def test_cli_passes_a_clean_launch_its_real_node_attests(clean, capsys, node, pin):
     for entry in clean.launch["nodes"]:
         if entry["authority"]:

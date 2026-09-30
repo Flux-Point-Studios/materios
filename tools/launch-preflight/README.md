@@ -223,8 +223,12 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   and newlines, and an authority's last command must start `materios-node`
   or `materios-node-spo`. Before it, an authority's launch may run only
   `set`, `export`, `cd`, `umask`, `ulimit` and `mkdir`, as bare words, and
-  node subcommands (`build-spec`, `purge-chain`): any other program could
-  start a node whose listeners go unchecked. A launch the preflight would
+  the node subcommands `build-spec` and `purge-chain`, which open no chain
+  database: any other program could start a node whose listeners go
+  unchecked, and any other subcommand (`export-blocks`, `check-block`,
+  `export-state`, `import-blocks`, `revert`) writes the genesis of its own
+  `--chain` into the base path, which the node then starts from whatever
+  its `--chain` names. A launch the preflight would
   have to evaluate refuses as unreadable: a `$VAR` or backtick expansion, a
   NUL byte in a word or setting (execve ends each one there), a script word
   the shell rewrites (brace expansion, a `*`, `?` or `[` glob, a `~`, a word
