@@ -111,12 +111,14 @@ kupo --match <lock address> --match '<D-parameter policy>.*' \
 
 The preflight trusts that Kupo for what Cardano holds, and refuses when it is
 more than 300 slots behind its node. It reads each committee datum from the one
-unspent output that holds its policy's token under the empty asset name, as the
-node's follower does; a token held by no unspent output, or by several, refuses
-as unreadable, since the follower reads the one created last. The follower reads
-each datum as it stood in the Cardano epoch it takes its data from, and the
-preflight as it stands at the check: change neither datum between that epoch
-and the launch.
+unspent output that holds its policy's token under the empty asset name; a
+token held by no unspent output, or by several, refuses as unreadable. The
+node's follower reads the output created last that holds the token, spent or
+not. The two are the same output unless a unit of the token that a later
+output held has been burnt, which the preflight does not see: mint one unit of
+each token and burn none. The follower reads each datum as it stood in the
+Cardano epoch it takes its data from, and the preflight as it stands at the
+check: change neither datum between that epoch and the launch.
 
 ## Hex
 
