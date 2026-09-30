@@ -19,7 +19,8 @@ Rules, each of which refuses on its own:
                  Sudo.Key or a genesis account that no declared role accounts
                  for, or Root not a multisig of threshold 2 or more; an
                  off-chain role left undeclared; a chain spec the anchor worker
-                 would read as a test network
+                 would read as a test network; a genesis GRANDPA voter that is
+                 not a genesis author's declared grandpa key, once, weight 1
   2 rewards      attestor reward and subsidy values or validator reward
                  parameters not declared, or genesis and the runtime do not
                  hold exactly the declared values
@@ -1915,9 +1916,8 @@ def proxy_routes(proxy: dict) -> list[tuple[str, int]]:
     return routes
 
 
-def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
-    """(label, aura key) of every block author: the genesis Aura authorities, then
-    the Cardano permissioned candidates, who author after the first rotation."""
+def genesis_aura(spec: Spec) -> list[bytes]:
+    """The aura keys of the block authors genesis names in Aura.Authorities."""
     raw = spec.value("Aura", "Authorities")
     if raw is None:
         raise InputError("genesis sets no Aura.Authorities")
@@ -1927,9 +1927,50 @@ def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
         raise InputError("Aura.Authorities does not decode") from e
     if len(raw) != pos + 32 * count:
         raise InputError("Aura.Authorities does not decode as a list of 32-byte keys")
-    listed = [(f"genesis Aura.Authorities[{i}]", raw[pos + 32 * i:pos + 32 * i + 32]) for i in range(count)]
-    return listed + [(f"Cardano permissioned candidate {i}", cand.keys["aura"])
-                     for i, cand in enumerate(cardano.candidates)]
+    return [raw[start:start + 32] for start in range(pos, len(raw), 32)]
+
+
+def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
+    """(label, aura key) of every block author: the genesis Aura authorities, then
+    the Cardano permissioned candidates, who author after the first rotation."""
+    return ([(f"genesis Aura.Authorities[{i}]", key) for i, key in enumerate(genesis_aura(spec))]
+            + [(f"Cardano permissioned candidate {i}", cand.keys["aura"]) for i, cand in enumerate(cardano.candidates)])
+
+
+def check_grandpa(spec: Spec, launch: dict) -> list[Finding]:
+    """Who finalizes from genesis: Grandpa.Authorities must list the grandpa key of
+    each authority that authors at genesis (its aura key is in Aura.Authorities),
+    once and with weight 1 as build-spec writes them, and no other key."""
+    raw = spec.value("Grandpa", "Authorities")
+    if raw is None:
+        return [Finding(KEYS, "genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes is "
+                              "unchecked")]
+    undecodable = InputError("Grandpa.Authorities does not decode as a list of 32-byte keys and u64 weights")
+    try:
+        count, pos = read_compact(raw, 0)
+    except IndexError as e:
+        raise undecodable from e
+    if len(raw) != pos + 40 * count:
+        raise undecodable
+    authors = set(genesis_aura(spec))
+    declared = {decode_public_key(node["grandpa"]): node["name"] for node in launch.get("nodes", [])
+                if node["authority"] and decode_public_key(node["aura"]) in authors}
+    findings, voted = [], set()
+    for i, start in enumerate(range(pos, len(raw), 40)):
+        key, weight = raw[start:start + 32], int.from_bytes(raw[start + 32:start + 40], "little")
+        where = f"genesis Grandpa.Authorities[{i}] 0x{key.hex()}"
+        if key in voted:
+            findings.append(Finding(KEYS, f"{where} is listed before: it counts twice toward finality"))
+        elif key not in declared:
+            findings.append(Finding(KEYS, f"{where} is not the grandpa key of an authority that genesis "
+                                          "Aura.Authorities lists: who finalizes is unchecked"))
+        if weight != 1:
+            findings.append(Finding(KEYS, f"{where} has weight {weight}, not the 1 build-spec writes: it counts as "
+                                          f"{weight} voters toward finality"))
+        voted.add(key)
+    return findings + [Finding(KEYS, f"authority {name}'s grandpa key 0x{key.hex()} is not in genesis "
+                                     "Grandpa.Authorities: it does not vote on finality")
+                       for key, name in declared.items() if key not in voted]
 
 
 def node_addresses(node: dict) -> set[str]:
@@ -2700,14 +2741,15 @@ def validate_node(node, where: str) -> None:
             raise InputError(f"{where} {field} must be the path of a capture")
     launch_commands(node)
     if node["authority"]:
-        text = node["aura"] if isinstance(node.get("aura"), str) else ""
-        validate_key_text(text, f"{where} aura")
-        try:
-            aura = decode_public_key(text)
-        except ValueError:
-            aura = b""
-        if len(aura) != 32:
-            raise InputError(f"{where} is an authority and must declare its aura public key (SS58 or 0x-hex)")
+        for field in ("aura", "grandpa"):
+            text = node[field] if isinstance(node.get(field), str) else ""
+            validate_key_text(text, f"{where} {field}")
+            try:
+                key = decode_public_key(text)
+            except ValueError:
+                key = b""
+            if len(key) != 32:
+                raise InputError(f"{where} is an authority and must declare its {field} public key (SS58 or 0x-hex)")
         pin = node.get("exe_sha256")
         if not isinstance(pin, str) or len(hex_bytes(pin, f"{where} exe_sha256")) != 32:
             raise InputError(f"{where} is an authority and must pin the sha256 of its node binary as exe_sha256")
@@ -2798,6 +2840,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
     well_known = load_well_known(extra_well_known)
     return (check_chain_identity(spec)
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
+            + check_grandpa(spec, launch)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_public_rpc(launch)

@@ -1482,7 +1482,8 @@ BEHIND_PROXY = ["[3 rpc] authority val1 serves unsafe RPC methods behind proxy p
 
 def authority(argv, host="val1", name="val1", aura=None):
     return {"name": name, "host": host, "authority": True, "aura": "0x" + (aura or fresh_account()).hex(),
-            "argv": argv, "exe_sha256": "0x" + hashlib.sha256(b"materios-node").hexdigest()}
+            "grandpa": "0x" + fresh_account().hex(), "argv": argv,
+            "exe_sha256": "0x" + hashlib.sha256(b"materios-node").hexdigest()}
 
 
 def declared(argv, is_authority: bool, **fields) -> dict:
@@ -2426,6 +2427,102 @@ def test_authorities_come_from_genesis_aura_and_the_cardano_candidates(spec):
     assert [aura for _, aura in labels] == aura_keys(spec) + [extra]
     assert labels[0][0] == "genesis Aura.Authorities[0]"
     assert labels[-1][0] == "Cardano permissioned candidate 0"
+
+
+# ---------------------------------------------------------------------------
+# Rule 1: who finalizes at genesis
+# ---------------------------------------------------------------------------
+
+def grandpa_keys(spec: lp.Spec) -> list[bytes]:
+    raw = spec.value("Grandpa", "Authorities")
+    count, pos = lp.read_compact(raw, 0)
+    return [raw[pos + 40 * i:pos + 40 * i + 32] for i in range(count)]
+
+
+def grandpa_list(*voters: tuple[bytes, int]) -> bytes:
+    return lp.compact(len(voters)) + b"".join(key + weight.to_bytes(8, "little") for key, weight in voters)
+
+
+def voter_launch(spec: lp.Spec, grandpas=None, extra=()) -> dict:
+    """An authority for each genesis Aura key, declaring the genesis GRANDPA key at the same index."""
+    grandpas = grandpa_keys(spec) if grandpas is None else grandpas
+    return rpc_launch([dict(authority(["materios-node"], f"val{i}", f"val{i}", aura), grandpa="0x" + gran.hex())
+                       for i, (aura, gran) in enumerate(zip(aura_keys(spec), grandpas))] + list(extra))
+
+
+def voter_findings(spec: lp.Spec, launch: dict) -> list[str]:
+    return messages(lp.check_grandpa(spec, launch))
+
+
+def test_genesis_grandpa_voters_that_are_the_authorities_that_author_at_genesis_pass(spec):
+    assert voter_findings(spec, voter_launch(spec)) == []
+
+
+# The red team's PoC: a GRANDPA voter no declared authority holds finalized the chain unchecked.
+def test_a_genesis_grandpa_voter_no_authority_declares_is_refused(spec):
+    keys, launch, outsider = grandpa_keys(spec), voter_launch(spec), fresh_account()
+    put(spec, "Grandpa", "Authorities", grandpa_list((outsider, 1)))
+    assert voter_findings(spec, launch) == [
+        f"[1 dev-keys] genesis Grandpa.Authorities[0] 0x{outsider.hex()} is not the grandpa key of an authority that "
+        "genesis Aura.Authorities lists: who finalizes is unchecked"] + [
+        f"[1 dev-keys] authority val{i}'s grandpa key 0x{key.hex()} is not in genesis Grandpa.Authorities: it does not "
+        "vote on finality" for i, key in enumerate(keys)]
+
+
+def test_a_genesis_grandpa_voter_of_weight_other_than_one_is_refused(spec):
+    keys = grandpa_keys(spec)
+    put(spec, "Grandpa", "Authorities", grandpa_list((keys[0], 3), *((key, 1) for key in keys[1:])))
+    assert voter_findings(spec, voter_launch(spec)) == [
+        f"[1 dev-keys] genesis Grandpa.Authorities[0] 0x{keys[0].hex()} has weight 3, not the 1 build-spec writes: it "
+        "counts as 3 voters toward finality"]
+
+
+def test_a_genesis_grandpa_voter_listed_twice_is_refused(spec):
+    keys = grandpa_keys(spec)
+    put(spec, "Grandpa", "Authorities", grandpa_list(*((key, 1) for key in keys), (keys[2], 1)))
+    assert voter_findings(spec, voter_launch(spec)) == [
+        f"[1 dev-keys] genesis Grandpa.Authorities[4] 0x{keys[2].hex()} is listed before: it counts twice toward "
+        "finality"]
+
+
+def test_an_authority_that_declares_another_grandpa_key_than_genesis_is_refused(spec):
+    keys, other = grandpa_keys(spec), fresh_account()
+    found = voter_findings(spec, voter_launch(spec, grandpas=[other, *keys[1:]]))
+    assert found == [
+        f"[1 dev-keys] genesis Grandpa.Authorities[0] 0x{keys[0].hex()} is not the grandpa key of an authority that "
+        "genesis Aura.Authorities lists: who finalizes is unchecked",
+        f"[1 dev-keys] authority val0's grandpa key 0x{other.hex()} is not in genesis Grandpa.Authorities: it does not "
+        "vote on finality"]
+
+
+def test_an_authority_that_joins_after_genesis_needs_no_genesis_grandpa_key(spec):
+    joining = dict(authority(["materios-node"], "val9", "val9"), grandpa="0x" + fresh_account().hex())
+    assert voter_findings(spec, voter_launch(spec, extra=[joining])) == []
+
+
+def test_a_genesis_with_no_grandpa_voters_is_refused(spec):
+    launch = voter_launch(spec)
+    del spec.storage[lp.storage_key("Grandpa", "Authorities")]
+    assert voter_findings(spec, launch) == [
+        "[1 dev-keys] genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes is unchecked"]
+
+
+@pytest.mark.parametrize("raw", [lp.compact(1) + bytes(39), lp.compact(1) + bytes(41), b""])
+def test_grandpa_voters_that_do_not_decode_are_an_input_error(spec, raw):
+    launch = voter_launch(spec)
+    put(spec, "Grandpa", "Authorities", raw)
+    with pytest.raises(lp.InputError, match="Grandpa.Authorities does not decode as a list of 32-byte keys and "
+                                            "u64 weights"):
+        lp.check_grandpa(spec, launch)
+
+
+@pytest.mark.parametrize("grandpa", [None, "0x" + "ab" * 31, "not a key"])
+def test_an_authority_must_declare_its_grandpa_key(grandpa):
+    node = {k: v for k, v in authority(["materios-node"]).items() if k != "grandpa"}
+    if grandpa is not None:
+        node["grandpa"] = grandpa
+    with pytest.raises(lp.InputError, match="nodes\\[0\\] is an authority and must declare its grandpa public key"):
+        lp.validate_node(node, "nodes[0]")
 
 
 # An authority's node process argv, as the kernel holds it: each word ended by a NUL, as `cat /proc/<pid>/cmdline`
@@ -4177,7 +4274,8 @@ class Launch:
         # None serves this genesis hash as the lock's inline datum.
         self.lock_datum = None
         self.node_exe = fake_node(tmp_path)
-        self.launch["nodes"][:0] = [self.authority(f"val{i}", aura) for i, aura in enumerate(aura_keys(spec))]
+        self.launch["nodes"][:0] = [self.authority(f"val{i}", aura, gran)
+                                    for i, (aura, gran) in enumerate(zip(aura_keys(spec), grandpa_keys(spec)))]
         # The argv each authority's node process runs with, where a test gives one other than its launch argv.
         self.running = {}
         # The bytes of the file each authority's --chain names, where a test gives other than the checked spec.
@@ -4185,11 +4283,12 @@ class Launch:
         self.launch_key = signing.SigningKey.generate()
         self.candidates = genesis_candidates_datum(spec)
 
-    def authority(self, name: str, aura: bytes) -> dict:
+    def authority(self, name: str, aura: bytes, grandpa: bytes) -> dict:
         """An authority that runs the fake node, pinned to it, on the spec from its own file."""
         node = authority(["materios-node", "--validator", "--chain", authority_chain(self.tmp_path), "--rpc-methods",
                           "safe"], name, name, aura)
-        return dict(node, cmdline=str(self.tmp_path / f"{name}.cmdline"), exe=str(self.node_exe),
+        return dict(node, grandpa="0x" + grandpa.hex(), cmdline=str(self.tmp_path / f"{name}.cmdline"),
+                    exe=str(self.node_exe),
                     exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"))
 
     def spec_path(self) -> Path:
@@ -4710,6 +4809,14 @@ def test_cli_refuses_an_authority_that_overrides_the_signed_runtime(clean, capsy
            "runtime code" in out
 
 
+# The red team's PoC: a GRANDPA voter no declared authority holds.
+def test_cli_refuses_a_genesis_grandpa_voter_no_authority_declares(clean, capsys):
+    clean.spec.storage[lp.storage_key("Grandpa", "Authorities")] = grandpa_list((fresh_account(), 1))
+    code, out = clean.run(capsys)
+    assert code == 1 and ("is not the grandpa key of an authority that genesis Aura.Authorities lists: who "
+                          "finalizes is unchecked") in out, out
+
+
 # The red team's composition PoC: a spec version no upgrade reaches, so no later runtime runs its migrations.
 def test_cli_refuses_a_last_runtime_upgrade_that_no_upgrade_reaches(clean, capsys):
     stored = clean.spec.storage[LAST_RUNTIME_UPGRADE]
@@ -4743,7 +4850,7 @@ def test_cli_refuses_a_local_chain_type(clean, capsys):
 
 def test_cli_refuses_a_dev_key_in_the_cardano_committee(clean, capsys):
     clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), ALICE, fresh_account())])
-    clean.launch["nodes"].append(clean.authority("val9", ALICE))
+    clean.launch["nodes"].append(clean.authority("val9", ALICE, fresh_account()))
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] Cardano permissioned candidate 0 aura: //Alice (sr25519)" in out
