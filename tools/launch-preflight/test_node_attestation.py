@@ -88,6 +88,16 @@ def test_build_spec_writes_committee_scripts_the_preflight_reads(preprod):
     assert lp.committee_policies(spec) == base.scripts_policies(spec)
 
 
+# The preprod builder's 600-slot sessions, as a u32, under the slot duration its own runtime declares.
+def test_build_spec_writes_the_session_length_the_preflight_reads(preprod):
+    spec = lp.load_spec(str(preprod))
+    meta = lp.Metadata.from_v14(lp.subwasm_metadata(spec.code, base.subwasm()))
+    assert lp.check_sessions(spec, meta, {"slots_per_epoch": base.PREPROD_SLOTS_PER_EPOCH}) == []
+    assert [str(f) for f in lp.check_sessions(spec, meta, {"slots_per_epoch": 60})] == [
+        "[9 committee] genesis Sidechain.SlotsPerEpoch is 600, not the 60 the launch declares: each session, and each "
+        "committee, lasts another length than the one signed"]
+
+
 # The preprod candidates' cross-chain keys (MacBook, Gemtek, Node-2, Node-3), in the order the preprod spec lists
 # their aura and grandpa keys.
 CROSS_CHAIN_KEYS = [bytes.fromhex(key) for key in (

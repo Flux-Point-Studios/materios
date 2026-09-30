@@ -10,7 +10,7 @@ public RPC URL serves, probed live, and what Cardano holds, through a Kupo index
 the cMATRA lock that backs genesis and the permissioned candidates the runtime
 draws the committee from. A launch manifest, signed with a launch
 key launch_keys.json pins, supplies what genesis cannot show: who holds each
-role, the explicit economics, where the lock is.
+role, the explicit economics, where the lock is, how long a session lasts.
 
 Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
@@ -65,7 +65,9 @@ Rules, each of which refuses on its own:
                  from (fewer than two candidates it can seat) or that holds a
                  candidate it drops; a D-parameter that seats registered
                  candidates, fewer permissioned seats than candidates, or more
-                 than MaxValidators
+                 than MaxValidators; a genesis session length (slots per
+                 epoch) other than the declared one, 0, or one whose sessions
+                 do not divide Cardano's epoch
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -277,10 +279,12 @@ NODE_OPTIONS = {
     **dict.fromkeys(("--rpc-rate-limit-whitelisted-ips", RPC_ENDPOINT_FLAG, "--bootnodes", "--reserved-nodes",
                      "--public-addr", "--listen-addr"), (MANY, False)),
 }
+# A Cardano mainnet epoch since Shelley: 432,000 one-second slots.
+CARDANO_EPOCH_MILLIS = 432_000_000
 # What the node reads before it builds genesis, and does not build it from: its Cardano follower settings, here the
 # mock follower, which connects to nothing, and Cardano mainnet's Shelley epoch layout.
 NODE_ENV = {"USE_MAIN_CHAIN_FOLLOWER_MOCK": "true", "MC__FIRST_EPOCH_TIMESTAMP_MILLIS": "1596059091000",
-            "MC__EPOCH_DURATION_MILLIS": "432000000", "MC__FIRST_EPOCH_NUMBER": "208",
+            "MC__EPOCH_DURATION_MILLIS": str(CARDANO_EPOCH_MILLIS), "MC__FIRST_EPOCH_NUMBER": "208",
             "MC__FIRST_SLOT_NUMBER": "4492800"}
 NODE_TIMEOUT = 900
 # What the node prints when its --chain names a file that does not exist: sc-chain-spec's ChainSpec::from_json_file,
@@ -303,7 +307,7 @@ STAT_LINE = re.compile(r"(\d+) ([0-9a-f]+) (.*)")
 # parent hash, number 0, state root, extrinsics root, empty digest), no extrinsics and no justifications.
 GENESIS_HEADER = 32 + 1 + 32 + 32 + 1
 GENESIS_EXPORT = 8 + GENESIS_HEADER + 2
-LAUNCH_FIELDS = {"roles", "economics", "supply", "nodes", "rpc_proxies", "public_rpc"}
+LAUNCH_FIELDS = {"roles", "economics", "supply", "slots_per_epoch", "nodes", "rpc_proxies", "public_rpc"}
 PROXY_KINDS = ("nginx", "nginx-dump", "cloudflared")
 PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
 # What a node built from polkadot-stable2409-4 serves under --rpc-methods safe: its rpc_methods less each method whose
@@ -617,8 +621,8 @@ class Spec:
         fields = scale_uints(raw, widths)
         if fields is None:
             raise InputError(f"chain spec raw storage: {where} is {len(raw)} byte{'s' * (len(raw) != 1)}, not the "
-                             f"{sum(widths)} its type encodes to: the node reads a shorter value as its default, "
-                             "zero, and only the first bytes of a longer one")
+                             f"{sum(widths)} its type encodes to: the node reads a shorter value as the item's "
+                             "default and only the first bytes of a longer one")
         return fields
 
     def uint(self, pallet: str, item: str, width: int) -> int | None:
@@ -978,10 +982,11 @@ def lone_holders(entry) -> list[bytes]:
     return sorted(key for key in {role_account(text) for _, text in role_leaves(entry, "")} if acts_alone(key))
 
 
-def u32_constant(meta: Metadata, pallet: str, name: str) -> int | None:
-    """A u32 constant the runtime metadata declares, or None if it declares none of that width."""
+def uint_constant(meta: Metadata, pallet: str, name: str, width: int) -> int | None:
+    """An unsigned constant of `width` bytes the runtime metadata declares, or None if it declares none of that
+    width."""
     raw = meta.constants.get((pallet, name), b"")
-    return int.from_bytes(raw, "little") if len(raw) == 4 else None
+    return int.from_bytes(raw, "little") if len(raw) == width else None
 
 
 def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, prefix: int) -> list[str]:
@@ -992,7 +997,7 @@ def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, pr
     if not isinstance(entry, dict):
         return [f"{where} is a single key: {name} must be a multisig with a threshold of at least 2, declared by its "
                 "members so each one is checked"]
-    limit = u32_constant(meta, "Multisig", "MaxSignatories")
+    limit = uint_constant(meta, "Multisig", "MaxSignatories", 4)
     if limit is None:
         faults = [f"{where}: the runtime metadata declares no Multisig.MaxSignatories the preflight can read: "
                   "whether pallet_multisig lets this multisig sign is unknown here"]
@@ -2115,7 +2120,7 @@ def check_cardano_committee(meta: Metadata, cardano: CardanoView) -> list[Findin
                                            f"candidate{'s' * (permissioned != 1)}, fewer than the {count} the datum "
                                            "holds: Ariadne draws the seats at random, with repeats, so a declared "
                                            "authority can be left out and a draw can fall below two members"))
-    bound = u32_constant(meta, "SessionCommitteeManagement", "MaxValidators")
+    bound = uint_constant(meta, "SessionCommitteeManagement", "MaxValidators", 4)
     if bound is not None and permissioned > bound:
         findings.append(Finding(COMMITTEE, f"the D-parameter seats {permissioned} permissioned candidates, more than "
                                            f"the {bound} members a committee holds "
@@ -2184,7 +2189,7 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                                            "of the epoch after it instead of the current one's, which it cannot "
                                            "derive for an epoch that began before Cardano's first, so the chain never "
                                            "authors block 1"))
-    bound = u32_constant(meta, "SessionCommitteeManagement", "MaxValidators")
+    bound = uint_constant(meta, "SessionCommitteeManagement", "MaxValidators", 4)
     if bound is None:
         findings.append(Finding(COMMITTEE, "the runtime metadata declares no SessionCommitteeManagement.MaxValidators "
                                            "the preflight can read: whether the runtime can decode the genesis "
@@ -2223,6 +2228,43 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
         if stored not in (None, compact(0)):
             findings.append(Finding(COMMITTEE, f"genesis PalletSession.{item} is 0x{stored.hex()}, not the empty list "
                                                "build-spec writes: the session keys it holds are unchecked"))
+    return findings
+
+
+def check_sessions(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
+    """How long each session, and so each committee, lasts: genesis
+    Sidechain.SlotsPerEpoch, which build-spec always writes. It must be the
+    length the launch declares, above 0, since the runtime divides each block's
+    slot by it, and a divisor of Cardano's epoch in the runtime's slots, as
+    partner-chains' sidechain-slots requires."""
+    declared = launch.get("slots_per_epoch")
+    findings = [] if declared is not None else [
+        Finding(COMMITTEE, "the launch declares no slots_per_epoch: how long each session, and each committee, lasts "
+                           "is unchecked")]
+    slots = spec.uint("Sidechain", "SlotsPerEpoch", 4)
+    if slots is None:
+        return findings + [Finding(COMMITTEE, "genesis sets no Sidechain.SlotsPerEpoch, which build-spec always "
+                                              "writes: the runtime reads partner-chains' default of 60 slots")]
+    if declared is not None and slots != declared:
+        findings.append(Finding(COMMITTEE, f"genesis Sidechain.SlotsPerEpoch is {slots}, not the {declared} the launch "
+                                           "declares: each session, and each committee, lasts another length than the "
+                                           "one signed"))
+    if not slots:
+        return findings + [Finding(COMMITTEE, "genesis Sidechain.SlotsPerEpoch is 0: the runtime divides each block's "
+                                              "slot by it as it initializes the block, so block 1 traps and the chain "
+                                              "never authors a block")]
+    slot = uint_constant(meta, "Aura", "SlotDuration", 8)
+    if not slot:
+        return findings + [Finding(COMMITTEE, "the runtime metadata declares no Aura.SlotDuration above 0 the "
+                                              "preflight can read: whether a session divides Cardano's epoch is "
+                                              "unknown here")]
+    if CARDANO_EPOCH_MILLIS % (slots * slot):
+        findings.append(Finding(COMMITTEE, f"genesis Sidechain.SlotsPerEpoch {slots}: a session of {slots} slots of "
+                                           f"{slot} ms does not divide Cardano's {CARDANO_EPOCH_MILLIS} ms epoch, as "
+                                           "partner-chains' sidechain-slots requires: a session longer than a Cardano "
+                                           "epoch skips the committees Cardano holds for the epochs it spans, and the "
+                                           "node cannot draw block 1's committee in a session that began before "
+                                           "Cardano's first epoch"))
     return findings
 
 
@@ -3188,6 +3230,10 @@ def validate_launch(launch) -> None:
     if not UTXO.fullmatch(lock["utxo"]):
         raise InputError("supply.genesis_lock.utxo must be <64 hex>#<index>")
     hex_bytes(lock["native_script"], "supply.genesis_lock.native_script")
+    slots = launch.get("slots_per_epoch", 0)
+    if type(slots) is not int or not 0 <= slots <= 0xFFFFFFFF:
+        raise InputError("slots_per_epoch must be a u32: the slots in each session, which genesis "
+                         "Sidechain.SlotsPerEpoch stores")
     nodes = launch.get("nodes", [])
     if not isinstance(nodes, list):
         raise InputError("nodes must be a list")
@@ -3237,6 +3283,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
     return (check_chain_identity(spec)
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
             + check_committee(spec, meta, launch)
+            + check_sessions(spec, meta, launch)
             + check_candidate_grans(launch, cardano)
             + check_cardano_committee(meta, cardano)
             + check_rewards(spec, meta, launch)

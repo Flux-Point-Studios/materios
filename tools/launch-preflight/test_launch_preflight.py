@@ -468,7 +468,8 @@ def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_o
     what the accounts hold, free plus reserved, is TotalIssuance."""
     for genesis in (spec, spec239[0]):
         numbers = [("OrinqReceipts", item, width) for _, item, width in REWARD_WIDTHS]
-        numbers += [("OrinqReceipts", "BondRequirement", 16), ("Balances", "TotalIssuance", 16)]
+        numbers += [("OrinqReceipts", "BondRequirement", 16), ("Balances", "TotalIssuance", 16),
+                    ("Sidechain", "SlotsPerEpoch", 4)]
         for pallet, item, width in numbers:
             assert len(genesis.value(pallet, item)) == width
         accounts = genesis.accounts()
@@ -1502,8 +1503,9 @@ def mis_sized(where: str, size: int, width: int) -> str:
 @A_BYTE_OFF
 @pytest.mark.parametrize("field, item, width", REWARD_WIDTHS, ids=[item for _, item, _ in REWARD_WIDTHS])
 def test_a_reward_stored_at_another_width_is_an_input_error(spec, runtime_meta, field, item, width, change):
-    """FRAME reads a value too short for its type as the item's default, zero,
-    and ignores the bytes past its type; the declared number fits either way."""
+    """FRAME reads a value too short for its type as the item's default, here
+    zero, and ignores the bytes past its type; the declared number fits either
+    way."""
     put(spec, "OrinqReceipts", item, TUNED[field].to_bytes(width + change, "little"))
     with pytest.raises(lp.InputError, match="^" + re.escape(mis_sized(f"OrinqReceipts.{item}", width + change, width))):
         lp.check_rewards(spec, runtime_meta, {"economics": TUNED})
@@ -2854,6 +2856,94 @@ def test_a_genesis_that_leaves_out_the_pallet_session_stub_passes(seated, meta):
     for item in ("QueuedKeys", "Validators"):
         del spec.storage[lp.storage_key("PalletSession", item)]
     assert committee_findings(spec, meta, launch) == []
+
+
+# ---------------------------------------------------------------------------
+# Rule 9: how long each session lasts
+# ---------------------------------------------------------------------------
+
+PREPROD_SLOTS_PER_EPOCH = 600
+
+
+def session_findings(spec: lp.Spec, meta: lp.Metadata, slots=None, declared=PREPROD_SLOTS_PER_EPOCH) -> list[str]:
+    """Rule 9's session check with genesis storing `slots` per epoch, unless the test leaves the preprod value, and
+    the launch declaring `declared`, or nothing for None."""
+    if slots is not None:
+        put(spec, "Sidechain", "SlotsPerEpoch", slots.to_bytes(4, "little"))
+    return messages(lp.check_sessions(spec, meta, {} if declared is None else {"slots_per_epoch": declared}))
+
+
+def not_dividing(slots: int) -> str:
+    return (f"[9 committee] genesis Sidechain.SlotsPerEpoch {slots}: a session of {slots} slots of 6000 ms does not "
+            "divide Cardano's 432000000 ms epoch, as partner-chains' sidechain-slots requires: a session longer than "
+            "a Cardano epoch skips the committees Cardano holds for the epochs it spans, and the node cannot draw "
+            "block 1's committee in a session that began before Cardano's first epoch")
+
+
+ZERO_SLOTS = ("[9 committee] genesis Sidechain.SlotsPerEpoch is 0: the runtime divides each block's slot by it as it "
+              "initializes the block, so block 1 traps and the chain never authors a block")
+
+
+@pytest.mark.parametrize("slots", [1, 60, PREPROD_SLOTS_PER_EPOCH, 72_000])
+def test_a_declared_session_that_divides_cardanos_epoch_passes(spec, meta, slots):
+    assert session_findings(spec, meta, slots, slots) == []
+
+
+# The red team's PoC: the runtime's Sidechain::on_initialize divides by genesis SlotsPerEpoch in every block, and the
+# node's slot config reads the same storage.
+def test_a_genesis_of_zero_slots_per_epoch_is_refused(spec, meta):
+    assert session_findings(spec, meta, 0, 0) == [ZERO_SLOTS]
+
+
+# 700 slots divides no Cardano epoch; 144,000 is two of them; the node's Ariadne data provider fails block 1 at every
+# slot once a session is long enough to have begun before Cardano's first epoch, as u32::MAX slots is.
+@pytest.mark.parametrize("slots", [700, 144_000, 2**32 - 1])
+def test_a_session_that_does_not_divide_cardanos_epoch_is_refused(spec, meta, slots):
+    assert session_findings(spec, meta, slots, slots) == [not_dividing(slots)]
+
+
+def test_a_genesis_session_other_than_the_declared_one_is_refused(spec, meta):
+    assert session_findings(spec, meta, 60) == [
+        "[9 committee] genesis Sidechain.SlotsPerEpoch is 60, not the 600 the launch declares: each session, and "
+        "each committee, lasts another length than the one signed"]
+
+
+def test_an_undeclared_session_length_is_refused(spec, meta):
+    assert session_findings(spec, meta, declared=None) == [
+        "[9 committee] the launch declares no slots_per_epoch: how long each session, and each committee, lasts is "
+        "unchecked"]
+
+
+def test_a_genesis_that_sets_no_session_length_is_refused(spec, meta):
+    del spec.storage[lp.storage_key("Sidechain", "SlotsPerEpoch")]
+    assert session_findings(spec, meta) == [
+        "[9 committee] genesis sets no Sidechain.SlotsPerEpoch, which build-spec always writes: the runtime reads "
+        "partner-chains' default of 60 slots"]
+
+
+@A_BYTE_OFF
+def test_a_session_length_stored_at_another_width_is_an_input_error(spec, meta, change):
+    put(spec, "Sidechain", "SlotsPerEpoch", PREPROD_SLOTS_PER_EPOCH.to_bytes(4 + change, "little"))
+    with pytest.raises(lp.InputError, match="^" + re.escape(mis_sized("Sidechain.SlotsPerEpoch", 4 + change, 4))):
+        session_findings(spec, meta)
+
+
+@pytest.mark.parametrize("value", [None, bytes(4), bytes(8)], ids=["absent", "4 bytes", "zero"])
+def test_a_session_under_a_runtime_that_hides_its_slot_duration_is_refused(spec, meta, value):
+    if value is None:
+        del meta.constants[("Aura", "SlotDuration")]
+    else:
+        meta.constants[("Aura", "SlotDuration")] = value
+    assert session_findings(spec, meta) == [
+        "[9 committee] the runtime metadata declares no Aura.SlotDuration above 0 the preflight can read: whether a "
+        "session divides Cardano's epoch is unknown here"]
+
+
+@pytest.mark.parametrize("value", ["600", 600.0, True, -1, 2**32], ids=["a string", "a float", "a bool", "negative",
+                                                                        "past u32"])
+def test_a_session_length_that_is_not_a_u32_is_an_input_error(value):
+    with pytest.raises(lp.InputError, match="^slots_per_epoch must be a u32"):
+        lp.validate_launch({"roles": {}, "supply": VALID_LOCK, "slots_per_epoch": value})
 
 
 # ---------------------------------------------------------------------------
@@ -5189,6 +5279,7 @@ class Launch:
                       "endowed": [ss58(a) for a in genesis_accounts(spec) if a not in (self.attestor, sudo)]},
             "economics": dict(TUNED, fee_buffer=100 * MATRA),
             "supply": {"genesis_lock": LOCK},
+            "slots_per_epoch": PREPROD_SLOTS_PER_EPOCH,
             "nodes": [{"name": "edge", "host": "edge", "authority": False}],
             "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
                              "other_targets": ["rpc-node:9944"]}],
@@ -5418,6 +5509,22 @@ def test_cli_refuses_a_genesis_committee_no_authority_declares(clean, capsys):
     assert f"[9 committee] {COMMITTEE}[0] {pair(*outsider[1:])} is not a declared authority's aura and grandpa key " \
            "pair" in out, out
     assert f"[9 committee] the permissioned candidates datum holds 1 candidate the runtime can seat, {NO_DRAW}" in out
+
+
+# The red team's PoC: genesis SlotsPerEpoch 0 traps every block's initialization, and u32::MAX slots leaves block 1
+# no Cardano epoch to draw from; both passed every rule.
+@pytest.mark.parametrize("slots, refusal", [(0, ZERO_SLOTS), (2**32 - 1, not_dividing(2**32 - 1))])
+def test_cli_refuses_a_genesis_session_that_stops_the_chain(clean, capsys, slots, refusal):
+    put(clean.spec, "Sidechain", "SlotsPerEpoch", slots.to_bytes(4, "little"))
+    clean.launch["slots_per_epoch"] = slots
+    code, out = clean.run(capsys)
+    assert code == 1 and refusal in out, out
+
+
+def test_cli_refuses_a_launch_that_declares_no_session_length(clean, capsys):
+    del clean.launch["slots_per_epoch"]
+    code, out = clean.run(capsys)
+    assert code == 1 and "[9 committee] the launch declares no slots_per_epoch" in out, out
 
 
 def test_cli_refuses_a_committee_address_past_the_runtimes_bound_as_unreadable(clean, capsys):
