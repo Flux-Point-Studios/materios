@@ -149,7 +149,7 @@ def msig(threshold, *members) -> dict:
     return {"threshold": threshold, "members": [ss58(m) for m in members]}
 
 
-NO_CARDANO = lp.CardanoView(lock=None, candidates=[])
+NO_CARDANO = lp.CardanoView(lock=None, candidates=[], d_parameter=(0, 0))
 
 
 def leb128(n: int) -> bytes:
@@ -1317,18 +1317,20 @@ def test_test_network_names_are_one_pattern_shared_with_the_anchor_worker():
 
 
 # ---------------------------------------------------------------------------
-# Rule 1 and 3: the Cardano permissioned candidates (the committee after the first rotation)
+# Rule 1 and 3: the Cardano permissioned candidates (the committee the runtime draws)
 # ---------------------------------------------------------------------------
 
 def candidate(aura: bytes, gran: bytes | None = None, sidechain: bytes | None = None) -> lp.Candidate:
-    return lp.Candidate(sidechain or bytes([2]) + fresh_account(),
-                        {"aura": aura, "gran": gran or fresh_account()})
+    return lp.Candidate(sidechain or bytes([2]) + fresh_account(), aura, gran or fresh_account())
 
 
 def test_dev_key_in_a_cardano_permissioned_candidate_is_named(spec, meta, known):
     alice_ed = bytes.fromhex(SP_KEYRING["ed25519"]["//Alice"])
-    cardano = lp.CardanoView(lock=None, candidates=[candidate(fresh_account()), candidate(ALICE, alice_ed)])
+    alice_ecdsa = bytes.fromhex(ALICE_ECDSA)
+    cardano = lp.CardanoView(lock=None, d_parameter=(2, 0),
+                             candidates=[candidate(fresh_account()), candidate(ALICE, alice_ed, alice_ecdsa)])
     found = dev_key_findings(spec, meta, known, cardano=cardano)
+    assert "[1 dev-keys] Cardano permissioned candidate 1 partner chains key: //Alice (ecdsa)" in found
     assert "[1 dev-keys] Cardano permissioned candidate 1 aura: //Alice (sr25519)" in found
     assert "[1 dev-keys] Cardano permissioned candidate 1 gran: //Alice (ed25519)" in found
 
@@ -1341,18 +1343,23 @@ def versioned_datum(appendix, version) -> bytes:
     return cbor2.dumps([cbor2.CBORTag(121, []), appendix, version])
 
 
-def test_permissioned_candidate_datums_decode_in_every_partner_chains_format():
+def d_parameter_datum(permissioned: int, registered: int = 0) -> bytes:
+    """The D-parameter datum as partner-chains writes it: versioned, at version 0."""
+    return versioned_datum([permissioned, registered], 0)
+
+
+# The node's follower decodes the datum with partner-chains-plutus-data v1.5.1: a legacy bare list, or a versioned
+# datum at version 0.
+def test_permissioned_candidate_datums_decode_in_every_format_the_node_reads():
     sc, aura, gran = bytes([2]) * 33, bytes([1]) * 32, bytes([3]) * 32
-    want = [lp.Candidate(sc, {"aura": aura, "gran": gran})]
+    want = [lp.Candidate(sc, aura, gran)]
     assert lp.decode_candidates(legacy_datum([(sc, aura, gran)])) == want
     assert lp.decode_candidates(versioned_datum([[sc, aura, gran]], 0)) == want
-    v1 = versioned_datum([[sc, [[b"aura", aura], [b"gran", gran]]]], 1)
-    assert lp.decode_candidates(v1) == want
 
 
 def test_three_legacy_candidates_are_not_read_as_a_versioned_datum():
     rows = [(bytes([2]) * 33, bytes([i]) * 32, bytes([9]) * 32) for i in range(3)]
-    assert [c.keys["aura"] for c in lp.decode_candidates(legacy_datum(rows))] == [bytes([i]) * 32 for i in range(3)]
+    assert [c.aura for c in lp.decode_candidates(legacy_datum(rows))] == [bytes([i]) * 32 for i in range(3)]
 
 
 @pytest.mark.parametrize("raw", [
@@ -1360,16 +1367,18 @@ def test_three_legacy_candidates_are_not_read_as_a_versioned_datum():
     cbor2.dumps({"not": "a list"}),
     versioned_datum([[b"\x02" * 33, b"\x01" * 32]], 0),
     versioned_datum([], 7),
-    versioned_datum([[b"\x02" * 33, [[b"toolong", b"\x01"]]]], 1),
-])
+    versioned_datum([[b"\x02" * 33, [[b"aura", b"\x01" * 32], [b"gran", b"\x03" * 32]]]], 1),
+    cbor2.dumps([cbor2.CBORTag(121, []), [[b"\x02" * 33, b"\x01" * 32, b"\x03" * 32]], False]),
+], ids=["not CBOR", "a map", "a candidate of two keys", "version 7", "version 1", "a boolean version"])
 def test_undecodable_candidate_datum_is_an_input_error(raw):
     with pytest.raises(lp.InputError, match="permissioned candidates"):
         lp.decode_candidates(raw)
 
 
-def test_permissioned_candidates_policy_is_read_from_genesis(spec):
-    assert lp.permissioned_candidates_policy(spec).hex() == \
-        "ef2890d1e98247819abcf2df6e891824ed950a4216d36c71ee6f9974"
+def test_the_committee_policies_are_read_from_genesis(spec):
+    assert [policy.hex() for policy in lp.committee_policies(spec)] == [
+        "38dddaf5198b927b19dac9b28226ab29eddad176d5d81c7748bc2c31",
+        "ef2890d1e98247819abcf2df6e891824ed950a4216d36c71ee6f9974"]
 
 
 # ---------------------------------------------------------------------------
@@ -2453,7 +2462,7 @@ def test_authority_left_out_of_nodes_behind_a_proxy_is_refused(tmp_path):
 
 def test_authorities_come_from_genesis_aura_and_the_cardano_candidates(spec):
     extra = fresh_account()
-    cardano = lp.CardanoView(lock=None, candidates=[candidate(extra)])
+    cardano = lp.CardanoView(lock=None, candidates=[candidate(extra)], d_parameter=(1, 0))
     labels = lp.authorities(spec, cardano)
     assert [aura for _, aura in labels] == aura_keys(spec) + [extra]
     assert labels[0][0] == "genesis Aura.Authorities[0]"
@@ -2801,7 +2810,8 @@ def genesis_authors_on_cardano(spec: lp.Spec, grans=None) -> lp.CardanoView:
     """The authors genesis names as Cardano's permissioned candidates, each with the genesis GRANDPA key at its
     index unless the test gives other gran keys."""
     grans = grandpa_keys(spec) if grans is None else grans
-    return lp.CardanoView(lock=None, candidates=[candidate(aura, gran) for aura, gran in zip(aura_keys(spec), grans)])
+    return lp.CardanoView(lock=None, candidates=[candidate(aura, gran) for aura, gran in zip(aura_keys(spec), grans)],
+                          d_parameter=(len(grans), 0))
 
 
 def voter_launch(spec: lp.Spec) -> dict:
@@ -2832,18 +2842,137 @@ def test_a_cardano_candidate_that_carries_another_authoritys_grandpa_key_is_refu
         for i in (0, 1)]
 
 
-def test_a_cardano_candidate_with_no_gran_key_is_refused(spec):
-    cardano = genesis_authors_on_cardano(spec)
-    cardano.candidates[1] = lp.Candidate(cardano.candidates[1].partner_chains_key, {"aura": aura_keys(spec)[1]})
-    assert cardano_findings(spec, voter_launch(spec), cardano) == [
-        "[9 committee] Cardano permissioned candidate 1 carries no gran key, where authority val1 declares a grandpa "
-        "key with its aura key: once the committee is drawn from Cardano it does not vote on finality as declared"]
-
-
 # Rule 3 refuses a candidate whose aura key no authority declares; it has no declared grandpa key to hold here.
 def test_a_cardano_candidate_no_authority_declares_is_left_to_rule_3(spec):
-    cardano = lp.CardanoView(lock=None, candidates=[candidate(fresh_account())])
+    cardano = lp.CardanoView(lock=None, candidates=[candidate(fresh_account())], d_parameter=(1, 0))
     assert cardano_findings(spec, voter_launch(spec), cardano) == []
+
+
+def draw_findings(meta: lp.Metadata, candidates: list[lp.Candidate], d_parameter=None) -> list[str]:
+    """What rule 9 finds in a candidates datum, and a D-parameter of one permissioned seat per candidate unless the
+    test gives one."""
+    view = lp.CardanoView(lock=None, candidates=candidates, d_parameter=d_parameter or (len(candidates), 0))
+    return messages(lp.check_cardano_committee(meta, view))
+
+
+def fresh_candidates(count: int) -> list[lp.Candidate]:
+    return [candidate(fresh_account()) for _ in range(count)]
+
+
+NO_DRAW = "fewer than the 2 it draws a committee from, so every rotation seats the genesis committee again"
+
+
+def test_candidates_each_seated_by_the_d_parameter_pass(meta):
+    assert draw_findings(meta, fresh_candidates(4)) == []
+
+
+@pytest.mark.parametrize("seats", [5, 32], ids=["a spare seat", "MaxValidators"])
+def test_a_d_parameter_with_permissioned_seats_to_spare_passes(meta, seats):
+    assert draw_findings(meta, fresh_candidates(4), (seats, 0)) == []
+
+
+# The red team's PoC: one candidate, so Ariadne selects fewer than two distinct validators and returns none, and the
+# runtime re-seats the genesis committee at every rotation.
+@pytest.mark.parametrize("count", [0, 1])
+def test_a_datum_the_runtime_draws_no_committee_from_is_refused(meta, count):
+    assert draw_findings(meta, fresh_candidates(count)) == [
+        f"[9 committee] the permissioned candidates datum holds {count} candidate{'s' * (count != 1)} the runtime can "
+        f"seat, {NO_DRAW}"]
+
+
+# The red team's PoC: partner chains keys of 32 bytes, which Ariadne filters out, leaving no candidate to draw.
+def test_candidates_ariadne_drops_are_refused(meta):
+    candidates = [lp.Candidate(fresh_account(), c.aura, c.gran) for c in fresh_candidates(4)]
+    assert draw_findings(meta, candidates) == [
+        f"[9 committee] Cardano permissioned candidate {i} has a 32-byte partner chains key, not 33 bytes: Ariadne "
+        "drops it" for i in range(4)] + [
+        f"[9 committee] the permissioned candidates datum holds 0 candidates the runtime can seat, {NO_DRAW}"]
+
+
+@pytest.mark.parametrize("field, size, width, name", [
+    ("partner_chains_key", 34, 33, "partner chains key"),
+    ("aura", 31, 32, "aura key"),
+    ("gran", 33, 32, "gran key"),
+])
+def test_a_candidate_with_a_key_of_another_length_is_refused(meta, field, size, width, name):
+    candidates = fresh_candidates(3)
+    candidates[1] = dataclasses.replace(candidates[1], **{field: bytes([2]) * size})
+    assert draw_findings(meta, candidates) == [
+        f"[9 committee] Cardano permissioned candidate 1 has a {size}-byte {name}, not {width} bytes: Ariadne drops "
+        "it"]
+
+
+# The runtime's input sanitizer keeps the first of candidates that share any key.
+@pytest.mark.parametrize("field, name", [("partner_chains_key", "partner chains key"), ("aura", "aura key"),
+                                         ("gran", "gran key")])
+def test_a_candidate_that_repeats_a_key_is_refused(meta, field, name):
+    candidates = fresh_candidates(3)
+    candidates.append(dataclasses.replace(fresh_candidates(1)[0], **{field: getattr(candidates[0], field)}))
+    assert draw_findings(meta, candidates, (4, 0)) == [
+        f"[9 committee] Cardano permissioned candidate 3 repeats candidate 0's {name}: the runtime keeps the first and "
+        "drops it"]
+
+
+def test_a_datum_that_repeats_its_only_other_candidate_draws_no_committee(meta):
+    only = fresh_candidates(1)[0]
+    assert draw_findings(meta, [only, only]) == [
+        f"[9 committee] Cardano permissioned candidate 1 repeats candidate 0's {name}: the runtime keeps the first and "
+        "drops it" for name in ("partner chains key", "aura key", "gran key")] + [
+        f"[9 committee] the permissioned candidates datum holds 1 candidate the runtime can seat, {NO_DRAW}"]
+
+
+def test_a_d_parameter_that_seats_registered_candidates_is_refused(meta):
+    assert draw_findings(meta, fresh_candidates(4), (4, 2)) == [
+        "[9 committee] the D-parameter seats 2 registered candidates: a Cardano stake pool that registers joins the "
+        "committee, and the preflight reads no registration"]
+
+
+# The red team's PoC: one permissioned seat for three candidates, so the draw seats one and no committee is drawn.
+@pytest.mark.parametrize("seats", [0, 1, 2])
+def test_a_d_parameter_that_seats_fewer_than_the_candidates_is_refused(meta, seats):
+    assert draw_findings(meta, fresh_candidates(3), (seats, 0)) == [
+        f"[9 committee] the D-parameter seats {seats} permissioned candidate{'s' * (seats != 1)}, fewer than the 3 the "
+        "datum holds: Ariadne draws the seats at random, with repeats, so a declared authority can be left out and a "
+        "draw can fall below two members"]
+
+
+def test_a_d_parameter_over_max_validators_is_refused(meta):
+    assert draw_findings(meta, fresh_candidates(4), (33, 0)) == [
+        "[9 committee] the D-parameter seats 33 permissioned candidates, more than the 32 members a committee holds "
+        "(SessionCommitteeManagement.MaxValidators): the runtime refuses a whole draw past a cap of its own that its "
+        "metadata does not declare, so the preflight holds the D-parameter to what a committee holds"]
+
+
+# A runtime that hides MaxValidators is refused once, by the genesis committee check.
+def test_the_d_parameter_is_not_bounded_under_a_runtime_that_hides_max_validators(meta):
+    del meta.constants[("SessionCommitteeManagement", "MaxValidators")]
+    assert draw_findings(meta, fresh_candidates(4), (33, 0)) == []
+
+
+@pytest.mark.parametrize("raw, want", [
+    (d_parameter_datum(4, 0), (4, 0)),
+    (cbor2.dumps([7, 1]), (7, 1)),
+    (d_parameter_datum(65535, 65535), (65535, 65535)),
+], ids=["version 0", "legacy", "u16 maxima"])
+def test_d_parameter_datums_decode_in_every_format_the_node_reads(raw, want):
+    assert lp.decode_d_parameter(raw) == want
+
+
+@pytest.mark.parametrize("raw", [
+    b"\xff",
+    versioned_datum([4, 0], 1),
+    cbor2.dumps([4]),
+    cbor2.dumps([4, 0, 0]),
+    d_parameter_datum(-1, 0),
+    d_parameter_datum(65536, 0),
+    d_parameter_datum(True, 0),
+    cbor2.dumps([cbor2.CBORTag(121, []), [4, 0], True]),
+    cbor2.dumps([b"\x04", 0]),
+], ids=["not CBOR", "version 1", "one number", "three numbers", "negative", "past u16", "a boolean",
+        "a boolean version", "bytes"])
+def test_undecodable_d_parameter_datum_is_an_input_error(raw):
+    with pytest.raises(lp.InputError, match="the D-parameter datum"):
+        lp.decode_d_parameter(raw)
 
 
 @pytest.mark.parametrize("grandpa", [None, "0x" + "ab" * 31, "not a key"])
@@ -3249,7 +3378,7 @@ def kupo_output(address=SCRIPT_ADDRESS, assets=None, tx=LOCK_TX, index=1, datum_
 
 
 def locked(amount, address=SCRIPT_ADDRESS, unit=lp.CMATRA_UNIT) -> lp.CardanoView:
-    return lp.CardanoView(lock=kupo_output(address, {unit: amount}), candidates=[])
+    return lp.CardanoView(lock=kupo_output(address, {unit: amount}), candidates=[], d_parameter=(0, 0))
 
 
 def with_constants(metadata_v14: dict, constants=None) -> dict:
@@ -3355,7 +3484,7 @@ def lock_findings(spec, lock=LOCK, output=None, datum=GENESIS_DATUM):
     address with an inline datum that is this genesis hash."""
     output = kupo_output(lock["address"], {lp.CMATRA_UNIT: 1}) if output is None else output
     datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if datum is GENESIS_DATUM else datum
-    cardano = lp.CardanoView(lock=output or None, candidates=[], lock_datum=datum)
+    cardano = lp.CardanoView(lock=output or None, candidates=[], d_parameter=(0, 0), lock_datum=datum)
     return messages(lp.check_genesis_lock(spec, {"supply": {"genesis_lock": lock}}, cardano, lp.load_well_known()))
 
 
@@ -3645,18 +3774,23 @@ class Kupo:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
 
-    def serve(self, spec: lp.Spec, lock_output: dict | None, candidates_datum: bytes, lock=LOCK, lock_datum=b""):
+    def serve(self, spec: lp.Spec, lock_output: dict | None, candidates_datum: bytes, lock=LOCK, lock_datum=b"",
+              d_parameter=None):
+        """The lock, and the outputs that hold the D-parameter and permissioned candidates tokens with their datums:
+        a D-parameter of 32 permissioned seats and no registered one, unless the test gives its datum."""
         tx, _, index = lock["utxo"].partition("#")
         if lock_output and lock_datum:
             lock_hash = hashlib.blake2b(lock_datum, digest_size=32).hexdigest()
             lock_output = dict(lock_output, datum_hash=lock_hash, datum_type="inline")
             self.routes[f"/datums/{lock_hash}"] = {"datum": lock_datum.hex()}
         self.routes[f"/matches/{index}@{tx}?unspent"] = [lock_output] if lock_output else []
-        policy = lp.permissioned_candidates_policy(spec).hex()
-        datum_hash = hashlib.blake2b(candidates_datum, digest_size=32).hexdigest()
-        self.routes[f"/matches/{policy}.*?unspent"] = [
-            kupo_output(TEST_SCRIPT_ADDRESS, {policy: 1}, "cc" * 32, 0, datum_hash)]
-        self.routes[f"/datums/{datum_hash}"] = {"datum": candidates_datum.hex()}
+        d_policy, candidates_policy = (policy.hex() for policy in lp.committee_policies(spec))
+        for policy, datum, holder in ((d_policy, d_parameter or d_parameter_datum(32), "dd" * 32),
+                                      (candidates_policy, candidates_datum, "cc" * 32)):
+            datum_hash = hashlib.blake2b(datum, digest_size=32).hexdigest()
+            self.routes[f"/matches/{policy}.*?unspent"] = [
+                kupo_output(TEST_SCRIPT_ADDRESS, {policy: 1}, holder, 0, datum_hash)]
+            self.routes[f"/datums/{datum_hash}"] = {"datum": datum.hex()}
 
 
 @pytest.fixture
@@ -3680,7 +3814,8 @@ def test_cardano_view_reads_the_lock_and_the_candidates_from_kupo(spec, kupo):
     view = lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
     assert view.lock["value"] == output["value"] and view.lock["datum_type"] == "inline"
     assert view.lock_datum == datum
-    assert [c.keys["aura"] for c in view.candidates] == aura_keys(spec)
+    assert [c.aura for c in view.candidates] == aura_keys(spec)
+    assert view.d_parameter == (32, 0)
     assert set(kupo.accept) == {"application/json"}
 
 
@@ -3692,10 +3827,40 @@ def test_a_lock_datum_kupo_serves_under_another_hash_is_an_input_error(spec, kup
         lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
 
 
-def test_kupo_with_no_candidates_datum_is_an_input_error(spec, kupo):
+COMMITTEE_TOKENS = pytest.mark.parametrize("policy, what", [(0, "D-parameter"), (1, "permissioned candidates")])
+
+
+def token_route(spec, policy: int) -> str:
+    return f"/matches/{lp.committee_policies(spec)[policy].hex()}.*?unspent"
+
+
+@COMMITTEE_TOKENS
+def test_kupo_with_no_committee_datum_is_an_input_error(spec, kupo, policy, what):
     kupo.serve(spec, None, legacy_datum([]))
-    kupo.routes[f"/matches/{lp.permissioned_candidates_policy(spec).hex()}.*?unspent"] = []
-    with pytest.raises(lp.InputError, match="no unspent output holding the permissioned candidates token"):
+    kupo.routes[token_route(spec, policy)] = []
+    with pytest.raises(lp.InputError, match=f"no unspent output holding the {what} token"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+# The node's follower reads the output created last that holds the token under the empty asset name: the preflight
+# reads one only when it is the only unspent one.
+@COMMITTEE_TOKENS
+def test_two_unspent_outputs_holding_a_committee_token_are_an_input_error(spec, kupo, policy, what):
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    route = token_route(spec, policy)
+    kupo.routes[route] = kupo.routes[route] * 2
+    with pytest.raises(lp.InputError, match=f"Kupo has 2 unspent outputs holding the {what} token"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+@COMMITTEE_TOKENS
+def test_a_committee_token_under_another_asset_name_is_not_read(spec, kupo, policy, what):
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    route = token_route(spec, policy)
+    held = kupo.routes[route][0]
+    named = lp.committee_policies(spec)[policy].hex() + ".6d617472"
+    kupo.routes[route] = [dict(held, value={"coins": 2_000_000, "assets": {named: 1}})]
+    with pytest.raises(lp.InputError, match=f"no unspent output holding the {what} token"):
         lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
 
 
@@ -3713,11 +3878,12 @@ def test_an_output_kupo_lists_as_spent_is_not_the_lock(spec, kupo):
     assert lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}}).lock is None
 
 
-def test_a_spent_candidates_output_is_not_the_committee(spec, kupo):
+@COMMITTEE_TOKENS
+def test_a_spent_committee_output_is_not_read(spec, kupo, policy, what):
     kupo.serve(spec, None, genesis_candidates_datum(spec))
-    route = f"/matches/{lp.permissioned_candidates_policy(spec).hex()}.*?unspent"
+    route = token_route(spec, policy)
     kupo.routes[route] = [dict(kupo.routes[route][0], spent_at={"slot_no": 2, "header_hash": "11" * 32})]
-    with pytest.raises(lp.InputError, match="no unspent output holding the permissioned candidates token"):
+    with pytest.raises(lp.InputError, match=f"no unspent output holding the {what} token"):
         lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
 
 
@@ -3728,7 +3894,7 @@ def test_lock_with_a_non_integer_amount_is_an_input_error(spec, kupo):
 
 
 @pytest.mark.parametrize("pallet, item, read", [
-    ("SessionCommitteeManagement", "MainChainScriptsConfiguration", lp.permissioned_candidates_policy),
+    ("SessionCommitteeManagement", "MainChainScriptsConfiguration", lp.committee_policies),
     ("Aura", "Authorities", lambda spec: lp.authorities(spec, NO_CARDANO)),
 ])
 def test_empty_committee_storage_is_an_input_error(spec, pallet, item, read):
@@ -4703,6 +4869,7 @@ class Launch:
         self.served = {}
         self.launch_key = signing.SigningKey.generate()
         self.candidates = legacy_datum(self.members)
+        self.d_parameter = d_parameter_datum(len(self.members))
 
     def authority(self, name: str, aura: bytes, grandpa: bytes) -> dict:
         """An authority that runs the fake node, pinned to it, on the spec from its own file."""
@@ -4734,7 +4901,8 @@ class Launch:
             if node["authority"] and "served_genesis" in node:
                 served(self.tmp_path, node["name"], self.served.get(node["name"], lp.spec_genesis_hash(spec)))
         datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
-        self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum)
+        self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum,
+                        self.d_parameter)
         return spec_path
 
     def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
@@ -4898,6 +5066,20 @@ def test_cli_refuses_a_genesis_committee_no_authority_declares(clean, capsys):
     assert code == 1, out
     assert f"[9 committee] {COMMITTEE}[0] {pair(*outsider[1:])} is not a declared authority's aura and grandpa key " \
            "pair" in out, out
+    assert f"[9 committee] the permissioned candidates datum holds 1 candidate the runtime can seat, {NO_DRAW}" in out
+
+
+def test_cli_refuses_a_d_parameter_that_seats_registered_candidates(clean, capsys):
+    clean.d_parameter = d_parameter_datum(len(clean.members), 1)
+    code, out = clean.run(capsys)
+    assert code == 1 and "[9 committee] the D-parameter seats 1 registered candidate: " in out, out
+
+
+def test_cli_refuses_a_candidates_datum_the_node_cannot_decode_as_unreadable(clean, capsys):
+    clean.candidates = versioned_datum([[cc, [[b"aura", aura], [b"gran", gran]]] for cc, aura, gran in clean.members],
+                                       1)
+    code, out = clean.run(capsys)
+    assert code == 2 and "the permissioned candidates datum has version 1" in out, out
 
 
 def test_cli_refuses_the_build_spec_genesis_with_an_empty_committee(clean, capsys):

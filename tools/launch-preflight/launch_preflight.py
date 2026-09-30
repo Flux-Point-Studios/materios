@@ -58,7 +58,11 @@ Rules, each of which refuses on its own:
                  pallet_session keys other than theirs; two authorities that
                  declare one key; a Cardano permissioned candidate's gran key
                  that is not the grandpa key the authority with its aura key
-                 declares
+                 declares; a candidates datum the runtime draws no committee
+                 from (fewer than two candidates it can seat) or that holds a
+                 candidate it drops; a D-parameter that seats registered
+                 candidates, fewer permissioned seats than candidates, or more
+                 than MaxValidators
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -168,6 +172,12 @@ ECONOMICS_FIELDS = {"fee_buffer", *(field for field, _ in VALIDATOR_REWARD_CONST
 EPOCH_NUMBER = 8
 CROSS_CHAIN_KEY = 33
 COMMITTEE_MEMBER = CROSS_CHAIN_KEY + 32 + 32
+# A Cardano permissioned candidate's keys, as the runtime takes them: a partner chains key (ecdsa, compressed), then
+# aura (sr25519) and grandpa (ed25519) keys; and the fewest distinct members the vendored Ariadne seats
+# (MIN_DISTINCT_COMMITTEE): from fewer it draws no committee.
+CANDIDATE_KEYS = ("partner chains key", "aura key", "gran key")
+CANDIDATE_KEY_WIDTHS = (CROSS_CHAIN_KEY, 32, 32)
+MIN_DISTINCT_COMMITTEE = 2
 EMPTY_COMMITTEE = ("the runtime seats the genesis committee at every rotation whose Cardano draw fails, as a fresh "
                    "chain's first draw does, and GRANDPA refuses an empty authority set, so the chain halts there")
 # Every launch names who holds these; the ones that always run must name a key.
@@ -993,13 +1003,19 @@ def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, pr
 @dataclass
 class Candidate:
     partner_chains_key: bytes
-    keys: dict[str, bytes]
+    aura: bytes
+    gran: bytes
+
+    @property
+    def keys(self) -> tuple[bytes, bytes, bytes]:
+        return self.partner_chains_key, self.aura, self.gran
 
 
 @dataclass
 class CardanoView:
     lock: dict | None
     candidates: list[Candidate]
+    d_parameter: tuple[int, int]
     lock_datum: bytes | None = None
 
 
@@ -1027,9 +1043,11 @@ def unspent(matches, what: str) -> list[dict]:
     return [m for m in matches if m.get("spent_at") is None]
 
 
-def permissioned_candidates_policy(spec: Spec) -> bytes:
-    """The Cardano policy whose token marks the permissioned candidates datum,
-    from genesis: committee candidate address, D-parameter policy, then this."""
+def committee_policies(spec: Spec) -> tuple[bytes, bytes]:
+    """The Cardano policies whose tokens mark the D-parameter and the
+    permissioned candidates datums, from genesis
+    SessionCommitteeManagement.MainChainScriptsConfiguration: the committee
+    candidate address, then those two policy ids."""
     raw = spec.value("SessionCommitteeManagement", "MainChainScriptsConfiguration")
     if raw is None:
         raise InputError("genesis sets no SessionCommitteeManagement.MainChainScriptsConfiguration: "
@@ -1038,53 +1056,74 @@ def permissioned_candidates_policy(spec: Spec) -> bytes:
         address_len, pos = read_compact(raw, 0)
     except ValueError as e:
         raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration does not decode") from e
-    start = pos + address_len + POLICY_ID_LEN
-    policy = raw[start:start + POLICY_ID_LEN]
-    if len(policy) != POLICY_ID_LEN:
+    start = pos + address_len
+    policies = raw[start:start + POLICY_ID_LEN], raw[start + POLICY_ID_LEN:start + 2 * POLICY_ID_LEN]
+    if len(policies[1]) != POLICY_ID_LEN:
         raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration does not decode")
-    return policy
+    return policies
 
 
-def _candidate_v0(row) -> Candidate:
-    if not (isinstance(row, (list, tuple)) and len(row) == 3 and all(isinstance(k, bytes) for k in row)):
-        raise ValueError("a V0 candidate is [partner chains key, aura key, grandpa key]")
-    return Candidate(row[0], {"aura": row[1], "gran": row[2]})
+def versioned_appendix(data, what: str):
+    """The appendix of partner-chains' VersionedGenericDatum [datum, appendix, version] at version 0, or `data` itself
+    when it is not one, as the legacy datum. partner-chains-plutus-data v1.5.1, which the node's followers decode the
+    committee datums with, knows version 0 only and reads no data from any other."""
+    if not (isinstance(data, list) and len(data) == 3 and type(data[2]) is int):
+        return data
+    if data[2] != 0:
+        raise InputError(f"the {what} datum has version {data[2]}, and the node's follower (partner-chains v1.5.1) "
+                         "reads a legacy datum or version 0 only: it reads none of it")
+    return data[1]
 
 
-def _candidate_v1(row) -> Candidate:
-    if not (isinstance(row, (list, tuple)) and len(row) == 2 and isinstance(row[0], bytes)
-            and isinstance(row[1], (list, tuple))):
-        raise ValueError("a V1 candidate is [partner chains key, [[key id, key], ...]]")
-    keys = {}
-    for pair in row[1]:
-        if not (isinstance(pair, (list, tuple)) and len(pair) == 2 and isinstance(pair[0], bytes)
-                and len(pair[0]) == 4 and isinstance(pair[1], bytes)):
-            raise ValueError("a V1 candidate key is [4-byte key id, key]")
-        keys[pair[0].decode("ascii", errors="replace")] = pair[1]
-    if "aura" not in keys:
-        raise ValueError("a candidate has no aura key")
-    return Candidate(row[0], keys)
+def plutus_datum(raw: bytes, what: str):
+    try:
+        return cbor2.loads(raw)
+    except ValueError as e:
+        raise InputError(f"the {what} datum is not CBOR: {e}") from e
 
 
 def decode_candidates(raw: bytes) -> list[Candidate]:
-    """partner-chains' permissioned candidates datum: the legacy bare list, or
-    VersionedGenericDatum [datum, appendix, version] with a V0 or V1 appendix."""
-    try:
-        data = cbor2.loads(raw)
-    except ValueError as e:
-        raise InputError(f"the permissioned candidates datum is not CBOR: {e}") from e
-    versioned = isinstance(data, (list, tuple)) and len(data) == 3 and isinstance(data[2], int)
-    version, rows = (data[2], data[1]) if versioned else (0, data)
-    if version not in (0, 1) or not isinstance(rows, (list, tuple)):
-        raise InputError(f"the permissioned candidates datum has an unknown shape (version {version})")
-    try:
-        return [(_candidate_v0 if version == 0 else _candidate_v1)(row) for row in rows]
-    except ValueError as e:
-        raise InputError(f"the permissioned candidates datum does not decode: {e}") from e
+    """partner-chains' permissioned candidates datum, a list of [partner chains key, aura key, grandpa key]: bare, as
+    the legacy datum, or the appendix of a VersionedGenericDatum at version 0."""
+    rows = versioned_appendix(plutus_datum(raw, "permissioned candidates"), "permissioned candidates")
+    if not isinstance(rows, list) or not all(
+            isinstance(row, list) and len(row) == 3 and all(isinstance(key, bytes) for key in row) for row in rows):
+        raise InputError("the permissioned candidates datum does not decode as a list of [partner chains key, aura "
+                         "key, grandpa key]")
+    return [Candidate(*row) for row in rows]
+
+
+def decode_d_parameter(raw: bytes) -> tuple[int, int]:
+    """partner-chains' D-parameter datum, [permissioned seats, registered seats] as two u16: bare, as the legacy
+    datum, or the appendix of a VersionedGenericDatum at version 0."""
+    seats = versioned_appendix(plutus_datum(raw, "D-parameter"), "D-parameter")
+    if not (isinstance(seats, list) and len(seats) == 2
+            and all(type(n) is int and 0 <= n <= 0xFFFF for n in seats)):
+        raise InputError("the D-parameter datum does not decode as [permissioned seats, registered seats], two u16")
+    return seats[0], seats[1]
+
+
+def committee_datum(kupo: str, policy: bytes, what: str) -> bytes:
+    """The datum of the unspent output that holds `policy`'s token under the empty asset name, which the node's
+    follower reads its committee configuration from. The follower reads the output that holds it created last; the
+    preflight reads one only when it is the only unspent one."""
+    token = policy.hex()
+    outputs = [output for output in unspent(kupo_get(kupo, f"/matches/{token}.*?unspent"), f"the {what} token")
+               if isinstance((output.get("value") or {}).get("assets"), dict)
+               and type(output["value"]["assets"].get(token)) is int and output["value"]["assets"][token] > 0]
+    if not outputs:
+        raise InputError(f"Kupo has no unspent output holding the {what} token {token}: the committee the runtime "
+                         "draws from Cardano cannot be checked")
+    if len(outputs) > 1:
+        raise InputError(f"Kupo has {len(outputs)} unspent outputs holding the {what} token {token}: the node's "
+                         "follower reads the one created last, which the preflight does not tell apart")
+    output = outputs[0]
+    return kupo_datum(kupo, output.get("datum_hash"),
+                      f"the {what} output {output.get('transaction_id')}#{output.get('output_index')}")
 
 
 def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
-    """The genesis lock output and the permissioned candidates, as the Kupo index holds them now."""
+    """The genesis lock output, the permissioned candidates and the D-parameter, as the Kupo index holds them now."""
     health = kupo_get(kupo, "/health")
     if not isinstance(health, dict):
         health = {}
@@ -1104,16 +1143,10 @@ def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
     lock_datum = None
     if lock is not None and lock.get("datum_type") == "inline":
         lock_datum = kupo_datum(kupo, lock.get("datum_hash"), "the genesis lock")
-    policy = permissioned_candidates_policy(spec).hex()
-    outputs = unspent(kupo_get(kupo, f"/matches/{policy}.*?unspent"), "the permissioned candidates token")
-    if not outputs:
-        raise InputError(f"Kupo has no unspent output holding the permissioned candidates token {policy}: "
-                         "the committee after the first rotation cannot be checked")
-    candidates = []
-    for output in outputs:
-        where = f"the permissioned candidates output {output.get('transaction_id')}#{output.get('output_index')}"
-        candidates += decode_candidates(kupo_datum(kupo, output.get("datum_hash"), where))
-    return CardanoView(lock, candidates, lock_datum)
+    d_policy, candidates_policy = committee_policies(spec)
+    candidates = decode_candidates(committee_datum(kupo, candidates_policy, "permissioned candidates"))
+    d_parameter = decode_d_parameter(committee_datum(kupo, d_policy, "D-parameter"))
+    return CardanoView(lock, candidates, d_parameter, lock_datum)
 
 
 def kupo_datum(kupo: str, datum_hash, what: str) -> bytes:
@@ -1313,7 +1346,7 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
             findings.append(Finding(KEYS, f"genesis account {ss58(account, spec.ss58_prefix)} is not declared in "
                                           "any role: who holds it is unchecked"))
     for i, cand in enumerate(cardano.candidates):
-        for name, raw in [("partner chains key", cand.partner_chains_key), *sorted(cand.keys.items())]:
+        for name, raw in zip(("partner chains key", "aura", "gran"), cand.keys):
             for hit in match_known(raw, known):
                 findings.append(Finding(KEYS, f"Cardano permissioned candidate {i} {name}: {hit}"))
     for node in launch.get("nodes", []):
@@ -1969,7 +2002,7 @@ def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
     the Cardano permissioned candidates, who author once the committee is drawn
     from Cardano."""
     return ([(f"genesis Aura.Authorities[{i}]", key) for i, key in enumerate(genesis_aura(spec))]
-            + [(f"Cardano permissioned candidate {i}", cand.keys["aura"]) for i, cand in enumerate(cardano.candidates)])
+            + [(f"Cardano permissioned candidate {i}", cand.aura) for i, cand in enumerate(cardano.candidates)])
 
 
 def declared_authorities(launch: dict) -> list[tuple[str, bytes, bytes]]:
@@ -1997,18 +2030,71 @@ def check_candidate_grans(launch: dict, cardano: CardanoView) -> list[Finding]:
     for name, aura, grandpa in declared_authorities(launch):
         grandpa_by_aura.setdefault(aura, {})[grandpa] = name
     for i, cand in enumerate(cardano.candidates):
-        grandpas = grandpa_by_aura.get(cand.keys["aura"])
-        gran = cand.keys.get("gran")
-        if grandpas is None or gran in grandpas:
+        grandpas = grandpa_by_aura.get(cand.aura)
+        if grandpas is not None and cand.gran not in grandpas:
+            findings.append(Finding(COMMITTEE, f"Cardano permissioned candidate {i} gran 0x{cand.gran.hex()} is not "
+                                               f"the grandpa key authority {', '.join(sorted(grandpas.values()))} "
+                                               "declares with its aura key: once the committee is drawn from Cardano "
+                                               "it votes on finality unchecked"))
+    return findings
+
+
+def seatable(candidates: list[Candidate]) -> int:
+    """How many permissioned candidates the runtime can seat: its input sanitizer keeps the first of candidates that
+    share any key, then Ariadne drops one whose partner chains key is not 33 bytes or whose aura or grandpa key is not
+    32."""
+    seen: tuple[set, set, set] = (set(), set(), set())
+    count = 0
+    for cand in candidates:
+        if any(key in keys_seen for key, keys_seen in zip(cand.keys, seen)):
             continue
-        names = ", ".join(sorted(grandpas.values()))
-        if gran is None:
-            message = (f"carries no gran key, where authority {names} declares a grandpa key with its aura key: once "
-                       "the committee is drawn from Cardano it does not vote on finality as declared")
-        else:
-            message = (f"gran 0x{gran.hex()} is not the grandpa key authority {names} declares with its aura key: once "
-                       "the committee is drawn from Cardano it votes on finality unchecked")
-        findings.append(Finding(COMMITTEE, f"Cardano permissioned candidate {i} {message}"))
+        for key, keys_seen in zip(cand.keys, seen):
+            keys_seen.add(key)
+        count += tuple(map(len, cand.keys)) == CANDIDATE_KEY_WIDTHS
+    return count
+
+
+def check_cardano_committee(meta: Metadata, cardano: CardanoView) -> list[Finding]:
+    """The committee the runtime draws from Cardano at each rotation. Its datum
+    must hold at least two candidates the runtime can seat, each once and whole:
+    the runtime keeps the first of candidates that share a key, Ariadne drops
+    one of a key of another length, and a draw of fewer than two distinct
+    members is refused, so the genesis committee stays. The D-parameter must
+    seat no registered candidate, which the preflight does not read, and at
+    least as many permissioned seats as candidates, so each is seated rather than
+    drawn at random with repeats, and no more than a committee holds."""
+    findings = []
+    for i, cand in enumerate(cardano.candidates):
+        findings += [Finding(COMMITTEE, f"Cardano permissioned candidate {i} has a {len(key)}-byte {name}, not "
+                                        f"{width} bytes: Ariadne drops it")
+                     for key, name, width in zip(cand.keys, CANDIDATE_KEYS, CANDIDATE_KEY_WIDTHS) if len(key) != width]
+    for index, name in enumerate(CANDIDATE_KEYS):
+        findings += [Finding(COMMITTEE, f"Cardano permissioned candidate {i} repeats candidate {j}'s {name}: the "
+                                        "runtime keeps the first and drops it")
+                     for i, j in repeats([cand.keys[index] for cand in cardano.candidates])]
+    count = seatable(cardano.candidates)
+    if count < MIN_DISTINCT_COMMITTEE:
+        findings.append(Finding(COMMITTEE, f"the permissioned candidates datum holds {count} "
+                                           f"candidate{'s' * (count != 1)} the runtime can seat, fewer than the "
+                                           f"{MIN_DISTINCT_COMMITTEE} it draws a committee from, so every rotation "
+                                           "seats the genesis committee again"))
+    permissioned, registered = cardano.d_parameter
+    if registered:
+        findings.append(Finding(COMMITTEE, f"the D-parameter seats {registered} registered "
+                                           f"candidate{'s' * (registered != 1)}: a Cardano stake pool that registers "
+                                           "joins the committee, and the preflight reads no registration"))
+    if permissioned < count:
+        findings.append(Finding(COMMITTEE, f"the D-parameter seats {permissioned} permissioned "
+                                           f"candidate{'s' * (permissioned != 1)}, fewer than the {count} the datum "
+                                           "holds: Ariadne draws the seats at random, with repeats, so a declared "
+                                           "authority can be left out and a draw can fall below two members"))
+    bound = u32_constant(meta, "SessionCommitteeManagement", "MaxValidators")
+    if bound is not None and permissioned > bound:
+        findings.append(Finding(COMMITTEE, f"the D-parameter seats {permissioned} permissioned candidates, more than "
+                                           f"the {bound} members a committee holds "
+                                           "(SessionCommitteeManagement.MaxValidators): the runtime refuses a whole "
+                                           "draw past a cap of its own that its metadata does not declare, so the "
+                                           "preflight holds the D-parameter to what a committee holds"))
     return findings
 
 
@@ -3027,6 +3113,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
             + check_committee(spec, meta, launch)
             + check_candidate_grans(launch, cardano)
+            + check_cardano_committee(meta, cardano)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_public_rpc(launch)
