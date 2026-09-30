@@ -7,8 +7,8 @@ loads, the runtime metadata extracted from that spec's own `:code` (with
 subwasm, the extractor the runtime-upgrade ceremony gate uses), the authority
 nodes' launch commands and the RPC proxy configs in front of them, what each
 public RPC URL serves, probed live, and what Cardano holds, through a Kupo index:
-the cMATRA lock that backs genesis and the permissioned candidates that become
-the committee after the first rotation. A launch manifest, signed with a launch
+the cMATRA lock that backs genesis and the permissioned candidates the runtime
+draws the committee from. A launch manifest, signed with a launch
 key launch_keys.json pins, supplies what genesis cannot show: who holds each
 role, the explicit economics, where the lock is.
 
@@ -19,10 +19,7 @@ Rules, each of which refuses on its own:
                  Sudo.Key or a genesis account that no declared role accounts
                  for, or Root not a multisig of threshold 2 or more; an
                  off-chain role left undeclared; a chain spec the anchor worker
-                 would read as a test network; a genesis GRANDPA voter that is
-                 not a genesis author's declared grandpa key, once, weight 1,
-                 or a Cardano permissioned candidate's gran key that is not the
-                 grandpa key the authority with its aura key declares
+                 would read as a test network
   2 rewards      attestor reward and subsidy values or validator reward
                  parameters not declared, or genesis and the runtime do not
                  hold exactly the declared values
@@ -54,6 +51,14 @@ Rules, each of which refuses on its own:
                  --chain names a chain built into the node or a file that is
                  not the checked spec; it runs another binary than the one the
                  manifest pins
+  9 committee    the genesis committee, which the runtime seats at every
+                 rotation whose Cardano draw fails, not exactly the declared
+                 authorities, each once, or past the runtime's MaxValidators;
+                 genesis Aura or GRANDPA authorities, session validators or
+                 pallet_session keys other than theirs; two authorities that
+                 declare one key; a Cardano permissioned candidate's gran key
+                 that is not the grandpa key the authority with its aura key
+                 declares
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -97,8 +102,8 @@ from websockets.sync.client import connect as ws_connect
 HERE = Path(__file__).resolve().parent
 # The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
 LAUNCH_KEYS = HERE / "launch_keys.json"
-KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE = (
-    "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock", "8 node")
+KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE, COMMITTEE = (
+    "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock", "8 node", "9 committee")
 CODE_KEY = b":code"
 # sp_api's id of the Core API, blake2_64 of its name; an API entry is the 8-byte id and a u32 version.
 CORE_API = hashlib.blake2b(b"Core", digest_size=8).digest()
@@ -158,6 +163,13 @@ REWARD_ITEMS = (
 ACCOUNT_INFO = (4, 4, 4, 4, BALANCE, BALANCE, BALANCE, BALANCE)
 ECONOMICS_FIELDS = {"fee_buffer", *(field for field, _ in VALIDATOR_REWARD_CONSTANTS),
                     *(field for field, _, _ in REWARD_ITEMS)}
+# SessionCommitteeManagement.CurrentCommittee: the epoch it serves, a u64, then its members, each a cross-chain key
+# (ecdsa, 33 bytes) with its session keys (aura sr25519, then grandpa ed25519).
+EPOCH_NUMBER = 8
+CROSS_CHAIN_KEY = 33
+COMMITTEE_MEMBER = CROSS_CHAIN_KEY + 32 + 32
+EMPTY_COMMITTEE = ("the runtime seats the genesis committee at every rotation whose Cardano draw fails, as a fresh "
+                   "chain's first draw does, and GRANDPA refuses an empty authority set, so the chain halts there")
 # Every launch names who holds these; the ones that always run must name a key.
 REQUIRED_ROLES = ("sudo", "anchor_signer", "attestors", "oracle")
 RUNNING_ROLES = ("anchor_signer", "attestors")
@@ -413,15 +425,30 @@ def compact(n: int) -> bytes:
 
 
 def read_compact(data: bytes, pos: int) -> tuple[int, int]:
+    """The SCALE compact integer at `pos`, and where it ends. parity-scale-codec refuses one cut short or written in
+    more bytes than its value needs, so the runtime reads a value whose length is written so as undecodable, where a
+    lenient reader would read the list after it."""
+    if pos >= len(data):
+        raise ValueError("no compact integer")
     mode = data[pos] & 3
-    if mode == 0:
-        return data[pos] >> 2, pos + 1
-    if mode == 1:
-        return int.from_bytes(data[pos:pos + 2], "little") >> 2, pos + 2
-    if mode == 2:
-        return int.from_bytes(data[pos:pos + 4], "little") >> 2, pos + 4
-    size = (data[pos] >> 2) + 4
-    return int.from_bytes(data[pos + 1:pos + 1 + size], "little"), pos + 1 + size
+    end = pos + (1, 2, 4)[mode] if mode < 3 else pos + 1 + (data[pos] >> 2) + 4
+    if end > len(data):
+        raise ValueError("a compact integer cut short")
+    value = int.from_bytes(data[pos:end], "little") >> 2 if mode < 3 else int.from_bytes(data[pos + 1:end], "little")
+    if compact(value) != data[pos:end]:
+        raise ValueError("a compact integer in more bytes than its value needs")
+    return value, end
+
+
+def fixed_list(raw: bytes, width: int, undecodable: str) -> list[bytes]:
+    """The entries of a SCALE list of `width`-byte entries that fills `raw`."""
+    try:
+        count, pos = read_compact(raw, 0)
+    except ValueError as e:
+        raise InputError(undecodable) from e
+    if len(raw) != pos + width * count:
+        raise InputError(undecodable)
+    return [raw[start:start + width] for start in range(pos, len(raw), width)]
 
 
 def scale_uints(raw: bytes, widths: tuple[int, ...]) -> tuple[int, ...] | None:
@@ -684,7 +711,7 @@ def runtime_version(wasm: bytes) -> tuple[bytes, int, int]:
         cursor += length
         spec_version = int.from_bytes(version[cursor + 4:cursor + 8], "little")  # past the authoring version
         count, cursor = read_compact(version, cursor + 12)  # past the authoring, spec and impl versions
-    except IndexError as e:
+    except ValueError as e:
         raise undecodable from e
     listed, cursor = version[cursor:cursor + API_ENTRY * count], cursor + API_ENTRY * count
     core = core_api_version(listed if apis is None else apis) or 0
@@ -923,8 +950,9 @@ def lone_holders(entry) -> list[bytes]:
     return sorted(key for key in {role_account(text) for _, text in role_leaves(entry, "")} if acts_alone(key))
 
 
-def max_signatories(meta: Metadata) -> int | None:
-    raw = meta.constants.get(("Multisig", "MaxSignatories"), b"")
+def u32_constant(meta: Metadata, pallet: str, name: str) -> int | None:
+    """A u32 constant the runtime metadata declares, or None if it declares none of that width."""
+    raw = meta.constants.get((pallet, name), b"")
     return int.from_bytes(raw, "little") if len(raw) == 4 else None
 
 
@@ -936,7 +964,7 @@ def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, pr
     if not isinstance(entry, dict):
         return [f"{where} is a single key: {name} must be a multisig with a threshold of at least 2, declared by its "
                 "members so each one is checked"]
-    limit = max_signatories(meta)
+    limit = u32_constant(meta, "Multisig", "MaxSignatories")
     if limit is None:
         faults = [f"{where}: the runtime metadata declares no Multisig.MaxSignatories the preflight can read: "
                   "whether pallet_multisig lets this multisig sign is unknown here"]
@@ -1008,7 +1036,7 @@ def permissioned_candidates_policy(spec: Spec) -> bytes:
                          "where the committee comes from on Cardano is unknown")
     try:
         address_len, pos = read_compact(raw, 0)
-    except IndexError as e:
+    except ValueError as e:
         raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration does not decode") from e
     start = pos + address_len + POLICY_ID_LEN
     policy = raw[start:start + POLICY_ID_LEN]
@@ -1933,35 +1961,41 @@ def genesis_aura(spec: Spec) -> list[bytes]:
     raw = spec.value("Aura", "Authorities")
     if raw is None:
         raise InputError("genesis sets no Aura.Authorities")
-    try:
-        count, pos = read_compact(raw, 0)
-    except IndexError as e:
-        raise InputError("Aura.Authorities does not decode") from e
-    if len(raw) != pos + 32 * count:
-        raise InputError("Aura.Authorities does not decode as a list of 32-byte keys")
-    return [raw[start:start + 32] for start in range(pos, len(raw), 32)]
+    return fixed_list(raw, 32, "Aura.Authorities does not decode as a list of 32-byte keys")
 
 
 def authorities(spec: Spec, cardano: CardanoView) -> list[tuple[str, bytes]]:
     """(label, aura key) of every block author: the genesis Aura authorities, then
-    the Cardano permissioned candidates, who author after the first rotation."""
+    the Cardano permissioned candidates, who author once the committee is drawn
+    from Cardano."""
     return ([(f"genesis Aura.Authorities[{i}]", key) for i, key in enumerate(genesis_aura(spec))]
             + [(f"Cardano permissioned candidate {i}", cand.keys["aura"]) for i, cand in enumerate(cardano.candidates)])
 
 
-def check_grandpa(spec: Spec, launch: dict, cardano: CardanoView) -> list[Finding]:
-    """Who finalizes. From the first committee rotation the Cardano permissioned
-    candidates vote with their gran keys, so each must carry the grandpa key that
-    the authority with its aura key declares; rule 3 refuses a candidate no
-    authority declares. From genesis Grandpa.Authorities must list the grandpa key
-    of each authority that authors at genesis (its aura key is in
-    Aura.Authorities), once and with weight 1 as build-spec writes them, and no
-    other key."""
+def declared_authorities(launch: dict) -> list[tuple[str, bytes, bytes]]:
+    """(name, aura key, grandpa key) of each authority the launch declares."""
+    return [(node["name"], decode_public_key(node["aura"]), decode_public_key(node["grandpa"]))
+            for node in launch.get("nodes", []) if node["authority"]]
+
+
+def repeats(keys: list[bytes]) -> list[tuple[int, int]]:
+    """(i, j) for each key at i that is first at an earlier j."""
+    first: dict[bytes, int] = {}
+    return [(i, first[key]) for i, key in enumerate(keys) if first.setdefault(key, i) != i]
+
+
+def key_pair(aura: bytes, grandpa: bytes) -> str:
+    return f"(aura 0x{aura.hex()}, grandpa 0x{grandpa.hex()})"
+
+
+def check_candidate_grans(launch: dict, cardano: CardanoView) -> list[Finding]:
+    """Once the committee is drawn from Cardano the permissioned candidates vote
+    on finality with their gran keys, so each must carry the grandpa key that
+    the authority with its aura key declares. Rule 3 refuses a candidate no
+    authority declares."""
     findings, grandpa_by_aura = [], {}
-    for node in launch.get("nodes", []):
-        if node["authority"]:
-            aura, grandpa = decode_public_key(node["aura"]), decode_public_key(node["grandpa"])
-            grandpa_by_aura.setdefault(aura, {})[grandpa] = node["name"]
+    for name, aura, grandpa in declared_authorities(launch):
+        grandpa_by_aura.setdefault(aura, {})[grandpa] = name
     for i, cand in enumerate(cardano.candidates):
         grandpas = grandpa_by_aura.get(cand.keys["aura"])
         gran = cand.keys.get("gran")
@@ -1969,42 +2003,121 @@ def check_grandpa(spec: Spec, launch: dict, cardano: CardanoView) -> list[Findin
             continue
         names = ", ".join(sorted(grandpas.values()))
         if gran is None:
-            message = (f"carries no gran key, where authority {names} declares a grandpa key with its aura key: from "
-                       "the first committee rotation it does not vote on finality as declared")
+            message = (f"carries no gran key, where authority {names} declares a grandpa key with its aura key: once "
+                       "the committee is drawn from Cardano it does not vote on finality as declared")
         else:
-            message = (f"gran 0x{gran.hex()} is not the grandpa key authority {names} declares with its aura key: "
-                       "from the first committee rotation it votes on finality unchecked")
-        findings.append(Finding(KEYS, f"Cardano permissioned candidate {i} {message}"))
+            message = (f"gran 0x{gran.hex()} is not the grandpa key authority {names} declares with its aura key: once "
+                       "the committee is drawn from Cardano it votes on finality unchecked")
+        findings.append(Finding(COMMITTEE, f"Cardano permissioned candidate {i} {message}"))
+    return findings
+
+
+def genesis_committee(spec: Spec) -> list[tuple[bytes, bytes, bytes]] | None:
+    """(cross-chain key, aura key, grandpa key) of each member of the genesis
+    SessionCommitteeManagement.CurrentCommittee, or None if genesis sets none."""
+    raw = spec.value("SessionCommitteeManagement", "CurrentCommittee")
+    if raw is None:
+        return None
+    undecodable = ("SessionCommitteeManagement.CurrentCommittee does not decode as a u64 epoch and a list of "
+                   f"{COMMITTEE_MEMBER}-byte members (a {CROSS_CHAIN_KEY}-byte cross-chain key, then 32-byte aura and "
+                   "grandpa keys)")
+    return [(entry[:CROSS_CHAIN_KEY], entry[CROSS_CHAIN_KEY:-32], entry[-32:])
+            for entry in fixed_list(raw[EPOCH_NUMBER:], COMMITTEE_MEMBER, undecodable)]
+
+
+def seated_once(listed: list[tuple[bytes, str]], declared: dict[bytes, tuple[str, str]], item: str, kind: str,
+                twice: str, outsider: str, absent: str) -> list[Finding]:
+    """A genesis list must hold each declared authority's `kind` once, and nothing else. `listed` holds each entry's
+    key and how a finding shows it, in the list's order; `declared` maps each declared key to its authority's name
+    and how a finding shows it."""
+    keys = [key for key, _ in listed]
+    later = dict(repeats(keys))
+    return ([Finding(COMMITTEE, f"genesis {item}[{i}] {shown} is listed before: {twice}" if i in later else
+                     f"genesis {item}[{i}] {shown} is not a declared authority's {kind}: {outsider}")
+             for i, (key, shown) in enumerate(listed) if i in later or key not in declared]
+            + [Finding(COMMITTEE, f"authority {name}'s {kind} {shown} is not in genesis {item}: {absent}")
+               for key, (name, shown) in declared.items() if key not in keys])
+
+
+def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
+    """Who authors and finalizes from genesis. The runtime seats the genesis
+    SessionCommitteeManagement.CurrentCommittee at every rotation whose Cardano
+    draw fails, and a fresh chain's first draw fails (the live-quorum floor
+    counts no candidate that has not authored), so the committee must be exactly
+    the declared authorities' aura and grandpa key pairs, each once, and no
+    longer than the runtime's MaxValidators, past which the runtime reads it as
+    empty. Aura.Authorities and Grandpa.Authorities must seat the same
+    authorities, each once, a voter at weight 1; Session.ValidatorsAndKeys must
+    be the committee as the session genesis writes it, and PalletSession's
+    session keys, which nothing rotates, empty as build-spec leaves them."""
+    declared = declared_authorities(launch)
+    findings = [Finding(COMMITTEE, f"authority {declared[i][0]} declares the {kind} key authority {declared[j][0]} "
+                                   "declares: two nodes that sign with one key equivocate")
+                for kind, index in (("aura", 1), ("grandpa", 2))
+                for i, j in repeats([entry[index] for entry in declared])]
+    committee = genesis_committee(spec)
+    if committee is None:
+        findings.append(Finding(COMMITTEE, "genesis sets no SessionCommitteeManagement.CurrentCommittee, which "
+                                           f"build-spec always writes: the runtime reads an empty one, and "
+                                           f"{EMPTY_COMMITTEE}"))
+    members = committee or []
+    bound = u32_constant(meta, "SessionCommitteeManagement", "MaxValidators")
+    if bound is None:
+        findings.append(Finding(COMMITTEE, "the runtime metadata declares no SessionCommitteeManagement.MaxValidators "
+                                           "the preflight can read: whether the runtime can decode the genesis "
+                                           "committee is unknown here"))
+    elif len(members) > bound:
+        findings.append(Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee lists {len(members)} "
+                                           "members, more than the runtime's SessionCommitteeManagement.MaxValidators "
+                                           f"{bound}: the runtime cannot decode it and reads an empty committee, and "
+                                           f"{EMPTY_COMMITTEE}"))
+    if committee == []:
+        findings.append(Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee is empty: "
+                                           f"{EMPTY_COMMITTEE}"))
+    findings += [Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee[{i}] repeats member {j}'s "
+                                    "cross-chain key: each authority sits in the committee once, under its own key")
+                 for i, j in repeats([cross_chain for cross_chain, _, _ in members])]
+    findings += seated_once([(aura + grandpa, key_pair(aura, grandpa)) for _, aura, grandpa in members],
+                            {aura + grandpa: (name, key_pair(aura, grandpa)) for name, aura, grandpa in declared},
+                            "SessionCommitteeManagement.CurrentCommittee", "aura and grandpa key pair",
+                            "each authority sits in the committee once",
+                            "the runtime seats it, unchecked, at every rotation whose Cardano draw fails",
+                            "the runtime leaves it out at every rotation whose Cardano draw fails")
+    findings += seated_once([(key, f"0x{key.hex()}") for key in genesis_aura(spec)],
+                            {aura: (name, f"0x{aura.hex()}") for name, aura, _ in declared},
+                            "Aura.Authorities", "aura key", "it authors the slots of two authorities",
+                            "it authors blocks unchecked", "it authors no block")
+    findings += check_grandpa_voters(spec, declared)
+    session = compact(len(members)) + b"".join(blake2_256(cross_chain) + aura + grandpa
+                                               for cross_chain, aura, grandpa in members)
+    if spec.value("Session", "ValidatorsAndKeys") != session:
+        findings.append(Finding(COMMITTEE, "genesis Session.ValidatorsAndKeys is not the genesis committee as the "
+                                           "session genesis writes it, each member's account (blake2-256 of its "
+                                           "cross-chain key) with its aura and grandpa keys, in the committee's order: "
+                                           "the session keys it holds are unchecked"))
+    for item in ("QueuedKeys", "Validators"):
+        stored = spec.value("PalletSession", item)
+        if stored not in (None, compact(0)):
+            findings.append(Finding(COMMITTEE, f"genesis PalletSession.{item} is 0x{stored.hex()}, not the empty list "
+                                               "build-spec writes: the session keys it holds are unchecked"))
+    return findings
+
+
+def check_grandpa_voters(spec: Spec, declared: list[tuple[str, bytes, bytes]]) -> list[Finding]:
+    """Genesis Grandpa.Authorities must be the declared authorities' grandpa keys, each once and at weight 1 as
+    build-spec writes them: a weight above 1, or a key listed twice, counts as several voters."""
     raw = spec.value("Grandpa", "Authorities")
     if raw is None:
-        return findings + [Finding(KEYS, "genesis sets no Grandpa.Authorities, which build-spec always writes: who "
-                                         "finalizes is unchecked")]
-    undecodable = InputError("Grandpa.Authorities does not decode as a list of 32-byte keys and u64 weights")
-    try:
-        count, pos = read_compact(raw, 0)
-    except IndexError as e:
-        raise undecodable from e
-    if len(raw) != pos + 40 * count:
-        raise undecodable
-    authors = set(genesis_aura(spec))
-    declared = {decode_public_key(node["grandpa"]): node["name"] for node in launch.get("nodes", [])
-                if node["authority"] and decode_public_key(node["aura"]) in authors}
-    voted = set()
-    for i, start in enumerate(range(pos, len(raw), 40)):
-        key, weight = raw[start:start + 32], int.from_bytes(raw[start + 32:start + 40], "little")
-        where = f"genesis Grandpa.Authorities[{i}] 0x{key.hex()}"
-        if key in voted:
-            findings.append(Finding(KEYS, f"{where} is listed before: it counts twice toward finality"))
-        elif key not in declared:
-            findings.append(Finding(KEYS, f"{where} is not the grandpa key of an authority that genesis "
-                                          "Aura.Authorities lists: who finalizes is unchecked"))
-        if weight != 1:
-            findings.append(Finding(KEYS, f"{where} has weight {weight}, not the 1 build-spec writes: it counts as "
-                                          f"{weight} voters toward finality"))
-        voted.add(key)
-    return findings + [Finding(KEYS, f"authority {name}'s grandpa key 0x{key.hex()} is not in genesis "
-                                     "Grandpa.Authorities: it does not vote on finality")
-                       for key, name in declared.items() if key not in voted]
+        return [Finding(COMMITTEE, "genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes "
+                                   "is unchecked")]
+    voters = fixed_list(raw, 40, "Grandpa.Authorities does not decode as a list of 32-byte keys and u64 weights")
+    return seated_once([(voter[:32], f"0x{voter[:32].hex()}") for voter in voters],
+                       {grandpa: (name, f"0x{grandpa.hex()}") for name, _, grandpa in declared},
+                       "Grandpa.Authorities", "grandpa key", "it counts twice toward finality",
+                       "who finalizes is unchecked", "it does not vote on finality") + [
+        Finding(COMMITTEE, f"genesis Grandpa.Authorities[{i}] 0x{voter[:32].hex()} has weight {weight}, not the 1 "
+                           f"build-spec writes: it counts as {weight} voters toward finality")
+        for i, voter in enumerate(voters) if (weight := int.from_bytes(voter[32:], "little")) != 1]
 
 
 def node_addresses(node: dict) -> set[str]:
@@ -2333,7 +2446,7 @@ def check_observation(spec: Spec) -> list[Finding]:
     try:
         asset_len, pos = read_compact(raw, POLICY_ID_LEN)
         address_len, pos = read_compact(raw, pos + asset_len)
-    except IndexError as e:
+    except ValueError as e:
         raise InputError("NativeTokenManagement.MainChainScriptsConfiguration does not decode") from e
     address = raw[pos:pos + address_len]
     if len(address) != address_len:
@@ -2912,7 +3025,8 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
     well_known = load_well_known(extra_well_known)
     return (check_chain_identity(spec)
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
-            + check_grandpa(spec, launch, cardano)
+            + check_committee(spec, meta, launch)
+            + check_candidate_grans(launch, cardano)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_public_rpc(launch)

@@ -651,6 +651,9 @@ UNDECODABLE_VERSIONS = {
     "a clipped name": (version_wasm((b"runtime_version", lp.compact(8) + b"mat")), "runtime_version"),
     "a clipped API list": (version_wasm((b"runtime_version", runtime_version(b"")[:-1] + lp.compact(2) + api(4))),
                            "runtime_version"),
+    # parity-scale-codec refuses a length written in more bytes than it needs.
+    "a name length in two bytes": (version_wasm((b"runtime_version", (8 << 2 | 1).to_bytes(2, "little")
+                                                 + runtime_version(TRANSACTION_VERSION)[1:])), "runtime_version"),
 }
 
 
@@ -2458,7 +2461,7 @@ def test_authorities_come_from_genesis_aura_and_the_cardano_candidates(spec):
 
 
 # ---------------------------------------------------------------------------
-# Rule 1: who finalizes at genesis
+# Rule 9: the genesis committee
 # ---------------------------------------------------------------------------
 
 def grandpa_keys(spec: lp.Spec) -> list[bytes]:
@@ -2471,82 +2474,328 @@ def grandpa_list(*voters: tuple[bytes, int]) -> bytes:
     return lp.compact(len(voters)) + b"".join(key + weight.to_bytes(8, "little") for key, weight in voters)
 
 
-def voter_launch(spec: lp.Spec, grandpas=None, extra=()) -> dict:
-    """An authority for each genesis Aura key, declaring the genesis GRANDPA key at the same index."""
-    grandpas = grandpa_keys(spec) if grandpas is None else grandpas
+def cross_chain_key() -> bytes:
+    """The shape of a compressed ECDSA public key: a parity byte, then 32 bytes."""
+    return bytes([2]) + fresh_account()
+
+
+def genesis_members(spec: lp.Spec) -> list[tuple[bytes, bytes, bytes]]:
+    """The preprod genesis authors as committee members: a fresh cross-chain key each, then its aura and grandpa
+    keys."""
+    return [(cross_chain_key(), aura, gran) for aura, gran in zip(aura_keys(spec), grandpa_keys(spec))]
+
+
+def committee_value(members, epoch: int = 0) -> bytes:
+    return epoch.to_bytes(8, "little") + lp.compact(len(members)) + b"".join(b"".join(m) for m in members)
+
+
+def session_value(members) -> bytes:
+    return lp.compact(len(members)) + b"".join(lp.blake2_256(cc) + aura + gran for cc, aura, gran in members)
+
+
+def seat(spec: lp.Spec, members) -> None:
+    """Genesis as build-spec writes it for a committee of `members`: the committee, and the Aura authors, GRANDPA
+    voters and session validators the session genesis seats from it."""
+    put(spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value(members))
+    put(spec, "Aura", "Authorities", lp.compact(len(members)) + b"".join(aura for _, aura, _ in members))
+    put(spec, "Grandpa", "Authorities", grandpa_list(*((gran, 1) for _, _, gran in members)))
+    put(spec, "Session", "ValidatorsAndKeys", session_value(members))
+
+
+def members_launch(members, extra=()) -> dict:
+    """An authority for each member, declaring its aura and grandpa keys."""
     return rpc_launch([dict(authority(["materios-node"], f"val{i}", f"val{i}", aura), grandpa="0x" + gran.hex())
-                       for i, (aura, gran) in enumerate(zip(aura_keys(spec), grandpas))] + list(extra))
+                       for i, (_, aura, gran) in enumerate(members)] + list(extra))
 
 
-def voter_findings(spec: lp.Spec, launch: dict, cardano: lp.CardanoView = NO_CARDANO) -> list[str]:
-    return messages(lp.check_grandpa(spec, launch, cardano))
+def committee_findings(spec: lp.Spec, meta: lp.Metadata, launch: dict) -> list[str]:
+    return messages(lp.check_committee(spec, meta, launch))
 
 
-def test_genesis_grandpa_voters_that_are_the_authorities_that_author_at_genesis_pass(spec):
-    assert voter_findings(spec, voter_launch(spec)) == []
+@pytest.fixture
+def seated(spec):
+    """The preprod genesis with its authors seated as its committee, and a launch that declares them."""
+    members = genesis_members(spec)
+    seat(spec, members)
+    return spec, members, members_launch(members)
 
 
-# The red team's PoC: a GRANDPA voter no declared authority holds finalized the chain unchecked.
-def test_a_genesis_grandpa_voter_no_authority_declares_is_refused(spec):
-    keys, launch, outsider = grandpa_keys(spec), voter_launch(spec), fresh_account()
-    put(spec, "Grandpa", "Authorities", grandpa_list((outsider, 1)))
-    assert voter_findings(spec, launch) == [
-        f"[1 dev-keys] genesis Grandpa.Authorities[0] 0x{outsider.hex()} is not the grandpa key of an authority that "
-        "genesis Aura.Authorities lists: who finalizes is unchecked"] + [
-        f"[1 dev-keys] authority val{i}'s grandpa key 0x{key.hex()} is not in genesis Grandpa.Authorities: it does not "
-        "vote on finality" for i, key in enumerate(keys)]
+COMMITTEE = "genesis SessionCommitteeManagement.CurrentCommittee"
+EMPTY_COMMITTEE = ("the runtime seats the genesis committee at every rotation whose Cardano draw fails, as a fresh "
+                   "chain's first draw does, and GRANDPA refuses an empty authority set, so the chain halts there")
+LEFT_OUT = "the runtime leaves it out at every rotation whose Cardano draw fails"
+NOT_THE_SESSION = ("[9 committee] genesis Session.ValidatorsAndKeys is not the genesis committee as the session "
+                   "genesis writes it, each member's account (blake2-256 of its cross-chain key) with its aura and "
+                   "grandpa keys, in the committee's order: the session keys it holds are unchecked")
 
 
-def test_a_genesis_grandpa_voter_of_weight_other_than_one_is_refused(spec):
-    keys = grandpa_keys(spec)
-    put(spec, "Grandpa", "Authorities", grandpa_list((keys[0], 3), *((key, 1) for key in keys[1:])))
-    assert voter_findings(spec, voter_launch(spec)) == [
-        f"[1 dev-keys] genesis Grandpa.Authorities[0] 0x{keys[0].hex()} has weight 3, not the 1 build-spec writes: it "
-        "counts as 3 voters toward finality"]
+def pair(aura: bytes, gran: bytes) -> str:
+    return f"(aura 0x{aura.hex()}, grandpa 0x{gran.hex()})"
 
 
-def test_a_genesis_grandpa_voter_listed_twice_is_refused(spec):
-    keys = grandpa_keys(spec)
-    put(spec, "Grandpa", "Authorities", grandpa_list(*((key, 1) for key in keys), (keys[2], 1)))
-    assert voter_findings(spec, voter_launch(spec)) == [
-        f"[1 dev-keys] genesis Grandpa.Authorities[4] 0x{keys[2].hex()} is listed before: it counts twice toward "
-        "finality"]
+def left_out(i: int, aura: bytes, gran: bytes) -> str:
+    return (f"[9 committee] authority val{i}'s aura and grandpa key pair {pair(aura, gran)} is not in {COMMITTEE}: "
+            f"{LEFT_OUT}")
 
 
-def test_an_authority_that_declares_another_grandpa_key_than_genesis_is_refused(spec):
-    keys, other = grandpa_keys(spec), fresh_account()
-    found = voter_findings(spec, voter_launch(spec, grandpas=[other, *keys[1:]]))
-    assert found == [
-        f"[1 dev-keys] genesis Grandpa.Authorities[0] 0x{keys[0].hex()} is not the grandpa key of an authority that "
-        "genesis Aura.Authorities lists: who finalizes is unchecked",
-        f"[1 dev-keys] authority val0's grandpa key 0x{other.hex()} is not in genesis Grandpa.Authorities: it does not "
+def test_a_genesis_committee_of_the_declared_authorities_passes(seated, meta):
+    spec, _, launch = seated
+    assert committee_findings(spec, meta, launch) == []
+
+
+# What build-spec writes before #57: Aura and GRANDPA seeded directly, and no committee. A fresh chain's first draw
+# fails, and the runtime then seats the empty committee.
+def test_the_build_spec_genesis_with_an_empty_committee_is_refused(spec, meta):
+    members = genesis_members(spec)
+    assert committee_findings(spec, meta, members_launch(members)) == [
+        f"[9 committee] {COMMITTEE} is empty: {EMPTY_COMMITTEE}"] + [
+        left_out(i, aura, gran) for i, (_, aura, gran) in enumerate(members)]
+
+
+def test_a_genesis_with_no_committee_is_refused(seated, meta):
+    spec, members, launch = seated
+    del spec.storage[lp.storage_key("SessionCommitteeManagement", "CurrentCommittee")]
+    assert committee_findings(spec, meta, launch) == [
+        "[9 committee] genesis sets no SessionCommitteeManagement.CurrentCommittee, which build-spec always writes: "
+        f"the runtime reads an empty one, and {EMPTY_COMMITTEE}"] + [
+        left_out(i, aura, gran) for i, (_, aura, gran) in enumerate(members)] + [NOT_THE_SESSION]
+
+
+# The red team's PoC: an outsider as the genesis committee, with Aura, GRANDPA and the Cardano candidates all the
+# declared authorities'. The first rotation's draw fails, and the runtime seats the outsider as the only author and
+# voter.
+def test_an_outsider_in_the_genesis_committee_is_refused(seated, meta):
+    spec, members, launch = seated
+    outsider = (cross_chain_key(), fresh_account(), fresh_account())
+    put(spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value([outsider]))
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] {COMMITTEE}[0] {pair(*outsider[1:])} is not a declared authority's aura and grandpa key pair: "
+        "the runtime seats it, unchecked, at every rotation whose Cardano draw fails"] + [
+        left_out(i, aura, gran) for i, (_, aura, gran) in enumerate(members)] + [NOT_THE_SESSION]
+
+
+def test_every_declared_authority_must_sit_in_the_genesis_committee(seated, meta):
+    spec, members, launch = seated
+    seat(spec, members[:3])
+    _, aura, gran = members[3]
+    assert committee_findings(spec, meta, launch) == [
+        left_out(3, aura, gran),
+        f"[9 committee] authority val3's aura key 0x{aura.hex()} is not in genesis Aura.Authorities: it authors no "
+        "block",
+        f"[9 committee] authority val3's grandpa key 0x{gran.hex()} is not in genesis Grandpa.Authorities: it does not "
         "vote on finality"]
 
 
-def test_an_authority_that_joins_after_genesis_needs_no_genesis_grandpa_key(spec):
-    joining = dict(authority(["materios-node"], "val9", "val9"), grandpa="0x" + fresh_account().hex())
-    assert voter_findings(spec, voter_launch(spec, extra=[joining])) == []
+def test_an_authority_listed_twice_in_the_genesis_committee_is_refused(seated, meta):
+    spec, members, launch = seated
+    put(spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value(members + [members[1]]))
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] {COMMITTEE}[4] repeats member 1's cross-chain key: each authority sits in the committee "
+        "once, under its own key",
+        f"[9 committee] {COMMITTEE}[4] {pair(*members[1][1:])} is listed before: each authority sits in the committee "
+        "once",
+        NOT_THE_SESSION]
 
 
-def test_a_genesis_with_no_grandpa_voters_is_refused(spec):
-    launch = voter_launch(spec)
+def test_two_genesis_committee_members_under_one_cross_chain_key_are_refused(seated, meta):
+    spec, members, launch = seated
+    shared = [members[0], (members[0][0], *members[1][1:]), *members[2:]]
+    seat(spec, shared)
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] {COMMITTEE}[1] repeats member 0's cross-chain key: each authority sits in the committee "
+        "once, under its own key"]
+
+
+@pytest.mark.parametrize("members", [1, 3])
+def test_a_genesis_committee_over_the_runtimes_max_validators_is_refused(seated, meta, members):
+    spec, _, launch = seated
+    meta.constants[("SessionCommitteeManagement", "MaxValidators")] = members.to_bytes(4, "little")
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] {COMMITTEE} lists 4 members, more than the runtime's SessionCommitteeManagement.MaxValidators "
+        f"{members}: the runtime cannot decode it and reads an empty committee, and {EMPTY_COMMITTEE}"]
+
+
+def test_a_genesis_committee_of_max_validators_passes(seated, meta):
+    spec, _, launch = seated
+    meta.constants[("SessionCommitteeManagement", "MaxValidators")] = (4).to_bytes(4, "little")
+    assert committee_findings(spec, meta, launch) == []
+
+
+@pytest.mark.parametrize("value", [None, b"", bytes(8)], ids=["absent", "empty", "8 bytes"])
+def test_a_genesis_committee_under_a_runtime_that_hides_max_validators_is_refused(seated, meta, value):
+    spec, _, launch = seated
+    if value is None:
+        del meta.constants[("SessionCommitteeManagement", "MaxValidators")]
+    else:
+        meta.constants[("SessionCommitteeManagement", "MaxValidators")] = value
+    assert committee_findings(spec, meta, launch) == [
+        "[9 committee] the runtime metadata declares no SessionCommitteeManagement.MaxValidators the preflight can "
+        "read: whether the runtime can decode the genesis committee is unknown here"]
+
+
+# parity-scale-codec refuses a length in more bytes than it needs: the runtime would read such a committee as
+# undecodable, and so empty.
+@pytest.mark.parametrize("raw", [
+    bytes(7),
+    committee_value([(bytes([2]) * 33, bytes(32), bytes(32))])[:-1],
+    committee_value([(bytes([2]) * 33, bytes(32), bytes(32))]) + b"\0",
+    bytes(8) + (1 << 2 | 1).to_bytes(2, "little") + bytes(97),
+], ids=["shorter than its epoch", "a byte short", "a byte long", "a length in two bytes"])
+def test_a_genesis_committee_that_does_not_decode_is_an_input_error(seated, meta, raw):
+    spec, _, launch = seated
+    put(spec, "SessionCommitteeManagement", "CurrentCommittee", raw)
+    with pytest.raises(lp.InputError, match="SessionCommitteeManagement.CurrentCommittee does not decode as a u64 "
+                                            "epoch and a list of 97-byte members"):
+        committee_findings(spec, meta, launch)
+
+
+def test_a_genesis_author_no_authority_declares_is_refused(seated, meta):
+    spec, members, launch = seated
+    outsider = fresh_account()
+    put(spec, "Aura", "Authorities", lp.compact(5) + b"".join(aura for _, aura, _ in members) + outsider)
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] genesis Aura.Authorities[4] 0x{outsider.hex()} is not a declared authority's aura key: it "
+        "authors blocks unchecked"]
+
+
+def test_a_genesis_author_listed_twice_is_refused(seated, meta):
+    spec, members, launch = seated
+    aura = [aura for _, aura, _ in members]
+    put(spec, "Aura", "Authorities", lp.compact(5) + b"".join(aura) + aura[2])
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] genesis Aura.Authorities[4] 0x{aura[2].hex()} is listed before: it authors the slots of two "
+        "authorities"]
+
+
+@pytest.mark.parametrize("item, width", [("Aura", 32), ("Grandpa", 40)])
+def test_a_genesis_authority_list_whose_length_is_not_in_its_fewest_bytes_is_an_input_error(seated, meta, item,
+                                                                                            width):
+    spec, _, launch = seated
+    raw = spec.value(item, "Authorities")
+    count, pos = lp.read_compact(raw, 0)
+    put(spec, item, "Authorities", (count << 2 | 1).to_bytes(2, "little") + raw[pos:])
+    with pytest.raises(lp.InputError, match=f"{item}.Authorities does not decode as a list of 32-byte keys"):
+        committee_findings(spec, meta, launch)
+
+
+# The red team's PoC: a GRANDPA voter no declared authority holds finalized the chain unchecked.
+def test_a_genesis_grandpa_voter_no_authority_declares_is_refused(seated, meta):
+    spec, members, launch = seated
+    outsider = fresh_account()
+    put(spec, "Grandpa", "Authorities", grandpa_list((outsider, 1)))
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] genesis Grandpa.Authorities[0] 0x{outsider.hex()} is not a declared authority's grandpa key: "
+        "who finalizes is unchecked"] + [
+        f"[9 committee] authority val{i}'s grandpa key 0x{gran.hex()} is not in genesis Grandpa.Authorities: it does "
+        "not vote on finality" for i, (_, _, gran) in enumerate(members)]
+
+
+def test_a_genesis_grandpa_voter_of_weight_other_than_one_is_refused(seated, meta):
+    spec, members, launch = seated
+    keys = [gran for _, _, gran in members]
+    put(spec, "Grandpa", "Authorities", grandpa_list((keys[0], 3), *((key, 1) for key in keys[1:])))
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] genesis Grandpa.Authorities[0] 0x{keys[0].hex()} has weight 3, not the 1 build-spec writes: it "
+        "counts as 3 voters toward finality"]
+
+
+def test_a_genesis_grandpa_voter_listed_twice_is_refused(seated, meta):
+    spec, members, launch = seated
+    keys = [gran for _, _, gran in members]
+    put(spec, "Grandpa", "Authorities", grandpa_list(*((key, 1) for key in keys), (keys[2], 1)))
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] genesis Grandpa.Authorities[4] 0x{keys[2].hex()} is listed before: it counts twice toward "
+        "finality"]
+
+
+def test_an_authority_that_declares_another_grandpa_key_than_genesis_is_refused(seated, meta):
+    spec, members, _ = seated
+    other = fresh_account()
+    declared = [members[0][:2] + (other,), *members[1:]]
+    _, aura, gran = members[0]
+    assert committee_findings(spec, meta, members_launch(declared)) == [
+        f"[9 committee] {COMMITTEE}[0] {pair(aura, gran)} is not a declared authority's aura and grandpa key pair: "
+        "the runtime seats it, unchecked, at every rotation whose Cardano draw fails",
+        left_out(0, aura, other),
+        f"[9 committee] genesis Grandpa.Authorities[0] 0x{gran.hex()} is not a declared authority's grandpa key: who "
+        "finalizes is unchecked",
+        f"[9 committee] authority val0's grandpa key 0x{other.hex()} is not in genesis Grandpa.Authorities: it does "
+        "not vote on finality"]
+
+
+def test_a_genesis_with_no_grandpa_voters_is_refused(seated, meta):
+    spec, _, launch = seated
     del spec.storage[lp.storage_key("Grandpa", "Authorities")]
-    assert voter_findings(spec, launch) == [
-        "[1 dev-keys] genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes is unchecked"]
+    assert committee_findings(spec, meta, launch) == [
+        "[9 committee] genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes is "
+        "unchecked"]
 
 
 @pytest.mark.parametrize("raw", [lp.compact(1) + bytes(39), lp.compact(1) + bytes(41), b""])
-def test_grandpa_voters_that_do_not_decode_are_an_input_error(spec, raw):
-    launch = voter_launch(spec)
+def test_grandpa_voters_that_do_not_decode_are_an_input_error(seated, meta, raw):
+    spec, _, launch = seated
     put(spec, "Grandpa", "Authorities", raw)
     with pytest.raises(lp.InputError, match="Grandpa.Authorities does not decode as a list of 32-byte keys and "
                                             "u64 weights"):
-        voter_findings(spec, launch)
+        committee_findings(spec, meta, launch)
+
+
+@pytest.mark.parametrize("kind", ["aura", "grandpa"])
+def test_two_authorities_that_declare_one_key_are_refused(seated, meta, kind):
+    spec, members, launch = seated
+    launch["nodes"][1][kind] = launch["nodes"][0][kind]
+    found = committee_findings(spec, meta, launch)
+    assert f"[9 committee] authority val1 declares the {kind} key authority val0 declares: two nodes that sign with " \
+           "one key equivocate" in found
+
+
+# build-spec's session genesis writes each member under its cross-chain key's account. The preprod builder's
+# session.initialValidators, which names each by its aura key, is not what a seated committee writes.
+def test_session_validators_that_are_not_the_genesis_committee_are_refused(seated, meta):
+    spec, members, launch = seated
+    put(spec, "Session", "ValidatorsAndKeys",
+        lp.compact(4) + b"".join(aura + aura + gran for _, aura, gran in members))
+    assert committee_findings(spec, meta, launch) == [NOT_THE_SESSION]
+
+
+@pytest.mark.parametrize("value", [None, b"\0", "reordered"], ids=["absent", "empty", "reordered"])
+def test_session_validators_other_than_the_committee_in_its_order_are_refused(seated, meta, value):
+    spec, members, launch = seated
+    key = lp.storage_key("Session", "ValidatorsAndKeys")
+    if value is None:
+        del spec.storage[key]
+    else:
+        spec.storage[key] = session_value(members[::-1]) if value == "reordered" else value
+    assert committee_findings(spec, meta, launch) == [NOT_THE_SESSION]
+
+
+@pytest.mark.parametrize("item, value", [
+    ("QueuedKeys", lp.compact(1) + bytes(32) + bytes(64)),
+    ("Validators", lp.compact(1) + bytes(32)),
+    ("Validators", b"\0\0"),
+])
+def test_a_genesis_that_fills_the_pallet_session_stub_is_refused(seated, meta, item, value):
+    spec, _, launch = seated
+    put(spec, "PalletSession", item, value)
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] genesis PalletSession.{item} is 0x{value.hex()}, not the empty list build-spec writes: the "
+        "session keys it holds are unchecked"]
+
+
+def test_a_genesis_that_leaves_out_the_pallet_session_stub_passes(seated, meta):
+    spec, _, launch = seated
+    for item in ("QueuedKeys", "Validators"):
+        del spec.storage[lp.storage_key("PalletSession", item)]
+    assert committee_findings(spec, meta, launch) == []
 
 
 # ---------------------------------------------------------------------------
-# Rule 1: who finalizes from the first committee rotation
+# Rule 9: the committee Cardano draws
 # ---------------------------------------------------------------------------
+
+def cardano_findings(spec: lp.Spec, launch: dict, cardano: lp.CardanoView) -> list[str]:
+    return messages(lp.check_candidate_grans(launch, cardano))
+
 
 def genesis_authors_on_cardano(spec: lp.Spec, grans=None) -> lp.CardanoView:
     """The authors genesis names as Cardano's permissioned candidates, each with the genesis GRANDPA key at its
@@ -2555,52 +2804,46 @@ def genesis_authors_on_cardano(spec: lp.Spec, grans=None) -> lp.CardanoView:
     return lp.CardanoView(lock=None, candidates=[candidate(aura, gran) for aura, gran in zip(aura_keys(spec), grans)])
 
 
+def voter_launch(spec: lp.Spec) -> dict:
+    return members_launch(genesis_members(spec))
+
+
 def test_cardano_candidates_that_vote_with_their_authorities_grandpa_keys_pass(spec):
-    assert voter_findings(spec, voter_launch(spec), genesis_authors_on_cardano(spec)) == []
+    assert cardano_findings(spec, voter_launch(spec), genesis_authors_on_cardano(spec)) == []
 
 
-# The red team's PoC: the committee Cardano seats from the first rotation votes with the candidates' gran keys, and
-# an outsider's key in one of them finalized unchecked.
+# The red team's PoC: the committee Cardano seats votes with the candidates' gran keys, and an outsider's key in one of
+# them finalized unchecked.
 def test_a_cardano_candidate_whose_gran_key_is_not_its_authoritys_grandpa_key_is_refused(spec):
     keys, outsider = grandpa_keys(spec), fresh_account()
     cardano = genesis_authors_on_cardano(spec, [outsider, *keys[1:]])
-    assert voter_findings(spec, voter_launch(spec), cardano) == [
-        f"[1 dev-keys] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key authority val0 "
-        "declares with its aura key: from the first committee rotation it votes on finality unchecked"]
+    assert cardano_findings(spec, voter_launch(spec), cardano) == [
+        f"[9 committee] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key authority val0 "
+        "declares with its aura key: once the committee is drawn from Cardano it votes on finality unchecked"]
 
 
 # Each candidate's key must be its own authority's: one authority's key on two candidates would count twice.
 def test_a_cardano_candidate_that_carries_another_authoritys_grandpa_key_is_refused(spec):
     keys = grandpa_keys(spec)
     cardano = genesis_authors_on_cardano(spec, [keys[1], keys[0], *keys[2:]])
-    assert voter_findings(spec, voter_launch(spec), cardano) == [
-        f"[1 dev-keys] Cardano permissioned candidate {i} gran 0x{keys[1 - i].hex()} is not the grandpa key authority "
-        f"val{i} declares with its aura key: from the first committee rotation it votes on finality unchecked"
+    assert cardano_findings(spec, voter_launch(spec), cardano) == [
+        f"[9 committee] Cardano permissioned candidate {i} gran 0x{keys[1 - i].hex()} is not the grandpa key authority "
+        f"val{i} declares with its aura key: once the committee is drawn from Cardano it votes on finality unchecked"
         for i in (0, 1)]
 
 
 def test_a_cardano_candidate_with_no_gran_key_is_refused(spec):
     cardano = genesis_authors_on_cardano(spec)
     cardano.candidates[1] = lp.Candidate(cardano.candidates[1].partner_chains_key, {"aura": aura_keys(spec)[1]})
-    assert voter_findings(spec, voter_launch(spec), cardano) == [
-        "[1 dev-keys] Cardano permissioned candidate 1 carries no gran key, where authority val1 declares a grandpa "
-        "key with its aura key: from the first committee rotation it does not vote on finality as declared"]
-
-
-def test_a_cardano_candidates_gran_key_is_checked_when_genesis_sets_no_grandpa_voters(spec):
-    launch, outsider = voter_launch(spec), fresh_account()
-    cardano = lp.CardanoView(lock=None, candidates=[candidate(aura_keys(spec)[0], outsider)])
-    del spec.storage[lp.storage_key("Grandpa", "Authorities")]
-    assert voter_findings(spec, launch, cardano) == [
-        f"[1 dev-keys] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key authority val0 "
-        "declares with its aura key: from the first committee rotation it votes on finality unchecked",
-        "[1 dev-keys] genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes is unchecked"]
+    assert cardano_findings(spec, voter_launch(spec), cardano) == [
+        "[9 committee] Cardano permissioned candidate 1 carries no gran key, where authority val1 declares a grandpa "
+        "key with its aura key: once the committee is drawn from Cardano it does not vote on finality as declared"]
 
 
 # Rule 3 refuses a candidate whose aura key no authority declares; it has no declared grandpa key to hold here.
 def test_a_cardano_candidate_no_authority_declares_is_left_to_rule_3(spec):
     cardano = lp.CardanoView(lock=None, candidates=[candidate(fresh_account())])
-    assert voter_findings(spec, voter_launch(spec), cardano) == []
+    assert cardano_findings(spec, voter_launch(spec), cardano) == []
 
 
 @pytest.mark.parametrize("grandpa", [None, "0x" + "ab" * 31, "not a key"])
@@ -4403,8 +4646,9 @@ class Launch:
     """A clean launch: the preprod genesis with //Alice removed, Root held by a
     multisig of fresh keys and its timelock guarded by a multisig of other fresh
     keys at the mainnet delays, the tuned rewards stored, one attestor endowed at
-    the floor, the chain renamed, every account and authority declared, Cardano
-    holding the lock and the candidates, a public RPC URL that serves only safe
+    the floor, the chain renamed, every account and authority declared, the
+    authorities seated as the genesis committee, Cardano holding the lock and
+    those authorities as the candidates, a public RPC URL that serves only safe
     methods, and authorities that load the spec from its own file, pinned to a
     node binary that builds the genesis the preflight computes. Every rule
     accepts it."""
@@ -4425,6 +4669,8 @@ class Launch:
         prefix = lp.storage_key("System", "Account")
         issuance = sum(int.from_bytes(v[16:32], "little") for k, v in spec.storage.items() if k.startswith(prefix))
         put(spec, "Balances", "TotalIssuance", issuance.to_bytes(16, "little"))
+        self.members = genesis_members(spec)
+        seat(spec, self.members)
         self.spec = spec
         self.tmp_path, self.kupo = tmp_path, kupo
         conf = tmp_path / "rpc.conf"
@@ -4448,7 +4694,7 @@ class Launch:
         self.lock_datum = None
         self.node_exe = fake_node(tmp_path)
         self.launch["nodes"][:0] = [self.authority(f"val{i}", aura, gran)
-                                    for i, (aura, gran) in enumerate(zip(aura_keys(spec), grandpa_keys(spec)))]
+                                    for i, (_, aura, gran) in enumerate(self.members)]
         # The argv each authority's node process runs with, where a test gives one other than its launch argv.
         self.running = {}
         # The bytes of the file each authority's --chain names, where a test gives other than the checked spec.
@@ -4456,7 +4702,7 @@ class Launch:
         # The genesis each authority's running node serves, where a test gives other than the computed one.
         self.served = {}
         self.launch_key = signing.SigningKey.generate()
-        self.candidates = genesis_candidates_datum(spec)
+        self.candidates = legacy_datum(self.members)
 
     def authority(self, name: str, aura: bytes, grandpa: bytes) -> dict:
         """An authority that runs the fake node, pinned to it, on the spec from its own file."""
@@ -4639,7 +4885,26 @@ def test_cli_refuses_a_cardano_candidate_that_votes_with_a_key_no_authority_decl
                                                                           grandpa_keys(clean.spec)))])
     code, out = clean.run(capsys)
     assert code == 1, out
-    assert f"[1 dev-keys] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key" in out
+    assert f"[9 committee] Cardano permissioned candidate 0 gran 0x{outsider.hex()} is not the grandpa key" in out
+
+
+# The red team's PoC: an outsider as the genesis committee, and a candidates datum Ariadne draws no committee from, so
+# every rotation seats the outsider as the only author and voter.
+def test_cli_refuses_a_genesis_committee_no_authority_declares(clean, capsys):
+    outsider = (cross_chain_key(), fresh_account(), fresh_account())
+    put(clean.spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value([outsider]))
+    clean.candidates = legacy_datum(clean.members[:1])
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert f"[9 committee] {COMMITTEE}[0] {pair(*outsider[1:])} is not a declared authority's aura and grandpa key " \
+           "pair" in out, out
+
+
+def test_cli_refuses_the_build_spec_genesis_with_an_empty_committee(clean, capsys):
+    put(clean.spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value([]))
+    put(clean.spec, "Session", "ValidatorsAndKeys", session_value([]))
+    code, out = clean.run(capsys)
+    assert code == 1 and f"[9 committee] {COMMITTEE} is empty: {EMPTY_COMMITTEE}" in out, out
 
 
 def test_cli_refuses_an_authority_whose_node_builds_another_genesis(clean, capsys):
@@ -5031,8 +5296,7 @@ def test_cli_refuses_an_authority_that_overrides_the_signed_runtime(clean, capsy
 def test_cli_refuses_a_genesis_grandpa_voter_no_authority_declares(clean, capsys):
     clean.spec.storage[lp.storage_key("Grandpa", "Authorities")] = grandpa_list((fresh_account(), 1))
     code, out = clean.run(capsys)
-    assert code == 1 and ("is not the grandpa key of an authority that genesis Aura.Authorities lists: who "
-                          "finalizes is unchecked") in out, out
+    assert code == 1 and "is not a declared authority's grandpa key: who finalizes is unchecked" in out, out
 
 
 # The red team's composition PoC: a spec version no upgrade reaches, so no later runtime runs its migrations.

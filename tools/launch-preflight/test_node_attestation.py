@@ -81,6 +81,45 @@ def test_build_spec_stores_the_last_runtime_upgrade_the_preflight_derives_from_t
     assert lp.check_last_runtime_upgrade(spec) == []
 
 
+# The preprod candidates' cross-chain keys (MacBook, Gemtek, Node-2, Node-3), in the order the preprod spec lists
+# their aura and grandpa keys.
+CROSS_CHAIN_KEYS = [bytes.fromhex(key) for key in (
+    "02ec64822300713585d9b0c3eb1456bb99c3cc42d79f4ab8e53538e50c9bed0a61",
+    "03477fc2a5b7b287ed89ec47556e0002aa0d7cf88b1fbd6fbe1722eb1ef7873599",
+    "034f293c281c59b8200ea316d1c8d7154c1b06a9ed2603251049b9fda63f2ed6ce",
+    "03f2c1c50d62f023c637afe79996843157c6914e929605cde3c53de47a6896fc0e")]
+
+
+def build_spec(node: Path, chain: str, base_path: Path, *raw: str) -> bytes:
+    return subprocess.run([str(node), "build-spec", "--chain", chain, *raw, "--disable-default-bootnode",
+                           "--base-path", str(base_path)], env={}, stdin=subprocess.DEVNULL, capture_output=True,
+                          timeout=lp.NODE_TIMEOUT, check=True).stdout
+
+
+# The genesis the runtime builds with the preprod authorities as its committee, given as
+# sessionCommitteeManagement.initialAuthorities with Aura and GRANDPA left for the session genesis to seat: it is
+# what the CLI tests' clean launch seats, byte for byte, and rule 9 reads it as the declared authorities.
+def test_rule_9_passes_the_genesis_the_runtime_builds_for_a_seated_committee(tmp_path, node, preprod):
+    doc = json.loads(build_spec(node, "preprod", tmp_path / "base"))
+    patch = doc["genesis"]["runtimeGenesis"]["patch"]
+    members = [(cross_chain, lp.decode_public_key(aura), lp.decode_public_key(grandpa)) for cross_chain, aura,
+               (grandpa, _) in zip(CROSS_CHAIN_KEYS, patch["aura"]["authorities"], patch["grandpa"]["authorities"])]
+    patch["sessionCommitteeManagement"]["initialAuthorities"] = [
+        [lp.ss58(cross_chain, 42), {"aura": lp.ss58(aura, 42), "grandpa": lp.ss58(grandpa, 42)}]
+        for cross_chain, aura, grandpa in members]
+    patch["aura"], patch["grandpa"] = {"authorities": []}, {"authorities": []}
+    plain = tmp_path / "seated.json"
+    plain.write_text(json.dumps(doc))
+    path = tmp_path / "seated-raw.json"
+    path.write_bytes(build_spec(node, str(plain), tmp_path / "base", "--raw"))
+    seated, harness = lp.load_spec(str(path)), lp.load_spec(str(path))
+    base.seat(harness, members)
+    assert seated.storage == harness.storage
+    meta = lp.Metadata.from_v14(lp.subwasm_metadata(seated.code, base.subwasm()))
+    assert lp.check_committee(seated, meta, base.members_launch(members)) == []
+    assert "is empty" in str(lp.check_committee(lp.load_spec(str(preprod)), meta, base.members_launch(members))[0])
+
+
 def test_the_node_reads_a_relative_chain_path_as_a_file(tmp_path, node, pin, preprod):
     assert findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain", "mainnet-raw.json"])) == []
 
