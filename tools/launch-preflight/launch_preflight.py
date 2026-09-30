@@ -153,6 +153,8 @@ GENESIS_STORAGE = frozenset({
 GENESIS_WELL_KNOWN_KEYS = {CODE_KEY, b":extrinsic_index"}
 STORAGE_VERSION_KEY = b":__STORAGE_VERSION__:"
 POLICY_ID_LEN = 28
+# partner-chains' MainchainAddress, a BoundedVec of this many bytes: the runtime reads a longer one as undecodable.
+MAINCHAIN_ADDRESS_LIMIT = 120
 # Validator reward parameters are runtime constants: (economics field, OrinqReceipts constant).
 VALIDATOR_REWARD_CONSTANTS = (
     ("validator_reward_per_era", "ValidatorRewardPerEra"),
@@ -1072,10 +1074,19 @@ def committee_policies(spec: Spec) -> tuple[bytes, bytes]:
         address_len, pos = read_compact(raw, 0)
     except ValueError as e:
         raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration does not decode") from e
+    if address_len > MAINCHAIN_ADDRESS_LIMIT:
+        raise InputError(f"SessionCommitteeManagement.MainChainScriptsConfiguration holds a {address_len}-byte "
+                         f"committee candidate address, past the {MAINCHAIN_ADDRESS_LIMIT} bytes the runtime's "
+                         "MainchainAddress holds: the runtime cannot decode the item and reads no committee policies, "
+                         "so the node's follower finds no D-parameter and no block is authored")
     start = pos + address_len
     policies = raw[start:start + POLICY_ID_LEN], raw[start + POLICY_ID_LEN:start + 2 * POLICY_ID_LEN]
     if len(policies[1]) != POLICY_ID_LEN:
         raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration does not decode")
+    extra = len(raw) - start - 2 * POLICY_ID_LEN
+    if extra:
+        raise InputError(f"SessionCommitteeManagement.MainChainScriptsConfiguration has {extra} "
+                         f"byte{'s' * (extra != 1)} past its second policy id, which build-spec does not write")
     return policies
 
 

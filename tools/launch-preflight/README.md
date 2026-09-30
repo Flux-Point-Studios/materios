@@ -56,7 +56,8 @@ than its type (see [Stored numbers](#stored-numbers)), a node option the
 preflight does not know or a node that builds no genesis from the checked spec
 (see [Node attestation](#node-attestation)), a proxy
 config with no route the preflight can read, a Kupo that is unreachable,
-behind its node or does not index the permissioned candidates token, and a
+behind its node or does not index the permissioned candidates token, genesis
+committee scripts the runtime cannot decode (see [Usage](#usage)), and a
 public RPC URL whose answers the probe cannot resolve.
 
 ## Usage
@@ -94,8 +95,14 @@ node to report it. The chain-spec and launch manifest hashes are blake2-256 of
 their canonical JSON (sorted keys, no whitespace).
 
 The Kupo must follow Cardano mainnet and index the genesis lock address and the
-D-parameter and permissioned candidates policies, the second and third policy
-ids in genesis `SessionCommitteeManagement.MainChainScriptsConfiguration`:
+D-parameter and permissioned candidates policies, the two policy ids after the
+committee candidate address in genesis
+`SessionCommitteeManagement.MainChainScriptsConfiguration`. That address must
+be at most 120 bytes, the bound of partner-chains' `MainchainAddress`, and
+nothing may follow the second policy id, as build-spec writes it: the runtime
+reads the item with a longer address as undecodable, so as its default, whose
+all-zero policies mark no D-parameter, and the node's follower then fails
+every block's committee inputs. Either refuses as unreadable.
 
 ```
 kupo --match <lock address> --match '<D-parameter policy>.*' \

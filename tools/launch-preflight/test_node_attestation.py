@@ -83,6 +83,11 @@ def test_build_spec_stores_the_last_runtime_upgrade_the_preflight_derives_from_t
     assert lp.check_last_runtime_upgrade(spec) == []
 
 
+def test_build_spec_writes_committee_scripts_the_preflight_reads(preprod):
+    spec = lp.load_spec(str(preprod))
+    assert lp.committee_policies(spec) == base.scripts_policies(spec)
+
+
 # The preprod candidates' cross-chain keys (MacBook, Gemtek, Node-2, Node-3), in the order the preprod spec lists
 # their aura and grandpa keys.
 CROSS_CHAIN_KEYS = [bytes.fromhex(key) for key in (

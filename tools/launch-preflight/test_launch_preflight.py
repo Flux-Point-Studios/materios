@@ -1381,6 +1381,48 @@ def test_the_committee_policies_are_read_from_genesis(spec):
         "ef2890d1e98247819abcf2df6e891824ed950a4216d36c71ee6f9974"]
 
 
+def committee_address(spec: lp.Spec, length: int, after: bytes = b"") -> tuple[bytes, bytes]:
+    """Genesis MainChainScriptsConfiguration with its committee candidate address repeated or cut to `length` bytes
+    before the same two policies, then `after`; returns those policies."""
+    raw = spec.value("SessionCommitteeManagement", "MainChainScriptsConfiguration")
+    address_len, pos = lp.read_compact(raw, 0)
+    policies = raw[pos + address_len:]
+    address = (raw[pos:pos + address_len] * 4)[:length]
+    put(spec, "SessionCommitteeManagement", "MainChainScriptsConfiguration",
+        lp.compact(length) + address + policies + after)
+    return policies[:28], policies[28:]
+
+
+def address_past_bound(length: int) -> str:
+    return (f"SessionCommitteeManagement.MainChainScriptsConfiguration holds a {length}-byte committee candidate "
+            "address, past the 120 bytes the runtime's MainchainAddress holds: the runtime cannot decode the item and "
+            "reads no committee policies, so the node's follower finds no D-parameter and no block is authored")
+
+
+@pytest.mark.parametrize("length", [0, 120])
+def test_committee_policies_after_an_address_the_runtime_decodes_are_read(spec, length):
+    policies = committee_address(spec, length)
+    assert lp.committee_policies(spec) == policies
+
+
+# The red team's PoC: an address past the runtime's bound, with the real policies after it, passed every rule while
+# the runtime read the default scripts, whose all-zero policies the follower finds no D-parameter under.
+@pytest.mark.parametrize("length", [121, 200])
+def test_a_committee_address_past_the_runtimes_bound_is_an_input_error(spec, length):
+    committee_address(spec, length)
+    with pytest.raises(lp.InputError, match="^" + re.escape(address_past_bound(length)) + "$"):
+        lp.committee_policies(spec)
+
+
+@pytest.mark.parametrize("after", [b"\0", bytes(28)], ids=["a byte", "a third policy"])
+def test_committee_scripts_with_bytes_past_the_second_policy_are_an_input_error(spec, after):
+    committee_address(spec, 63, after)
+    with pytest.raises(lp.InputError, match="^SessionCommitteeManagement.MainChainScriptsConfiguration has "
+                                            f"{len(after)} bytes? past its second policy id, which build-spec does "
+                                            "not write"):
+        lp.committee_policies(spec)
+
+
 # ---------------------------------------------------------------------------
 # Rule 2: explicit attestor rewards
 # ---------------------------------------------------------------------------
@@ -3800,13 +3842,21 @@ class Kupo:
             lock_output = dict(lock_output, datum_hash=lock_hash, datum_type="inline")
             self.routes[f"/datums/{lock_hash}"] = {"datum": lock_datum.hex()}
         self.routes[f"/matches/{index}@{tx}?unspent"] = [lock_output] if lock_output else []
-        d_policy, candidates_policy = (policy.hex() for policy in lp.committee_policies(spec))
+        d_policy, candidates_policy = (policy.hex() for policy in scripts_policies(spec))
         for policy, datum, holder in ((d_policy, d_parameter or d_parameter_datum(32), "dd" * 32),
                                       (candidates_policy, candidates_datum, "cc" * 32)):
             datum_hash = hashlib.blake2b(datum, digest_size=32).hexdigest()
             self.routes[f"/matches/{policy}.*?unspent"] = [
                 kupo_output(TEST_SCRIPT_ADDRESS, {policy: 1}, holder, 0, datum_hash)]
             self.routes[f"/datums/{datum_hash}"] = {"datum": datum.hex()}
+
+
+def scripts_policies(spec: lp.Spec) -> tuple[bytes, bytes]:
+    """The D-parameter and permissioned candidates policies, the last 56 bytes of genesis
+    MainChainScriptsConfiguration, read here apart from the preflight so Kupo serves them whatever it makes of the
+    address before them."""
+    raw = spec.value("SessionCommitteeManagement", "MainChainScriptsConfiguration")
+    return raw[-2 * 28:-28], raw[-28:]
 
 
 @pytest.fixture
@@ -5368,6 +5418,12 @@ def test_cli_refuses_a_genesis_committee_no_authority_declares(clean, capsys):
     assert f"[9 committee] {COMMITTEE}[0] {pair(*outsider[1:])} is not a declared authority's aura and grandpa key " \
            "pair" in out, out
     assert f"[9 committee] the permissioned candidates datum holds 1 candidate the runtime can seat, {NO_DRAW}" in out
+
+
+def test_cli_refuses_a_committee_address_past_the_runtimes_bound_as_unreadable(clean, capsys):
+    committee_address(clean.spec, 121)
+    code, out = clean.run(capsys)
+    assert code == 2 and address_past_bound(121) in out, out
 
 
 def test_cli_refuses_a_genesis_committee_at_another_epoch(clean, capsys):
