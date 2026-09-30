@@ -4007,9 +4007,10 @@ def test_a_node_that_exports_no_genesis_block_is_an_input_error(tmp_path, prepro
         node_findings(preprod_path, node)
 
 
+# Bytes no binfmt handler claims, so no host execs them; an ELF for another machine runs where qemu-user is registered.
 def test_a_binary_this_host_cannot_run_is_an_input_error(tmp_path, preprod_path):
-    exe = tmp_path / "arm64-node"
-    exe.write_bytes(b"\x7fELF\x02\x01\x01" + bytes(9) + b"\x02\x00\xb7\x00")
+    exe = tmp_path / "not-a-program"
+    exe.write_bytes(b"not a program\n")
     exe.chmod(0o755)
     with pytest.raises(lp.InputError, match="authority val0: cannot run its node binary on this host"):
         node_findings(preprod_path, attested(tmp_path, preprod_path, exe=exe))
