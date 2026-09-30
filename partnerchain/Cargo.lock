@@ -4631,6 +4631,7 @@ dependencies = [
  "orinq-receipts-primitives",
  "orinq-receipts-rpc",
  "pallet-block-rewards",
+ "pallet-orinq-receipts",
  "pallet-partner-chains-session",
  "pallet-session-validator-management",
  "pallet-session-validator-management-rpc",

@@ -96,5 +96,8 @@ orinq-receipts-primitives = { workspace = true, features = ["std"] }
 motra-rpc = { workspace = true }
 motra-primitives = { workspace = true, features = ["std"] }
 
+[dev-dependencies]
+pallet-orinq-receipts = { workspace = true, features = ["std"] }
+
 [build-dependencies]
 substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }

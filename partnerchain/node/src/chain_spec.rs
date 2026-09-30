@@ -203,7 +203,8 @@ pub(crate) mod tests {
     use super::{authority_keys_from_seed, AuraId, Authority, ChainSpec, GrandpaId};
     use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
     use materios_runtime::{
-        Block, Header, Runtime, SessionCommitteeManagement, Sidechain, SLOT_DURATION,
+        Block, Header, Runtime, SessionCommitteeManagement, Sidechain, UncheckedExtrinsic,
+        SLOT_DURATION,
     };
     use sidechain_domain::{
         byte_string::SizedByteString, AuraPublicKey, DParameter, EpochNonce, GrandpaPublicKey,
@@ -213,8 +214,12 @@ pub(crate) mod tests {
     use sp_block_builder::runtime_decl_for_block_builder::BlockBuilder;
     use sp_consensus_aura::{runtime_decl_for_aura_api::AuraApi, Slot, AURA_ENGINE_ID};
     use sp_consensus_grandpa::runtime_decl_for_grandpa_api::GrandpaApi;
-    use sp_core::Encode;
-    use sp_runtime::{traits::Header as _, BuildStorage, Digest, DigestItem, Storage};
+    use sp_core::{Decode, Encode};
+    use sp_inherents::InherentData;
+    use sp_runtime::{
+        traits::{Block as _, Header as _},
+        BuildStorage, Digest, DigestItem, Storage,
+    };
 
     /// Who a chain seats: its committee, the keys Aura takes authors from,
     /// and the keys GRANDPA votes with.
@@ -245,11 +250,11 @@ pub(crate) mod tests {
 
     /// A chain started from `spec`. The runtime's genesis builder builds its
     /// state from the spec's own code, as `build-spec` and a starting node do.
-    fn start(spec: &ChainSpec) -> sp_io::TestExternalities {
+    pub(crate) fn start(spec: &ChainSpec) -> sp_io::TestExternalities {
         sp_io::TestExternalities::new(spec.build_storage().expect("the genesis builds"))
     }
 
-    fn seated_now() -> Seated {
+    pub(crate) fn seated_now() -> Seated {
         Seated {
             committee: SessionCommitteeManagement::current_committee_storage()
                 .committee
@@ -268,7 +273,7 @@ pub(crate) mod tests {
 
     /// Cardano's committee selection inputs: `candidates` as the permissioned
     /// candidates, one seat each, and no registered seats.
-    fn cardano(candidates: &[Authority]) -> AuthoritySelectionInputs {
+    pub(crate) fn cardano(candidates: &[Authority]) -> AuthoritySelectionInputs {
         AuthoritySelectionInputs {
             d_parameter: DParameter {
                 num_permissioned_candidates: candidates.len() as u16,
@@ -287,45 +292,131 @@ pub(crate) mod tests {
         }
     }
 
-    /// Authors the block after `parent` at `slot` as the node's proposer
-    /// does: initialise it, apply the inherents the runtime makes from the
-    /// slot's timestamp and Cardano's selection inputs, finalise it.
-    fn author(parent: &Header, slot: u64, cardano: &AuthoritySelectionInputs) -> Header {
+    pub(crate) fn genesis_header() -> Header {
+        Header::new(
+            0,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            Default::default(),
+        )
+    }
+
+    /// The block the slot's author proposes after `parent` while Cardano's
+    /// selection inputs are `cardano`, and the inherent data it was made
+    /// from. Nothing it wrote is kept.
+    pub(crate) fn propose(
+        parent: &Header,
+        slot: u64,
+        cardano: &AuthoritySelectionInputs,
+    ) -> (Block, InherentData) {
         let digest = Digest {
             logs: vec![DigestItem::PreRuntime(
                 AURA_ENGINE_ID,
                 Slot::from(slot).encode(),
             )],
         };
-        <Runtime as Core<Block>>::initialize_block(&Header::new(
+        let pre = Header::new(
             parent.number + 1,
             Default::default(),
             Default::default(),
             parent.hash(),
             digest,
-        ));
-        let mut inherents = sp_inherents::InherentData::new();
-        inherents
-            .put_data(sp_timestamp::INHERENT_IDENTIFIER, &(slot * SLOT_DURATION))
+        );
+        let mut data = InherentData::new();
+        data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &(slot * SLOT_DURATION))
             .unwrap();
-        inherents
-            .put_data(
-                sp_session_validator_management::INHERENT_IDENTIFIER,
-                cardano,
+        data.put_data(
+            sp_session_validator_management::INHERENT_IDENTIFIER,
+            cardano,
+        )
+        .unwrap();
+        data.put_data(
+            sp_block_rewards::INHERENT_IDENTIFIER,
+            &SizedByteString([0; 32]),
+        )
+        .unwrap();
+        let (header, inherents) = discarded(|| run(&pre, None, &data));
+        (Block::new(header, inherents), data)
+    }
+
+    /// Checks `block`'s inherents as every peer does before importing it:
+    /// with `check_inherents` at its parent, as the node's Aura import queue
+    /// calls it, throwing away what the check wrote. `Err` says why the
+    /// peers reject it.
+    pub(crate) fn peers_check(block: &Block, data: &InherentData) -> Result<(), String> {
+        let checked = discarded(|| {
+            <Runtime as BlockBuilder<Block>>::check_inherents(block.clone(), data.clone())
+        });
+        if checked.ok() {
+            return Ok(());
+        }
+        Err(checked
+            .into_errors()
+            .map(|(id, error)| {
+                let reason = if id == sp_session_validator_management::INHERENT_IDENTIFIER {
+                    sp_session_validator_management::InherentError::decode(&mut &error[..])
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|_| sp_core::bytes::to_hex(&error, false))
+                } else {
+                    sp_core::bytes::to_hex(&error, false)
+                };
+                format!("{}: {reason}", String::from_utf8_lossy(&id))
+            })
+            .collect::<Vec<_>>()
+            .join("; "))
+    }
+
+    /// Plays the block after `parent` at `slot` as the network does, while
+    /// Cardano's selection inputs are `cardano`: the slot's author proposes
+    /// it, and peers import it only if their check passes. Returns the
+    /// imported header, or why the peers rejected the block.
+    pub(crate) fn play(
+        parent: &Header,
+        slot: u64,
+        cardano: &AuthoritySelectionInputs,
+    ) -> Result<Header, String> {
+        let (block, data) = propose(parent, slot, cardano);
+        peers_check(&block, &data).map_err(|rejection| {
+            format!(
+                "peers reject block #{} at slot {slot}: {rejection}",
+                block.header().number
             )
-            .unwrap();
-        inherents
-            .put_data(
-                sp_block_rewards::INHERENT_IDENTIFIER,
-                &SizedByteString([0; 32]),
-            )
-            .unwrap();
-        for inherent in <Runtime as BlockBuilder<Block>>::inherent_extrinsics(inherents) {
-            <Runtime as BlockBuilder<Block>>::apply_extrinsic(inherent)
+        })?;
+        let (proposed, inherents) = block.deconstruct();
+        let (imported, _) = run(&proposed, Some(inherents), &data);
+        assert_eq!(imported, proposed, "peers import the block they checked");
+        Ok(imported)
+    }
+
+    /// Runs the block `header` opens: initialises it, applies `inherents`,
+    /// or those the runtime makes from `data` if none are given, and
+    /// finalises it.
+    fn run(
+        header: &Header,
+        inherents: Option<Vec<UncheckedExtrinsic>>,
+        data: &InherentData,
+    ) -> (Header, Vec<UncheckedExtrinsic>) {
+        <Runtime as Core<Block>>::initialize_block(header);
+        let inherents = inherents
+            .unwrap_or_else(|| <Runtime as BlockBuilder<Block>>::inherent_extrinsics(data.clone()));
+        for inherent in &inherents {
+            <Runtime as BlockBuilder<Block>>::apply_extrinsic(inherent.clone())
                 .expect("the inherent is valid")
                 .expect("the inherent dispatches");
         }
-        <Runtime as BlockBuilder<Block>>::finalize_block()
+        (
+            <Runtime as BlockBuilder<Block>>::finalize_block(),
+            inherents,
+        )
+    }
+
+    /// `f`'s result, with every storage write it made rolled back.
+    fn discarded<R>(f: impl FnOnce() -> R) -> R {
+        sp_io::storage::start_transaction();
+        let result = f();
+        sp_io::storage::rollback_transaction();
+        result
     }
 
     /// Who a chain started from `spec` seats after its first committee
@@ -340,15 +431,10 @@ pub(crate) mod tests {
         start(spec).execute_with(|| {
             let cardano = cardano(candidates);
             let epoch_length = u64::from(Sidechain::slots_per_epoch().0);
-            let genesis = Header::new(
-                0,
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-            );
-            let block_1 = author(&genesis, 1_000 * epoch_length + 1, &cardano);
-            let block_2 = author(&block_1, 1_001 * epoch_length, &cardano);
+            let block_1 = play(&genesis_header(), 1_000 * epoch_length + 1, &cardano)
+                .unwrap_or_else(|rejection| panic!("{rejection}"));
+            let block_2 = play(&block_1, 1_001 * epoch_length, &cardano)
+                .unwrap_or_else(|rejection| panic!("{rejection}"));
             let scheduled = sc_consensus_grandpa::find_scheduled_change::<Block>(&block_2)
                 .expect("block 2 rotates the committee and schedules a GRANDPA set");
             Seated {
