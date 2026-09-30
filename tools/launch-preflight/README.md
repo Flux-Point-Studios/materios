@@ -22,8 +22,12 @@ It reads:
   `/proc/<pid>/exe` and of the file its `--chain` names, and that binary run
   offline to build the genesis it would start from (see
   [Node attestation](#node-attestation));
-- **the genesis each authority's running node serves**: its answer to
-  `chain_getBlockHash [0]`, saved from its local RPC;
+- **what each authority's running node serves**: its answers to
+  `chain_getBlockHash [0]`, `system_chain`, `system_chainType` and
+  `system_properties`, saved from its local RPC;
+- **when each authority's node started, and when its chain spec path last
+  changed**: copies of its `/proc/<pid>/stat` and its machine's `/proc/stat`,
+  and `stat` of each step of its `--chain` path;
 - a **launch manifest**: who holds each role, the economics, where the genesis
   lock is, each node's launch command, the RPC proxy configs and the public RPC
   URLs;
@@ -42,7 +46,7 @@ It reads:
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
 | 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Genesis may store `System.LastRuntimeUpgrade` only as build-spec writes it for its code, that code's spec version and spec name, or not at all: frame-executive runs a runtime's migrations when its spec version is above the stored one or its name differs, so another value runs them at block 1 or skips them at a later upgrade. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
 | 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian whose account is the genesis guardian, or that guardian does not need two keyholders to act or has a multisig as a member (see [Multisig roles](#multisig-roles)); or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
-| 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. See [Node attestation](#node-attestation). |
+| 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). Its running node answers `system_chain`, `system_chainType` or `system_properties` with other than the checked spec's name, chain type (`Live` when the spec names none) or properties (none as `{}`), or a step of its `--chain` path (a directory on it, or the file) last changed less than a full second before its node process started: the node reads its spec once, at its start, and keeps it when the file is replaced, and a spec can hold the checked genesis under another name, or with a code substitute that runs other code. An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. See [Node attestation](#node-attestation). |
 | 9 committee | Genesis `SessionCommitteeManagement.CurrentCommittee` is not exactly the declared authorities' `aura` and `grandpa` key pairs, each once, two of its members share a cross-chain key, or it lists more members than the runtime's `SessionCommitteeManagement.MaxValidators`, read from the runtime metadata (a runtime that does not declare it is refused). The runtime seats this committee at every rotation whose Cardano draw fails, and a fresh chain's first draw fails, since the live-quorum floor counts no candidate that has not authored yet: an empty committee halts the chain there (GRANDPA refuses an empty authority set), an undeclared member authors and finalizes unchecked, and a committee past MaxValidators does not decode and reads as empty. Genesis `Aura.Authorities` or `Grandpa.Authorities` is not exactly the declared authorities' `aura` or `grandpa` keys, each once, a voter at weight 1 as build-spec writes them: a key listed twice, or a weight above 1, counts as several authors or voters. `Session.ValidatorsAndKeys` is not the committee as the session genesis writes it (each member's account, blake2-256 of its cross-chain key, with its session keys, in the committee's order), or `PalletSession.QueuedKeys` or `PalletSession.Validators` is not the empty list build-spec writes: the session keys they hold would go unchecked. Two authorities declare the same `aura` or `grandpa` key: two nodes that sign with one key equivocate. A Cardano permissioned candidate's `gran` key is not the `grandpa` key that the authority with its `aura` key declares: the candidates vote on finality with those keys once the committee is drawn from Cardano. The permissioned candidates datum holds a candidate Ariadne drops (a partner chains key not 33 bytes, an `aura` or `gran` key not 32), one that repeats an earlier candidate's key (the runtime keeps the first), or fewer than two candidates the runtime can seat: from fewer than two it draws no committee, and every rotation seats the genesis committee again. The D-parameter seats registered candidates (a Cardano stake pool that registers would join the committee, and the preflight reads no registration), fewer permissioned seats than the datum's candidates (Ariadne would draw the seats at random, with repeats, so a declared authority could be left out), or more than `MaxValidators` (the runtime refuses a whole draw past a cap of its own that its metadata does not declare). The node reads both datums with partner-chains v1.5.1's decoder: a legacy datum or version 0 of the versioned one; any other version refuses as unreadable. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
@@ -279,8 +283,26 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   '{"jsonrpc":"2.0","id":1,"method":"chain_getBlockHash","params":[0]}'
   http://127.0.0.1:9944 > val-1.genesis.json`, at the node's own RPC port.
   It must be a JSON-RPC 2.0 answer whose result is the block hash in
-  0x-prefixed lowercase hex, as the node writes it. `check` reads all three,
-  and `sign` none. Only an authority takes them.
+  0x-prefixed lowercase hex, as the node writes it. `served_chain`,
+  `served_chain_type` and `served_properties` are its answers to
+  `system_chain`, `system_chainType` and `system_properties`, saved the same
+  way with `"params":[]`.
+- An authority's `process_stat` is the path of a copy of its node process's
+  `/proc/<pid>/stat`, `system_stat` of a copy of its machine's `/proc/stat`,
+  and `chain_spec_stat` of what `stat -c '%Z %f %n'` prints for each step of
+  the lookup of its `--chain` path, run in `/proc/<pid>/root` for an absolute
+  path and in `/proc/<pid>/cwd` for a relative one, each on its machine once
+  the node runs. For `--chain /srv/materios/mainnet-raw.json`:
+
+  ```
+  cat /proc/<pid>/stat > val-1.stat
+  cat /proc/stat > val-1.proc-stat
+  cd /proc/<pid>/root && stat -c '%Z %f %n' srv srv/materios srv/materios/mainnet-raw.json > val-1.chain.stat
+  ```
+
+  See [The spec a running node read](#the-spec-a-running-node-read).
+  `check` reads every capture, and `sign` none. Only an authority takes
+  them.
 - `env` holds the settings a node's unit or container definition gives it
   (`Environment=` and `EnvironmentFile=`, `docker run -e`, a compose file's
   `environment:`) as the process receives them: systemd decodes escapes and
@@ -482,6 +504,41 @@ checked spec refuses as unreadable. The tests in `test_node_attestation.py`
 run the real binary (`MATERIOS_NODE`), which CI builds from this tree, and
 check `NODE_OPTIONS` against its `--help`.
 
+### The spec a running node read
+
+A node reads its chain spec once, at its start. It keeps what it read when
+the file is replaced, so the captures an operator takes afterwards can show
+the checked spec while the node runs another: one that builds the checked
+genesis under another name or chain type, or with a code substitute, which
+runs other code from genesis on. So:
+
+- its running node's `system_chain`, `system_chainType` and
+  `system_properties` must be the checked spec's name, chain type and
+  properties, as sc-chain-spec reads them (`Live` for a spec that names no
+  chain type, `{}` for one with no properties);
+- each step of the lookup of its `--chain` path must have last changed (its
+  ctime) a full second before its node process started. The start is its
+  machine's boot time (`btime` in `/proc/stat`) plus the process's
+  `starttime` (`/proc/<pid>/stat`, in hundredths of a second after boot); the
+  kernel rounds both down, and a ctime to the second, so the preflight takes
+  the earliest start and the latest change each could be. Replacing the file,
+  renaming a directory on its path, or re-pointing an entry there changes the
+  ctime of what the path then names: a rename or a link sets it on the entry
+  moved, and a new file or directory has its creation's.
+
+The lookup starts at the process's root directory for an absolute path and
+at its working directory for a relative one, which the process holds open,
+so neither is a step. The steps are each directory on the path and the file,
+and each must be a directory or, last, a regular file: the node follows a
+symbolic link, which can be re-pointed with no trace on what it names, so a
+path through one refuses as unreadable, as does a path with `..`. Keep the
+spec where nothing changes once the node starts: not in its base path or a
+directory the node, its container runtime or anything else adds entries to
+(a container runtime that creates a mount point in a directory on the path
+changes that directory). A path whose steps show no change passes; the
+preflight trusts the machine's clock and mount table, which only root
+changes, as it trusts the captures.
+
 ## Test networks
 
 `test_networks.json` holds what the anchor worker reads as a test network: a
@@ -567,3 +624,10 @@ subwasm metadata runtime.wasm --format json | jq -jcS '{V14: {pallets: [.V14.pal
 
 The same trim of the preprod v6 runtime's metadata gives
 `fixtures/preprod-v6-metadata.json` byte for byte.
+
+Neither preprod genesis seats a committee: the builder at 9ca67a3 leaves
+`SessionCommitteeManagement.CurrentCommittee` empty and seeds Aura and GRANDPA
+directly, and rule 9 refuses that. The CLI tests' clean launch seats its
+authorities as the genesis committee, as a builder that seats one writes it:
+the committee, then the Aura authors, GRANDPA voters and session validators
+the session genesis takes from it.

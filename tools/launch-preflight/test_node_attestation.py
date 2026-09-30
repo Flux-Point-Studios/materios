@@ -54,15 +54,17 @@ LIVE_LIKE = ["--base-path", "/data/materios", "--validator", "--name", "val0", "
 
 
 def attested(tmp_path, node, pin, spec_path: Path, words, chain_spec: bytes | None = None,
-             served: str | None = None) -> dict:
-    """An authority whose running node serves the genesis the preflight computes, unless the test gives the path of
-    what a real node served."""
+             served: str | None = None, captures: dict | None = None) -> dict:
+    """An authority whose running node serves the genesis the preflight computes and the chain its spec names, on a
+    path set up before it started, unless the test gives what a real node served and the captures taken from it."""
     argv = ["/usr/local/bin/materios-node", *words]
     copied = tmp_path / "val0.chain.json"
     copied.write_bytes(spec_path.read_bytes() if chain_spec is None else chain_spec)
     served = served or base.served(tmp_path, "val0", lp.spec_genesis_hash(lp.load_spec(str(spec_path))))
+    captures = captures or dict(base.served_identity(tmp_path, "val0", json.loads(spec_path.read_text())),
+                                **base.process_captures(tmp_path, "val0", base.chain_value(argv)))
     return dict(base.authority(argv, "val0", "val0"), cmdline=base.capture(tmp_path, "val0", argv), exe=str(node),
-                exe_sha256=pin, chain_spec=str(copied), served_genesis=served)
+                exe_sha256=pin, chain_spec=str(copied), served_genesis=served, **captures)
 
 
 def findings(spec_path: Path, entry: dict) -> list[str]:
@@ -242,8 +244,9 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
-def block_hash_answer(port: int) -> bytes:
-    call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "chain_getBlockHash", "params": [0]}).encode()
+def rpc_answer(port: int, method: str, params: list) -> bytes:
+    """The node's answer, as `curl -s -H 'Content-Type: application/json' -d <call>` saves it."""
+    call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
     request = urllib.request.Request(f"http://127.0.0.1:{port}", call, {"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=10) as answer:
         return answer.read()
@@ -253,11 +256,12 @@ class RunningNode:
     """The real node's run command, offline: listeners on loopback only, no peers, no discovery, no telemetry or
     Prometheus, no keys, the mock follower, on a base path of the test's. Its chain spec names no boot node."""
 
-    def __init__(self, node: Path, spec_path: Path, base_path: Path, cwd: Path):
+    def __init__(self, node: Path, spec_path: Path, base_path: Path, cwd: Path, chain: str | None = None):
         assert not json.loads(spec_path.read_text()).get("bootNodes")
         (cwd / "registrations.json").write_text("[]")
         self.port = free_port()
-        argv = [str(node), "--chain", str(spec_path), "--base-path", str(base_path), "--no-telemetry",
+        self.chain = chain or str(spec_path)
+        argv = [str(node), "--chain", self.chain, "--base-path", str(base_path), "--no-telemetry",
                 "--no-prometheus", "--no-mdns", "--reserved-only", "--in-peers", "0", "--out-peers", "0",
                 "--in-peers-light", "0", "--listen-addr", "/ip4/127.0.0.1/tcp/0", "--rpc-port", str(self.port),
                 "--rpc-methods", "safe"]
@@ -267,16 +271,36 @@ class RunningNode:
             self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
 
     def served_genesis(self, path: Path) -> str:
-        """Its answer to chain_getBlockHash [0], saved as an operator saves it with curl."""
+        """Its answer to chain_getBlockHash [0], saved as an operator saves it with curl, once it answers."""
         deadline = time.monotonic() + lp.NODE_TIMEOUT
         while time.monotonic() < deadline:
             assert self.process.poll() is None, self.log.read_text()[-2000:]
             try:
-                path.write_bytes(block_hash_answer(self.port))
+                path.write_bytes(rpc_answer(self.port, "chain_getBlockHash", [0]))
                 return str(path)
             except OSError:
                 time.sleep(1)
         raise AssertionError(f"the node answered nothing in {lp.NODE_TIMEOUT} seconds")
+
+    def captures(self, into: Path) -> dict:
+        """What the operator captures on the authority's machine once the node runs, besides its genesis: its answers
+        to system_chain, system_chainType and system_properties, copies of /proc/<pid>/stat and /proc/stat, and what
+        stat -c '%Z %f %n' prints for each step of the lookup of its --chain path, run in /proc/<pid>/root or
+        /proc/<pid>/cwd."""
+        paths = {}
+        for field, (method, _) in base.SERVED_IDENTITY.items():
+            paths[field] = into / f"{field}.json"
+            paths[field].write_bytes(rpc_answer(self.port, method, []))
+        paths["process_stat"] = into / "process_stat"
+        paths["process_stat"].write_bytes(Path(f"/proc/{self.process.pid}/stat").read_bytes())
+        paths["system_stat"] = into / "system_stat"
+        paths["system_stat"].write_bytes(Path("/proc/stat").read_bytes())
+        paths["chain_spec_stat"] = into / "chain_spec_stat"
+        start = f"/proc/{self.process.pid}/{'root' if self.chain.startswith('/') else 'cwd'}"
+        paths["chain_spec_stat"].write_bytes(subprocess.run(
+            ["stat", "-c", "%Z %f %n", *base.lookup(self.chain)], cwd=start, env={"LC_ALL": "C"},
+            stdin=subprocess.DEVNULL, capture_output=True, check=True).stdout)
+        return {field: str(path) for field, path in paths.items()}
 
     def stop(self) -> None:
         self.process.send_signal(signal.SIGINT)
@@ -365,3 +389,118 @@ def test_cli_refuses_the_red_teams_chain_built_into_the_real_node(clean, capsys,
     base.with_node_argv(clean, ["--chain", "preprod"])
     code, out = clean.run(capsys)
     assert code == 1 and "[8 node] authority val0: --chain 'preprod' builds genesis 0x" in out, out
+
+
+IMPL = 0xDEAD
+
+
+def substitute(spec: lp.Spec) -> bytes:
+    """The genesis runtime with only its impl_version changed: the same spec version, so a code substitute at block 0
+    applies to genesis, and the node reports the impl version it runs."""
+    wasm = lp.decompressed_code(spec.code)
+    section = lp.custom_sections(wasm)[b"runtime_version"]
+    length, pos = lp.read_compact(section, 0)
+    length, pos = lp.read_compact(section, pos + length)
+    at = pos + length + 8
+    assert wasm.count(section) == 1
+    return wasm.replace(section, section[:at] + IMPL.to_bytes(4, "little") + section[at + 4:])
+
+
+def checked_spec(preprod: Path, path: Path) -> Path:
+    doc = json.loads(preprod.read_text())
+    doc.update(chainType="Live", name="Materios")
+    path.write_text(json.dumps(doc))
+    return path
+
+
+def same_genesis(checked: Path, path: Path, **fields) -> Path:
+    """The checked spec with a code substitute at genesis, and any other top-level fields the test gives: it builds
+    the checked genesis, and its node runs other code."""
+    doc = json.loads(checked.read_text())
+    doc.update(codeSubstitutes={"0": "0x" + substitute(lp.load_spec(str(checked))).hex()}, **fields)
+    path.write_text(json.dumps(doc))
+    assert lp.spec_genesis_hash(lp.load_spec(str(path))) == lp.spec_genesis_hash(lp.load_spec(str(checked)))
+    return path
+
+
+def launched(tmp_path: Path, node: Path, pin: str, checked: Path, started_on: dict[str, bytes], after=None) -> list:
+    """Rule 8 for an authority whose node runs --chain spec/raw.json in its working directory, laid out as
+    `started_on` (a path in that directory to the bytes there) a few seconds before the node starts. Once it runs,
+    `after` changes that layout; then its captures are taken as the operator takes them. Returns the findings and the
+    impl version the node runs."""
+    cwd = tmp_path / "run"
+    for name, raw in started_on.items():
+        (cwd / name).parent.mkdir(parents=True, exist_ok=True)
+        (cwd / name).write_bytes(raw)
+    captured = tmp_path / "captures"
+    captured.mkdir()
+    base_path = tmp_path / "base"
+    base_path.mkdir()
+    time.sleep(3)
+    running = RunningNode(node, checked, base_path, cwd, chain="spec/raw.json")
+    try:
+        served = running.served_genesis(captured / "genesis.json")
+        if after is not None:
+            after(cwd)
+        captures = running.captures(captured)
+        block0 = json.loads(Path(served).read_text())["result"]
+        impl = json.loads(rpc_answer(running.port, "state_getRuntimeVersion", [block0]))["result"]["implVersion"]
+    finally:
+        running.stop()
+    entry = attested(tmp_path, node, pin, checked, ["--chain", "spec/raw.json", *LIVE_LIKE], served=served,
+                     captures=captures)
+    return findings(checked, entry), impl
+
+
+def test_a_running_node_on_a_chain_spec_set_up_before_it_started_passes(tmp_path, node, pin, preprod):
+    checked = checked_spec(preprod, tmp_path / "checked-raw.json")
+    found, impl = launched(tmp_path, node, pin, checked, {"spec/raw.json": checked.read_bytes()})
+    assert (found, impl) == ([], 1)
+
+
+def changed_after_start(step: str) -> str:
+    return f"[8 node] authority val0: {step}, on the path its --chain names, changed at "
+
+
+# The red team's PoC: the node starts on a spec with the checked genesis, another chain type and name and a code
+# substitute, whose file is then overwritten with the checked spec. Every capture but what the node serves, and the
+# file's ctime, is the checked launch's.
+def test_a_node_started_on_another_spec_of_the_same_genesis_is_refused(tmp_path, node, pin, preprod):
+    checked = checked_spec(preprod, tmp_path / "checked-raw.json")
+    variant = same_genesis(checked, tmp_path / "variant-raw.json", chainType="Local", name="Local Testnet")
+    found, impl = launched(tmp_path, node, pin, checked, {"spec/raw.json": variant.read_bytes()},
+                           after=lambda cwd: (cwd / "spec/raw.json").write_bytes(checked.read_bytes()))
+    assert impl == IMPL
+    assert found[:2] == [
+        '[8 node] authority val0: its running node answers system_chain with "Local Testnet", where the checked chain '
+        'spec gives "Materios": it runs another chain spec than the checked one',
+        '[8 node] authority val0: its running node answers system_chainType with "Local", where the checked chain '
+        'spec gives "Live": it runs another chain spec than the checked one']
+    assert len(found) == 3 and found[2].startswith(changed_after_start("spec/raw.json")), found
+
+
+# The same swap with a spec whose name, chain type and properties are the checked spec's: only the file's ctime shows
+# it.
+def test_a_code_substitute_swapped_out_of_the_spec_file_after_the_node_started_is_refused(tmp_path, node, pin, preprod):
+    checked = checked_spec(preprod, tmp_path / "checked-raw.json")
+    variant = same_genesis(checked, tmp_path / "variant-raw.json")
+    found, impl = launched(tmp_path, node, pin, checked, {"spec/raw.json": variant.read_bytes()},
+                           after=lambda cwd: (cwd / "spec/raw.json").write_bytes(checked.read_bytes()))
+    assert impl == IMPL
+    assert len(found) == 1 and found[0].startswith(changed_after_start("spec/raw.json")), found
+
+
+# The checked spec, set up in another directory before the node started, renamed into the path once it runs: the file
+# keeps its ctime, and the renamed directory shows the swap.
+def test_a_directory_renamed_into_the_chain_spec_path_after_the_node_started_is_refused(tmp_path, node, pin, preprod):
+    checked = checked_spec(preprod, tmp_path / "checked-raw.json")
+    variant = same_genesis(checked, tmp_path / "variant-raw.json")
+
+    def swap(cwd: Path) -> None:
+        (cwd / "spec").rename(cwd / "old")
+        (cwd / "next").rename(cwd / "spec")
+
+    found, impl = launched(tmp_path, node, pin, checked, {"spec/raw.json": variant.read_bytes(),
+                                                          "next/raw.json": checked.read_bytes()}, after=swap)
+    assert impl == IMPL
+    assert len(found) == 1 and found[0].startswith(changed_after_start("spec")), found

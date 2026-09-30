@@ -4429,17 +4429,96 @@ def served(tmp_path: Path, name: str, genesis: bytes) -> str:
     return str(path)
 
 
+# What the running node answers system_chain, system_chainType and system_properties with: the name, chain type
+# (Live when the spec names none) and properties (none as {}) of the chain spec it started from.
+SERVED_IDENTITY = {"served_chain": ("system_chain", lambda doc: doc.get("name")),
+                   "served_chain_type": ("system_chainType", lambda doc: doc.get("chainType", "Live")),
+                   "served_properties": ("system_properties", lambda doc: doc.get("properties") or {})}
+
+
+def answer(tmp_path: Path, name: str, field: str, result) -> str:
+    """An authority's running node's JSON-RPC answer, as curl saves it from its local RPC."""
+    path = tmp_path / f"{name}.{field}.json"
+    path.write_text(json.dumps({"jsonrpc": "2.0", "result": result, "id": 1}))
+    return str(path)
+
+
+def served_identity(tmp_path: Path, name: str, doc: dict, **results) -> dict:
+    """The served_chain, served_chain_type and served_properties captures of a node started from the spec `doc`,
+    unless the test gives other results."""
+    return {field: answer(tmp_path, name, field, results.get(field, expected(doc)))
+            for field, (_, expected) in SERVED_IDENTITY.items()}
+
+
+# The authority's machine booted at BOOT (/proc/stat btime) and its node process started an hour later (starttime,
+# in USER_HZ ticks after boot); its chain spec path was set up a minute before that.
+BOOT = 1_700_000_000
+STARTED_TICKS = 3_600 * 100
+STARTED = BOOT + 3_600
+SET_UP = STARTED - 60
+DIRECTORY, REGULAR_FILE, SYMBOLIC_LINK = 0o40755, 0o100644, 0o120777
+
+
+def process_stat(started_ticks: int = STARTED_TICKS, comm: str = "materios-node") -> str:
+    """/proc/<pid>/stat: the pid, the command name in parentheses, then 50 fields, starttime the 20th after them."""
+    fields = ["S", "1", *["0"] * 17, str(started_ticks), *["0"] * 30]
+    return f"4242 ({comm}) " + " ".join(fields) + "\n"
+
+
+SYSTEM_STAT = f"cpu  1 2 3 4 5 6 7 0 0 0\ncpu0 1 2 3 4 5 6 7 0 0 0\nintr 7\nctxt 9\nbtime {BOOT}\nprocesses 4242\n"
+
+
+def chain_value(argv: list[str]) -> str | None:
+    """The value of the --chain an argv gives, if any."""
+    for i, word in enumerate(argv):
+        if word == "--chain" and i + 1 < len(argv):
+            return argv[i + 1]
+        if word.startswith("--chain="):
+            return word.partition("=")[2]
+    return None
+
+
+def lookup(value: str) -> list[str]:
+    """Each step of the path lookup for --chain `value`, as its stat capture names it: from the process's root
+    directory for an absolute path, its working directory for a relative one."""
+    parts = [part for part in value.split("/") if part not in ("", ".")]
+    return ["/".join(parts[:i + 1]) for i in range(len(parts))]
+
+
+def stat_lines(value: str, changed: dict | None = None, modes: dict | None = None) -> str:
+    """What `stat -c '%Z %f %n'` prints for each step of the lookup of `value`: its ctime, its mode in hex and its
+    name, every step a directory set up at SET_UP and the last a regular file, unless the test gives other ctimes or
+    modes."""
+    steps = lookup(value)
+    changed, modes = changed or {}, modes or {}
+    return "".join(f"{changed.get(step, SET_UP)} "
+                   f"{modes.get(step, REGULAR_FILE if step == steps[-1] else DIRECTORY):x} {step}\n" for step in steps)
+
+
+def process_captures(tmp_path: Path, name: str, value: str | None, changed: dict | None = None,
+                     started_ticks: int = STARTED_TICKS) -> dict:
+    """An authority's process_stat, system_stat and chain_spec_stat captures, for the --chain `value` its node
+    process runs with."""
+    paths = {field: tmp_path / f"{name}.{field}" for field in ("process_stat", "system_stat", "chain_spec_stat")}
+    paths["process_stat"].write_text(process_stat(started_ticks))
+    paths["system_stat"].write_text(SYSTEM_STAT)
+    paths["chain_spec_stat"].write_text(stat_lines(value, changed) if value is not None else "")
+    return {field: str(path) for field, path in paths.items()}
+
+
 def attested(tmp_path, spec_path: Path, argv=None, exe=None, chain_spec: bytes | None = None, name="val0") -> dict:
     """An authority whose node process runs `argv`, from the binary `exe` and pinned to it, whose --chain file is a
-    copy of `spec_path` unless the test gives other bytes, and whose running node serves the genesis the preflight
-    computes from `spec_path`."""
+    copy of `spec_path` unless the test gives other bytes, set up before the node started, and whose running node
+    serves the genesis the preflight computes from `spec_path` and the chain it names."""
     exe = exe or fake_node(tmp_path)
     argv = argv or ["materios-node", "--validator", "--chain", authority_chain(tmp_path), "--rpc-methods", "safe"]
     copied = tmp_path / f"{name}.chain.json"
     copied.write_bytes(spec_path.read_bytes() if chain_spec is None else chain_spec)
     return dict(authority(argv, name, name), cmdline=capture(tmp_path, name, argv), exe=str(exe),
                 exe_sha256=sha256_pin(exe), chain_spec=str(copied),
-                served_genesis=served(tmp_path, name, lp.spec_genesis_hash(lp.load_spec(str(spec_path)))))
+                served_genesis=served(tmp_path, name, lp.spec_genesis_hash(lp.load_spec(str(spec_path)))),
+                **served_identity(tmp_path, name, json.loads(spec_path.read_text())),
+                **process_captures(tmp_path, name, chain_value(argv)))
 
 
 def node_findings(spec_path: Path, *nodes) -> list[str]:
@@ -4512,6 +4591,188 @@ def test_a_served_genesis_capture_that_is_not_a_block_hash_answer_is_an_input_er
     where = re.escape(f"authority val0: served_genesis {path}")
     with pytest.raises(lp.InputError, match=f"{where}.*{re.escape(error)}"):
         node_findings(preprod_path, node)
+
+
+# The red team's PoC: a node started on a spec with the checked genesis, another chain type and name and a code
+# substitute, whose file was then overwritten with the checked spec. Every capture but what it serves is the checked
+# launch's.
+@pytest.mark.parametrize("field, result", [
+    ("served_chain", "Local Testnet"),
+    ("served_chain_type", "Local"),
+    ("served_properties", {"ss58Format": 42, "tokenDecimals": 18, "tokenSymbol": "MATRA"}),
+    ("served_properties", {"ss58Format": 42.0, "tokenDecimals": 6, "tokenSymbol": "MATRA"}),
+], ids=["another name", "another chain type", "other properties", "42.0 for 42"])
+def test_an_authority_whose_running_node_serves_another_chain_is_refused(tmp_path, preprod_path, field, result):
+    doc = json.loads(preprod_path.read_text())
+    method, expected = SERVED_IDENTITY[field]
+    node = dict(attested(tmp_path, preprod_path), **{field: answer(tmp_path, "val0", field, result)})
+    assert node_findings(preprod_path, node) == [
+        f"[8 node] authority val0: its running node answers {method} with {json.dumps(result)}, where the checked "
+        f"chain spec gives {json.dumps(expected(doc))}: it runs another chain spec than the checked one"]
+
+
+# sc-chain-spec reads a spec that names no chainType as Live and one with no properties as {}.
+def test_a_spec_with_no_chain_type_or_properties_is_served_as_the_node_reads_it(tmp_path, preprod_path):
+    doc = json.loads(preprod_path.read_text())
+    del doc["chainType"], doc["properties"]
+    path = tmp_path / "bare-raw.json"
+    path.write_text(json.dumps(doc))
+    node = attested(tmp_path, path)
+    assert json.loads(Path(node["served_chain_type"]).read_text())["result"] == "Live"
+    assert json.loads(Path(node["served_properties"]).read_text())["result"] == {}
+    assert node_findings(path, node) == []
+
+
+@pytest.mark.parametrize("field", SERVED_IDENTITY)
+@pytest.mark.parametrize("content, error", [
+    (b"\xff", "is not JSON"),
+    (b'{"jsonrpc": "2.0", "error": {"code": -32601, "message": "Method not found"}, "id": 1}',
+     "is not a JSON-RPC 2.0 answer with a result"),
+    (b'{"result": "Materios", "id": 1}', "is not a JSON-RPC 2.0 answer with a result"),
+], ids=["not JSON", "an error", "no jsonrpc"])
+def test_a_served_chain_capture_that_is_not_an_answer_is_an_input_error(tmp_path, preprod_path, field, content, error):
+    path = tmp_path / "answer.json"
+    path.write_bytes(content)
+    node = dict(attested(tmp_path, preprod_path), **{field: str(path)})
+    with pytest.raises(lp.InputError, match=f"authority val0: {field} {re.escape(str(path))} {error}"):
+        node_findings(preprod_path, node)
+
+
+def changed_after_start(step: str, ctime: int, started: str = f"{STARTED}.00") -> str:
+    return (f"[8 node] authority val0: {step}, on the path its --chain names, changed at {ctime} (its ctime), not a "
+            f"full second before its node process started at {started}: the path may have named another chain spec "
+            "when the node read it, and the node keeps the one it read")
+
+
+# The red team's swap: the spec file overwritten once the node runs, so the file its --chain names now is the checked
+# spec and the node runs what it read before.
+def test_a_chain_spec_file_changed_after_its_node_started_is_refused(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path)
+    step = lookup(authority_chain(tmp_path))[-1]
+    node.update(process_captures(tmp_path, "val0", authority_chain(tmp_path), {step: STARTED + 5}))
+    assert node_findings(preprod_path, node) == [changed_after_start(step, STARTED + 5)]
+
+
+# A directory renamed into the path once the node runs moves the checked spec under the name the node read another
+# spec from, and the file itself keeps its old ctime; the directory's own ctime shows the rename.
+def test_a_directory_on_the_chain_spec_path_changed_after_its_node_started_is_refused(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path)
+    step = lookup(authority_chain(tmp_path))[-2]
+    node.update(process_captures(tmp_path, "val0", authority_chain(tmp_path), {step: STARTED + 30}))
+    assert node_findings(preprod_path, node) == [changed_after_start(step, STARTED + 30)]
+
+
+# The kernel reports ctime and the boot time in whole seconds, rounded down, and the start in hundredths: a step is
+# refused unless it changed a full second before the earliest the process can have started.
+@pytest.mark.parametrize("ctime, started_ticks, refused", [
+    (STARTED - 2, STARTED_TICKS, False),
+    (STARTED - 1, STARTED_TICKS, False),
+    (STARTED - 1, STARTED_TICKS - 1, True),
+    (STARTED, STARTED_TICKS + 50, True),
+    (STARTED - 1, STARTED_TICKS + 50, False),
+])
+def test_a_chain_spec_path_is_refused_unless_it_changed_a_full_second_before_the_start(
+        tmp_path, preprod_path, ctime, started_ticks, refused):
+    node = attested(tmp_path, preprod_path)
+    step = lookup(authority_chain(tmp_path))[-1]
+    node.update(process_captures(tmp_path, "val0", authority_chain(tmp_path), {step: ctime}, started_ticks))
+    start = BOOT * 100 + started_ticks
+    assert node_findings(preprod_path, node) == (
+        [changed_after_start(step, ctime, f"{start // 100}.{start % 100:02d}")] if refused else [])
+
+
+@pytest.mark.parametrize("value, steps", [
+    ("raw.json", ["raw.json"]),
+    ("./spec//raw.json", ["spec", "spec/raw.json"]),
+    ("/srv/materios/mainnet-raw.json", ["srv", "srv/materios", "srv/materios/mainnet-raw.json"]),
+])
+def test_the_chain_spec_path_is_checked_step_by_step_from_where_its_lookup_starts(tmp_path, preprod_path, value,
+                                                                                  steps):
+    assert lookup(value) == steps
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", value])
+    assert node_findings(preprod_path, node) == []
+
+
+def test_a_chain_spec_path_that_climbs_is_an_input_error(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", "../spec/raw.json"])
+    with pytest.raises(lp.InputError, match=re.escape("authority val0: --chain '../spec/raw.json' climbs with '..'")):
+        node_findings(preprod_path, node)
+
+
+@pytest.mark.parametrize("content", [
+    "",
+    f"{SET_UP} 41ed srv\n{SET_UP} 81a4 srv/mainnet-raw.json\n",
+    stat_lines("/srv/other/mainnet-raw.json"),
+    stat_lines("/srv/materios/mainnet-raw.json").rstrip("\n"),
+    stat_lines("/srv/materios/mainnet-raw.json").replace(" 41ed ", " 41ED "),
+    stat_lines("/srv/materios/mainnet-raw.json").replace(f"{SET_UP} ", f"{SET_UP}.5 ", 1),
+    stat_lines("/srv/materios/mainnet-raw.json") + f"{SET_UP} 81a4 srv/materios/mainnet-raw.json\n",
+], ids=["empty", "other steps", "another path", "no newline at the end", "upper-case mode", "a fraction",
+        "a step twice"])
+def test_a_chain_spec_stat_capture_that_does_not_list_the_lookup_is_an_input_error(tmp_path, preprod_path, content):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", "/srv/materios/mainnet-raw.json"])
+    Path(node["chain_spec_stat"]).write_text(content)
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val0: chain_spec_stat {node['chain_spec_stat']} is not what stat -c '%Z %f %n' prints for "
+            "each step of the lookup of --chain '/srv/materios/mainnet-raw.json': srv, srv/materios, "
+            "srv/materios/mainnet-raw.json")):
+        node_findings(preprod_path, node)
+
+
+# The node follows a symbolic link, and a link re-pointed once it runs keeps no trace in the file it names.
+@pytest.mark.parametrize("step, mode, kind", [
+    ("srv/materios", SYMBOLIC_LINK, "a directory"),
+    ("srv/materios/mainnet-raw.json", SYMBOLIC_LINK, "a regular file"),
+    ("srv/materios/mainnet-raw.json", DIRECTORY, "a regular file"),
+    ("srv", REGULAR_FILE, "a directory"),
+])
+def test_a_chain_spec_path_through_anything_but_directories_to_a_file_is_an_input_error(
+        tmp_path, preprod_path, step, mode, kind):
+    value = "/srv/materios/mainnet-raw.json"
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", value])
+    Path(node["chain_spec_stat"]).write_text(stat_lines(value, modes={step: mode}))
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val0: {step}, on the path its --chain names, is not {kind} (mode {mode:o}): the preflight "
+            "checks a path of directories to a regular file")):
+        node_findings(preprod_path, node)
+
+
+@pytest.mark.parametrize("content", [
+    "4242 materios-node S 1\n",
+    "4242 (materios-node) S 1 0 0\n",
+    process_stat().replace(f" {STARTED_TICKS} ", " 36000x "),
+    process_stat().rstrip("\n"),
+], ids=["no command name", "too few fields", "a starttime that is not a number", "no newline at the end"])
+def test_a_process_stat_capture_that_is_not_proc_pid_stat_is_an_input_error(tmp_path, preprod_path, content):
+    node = attested(tmp_path, preprod_path)
+    Path(node["process_stat"]).write_text(content)
+    with pytest.raises(lp.InputError, match=re.escape(f"authority val0: process_stat {node['process_stat']} is not a "
+                                                      "/proc/<pid>/stat capture")):
+        node_findings(preprod_path, node)
+
+
+# The command name is whatever the process set, parentheses and spaces included: the fields start after the last ')'.
+def test_a_process_stat_capture_is_read_past_any_command_name(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path)
+    Path(node["process_stat"]).write_text(process_stat(comm="x) S 1 2 3 (y"))
+    assert node_findings(preprod_path, node) == []
+
+
+@pytest.mark.parametrize("content", ["cpu  1 2 3\nctxt 9\n", f"btime {BOOT}.5\n", f"btime {BOOT}\nbtime {BOOT}\n"],
+                         ids=["no btime", "a fraction", "btime twice"])
+def test_a_system_stat_capture_without_one_boot_time_is_an_input_error(tmp_path, preprod_path, content):
+    node = attested(tmp_path, preprod_path)
+    Path(node["system_stat"]).write_text(content)
+    with pytest.raises(lp.InputError, match=re.escape(f"authority val0: system_stat {node['system_stat']} is not a "
+                                                      "/proc/stat capture with one btime line")):
+        node_findings(preprod_path, node)
+
+
+# A chain built into the node is refused before its path is read: it names no file on the authority's machine.
+def test_the_path_of_a_chain_built_into_the_node_is_not_read(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", "preprod"])
+    del node["chain_spec_stat"], node["process_stat"], node["system_stat"]
+    assert node_findings(preprod_path, node)[0].startswith("[8 node] authority val0: --chain 'preprod' builds genesis")
 
 
 def test_an_authority_running_another_binary_than_its_pin_is_refused_and_that_binary_is_not_run(tmp_path,
@@ -4693,6 +4954,16 @@ def test_a_binary_this_host_cannot_run_is_an_input_error(tmp_path, preprod_path)
                    "chain_spec"),
     ("served_genesis", "authority val0: give its running node's answer to chain_getBlockHash [0], saved from its "
                        "local RPC, as served_genesis"),
+    ("served_chain", "authority val0: give its running node's answer to system_chain, saved from its local RPC, as "
+                     "served_chain"),
+    ("served_chain_type", "authority val0: give its running node's answer to system_chainType, saved from its local "
+                          "RPC, as served_chain_type"),
+    ("served_properties", "authority val0: give its running node's answer to system_properties, saved from its local "
+                          "RPC, as served_properties"),
+    ("process_stat", "authority val0: give a copy of its node process's /proc/<pid>/stat as process_stat"),
+    ("system_stat", "authority val0: give a copy of its machine's /proc/stat as system_stat"),
+    ("chain_spec_stat", "authority val0: give what stat -c '%Z %f %n' prints for each step of the lookup of its "
+                        "--chain path as chain_spec_stat"),
 ])
 def test_an_authority_with_a_capture_missing_is_an_input_error(tmp_path, preprod_path, field, error):
     node = attested(tmp_path, preprod_path)
@@ -4701,7 +4972,10 @@ def test_an_authority_with_a_capture_missing_is_an_input_error(tmp_path, preprod
         node_findings(preprod_path, node)
 
 
-@pytest.mark.parametrize("field", ["exe", "chain_spec", "served_genesis"])
+CAPTURES = ["exe", "chain_spec", "served_genesis", *SERVED_IDENTITY, "process_stat", "system_stat", "chain_spec_stat"]
+
+
+@pytest.mark.parametrize("field", CAPTURES)
 def test_an_unreadable_capture_is_an_input_error(tmp_path, preprod_path, field):
     node = dict(attested(tmp_path, preprod_path), **{field: str(tmp_path / "missing")})
     with pytest.raises(lp.InputError, match=f"authority val0: cannot read {field} "):
@@ -4786,13 +5060,13 @@ def test_an_authority_must_pin_its_node_binary(pin, error):
         lp.validate_node(node, "nodes[0]")
 
 
-@pytest.mark.parametrize("field", ["exe", "chain_spec", "served_genesis", "exe_sha256"])
+@pytest.mark.parametrize("field", [*CAPTURES, "exe_sha256"])
 def test_node_attestation_fields_are_read_for_an_authority_only(field):
     with pytest.raises(lp.InputError, match=f"nodes\\[0\\] {field} is read for an authority only"):
         lp.validate_node({"name": "edge", "host": "edge", "authority": False, field: "x"}, "nodes[0]")
 
 
-@pytest.mark.parametrize("field", ["exe", "chain_spec", "served_genesis"])
+@pytest.mark.parametrize("field", CAPTURES)
 def test_a_capture_that_is_not_a_path_is_an_input_error(field):
     with pytest.raises(lp.InputError, match=f"nodes\\[0\\] {field} must be the path of a capture"):
         lp.validate_node(dict(authority(["materios-node", "--chain", "x"]), **{field: 7}), "nodes[0]")
@@ -4867,6 +5141,11 @@ class Launch:
         self.chain_files = {}
         # The genesis each authority's running node serves, where a test gives other than the computed one.
         self.served = {}
+        # What each authority's running node answers system_chain, system_chainType or system_properties with,
+        # where a test gives other than the checked spec's, by capture field.
+        self.answers = {}
+        # The ctime of a step of each authority's --chain path, where a test gives one other than SET_UP.
+        self.changed = {}
         self.launch_key = signing.SigningKey.generate()
         self.candidates = legacy_datum(self.members)
         self.d_parameter = d_parameter_datum(len(self.members))
@@ -4878,7 +5157,10 @@ class Launch:
         return dict(node, grandpa="0x" + grandpa.hex(), cmdline=str(self.tmp_path / f"{name}.cmdline"),
                     exe=str(self.node_exe),
                     exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"),
-                    served_genesis=str(self.tmp_path / f"{name}.genesis.json"))
+                    served_genesis=str(self.tmp_path / f"{name}.genesis.json"),
+                    **{field: str(self.tmp_path / f"{name}.{field}.json") for field in SERVED_IDENTITY},
+                    **{field: str(self.tmp_path / f"{name}.{field}")
+                       for field in ("process_stat", "system_stat", "chain_spec_stat")})
 
     def spec_path(self) -> Path:
         self.spec.doc["genesis"]["raw"]["top"] = {"0x" + k.hex(): "0x" + v.hex() for k, v in self.spec.storage.items()}
@@ -4887,8 +5169,7 @@ class Launch:
         return path
 
     def prepare(self) -> Path:
-        """Write each authority's cmdline, chain spec and served genesis captures and the spec, serve Cardano for
-        that spec, and return its path."""
+        """Write each authority's captures and the spec, serve Cardano for that spec, and return its path."""
         for node in self.launch["nodes"]:
             if node["authority"] and isinstance(node.get("argv"), list) and "cmdline" in node:
                 capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
@@ -4900,6 +5181,10 @@ class Launch:
         for node in self.launch["nodes"]:
             if node["authority"] and "served_genesis" in node:
                 served(self.tmp_path, node["name"], self.served.get(node["name"], lp.spec_genesis_hash(spec)))
+            if node["authority"]:
+                served_identity(self.tmp_path, node["name"], spec.doc, **self.answers.get(node["name"], {}))
+                running = self.running.get(node["name"], node.get("argv", []))
+                process_captures(self.tmp_path, node["name"], chain_value(running), self.changed.get(node["name"]))
         datum = cbor2.dumps(lp.spec_genesis_hash(spec)) if self.lock_datum is None else self.lock_datum
         self.kupo.serve(spec, self.lock_output, self.candidates, self.launch["supply"]["genesis_lock"], datum,
                         self.d_parameter)
@@ -5109,6 +5394,25 @@ def test_cli_refuses_an_authority_whose_running_node_serves_another_genesis(clea
     code, out = clean.run(capsys)
     assert code == 1, out
     assert f"[8 node] authority val1: its running node serves genesis 0x{REHEARSAL_GENESIS.hex()} as block 0" in out
+
+
+def test_cli_refuses_an_authority_whose_running_node_serves_another_chain_name(clean, capsys):
+    clean.answers["val2"] = {"served_chain": "Local Testnet", "served_chain_type": "Local"}
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert '[8 node] authority val2: its running node answers system_chain with "Local Testnet", where the checked ' \
+           'chain spec gives "Materios"' in out
+    assert '[8 node] authority val2: its running node answers system_chainType with "Local", where the checked chain ' \
+           'spec gives "Live"' in out
+
+
+def test_cli_refuses_an_authority_whose_chain_spec_file_changed_after_its_node_started(clean, capsys):
+    step = lookup(authority_chain(clean.tmp_path))[-1]
+    clean.changed["val1"] = {step: STARTED + 1}
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert f"[8 node] authority val1: {step}, on the path its --chain names, changed at {STARTED + 1} (its " \
+           "ctime)" in out
 
 
 def test_cli_refuses_an_authority_with_no_served_genesis_as_unreadable(clean, capsys):

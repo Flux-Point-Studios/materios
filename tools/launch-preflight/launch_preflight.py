@@ -50,7 +50,9 @@ Rules, each of which refuses on its own:
                  options its node process runs with, builds another; its
                  --chain names a chain built into the node or a file that is
                  not the checked spec; it runs another binary than the one the
-                 manifest pins
+                 manifest pins; its running node names another chain, chain
+                 type or properties than the checked spec, or its --chain path
+                 changed less than a second before its node process started
   9 committee    the genesis committee, which the runtime seats at every
                  rotation whose Cardano draw fails, not exactly the declared
                  authorities, each once, or past the runtime's MaxValidators;
@@ -281,6 +283,19 @@ NODE_TIMEOUT = 900
 # What the node prints when its --chain names a file that does not exist: sc-chain-spec's ChainSpec::from_json_file,
 # the branch the node's load_spec takes for any name it does not build in.
 MISSING_SPEC_FILE = "Error opening spec file `{}`: No such file or directory"
+# What an authority's running node answers on its local RPC, saved by the operator, by manifest field: the method,
+# and what the node answers it with for the chain spec it started from (sc-chain-spec reads a spec that names no
+# chainType as Live and one with no properties as {}).
+SERVED_IDENTITY = {"served_chain": ("system_chain", lambda doc: doc.get("name")),
+                   "served_chain_type": ("system_chainType", lambda doc: doc.get("chainType", "Live")),
+                   "served_properties": ("system_properties", lambda doc: doc.get("properties") or {})}
+# procfs gives a process's starttime in USER_HZ ticks after boot: 100 a second on every architecture the node is built
+# for (Linux sets another only on alpha).
+USER_HZ = 100
+# An authority's captures besides its cmdline: files taken on its machine, read by check only.
+CAPTURES = ("exe", "chain_spec", "served_genesis", *SERVED_IDENTITY, "process_stat", "system_stat", "chain_spec_stat")
+FILE_TYPE, DIRECTORY, REGULAR_FILE = 0o170000, 0o040000, 0o100000
+STAT_LINE = re.compile(r"(\d+) ([0-9a-f]+) (.*)")
 # What export-blocks --binary writes for --from 0 --to 0: a u64 block count, then genesis as SCALE, its header (zero
 # parent hash, number 0, state root, extrinsics root, empty digest), no extrinsics and no justifications.
 GENESIS_HEADER = 32 + 1 + 32 + 32 + 1
@@ -2789,29 +2804,120 @@ def pinned_binary(node: dict, scratch: Path, where: str) -> tuple[str, Path]:
     return "0x" + digest.hexdigest(), pinned
 
 
+def read_capture(node: dict, field: str, where: str, what: str) -> bytes:
+    """The bytes of an authority's `field` capture, which is `what`."""
+    path = node.get(field)
+    if path is None:
+        raise InputError(f"{where}: give {what} as {field}; the preflight checks what the node runs, which a "
+                         "database already in its base path, or a spec file replaced since it started, hides from "
+                         "its argv")
+    try:
+        return Path(path).read_bytes()
+    except OSError as e:
+        raise InputError(f"{where}: cannot read {field} {path}: {e.strerror}") from e
+
+
+def served_answer(node: dict, field: str, method: str, where: str):
+    """The result of an authority's running node's answer to `method`, saved from its local RPC as its `field`
+    capture: a JSON-RPC 2.0 answer, as the node gives it."""
+    raw = read_capture(node, field, where, f"its running node's answer to {method}, saved from its local RPC,")
+    try:
+        answer = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_keys)
+    except (ValueError, RecursionError) as e:
+        raise InputError(f"{where}: {field} {node[field]} is not JSON: {e}") from e
+    if not (isinstance(answer, dict) and answer.get("jsonrpc") == "2.0" and "result" in answer):
+        raise InputError(f"{where}: {field} {node[field]} is not a JSON-RPC 2.0 answer with a result, as the node "
+                         f"answers {method}")
+    return answer["result"]
+
+
 def served_genesis(node: dict, where: str) -> bytes:
     """The genesis hash an authority's running node serves: its answer to chain_getBlockHash [0], saved from its local
     RPC. That is the genesis the node runs, which a database already in its base path decides over its --chain, and
     which a spec file overwritten after it started no longer shows; a fresh start from its argv shows neither."""
-    path = node.get("served_genesis")
-    if path is None:
-        raise InputError(f"{where}: give its running node's answer to chain_getBlockHash [0], saved from its local "
-                         "RPC, as served_genesis; the preflight checks the genesis the node runs, which a database "
-                         "already in its base path decides whatever its --chain names")
-    try:
-        answer = json.loads(Path(path).read_bytes().decode("utf-8"), object_pairs_hook=unique_keys)
-    except OSError as e:
-        raise InputError(f"{where}: cannot read served_genesis {path}: {e.strerror}") from e
-    except (ValueError, RecursionError) as e:
-        raise InputError(f"{where}: served_genesis {path} is not JSON: {e}") from e
-    result = answer.get("result") if isinstance(answer, dict) else None
-    if not (isinstance(answer, dict) and answer.get("jsonrpc") == "2.0" and isinstance(result, str)):
-        raise InputError(f"{where}: served_genesis {path} is not a JSON-RPC 2.0 answer with a result, as the node "
-                         "answers chain_getBlockHash [0]")
-    block = hex_bytes(result, f"{where}: served_genesis {path}: its result")
+    result = served_answer(node, "served_genesis", "chain_getBlockHash [0]", where)
+    if not isinstance(result, str):
+        raise InputError(f"{where}: served_genesis {node['served_genesis']} is not a JSON-RPC 2.0 answer with a block "
+                         "hash as its result, as the node answers chain_getBlockHash [0]")
+    block = hex_bytes(result, f"{where}: served_genesis {node['served_genesis']}: its result")
     if len(block) != 32:
-        raise InputError(f"{where}: served_genesis {path} holds no 32-byte block hash")
+        raise InputError(f"{where}: served_genesis {node['served_genesis']} holds no 32-byte block hash")
     return block
+
+
+def check_served_chain(spec: Spec, node: dict, where: str) -> list[Finding]:
+    """The chain spec an authority's running node started from, as its local RPC names it: its name, chain type and
+    properties must be the checked spec's. A node keeps the spec it read at its start when the file is replaced, and a
+    spec can hold the checked genesis under another name or chain type, and with a code substitute."""
+    findings = []
+    for field, (method, expected) in SERVED_IDENTITY.items():
+        result, wanted = served_answer(node, field, method, where), expected(spec.doc)
+        if json.dumps(result, sort_keys=True) != json.dumps(wanted, sort_keys=True):
+            findings.append(Finding(NODE, f"{where}: its running node answers {method} with "
+                                          f"{json.dumps(result)[:200]}, where the checked chain spec gives "
+                                          f"{json.dumps(wanted)[:200]}: it runs another chain spec than the checked "
+                                          "one"))
+    return findings
+
+
+def process_start(node: dict, where: str) -> int:
+    """When an authority's node process started, in hundredths of a second since the epoch, at the earliest: its
+    machine's boot time (/proc/stat btime) and the process's starttime after boot (/proc/<pid>/stat, in USER_HZ
+    ticks), each of which the kernel rounds down."""
+    stat = read_capture(node, "process_stat", where, "a copy of its node process's /proc/<pid>/stat")
+    _, _, rest = stat.rpartition(b")")
+    fields = rest[1:-1].split(b" ")
+    if not (rest.startswith(b" ") and rest.endswith(b"\n") and len(fields) > 19 and fields[19].isdigit()):
+        raise InputError(f"{where}: process_stat {node['process_stat']} is not a /proc/<pid>/stat capture: its pid, "
+                         "its command name in parentheses, then its fields, starttime the 20th after the name")
+    system = read_capture(node, "system_stat", where, "a copy of its machine's /proc/stat")
+    boot = [line[len(b"btime "):] for line in system.split(b"\n") if line.startswith(b"btime ")]
+    if len(boot) != 1 or not boot[0].isdigit():
+        raise InputError(f"{where}: system_stat {node['system_stat']} is not a /proc/stat capture with one btime line")
+    return int(boot[0]) * USER_HZ + int(fields[19])
+
+
+def check_chain_spec_age(node: dict, value: str, where: str) -> list[Finding]:
+    """Each step of the lookup of an authority's --chain path must have last changed a full second before its node
+    process started, the start and a ctime being known to the second at best. The node reads its chain spec once, at
+    its start: a file replaced since, or a directory on its path renamed or re-pointed, leaves the path naming another
+    spec than the node runs, and the replaced or renamed entry's ctime shows when. The lookup starts at the process's
+    root directory for an absolute path and its working directory for a relative one, both held open by the process,
+    and passes only directories to a regular file, as the capture shows each step, not following a symbolic link."""
+    parts = [part for part in value.split("/") if part not in ("", ".")]
+    if ".." in parts:
+        raise InputError(f"{where}: --chain {value!r} climbs with '..'; the preflight checks each step of the path "
+                         "from the process's root or working directory, which the check host may see apart from the "
+                         "process above its root: name the file without '..'")
+    steps = ["/".join(parts[:i + 1]) for i in range(len(parts))]
+    raw = read_capture(node, "chain_spec_stat", where,
+                       "what stat -c '%Z %f %n' prints for each step of the lookup of its --chain path")
+    unlisted = InputError(f"{where}: chain_spec_stat {node['chain_spec_stat']} is not what stat -c '%Z %f %n' prints "
+                          f"for each step of the lookup of --chain {value!r}: {', '.join(steps)}, run in its node "
+                          "process's root directory (/proc/<pid>/root) for an absolute path, or its working directory "
+                          "(/proc/<pid>/cwd) for a relative one")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise unlisted from e
+    lines = [STAT_LINE.fullmatch(line) for line in text.removesuffix("\n").split("\n")] if text.endswith("\n") else []
+    if len(lines) != len(steps) or not all(line and line[3] == step for line, step in zip(lines, steps)):
+        raise unlisted
+    start, findings = process_start(node, where), []
+    for line, step in zip(lines, steps):
+        ctime, mode = int(line[1]), int(line[2], 16)
+        kind, file_type = ("a regular file", REGULAR_FILE) if step == steps[-1] else ("a directory", DIRECTORY)
+        if mode & FILE_TYPE != file_type:
+            raise InputError(f"{where}: {step}, on the path its --chain names, is not {kind} (mode {mode:o}): the "
+                             "preflight checks a path of directories to a regular file, since the node follows a "
+                             "symbolic link, which can be re-pointed once the node runs with no trace in what it "
+                             "names")
+        if (ctime + 1) * USER_HZ > start:
+            findings.append(Finding(NODE, f"{where}: {step}, on the path its --chain names, changed at {ctime} (its "
+                                          f"ctime), not a full second before its node process started at "
+                                          f"{start // USER_HZ}.{start % USER_HZ:02d}: the path may have named another "
+                                          "chain spec when the node read it, and the node keeps the one it read"))
+    return findings
 
 
 def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
@@ -2848,19 +2954,15 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
             where = f"authority {node['name']}"
             options = attested_options(running_argv(node), where)
             sha, exe = pinned_binary(node, scratch, where)
-            if node.get("chain_spec") is None:
-                raise InputError(f"{where}: give a copy of the file its node's --chain names, taken on its machine, "
-                                 "as chain_spec")
-            try:
-                chain_sha = hashlib.sha256(Path(node["chain_spec"]).read_bytes()).hexdigest()
-            except OSError as e:
-                raise InputError(f"{where}: cannot read chain_spec {node['chain_spec']}: {e.strerror}") from e
+            chain_sha = hashlib.sha256(read_capture(node, "chain_spec", where, "a copy of the file its node's --chain "
+                                                    "names, taken on its machine,")).hexdigest()
             running = served_genesis(node, where)
             if running != genesis:
                 findings.append(Finding(NODE, f"{where}: its running node serves genesis 0x{running.hex()} as block 0, "
                                               f"and the preflight computes 0x{genesis.hex()}: it started from another "
                                               "chain spec, or from a database its base path already held, not the "
                                               "chain the signed genesis hash and the lock's datum bind"))
+            findings += check_served_chain(spec, node, where)
             if sha != node["exe_sha256"]:
                 findings.append(Finding(NODE, f"{where} runs a node binary whose sha256 is {sha}, not its pinned "
                                               f"exe_sha256 {node['exe_sha256']}: only the pinned binary is run to "
@@ -2903,6 +3005,7 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
             if here and launched is None:
                 raise InputError(f"{where}: its node builds no genesis from --chain {value!r} on this host, where it "
                                  f"is the checked chain spec: {stop_reason(said)}")
+            findings += check_chain_spec_age(node, value, where)
             swapped = ["--chain", str(checked)] if split else [f"--chain={checked}"]
             attested, said = built(exe, sha, options[:chain] + swapped + options[chain + 1 + split:],
                                    Path(tempfile.mkdtemp(dir=scratch)), where)
@@ -3002,12 +3105,12 @@ def validate_node(node, where: str) -> None:
     env = node.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise InputError(f"{where} env must map names to strings")
-    for field in ("cmdline", "exe", "chain_spec", "served_genesis", "exe_sha256"):
+    for field in ("cmdline", *CAPTURES, "exe_sha256"):
         if field in node and not node["authority"]:
             raise InputError(f"{where} {field} is read for an authority only")
     if not isinstance(node.get("cmdline", ""), str):
         raise InputError(f"{where} cmdline must be the path of a /proc/<pid>/cmdline capture")
-    for field in ("exe", "chain_spec", "served_genesis"):
+    for field in CAPTURES:
         if not isinstance(node.get(field, ""), str):
             raise InputError(f"{where} {field} must be the path of a capture")
     launch_commands(node)
