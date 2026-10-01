@@ -38,6 +38,7 @@ frame-system = { workspace = true }
 frame-executive = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
 frame-system-benchmarking = { workspace = true, optional = true }
+frame-try-runtime = { workspace = true, optional = true }
 
 # Pallets
 pallet-aura = { workspace = true }
@@ -145,6 +146,7 @@ std = [
     "frame-executive/std",
     "frame-benchmarking?/std",
     "frame-system-benchmarking?/std",
+    "frame-try-runtime?/std",
     "pallet-aura/std",
     "pallet-balances/std",
     "pallet-grandpa/std",
@@ -233,6 +235,7 @@ try-runtime = [
     "frame-support/try-runtime",
     "frame-system/try-runtime",
     "frame-executive/try-runtime",
+    "frame-try-runtime/try-runtime",
     "pallet-aura/try-runtime",
     "pallet-balances/try-runtime",
     "pallet-grandpa/try-runtime",
