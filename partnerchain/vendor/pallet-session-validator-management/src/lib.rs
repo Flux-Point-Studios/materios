@@ -238,9 +238,11 @@ pub mod pallet {
 				T::select_authorities(authority_selection_inputs, *for_epoch_number_param)
 					.unwrap_or_else(|| {
 						// Proposed block should keep the same committee if calculation of new one was impossible.
-						// This is code is executed before the committee rotation, so the NextCommittee should be used.
+						// [materios-patch: check-after-initialize] The Materios runtime runs this
+						// after initialize_block, on the state create_inherent ran on, so on a
+						// rotation block NextCommittee is already taken and this falls back to the
+						// CurrentCommittee that create_inherent re-proposes.
 						let committee_info = NextCommittee::<T>::get()
-							// Needed only for verification of the block no 1, before any `set` call is executed.
 							.unwrap_or_else(CurrentCommittee::<T>::get);
 						committee_info.committee
 					});
