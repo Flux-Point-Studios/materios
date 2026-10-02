@@ -94,6 +94,95 @@ mod idp_none_tests {
 	}
 }
 
+// A block author whose committee inherent its peers cannot recompute, because
+// their Ariadne data is absent, must not be able to seat a committee of its
+// choosing.
+mod unverifiable_committee_tests {
+	use super::*;
+	use crate::{pallet, Error};
+	use frame_support::{assert_noop, inherent::InherentData};
+	use sidechain_domain::byte_string::SizedByteString;
+	use sp_runtime::DispatchError;
+	use sp_session_validator_management::InherentError;
+
+	fn set_call(validators: &[MockValidator]) -> pallet::Call<Test> {
+		pallet::Call::set {
+			validators: ids_and_keys_fn(validators),
+			for_epoch_number: current_epoch_number() + 1,
+			selection_inputs_hash: SizedByteString([0xee; 32]),
+		}
+	}
+
+	fn check_without_ariadne_data(call: &pallet::Call<Test>) -> Result<(), InherentError> {
+		<SessionCommitteeManagement as ProvideInherent>::check_inherent(call, &InherentData::new())
+	}
+
+	#[allow(deprecated)]
+	fn not_the_committee_this_node_can_verify() -> Result<(), InherentError> {
+		Err(InherentError::InvalidValidators)
+	}
+
+	#[test]
+	fn check_inherent_without_ariadne_data_refuses_any_committee_but_the_current_one() {
+		new_test_ext().execute_with(|| {
+			initialize_first_committee();
+			for committee in [
+				&[CHARLIE, DAVE][..],
+				&[ALICE][..],
+				&[ALICE, BOB, EVE][..],
+				&[BOB, ALICE][..],
+			] {
+				assert_eq!(
+					check_without_ariadne_data(&set_call(committee)),
+					not_the_committee_this_node_can_verify(),
+					"{committee:?}"
+				);
+			}
+		});
+	}
+
+	#[test]
+	fn check_inherent_without_ariadne_data_refuses_an_empty_committee() {
+		new_test_ext().execute_with(|| {
+			initialize_first_committee();
+			assert_eq!(
+				check_without_ariadne_data(&set_call(&[])),
+				not_the_committee_this_node_can_verify()
+			);
+		});
+	}
+
+	// A node whose Ariadne data is present proposes the committee it draws.
+	// When that draw re-seats the committee in force, a peer whose data is
+	// absent accepts it: the block changes nothing the peer's own view would
+	// not also keep.
+	#[test]
+	fn check_inherent_without_ariadne_data_accepts_the_current_committee() {
+		new_test_ext().execute_with(|| {
+			initialize_first_committee();
+			assert_eq!(check_without_ariadne_data(&set_call(&[ALICE, BOB])), Ok(()));
+		});
+	}
+
+	#[test]
+	fn set_refuses_to_overwrite_a_stored_next_committee() {
+		new_test_ext().execute_with(|| {
+			initialize_first_committee();
+			set_validators_through_inherents(&[ALICE]);
+			let for_epoch = current_epoch_number() + 1;
+			assert_noop!(
+				set_validators_directly(&[CHARLIE, DAVE], for_epoch),
+				DispatchError::from(Error::<Test>::UnnecessarySetCall)
+			);
+			assert_noop!(
+				set_validators_directly(&[], for_epoch),
+				DispatchError::from(Error::<Test>::UnnecessarySetCall)
+			);
+			assert_eq!(SessionCommitteeManagement::next_committee(), Some(authority_ids(&[ALICE])));
+		});
+	}
+}
+
 mod inherent_tests {
 	use super::*;
 	use crate::{pallet, CommitteeInfo, Error};
