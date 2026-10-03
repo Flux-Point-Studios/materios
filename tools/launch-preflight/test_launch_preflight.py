@@ -981,6 +981,7 @@ def sidecar(argv=(), **env) -> dict:
     (sidecar(["systemd-run", "--setenv=SIGNER_URI=/Attestor6", "cert-daemon"]), "/Attestor6"),
     (sidecar(["docker", "run", "-eSIGNER_URI=/Attestor7", "img"]), "/Attestor7"),
     (sidecar(["systemd-run", "-p", "Environment=RUST_LOG=info SIGNER_URI=/Attestor8", "cert-daemon"]), "/Attestor8"),
+    (sidecar(["bash", "--norc", "-c", "SIGNER_URI=/Attestor9 exec sh -c 'exec cert-daemon'"]), "/Attestor9"),
 ])
 def test_a_secret_uri_setting_with_no_phrase_is_named(spec, meta, known, launch, named):
     found = dev_key_findings(spec, meta, known, launch)
@@ -2430,7 +2431,7 @@ def test_an_authority_may_set_logging_the_time_zone_and_its_node_settings(tmp_pa
            "MAIN_CHAIN_FOLLOWER": "yaci", "DB_SYNC_POSTGRES_CONNECTION_STRING": "postgres://follower@db:5432/cexplorer",
            "CARDANO_SECURITY_PARAMETER": "2160", "CARDANO_ACTIVE_SLOTS_COEFF": "0.05", "BLOCK_STABILITY_MARGIN": "0",
            "MC__FIRST_EPOCH_TIMESTAMP_MILLIS": "1596059091000", "MC__EPOCH_DURATION_MILLIS": "432000000",
-           "MC__FIRST_EPOCH_NUMBER": "208", "MC__FIRST_SLOT_NUMBER": "4492800",
+           "MC__FIRST_EPOCH_NUMBER": "208", "MC__FIRST_SLOT_NUMBER": "4492800", "MC__SLOT_DURATION_MILLIS": "1000",
            "SIDECHAIN_BLOCK_BENEFICIARY": "0x" + fresh_account().hex(),
            "MITHRIL_AGGREGATOR_ENDPOINT": "https://aggregator.example.org/aggregator",
            "MITHRIL_GENESIS_VERIFICATION_KEY": "5b3139312c36362c3134302c3138355d"}
@@ -2986,6 +2987,159 @@ def test_a_session_under_a_runtime_that_hides_its_slot_duration_is_refused(spec,
 def test_a_session_length_that_is_not_a_u32_is_an_input_error(value):
     with pytest.raises(lp.InputError, match="^slots_per_epoch must be a u32"):
         lp.validate_launch({"roles": {}, "supply": VALID_LOCK, "slots_per_epoch": value})
+
+
+# ---------------------------------------------------------------------------
+# Rule 9: the Cardano settings every authority's follower shares
+# ---------------------------------------------------------------------------
+
+# Cardano mainnet's Shelley-era layout (epoch 208 from slot 4,492,800 at 2020-07-29T21:44:51Z, 432,000 one-second
+# slots an epoch) and its shelley-genesis.json securityParam and activeSlotsCoeff, as the node's follower reads them.
+MAINNET_FOLLOWER = {
+    "MC__FIRST_EPOCH_TIMESTAMP_MILLIS": "1596059091000", "MC__EPOCH_DURATION_MILLIS": "432000000",
+    "MC__FIRST_EPOCH_NUMBER": "208", "MC__FIRST_SLOT_NUMBER": "4492800", "MC__SLOT_DURATION_MILLIS": "1000",
+    "CARDANO_SECURITY_PARAMETER": "2160", "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
+}
+NO_FOLLOWER = ("[9 committee] the launch declares no cardano_follower, the Cardano settings every authority's "
+               "follower must share: the preflight holds each authority to Cardano mainnet's")
+FOLLOWER_DIVERGES = ("a node derives Cardano's epochs and slots, and which Cardano blocks are stable, from these "
+                     "settings, so one whose settings differ from its peers' draws another committee or judges "
+                     "another Cardano block stable, and refuses the committee changes and blocks they make")
+
+
+def follower_node(name: str = "val1", env: dict = MAINNET_FOLLOWER, script: str | None = None) -> dict:
+    """An authority whose unit gives it `env`, and that runs its node directly or through `bash --norc -c script`."""
+    argv = ["materios-node", "--validator"] if script is None else ["bash", "--norc", "-c", script]
+    return dict(authority(argv, name, name), env=dict(env))
+
+
+def follower_findings(*nodes, declared=MAINNET_FOLLOWER) -> list[str]:
+    launch = {"nodes": list(nodes)}
+    if declared is not None:
+        launch["cardano_follower"] = dict(declared)
+    return messages(lp.check_follower(launch))
+
+
+def not_mainnets(name: str, value: str) -> str:
+    return (f"[9 committee] cardano_follower sets {name} to {value!r}, not Cardano mainnet's "
+            f"{MAINNET_FOLLOWER[name]!r}: the node derives Cardano's epochs and slots, and which Cardano blocks are "
+            "stable, from these settings, so on any other it asks Cardano for another epoch's committee, or none, "
+            "and cites Cardano blocks its peers on Cardano's own settings refuse")
+
+
+def not_set(node: str, name: str, value: str) -> str:
+    return (f"[9 committee] authority {node} does not set {name}, which every authority sets to the {value!r} the "
+            f"launch declares: {FOLLOWER_DIVERGES}")
+
+
+def sets_other(node: str, word: str, name: str, value: str) -> str:
+    return (f"[9 committee] authority {node} sets {word!r}, not the {value!r} the launch declares for {name}: "
+            f"{FOLLOWER_DIVERGES}")
+
+
+def test_authorities_on_cardano_mainnets_follower_settings_pass():
+    exports = "; ".join(f"export {name}={value}" for name, value in MAINNET_FOLLOWER.items())
+    prefixed = " ".join(f"{name}={value}" for name, value in MAINNET_FOLLOWER.items())
+    nodes = [follower_node("val0"), follower_node("val1", {}, f"set -e; {exports}; exec materios-node --validator"),
+             follower_node("val2", {}, f"{prefixed} exec materios-node --validator"),
+             follower_node("val3", script="export MC__FIRST_EPOCH_NUMBER; exec materios-node --validator"),
+             dict(follower_node("edge", {}), authority=False)]
+    assert follower_findings(*nodes) == []
+
+
+def test_a_launch_that_declares_no_cardano_follower_is_refused():
+    assert follower_findings(follower_node(), declared=None) == [NO_FOLLOWER]
+
+
+def test_a_launch_that_declares_no_cardano_follower_holds_its_authorities_to_cardano_mainnets():
+    node = follower_node(env=dict(MAINNET_FOLLOWER, CARDANO_SECURITY_PARAMETER="432"))
+    assert follower_findings(node, declared=None) == [
+        NO_FOLLOWER, sets_other("val1", "CARDANO_SECURITY_PARAMETER=432", "CARDANO_SECURITY_PARAMETER", "2160")]
+
+
+# The red team's provider test: preprod's layout asks for an epoch the mainnet follower has no data for, a first epoch
+# in 2030 never authors (TimestampTooSmall), an epoch length of 0 panics (division by zero), one-day epochs read no
+# committee data. k and f set how deep and how old a cited Cardano block must be. Each value is held in the one
+# spelling Cardano's own is written in.
+OTHER_FOLLOWER_SETTINGS = {
+    "preprod's first epoch": ("MC__FIRST_EPOCH_TIMESTAMP_MILLIS", "1655769600000"),
+    "a first epoch in 2030": ("MC__FIRST_EPOCH_TIMESTAMP_MILLIS", "1893456000000"),
+    "epochs of 0 ms": ("MC__EPOCH_DURATION_MILLIS", "0"),
+    "one-day epochs": ("MC__EPOCH_DURATION_MILLIS", "86400000"),
+    "another first epoch": ("MC__FIRST_EPOCH_NUMBER", "4"),
+    "another first slot": ("MC__FIRST_SLOT_NUMBER", "86400"),
+    "2-second slots": ("MC__SLOT_DURATION_MILLIS", "2000"),
+    "k of 2161": ("CARDANO_SECURITY_PARAMETER", "2161"),
+    "preprod's k": ("CARDANO_SECURITY_PARAMETER", "432"),
+    "f of 0.1": ("CARDANO_ACTIVE_SLOTS_COEFF", "0.1"),
+    "a leading zero": ("MC__FIRST_EPOCH_NUMBER", "0208"),
+    "a plus sign": ("MC__FIRST_EPOCH_NUMBER", "+208"),
+    "a trailing space": ("MC__FIRST_EPOCH_NUMBER", "208 "),
+    "f in exponent form": ("CARDANO_ACTIVE_SLOTS_COEFF", "5e-2"),
+    "f with a trailing zero": ("CARDANO_ACTIVE_SLOTS_COEFF", "0.050"),
+}
+
+
+@pytest.mark.parametrize("name, value", OTHER_FOLLOWER_SETTINGS.values(), ids=OTHER_FOLLOWER_SETTINGS)
+def test_a_declared_follower_setting_other_than_cardano_mainnets_is_refused(name, value):
+    declared = dict(MAINNET_FOLLOWER, **{name: value})
+    assert follower_findings(follower_node(env=declared), declared=declared) == [not_mainnets(name, value)]
+
+
+@pytest.mark.parametrize("name", MAINNET_FOLLOWER)
+def test_an_authority_that_does_not_set_a_follower_setting_is_refused(name):
+    env = {key: value for key, value in MAINNET_FOLLOWER.items() if key != name}
+    assert follower_findings(follower_node(env=env)) == [not_set("val1", name, MAINNET_FOLLOWER[name])]
+
+
+# Each way an authority's launch hands its node a setting: its unit's env, an assignment before the node, an export or
+# a bare assignment in its script, an append, and an assignment before a nested shell, which its node inherits; and
+# spellings the node reads as the same number, held to the declared one.
+OTHER_EPOCH = {
+    "env": ({"MC__FIRST_EPOCH_NUMBER": "209"}, None, "MC__FIRST_EPOCH_NUMBER=209"),
+    "before the node": ({}, "MC__FIRST_EPOCH_NUMBER=209 exec materios-node --validator", "MC__FIRST_EPOCH_NUMBER=209"),
+    "an export": ({}, "export MC__FIRST_EPOCH_NUMBER=209; exec materios-node --validator",
+                  "MC__FIRST_EPOCH_NUMBER=209"),
+    "a bare assignment": ({}, "MC__FIRST_EPOCH_NUMBER=209; exec materios-node --validator",
+                          "MC__FIRST_EPOCH_NUMBER=209"),
+    "an append": ({}, "MC__FIRST_EPOCH_NUMBER+=9; exec materios-node --validator", "MC__FIRST_EPOCH_NUMBER+=9"),
+    "before a nested shell": ({}, "MC__FIRST_EPOCH_NUMBER=209 exec bash --norc -c 'exec materios-node --validator'",
+                              "MC__FIRST_EPOCH_NUMBER=209"),
+    "a leading zero": ({"MC__FIRST_EPOCH_NUMBER": "0208"}, None, "MC__FIRST_EPOCH_NUMBER=0208"),
+    "a plus sign": ({"MC__FIRST_EPOCH_NUMBER": "+208"}, None, "MC__FIRST_EPOCH_NUMBER=+208"),
+    "a trailing space": ({"MC__FIRST_EPOCH_NUMBER": "208 "}, None, "MC__FIRST_EPOCH_NUMBER=208 "),
+}
+
+
+@pytest.mark.parametrize("env, script, word", OTHER_EPOCH.values(), ids=OTHER_EPOCH)
+def test_an_authority_follower_setting_other_than_the_declared_one_is_refused(env, script, word):
+    node = follower_node(env=dict(MAINNET_FOLLOWER, **env), script=script)
+    assert follower_findings(node) == [sets_other("val1", word, "MC__FIRST_EPOCH_NUMBER", "208")]
+
+
+# The spec-239 red team's one new liveness risk: authorities on a mixed Cardano epoch configuration, where the
+# divergent node refuses an honest committee change.
+def test_an_authority_whose_follower_differs_from_its_peers_is_refused():
+    nodes = [follower_node("val0"), follower_node("val1"),
+             follower_node("val2", dict(MAINNET_FOLLOWER, MC__EPOCH_DURATION_MILLIS="86400000"))]
+    assert follower_findings(*nodes) == [
+        sets_other("val2", "MC__EPOCH_DURATION_MILLIS=86400000", "MC__EPOCH_DURATION_MILLIS", "432000000")]
+
+
+def test_authorities_are_held_to_the_declared_settings_even_where_those_are_not_cardano_mainnets():
+    declared = dict(MAINNET_FOLLOWER, CARDANO_SECURITY_PARAMETER="432")
+    assert follower_findings(follower_node(), declared=declared) == [
+        not_mainnets("CARDANO_SECURITY_PARAMETER", "432"),
+        sets_other("val1", "CARDANO_SECURITY_PARAMETER=2160", "CARDANO_SECURITY_PARAMETER", "432")]
+
+
+@pytest.mark.parametrize("follower", [
+    [], "MC__FIRST_EPOCH_NUMBER=208", {k: v for k, v in MAINNET_FOLLOWER.items() if k != "MC__FIRST_SLOT_NUMBER"},
+    dict(MAINNET_FOLLOWER, BLOCK_STABILITY_MARGIN="0"), dict(MAINNET_FOLLOWER, MC__FIRST_EPOCH_NUMBER=208),
+], ids=["a list", "a string", "a setting missing", "another setting", "a number"])
+def test_a_cardano_follower_that_is_not_the_settings_as_strings_is_an_input_error(follower):
+    with pytest.raises(lp.InputError, match="^cardano_follower must map exactly MC__FIRST_EPOCH_TIMESTAMP_MILLIS, "):
+        lp.validate_launch({"roles": {}, "supply": VALID_LOCK, "cardano_follower": follower})
 
 
 # ---------------------------------------------------------------------------
@@ -5124,7 +5278,7 @@ def test_the_node_runs_offline_on_a_fresh_base_path_with_only_the_options_export
         assert set(call["env"]) - {"LC_CTYPE"} == {
             "USE_MAIN_CHAIN_FOLLOWER_MOCK", "MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE",
             "MC__FIRST_EPOCH_TIMESTAMP_MILLIS", "MC__EPOCH_DURATION_MILLIS", "MC__FIRST_EPOCH_NUMBER",
-            "MC__FIRST_SLOT_NUMBER"}
+            "MC__FIRST_SLOT_NUMBER", "MC__SLOT_DURATION_MILLIS"}
         assert json.loads(call["registrations"]) == []
     as_launched, on_its_spec = calls
     assert as_launched["argv"][3] == authority_chain(tmp_path) and as_launched["chain_sha256"] is False
@@ -5347,6 +5501,7 @@ class Launch:
             "economics": dict(TUNED, fee_buffer=100 * MATRA),
             "supply": {"genesis_lock": LOCK},
             "slots_per_epoch": PREPROD_SLOTS_PER_EPOCH,
+            "cardano_follower": dict(MAINNET_FOLLOWER),
             "nodes": [{"name": "edge", "host": "edge", "authority": False}],
             "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
                              "other_targets": ["rpc-node:9944"]}],
@@ -5378,8 +5533,8 @@ class Launch:
         """An authority that runs the fake node, pinned to it, on the spec from its own file."""
         node = authority(["materios-node", "--validator", "--chain", authority_chain(self.tmp_path), "--rpc-methods",
                           "safe"], name, name, aura)
-        return dict(node, grandpa="0x" + grandpa.hex(), cmdline=str(self.tmp_path / f"{name}.cmdline"),
-                    exe=str(self.node_exe),
+        return dict(node, grandpa="0x" + grandpa.hex(), env=dict(MAINNET_FOLLOWER),
+                    cmdline=str(self.tmp_path / f"{name}.cmdline"), exe=str(self.node_exe),
                     exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"),
                     served_genesis=str(self.tmp_path / f"{name}.genesis.json"),
                     **{field: str(self.tmp_path / f"{name}.{field}.json") for field in SERVED_IDENTITY},
@@ -5592,6 +5747,22 @@ def test_cli_refuses_a_launch_that_declares_no_session_length(clean, capsys):
     del clean.launch["slots_per_epoch"]
     code, out = clean.run(capsys)
     assert code == 1 and "[9 committee] the launch declares no slots_per_epoch" in out, out
+
+
+def test_cli_refuses_a_launch_that_declares_no_cardano_follower(clean, capsys):
+    del clean.launch["cardano_follower"]
+    code, out = clean.run(capsys)
+    assert code == 1 and NO_FOLLOWER in out, out
+
+
+# The red team's PoC: an authority on another Cardano layout than mainnet's passed every rule, and its node's Ariadne
+# provider never authors (a first epoch in 2030) or panics (epochs of 0 ms).
+@pytest.mark.parametrize("name, value", [("MC__FIRST_EPOCH_TIMESTAMP_MILLIS", "1893456000000"),
+                                         ("MC__EPOCH_DURATION_MILLIS", "0")])
+def test_cli_refuses_an_authority_on_another_cardano_layout(clean, capsys, name, value):
+    clean.launch["nodes"][1]["env"][name] = value
+    code, out = clean.run(capsys)
+    assert code == 1 and sets_other("val1", f"{name}={value}", name, MAINNET_FOLLOWER[name]) in out, out
 
 
 def test_cli_refuses_a_committee_address_past_the_runtimes_bound_as_unreadable(clean, capsys):

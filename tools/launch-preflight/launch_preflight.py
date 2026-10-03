@@ -10,7 +10,8 @@ public RPC URL serves, probed live, and what Cardano holds, through a Kupo index
 the cMATRA lock that backs genesis and the permissioned candidates the runtime
 draws the committee from. A launch manifest, signed with a launch
 key launch_keys.json pins, supplies what genesis cannot show: who holds each
-role, the explicit economics, where the lock is, how long a session lasts.
+role, the explicit economics, where the lock is, how long a session lasts, the
+Cardano settings every authority's follower runs with.
 
 Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
@@ -67,7 +68,10 @@ Rules, each of which refuses on its own:
                  candidates, fewer permissioned seats than candidates, or more
                  than MaxValidators; a genesis session length (slots per
                  epoch) other than the declared one, 0, or one whose sessions
-                 do not divide Cardano's epoch
+                 do not divide Cardano's epoch; an authority whose Cardano
+                 follower settings (the MC__ epoch layout, k and f) are not
+                 the declared cardano_follower, or one other than Cardano
+                 mainnet's
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -223,15 +227,25 @@ SHELL_OPTIONS = re.compile(r"[-+][aeu]*")
 # ($BASH_ENV, BASH_FUNC_* imports, $PS4 under xtrace, $ENV, LD_PRELOAD and LD_AUDIT), the options it
 # starts with (SHELLOPTS, BASHOPTS), or where a program or library is found (PATH, LD_LIBRARY_PATH).
 LOADER_SETTINGS = re.compile(r"BASH_ENV|BASH_FUNC_.*|PS4|ENV|SHELLOPTS|BASHOPTS|PATH|LD_.*", re.DOTALL)
+# Cardano mainnet's Shelley-era layout, as the node's follower reads it from the MC__ settings (epoch 208 from slot
+# 4,492,800 at 2020-07-29T21:44:51Z, 432,000 one-second slots an epoch; partner-chains v1.5.1 builds the one-second
+# slot in and later releases read it), and the securityParam k and activeSlotsCoeff f of mainnet's
+# shelley-genesis.json, which set how deep and how old a Cardano block must be for a block to cite it. Every authority
+# must run with exactly these, in this spelling.
+CARDANO_MAINNET_FOLLOWER = {
+    "MC__FIRST_EPOCH_TIMESTAMP_MILLIS": "1596059091000", "MC__EPOCH_DURATION_MILLIS": "432000000",
+    "MC__FIRST_EPOCH_NUMBER": "208", "MC__FIRST_SLOT_NUMBER": "4492800", "MC__SLOT_DURATION_MILLIS": "1000",
+    "CARDANO_SECURITY_PARAMETER": "2160", "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
+}
+CARDANO_EPOCH_MILLIS = int(CARDANO_MAINNET_FOLLOWER["MC__EPOCH_DURATION_MILLIS"])
 # The settings an authority may set: logging, the time zone and the node's own Cardano follower settings.
 # Anything else (a gconv or OpenSSL module path, the mock follower, the mithril client binary) could run
 # code or change the node beyond its argv.
 AUTHORITY_SETTINGS = frozenset({
     "RUST_LOG", "RUST_BACKTRACE", "RUST_LIB_BACKTRACE", "TZ",
-    "MAIN_CHAIN_FOLLOWER", "DB_SYNC_POSTGRES_CONNECTION_STRING", "CARDANO_SECURITY_PARAMETER",
-    "CARDANO_ACTIVE_SLOTS_COEFF", "BLOCK_STABILITY_MARGIN", "SIDECHAIN_BLOCK_BENEFICIARY",
-    "MC__FIRST_EPOCH_TIMESTAMP_MILLIS", "MC__EPOCH_DURATION_MILLIS", "MC__FIRST_EPOCH_NUMBER", "MC__FIRST_SLOT_NUMBER",
-    "MITHRIL_AGGREGATOR_ENDPOINT", "MITHRIL_GENESIS_VERIFICATION_KEY",
+    "MAIN_CHAIN_FOLLOWER", "DB_SYNC_POSTGRES_CONNECTION_STRING", "BLOCK_STABILITY_MARGIN",
+    "SIDECHAIN_BLOCK_BENEFICIARY", "MITHRIL_AGGREGATOR_ENDPOINT", "MITHRIL_GENESIS_VERIFICATION_KEY",
+    *CARDANO_MAINNET_FOLLOWER,
 })
 # What an authority's launch may run before its node, as bare words: builtins and mkdir, which start nothing.
 SETUP_COMMANDS = ("set", "export", "cd", "umask", "ulimit", "mkdir")
@@ -279,13 +293,10 @@ NODE_OPTIONS = {
     **dict.fromkeys(("--rpc-rate-limit-whitelisted-ips", RPC_ENDPOINT_FLAG, "--bootnodes", "--reserved-nodes",
                      "--public-addr", "--listen-addr"), (MANY, False)),
 }
-# A Cardano mainnet epoch since Shelley: 432,000 one-second slots.
-CARDANO_EPOCH_MILLIS = 432_000_000
 # What the node reads before it builds genesis, and does not build it from: its Cardano follower settings, here the
 # mock follower, which connects to nothing, and Cardano mainnet's Shelley epoch layout.
-NODE_ENV = {"USE_MAIN_CHAIN_FOLLOWER_MOCK": "true", "MC__FIRST_EPOCH_TIMESTAMP_MILLIS": "1596059091000",
-            "MC__EPOCH_DURATION_MILLIS": str(CARDANO_EPOCH_MILLIS), "MC__FIRST_EPOCH_NUMBER": "208",
-            "MC__FIRST_SLOT_NUMBER": "4492800"}
+NODE_ENV = {"USE_MAIN_CHAIN_FOLLOWER_MOCK": "true",
+            **{name: value for name, value in CARDANO_MAINNET_FOLLOWER.items() if name.startswith("MC__")}}
 NODE_TIMEOUT = 900
 # What the node prints when its --chain names a file that does not exist: sc-chain-spec's ChainSpec::from_json_file,
 # the branch the node's load_spec takes for any name it does not build in.
@@ -307,7 +318,8 @@ STAT_LINE = re.compile(r"(\d+) ([0-9a-f]+) (.*)")
 # parent hash, number 0, state root, extrinsics root, empty digest), no extrinsics and no justifications.
 GENESIS_HEADER = 32 + 1 + 32 + 32 + 1
 GENESIS_EXPORT = 8 + GENESIS_HEADER + 2
-LAUNCH_FIELDS = {"roles", "economics", "supply", "slots_per_epoch", "nodes", "rpc_proxies", "public_rpc"}
+LAUNCH_FIELDS = {"roles", "economics", "supply", "slots_per_epoch", "cardano_follower", "nodes", "rpc_proxies",
+                 "public_rpc"}
 PROXY_KINDS = ("nginx", "nginx-dump", "cloudflared")
 PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
 # What a node built from polkadot-stable2409-4 serves under --rpc-methods safe: its rpc_methods less each method whose
@@ -1574,16 +1586,23 @@ def _refuse_settings(names, authority: bool, where: str) -> None:
                              "and the node's Cardano follower settings); the preflight cannot read what it changes")
 
 
+def _assigned(words: list[str]) -> list[str]:
+    """The words a shell command assigns or exports: NAME=value words before its program, and export's arguments."""
+    program = _program(words)
+    assigned = [word for word in words[:len(words) - len(program)] if word != "exec"]
+    return assigned + program[1:] if program[:1] == ["export"] else assigned
+
+
 def _commands(words: list[str], where: str, depth: int, authority: bool) -> list[list[str]]:
+    """A command's words, or for a shell, the settings it is started with as a command of their own, which the
+    script's commands inherit, then the script's commands, opened in turn."""
     # A setting any word hands a program counts, since a program such as env or systemd-run passes it on.
     _refuse_settings((name for word in words for name, _ in word_settings(word)), False, where)
     if any(Path(word).name == "env" and _env_splits_a_string(words[i + 1:]) for i, word in enumerate(words)):
         raise InputError(f"{where}: runs env -S, which splits a string into settings and arguments by env's own "
                          "quoting and escapes; the preflight cannot read it")
     program = _program(words)
-    assigned = [word for word in words[:len(words) - len(program)] if word != "exec"]
-    if program[:1] == ["export"]:
-        assigned += program[1:]
+    assigned = _assigned(words)
     _refuse_settings(map(_setting, assigned), authority, where)
     if program[:1] == ["set"]:
         for word in program[1:]:
@@ -1599,8 +1618,9 @@ def _commands(words: list[str], where: str, depth: int, authority: bool) -> list
         return [words]
     if depth == SHELL_NESTING:
         raise InputError(f"{where}: shells nest more than {SHELL_NESTING} deep")
-    return [command for inner in _script_commands(_shell_script(program, where), where)
-            for command in _commands(inner, where, depth + 1, authority)]
+    script = [command for inner in _script_commands(_shell_script(program, where), where)
+              for command in _commands(inner, where, depth + 1, authority)]
+    return ([assigned] if assigned else []) + script
 
 
 def launch_commands(node: dict) -> list[list[str]]:
@@ -2275,6 +2295,53 @@ def check_sessions(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                                            "epoch skips the committees Cardano holds for the epochs it spans, and the "
                                            "node cannot draw block 1's committee in a session that began before "
                                            "Cardano's first epoch"))
+    return findings
+
+
+def follower_settings(node: dict) -> dict[str, list[str]]:
+    """Each Cardano follower setting an authority's launch gives, with every NAME=value or NAME+=value word that
+    gives it: its env, then the assignments and exports of its launch's commands."""
+    words = [f"{name}={value}" for name, value in node.get("env", {}).items()]
+    words += [word for command in launch_commands(node) for word in _assigned(command) if "=" in word]
+    given: dict[str, list[str]] = {}
+    for word in words:
+        if _setting(word) in CARDANO_MAINNET_FOLLOWER:
+            given.setdefault(_setting(word), []).append(word)
+    return given
+
+
+def check_follower(launch: dict) -> list[Finding]:
+    """Every authority's node derives Cardano's epochs and slots, and which Cardano blocks are stable, from its
+    follower settings, so all must run with one set, in one spelling: the cardano_follower the launch declares, which
+    must be Cardano mainnet's. An authority on other settings than its peers' draws another committee or judges
+    another Cardano block stable, and refuses the committee changes and blocks they make."""
+    declared = launch.get("cardano_follower")
+    findings = []
+    if declared is None:
+        findings.append(Finding(COMMITTEE, "the launch declares no cardano_follower, the Cardano settings every "
+                                           "authority's follower must share: the preflight holds each authority to "
+                                           "Cardano mainnet's"))
+        declared = CARDANO_MAINNET_FOLLOWER
+    findings += [Finding(COMMITTEE, f"cardano_follower sets {name} to {declared[name]!r}, not Cardano mainnet's "
+                                    f"{value!r}: the node derives Cardano's epochs and slots, and which Cardano "
+                                    "blocks are stable, from these settings, so on any other it asks Cardano for "
+                                    "another epoch's committee, or none, and cites Cardano blocks its peers on "
+                                    "Cardano's own settings refuse")
+                 for name, value in CARDANO_MAINNET_FOLLOWER.items() if declared[name] != value]
+    diverges = ("a node derives Cardano's epochs and slots, and which Cardano blocks are stable, from these settings, "
+                "so one whose settings differ from its peers' draws another committee or judges another Cardano block "
+                "stable, and refuses the committee changes and blocks they make")
+    for node in launch.get("nodes", []):
+        if not node["authority"]:
+            continue
+        given = follower_settings(node)
+        for name, value in declared.items():
+            if name not in given:
+                findings.append(Finding(COMMITTEE, f"authority {node['name']} does not set {name}, which every "
+                                                   f"authority sets to the {value!r} the launch declares: {diverges}"))
+            findings += [Finding(COMMITTEE, f"authority {node['name']} sets {word!r}, not the {value!r} the launch "
+                                            f"declares for {name}: {diverges}")
+                         for word in given.get(name, []) if word != f"{name}={value}"]
     return findings
 
 
@@ -3244,6 +3311,11 @@ def validate_launch(launch) -> None:
     if type(slots) is not int or not 0 <= slots <= 0xFFFFFFFF:
         raise InputError("slots_per_epoch must be a u32: the slots in each session, which genesis "
                          "Sidechain.SlotsPerEpoch stores")
+    follower = launch.get("cardano_follower", CARDANO_MAINNET_FOLLOWER)
+    if not (isinstance(follower, dict) and set(follower) == set(CARDANO_MAINNET_FOLLOWER)
+            and all(isinstance(value, str) for value in follower.values())):
+        raise InputError(f"cardano_follower must map exactly {', '.join(CARDANO_MAINNET_FOLLOWER)} to the strings "
+                         "every authority's node is given as those settings")
     nodes = launch.get("nodes", [])
     if not isinstance(nodes, list):
         raise InputError("nodes must be a list")
@@ -3294,6 +3366,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
             + check_committee(spec, meta, launch)
             + check_sessions(spec, meta, launch)
+            + check_follower(launch)
             + check_candidate_grans(launch, cardano)
             + check_cardano_committee(meta, cardano)
             + check_rewards(spec, meta, launch)
