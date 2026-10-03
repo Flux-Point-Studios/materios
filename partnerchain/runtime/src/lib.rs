@@ -11,6 +11,7 @@ mod tests;
 mod seating_model_check;
 
 pub mod committee_liveness;
+pub mod genesis_committee;
 pub mod input_sanity;
 pub mod migrations;
 pub mod root_gate;
@@ -1742,6 +1743,7 @@ impl_runtime_apis! {
             let genesis = serde_json::from_slice::<RuntimeGenesisConfig>(&config)
                 .map_err(|e| sp_runtime::format_runtime_string!("Invalid JSON blob: {}", e))?;
             root_gate::ensure_guarded_genesis(&genesis)?;
+            genesis_committee::ensure_runnable_genesis_committee(&genesis)?;
             <RuntimeGenesisConfig as frame_support::traits::BuildGenesisConfig>::build(&genesis);
             Ok(())
         }
@@ -1752,9 +1754,10 @@ impl_runtime_apis! {
                 // frame-omni-bencher's default `--genesis-builder-preset=development`,
                 // which applies it as a patch over every pallet's genesis
                 // defaults. A benchmarking genesis has no guardian and has to
-                // say so, or `build_state` refuses it.
+                // say so, and has to seat a committee, here //Alice, or
+                // `build_state` refuses it.
                 if preset_id.as_ref() == sp_genesis_builder::DEV_RUNTIME_PRESET.as_bytes() {
-                    Some(br#"{"rootTimelock":{"unguarded":true}}"#.to_vec())
+                    Some(br#"{"rootTimelock":{"unguarded":true},"sessionCommitteeManagement":{"initialAuthorities":[["KW39r9CJjAVzmkf9zQ4YDb2hqfAVGdRqn53eRqyruqpxAP5YL",{"aura":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","grandpa":"5FA9nQDVg267DEd8m1ZypXLBnvN7SFxYwV7ndqSYGiN9TTpu"}]]}}"#.to_vec())
                 } else {
                     None
                 }

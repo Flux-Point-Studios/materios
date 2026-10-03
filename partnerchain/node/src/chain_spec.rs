@@ -33,16 +33,17 @@ where
 ///
 /// A chain spec seats its authorities only through
 /// `sessionCommitteeManagement.initialAuthorities`: the session pallet's
-/// genesis initialises Aura and GRANDPA from that committee, and panics with
-/// "Authorities are already initialized!" if `aura` or `grandpa` is set too.
-/// The committee also outlasts genesis. While Cardano's draw fails the
-/// live-quorum floor, as it does at block 1 unless one author alone is a
-/// quorum, block 1 proposes this committee again, so a spec without one
-/// schedules an empty GRANDPA set at its first rotation and halts.
+/// genesis initialises Aura and GRANDPA from that committee. The committee
+/// also outlasts genesis. While Cardano's draw fails the live-quorum floor,
+/// as it does at block 1 unless one author alone is a quorum, block 1
+/// proposes this committee again.
 ///
-/// List each authority once, in ascending cross-chain-key order, which is
-/// the order Ariadne seats a committee in. A duplicate carries double weight
-/// in GRANDPA, and any other order is re-seated by the first draw.
+/// The runtime's genesis builder refuses a committee that is empty, whose
+/// first rotation would schedule an empty GRANDPA set and halt the chain;
+/// `aura` or `grandpa` authorities set beside it; more seats than
+/// `MaxValidators`; an authority listed twice or out of ascending
+/// cross-chain-key order, the order Ariadne seats a committee in; and an
+/// Aura or GRANDPA key two authorities share.
 pub type Authority = (CrossChainPublic, SessionKeys);
 
 /// The authority a development seed derives.

@@ -408,17 +408,24 @@ mod tests {
         ChainSpec::from_json_bytes(json.to_string().into_bytes()).unwrap()
     }
 
-    /// `spec` with `authorities` seeded into Aura and GRANDPA directly, and
-    /// no genesis committee.
-    fn without_committee(spec: &ChainSpec, authorities: &[Authority]) -> ChainSpec {
-        patched(spec, |patch| {
-            patch["aura"] = serde_json::json!({
-                "authorities": authorities.iter().map(|(_, keys)| &keys.aura).collect::<Vec<_>>(),
-            });
-            patch["grandpa"] = serde_json::json!({
-                "authorities": authorities.iter().map(|(_, keys)| (&keys.grandpa, 1)).collect::<Vec<_>>(),
-            });
-            patch["sessionCommitteeManagement"]["initialAuthorities"] = serde_json::json!([]);
+    /// The preprod spec with `committee` as its genesis committee, and the
+    /// four authorities also seeded into Aura if `aura`, and into GRANDPA if
+    /// `grandpa`.
+    fn preprod_seating(committee: Vec<Authority>, aura: bool, grandpa: bool) -> ChainSpec {
+        let authorities = cardano_candidates();
+        patched(&preprod_config().unwrap(), |patch| {
+            patch["sessionCommitteeManagement"]["initialAuthorities"] =
+                serde_json::json!(committee);
+            if aura {
+                patch["aura"] = serde_json::json!({
+                    "authorities": authorities.iter().map(|(_, keys)| &keys.aura).collect::<Vec<_>>(),
+                });
+            }
+            if grandpa {
+                patch["grandpa"] = serde_json::json!({
+                    "authorities": authorities.iter().map(|(_, keys)| (&keys.grandpa, 1)).collect::<Vec<_>>(),
+                });
+            }
         })
     }
 
@@ -630,28 +637,86 @@ mod tests {
         assert_eq!(seated_at_genesis(&spec), Seated::by(&authorities));
     }
 
-    /// The harness sees the halt: without a genesis committee, block 1
-    /// proposes an empty one, and the rotation schedules an empty GRANDPA
-    /// set, which the node's block import refuses.
+    /// Genesis refuses, with its reason, a committee the chain cannot run
+    /// from. Without one, block 1 proposes an empty committee and the first
+    /// rotation schedules an empty GRANDPA set, which the node's block import
+    /// refuses; a key listed twice votes twice; and Aura and GRANDPA are
+    /// seated from the committee alone.
     #[test]
-    fn a_preprod_genesis_without_a_committee_schedules_an_empty_grandpa_set() {
-        let authorities = cardano_candidates();
-        let spec = without_committee(&preprod_config().unwrap(), &authorities);
-        assert_eq!(
-            seated_at_genesis(&spec),
-            Seated {
-                committee: Vec::new(),
-                ..Seated::by(&authorities)
-            }
+    fn genesis_refuses_a_committee_the_chain_cannot_run_from() {
+        let four = cardano_candidates;
+        let edited = |edit: fn(&mut Vec<Authority>)| {
+            let mut committee = four();
+            edit(&mut committee);
+            preprod_seating(committee, false, false)
+        };
+        let oversized = in_seating_order(
+            (0..=materios_runtime::MAX_VALIDATORS)
+                .map(|seat| authority_keys_from_seed(&format!("Seat{seat}")))
+                .collect(),
         );
-        assert_eq!(
-            seated_after_first_rotation(&spec, &authorities),
-            Seated {
-                committee: Vec::new(),
-                grandpa: Vec::new(),
-                ..Seated::by(&authorities)
+        let mut not_refused = Vec::new();
+        for (case, spec, reason) in [
+            (
+                "Aura and GRANDPA seeded without a committee",
+                preprod_seating(Vec::new(), true, true),
+                "the genesis committee is empty",
+            ),
+            (
+                "no committee",
+                preprod_seating(Vec::new(), false, false),
+                "the genesis committee is empty",
+            ),
+            (
+                "Aura seeded too",
+                preprod_seating(four(), true, false),
+                "leave aura and grandpa empty",
+            ),
+            (
+                "GRANDPA seeded too",
+                preprod_seating(four(), false, true),
+                "leave aura and grandpa empty",
+            ),
+            (
+                "more seats than MaxValidators",
+                preprod_seating(oversized, false, false),
+                "more seats than MaxValidators",
+            ),
+            (
+                "an authority listed twice",
+                edited(|committee| committee[3] = committee[0].clone()),
+                "ascending cross-chain-key order",
+            ),
+            (
+                "two authorities out of order",
+                edited(|committee| committee.swap(0, 1)),
+                "ascending cross-chain-key order",
+            ),
+            (
+                "two authorities sharing an Aura key",
+                edited(|committee| committee[1].1.aura = committee[0].1.aura.clone()),
+                "share an Aura or GRANDPA key",
+            ),
+            (
+                "two authorities sharing a GRANDPA key",
+                edited(|committee| committee[1].1.grandpa = committee[0].1.grandpa.clone()),
+                "share an Aura or GRANDPA key",
+            ),
+        ] {
+            match spec.build_storage() {
+                Err(error) if error.contains(reason) => {}
+                built => not_refused.push(format!(
+                    "{case}: {:?}",
+                    built
+                        .map(|_| ())
+                        .map_err(|error| error.lines().next().map(str::to_owned))
+                )),
             }
-        );
+        }
+        assert!(not_refused.is_empty(), "{not_refused:#?}");
+        assert!(preprod_seating(four(), false, false)
+            .build_storage()
+            .is_ok());
     }
 
     #[test]
@@ -686,27 +751,6 @@ mod tests {
                      (0xa466c3bc80bfa4daa489a7f3a3c662edd5c5d687d3d7758d3572db7b1d285e4a) is valid."
                     .to_string())
             );
-        });
-    }
-
-    /// Gemtek listed ahead of MacBook: the first rotation re-seats the set in
-    /// Ariadne's order, in a block whose author, Gemtek, makes the quorum
-    /// with its first block after Node-2's and Node-3's.
-    #[test]
-    fn peers_accept_the_first_rotation_of_a_genesis_committee_listed_in_another_order() {
-        let spec = patched(&preprod_config().unwrap(), |patch| {
-            let committee = &mut patch["sessionCommitteeManagement"]["initialAuthorities"];
-            committee.as_array_mut().unwrap().swap(0, 1);
-        });
-        start(&spec).execute_with(|| {
-            let listed = cardano(&cardano_candidates());
-            let rotation = epoch_start(1_001);
-            let mut parent = genesis_header();
-            for slot in rotation - 2..=rotation {
-                parent =
-                    play(&parent, slot, &listed).unwrap_or_else(|rejection| panic!("{rejection}"));
-            }
-            assert_eq!(next_committee(), Some(cardano_candidates()));
         });
     }
 

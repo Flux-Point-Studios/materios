@@ -3,6 +3,7 @@
 //! `check_inherents` at the parent, as the node's Aura import queue does, and
 //! imports it only if that passes.
 
+use super::{authority, Authority};
 use crate::*;
 use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
 use frame_support::inherent::ProvideInherent;
@@ -16,7 +17,6 @@ use sp_api::runtime_decl_for_core::Core;
 use sp_block_builder::runtime_decl_for_block_builder::BlockBuilder;
 use sp_consensus_aura::{Slot, AURA_ENGINE_ID};
 use sp_consensus_grandpa::{ConsensusLog, GRANDPA_ENGINE_ID};
-use sp_core::{ecdsa, ed25519, sr25519, Pair};
 use sp_inherents::InherentData;
 use sp_runtime::{
     traits::{Block as _, Header as _},
@@ -25,16 +25,6 @@ use sp_runtime::{
 };
 
 const SLOTS_PER_EPOCH: u64 = 10;
-
-type Authority = (CrossChainPublic, SessionKeys);
-
-fn authority(seed: &str) -> Authority {
-    let uri = format!("//{seed}");
-    let cross_chain = ecdsa::Pair::from_string(&uri, None).unwrap().public();
-    let aura = sr25519::Pair::from_string(&uri, None).unwrap().public();
-    let grandpa = ed25519::Pair::from_string(&uri, None).unwrap().public();
-    (cross_chain.into(), (aura, grandpa).into())
-}
 
 fn authorities(seeds: &[&str]) -> Vec<Authority> {
     seeds.iter().copied().map(authority).collect()
