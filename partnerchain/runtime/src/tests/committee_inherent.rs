@@ -348,6 +348,54 @@ fn peers_without_ariadne_data_refuse_a_block_that_seats_an_empty_committee() {
     });
 }
 
+/// Block 1 has no parent whose reference its own must stay at or ahead of,
+/// so its author may cite any stable block the peers accept, one that leaves
+/// their Ariadne data empty included, at any time and not only inside a
+/// window.
+#[test]
+fn peers_without_ariadne_data_refuse_a_first_block_that_seats_outsiders_or_no_one() {
+    chain(&cores()).execute_with(|| {
+        let slot = epoch_start(1_000);
+        let data = inherent_data(slot, None);
+        for committee in [outsiders(), Vec::new()] {
+            let injected = propose_injected(&genesis_header(), slot, &data, committee.clone());
+            assert_eq!(
+                peers_check(&injected, &data),
+                Err(
+                    "/ariadne: The validators in the block do not match the calculated validators"
+                        .to_string()
+                ),
+                "{committee:?}"
+            );
+        }
+    });
+}
+
+/// The first block after a runtime upgrade. The peers' check initialises the
+/// block, which runs the upgrade's migrations in the check's discarded state;
+/// the import runs them again for good. Peers accept the block, and the
+/// import records the upgrade.
+#[test]
+fn peers_accept_the_first_block_after_a_runtime_upgrade_and_its_import_records_the_upgrade() {
+    chain(&cores()).execute_with(|| {
+        let version = <Runtime as Core<Block>>::version();
+        frame_system::LastRuntimeUpgrade::<Runtime>::put(frame_system::LastRuntimeUpgradeInfo {
+            spec_version: (version.spec_version - 1).into(),
+            spec_name: version.spec_name.clone(),
+        });
+        let recorded = || {
+            frame_system::LastRuntimeUpgrade::<Runtime>::get()
+                .is_some_and(|last| !last.was_upgraded(&version))
+        };
+        let slot = epoch_start(1_000);
+        let data = inherent_data(slot, Some(&cardano(&cores())));
+        let block = propose(&genesis_header(), slot, &data);
+        assert!(!recorded());
+        import(block, &data).unwrap_or_else(|rejection| panic!("{rejection}"));
+        assert!(recorded());
+    });
+}
+
 /// After an honest block stores the next committee, a second committee
 /// inherent cannot replace it: not one the peers can check, and not even one
 /// that re-seats the committee in force, which their check lets through.

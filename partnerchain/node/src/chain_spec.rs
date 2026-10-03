@@ -306,6 +306,27 @@ pub(crate) mod tests {
         )
     }
 
+    /// A node's inherent data for the block at `slot`, with `ariadne` as what
+    /// its Ariadne inherent data provider gave it.
+    pub(crate) fn inherent_data(
+        slot: u64,
+        ariadne: Option<&AuthoritySelectionInputs>,
+    ) -> InherentData {
+        let mut data = InherentData::new();
+        data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &(slot * SLOT_DURATION))
+            .unwrap();
+        if let Some(inputs) = ariadne {
+            data.put_data(sp_session_validator_management::INHERENT_IDENTIFIER, inputs)
+                .unwrap();
+        }
+        data.put_data(
+            sp_block_rewards::INHERENT_IDENTIFIER,
+            &SizedByteString([0; 32]),
+        )
+        .unwrap();
+        data
+    }
+
     /// The block the slot's author proposes after `parent` while Cardano's
     /// selection inputs are `cardano`, and the inherent data it was made
     /// from. Nothing it wrote is kept.
@@ -327,19 +348,7 @@ pub(crate) mod tests {
             parent.hash(),
             digest,
         );
-        let mut data = InherentData::new();
-        data.put_data(sp_timestamp::INHERENT_IDENTIFIER, &(slot * SLOT_DURATION))
-            .unwrap();
-        data.put_data(
-            sp_session_validator_management::INHERENT_IDENTIFIER,
-            cardano,
-        )
-        .unwrap();
-        data.put_data(
-            sp_block_rewards::INHERENT_IDENTIFIER,
-            &SizedByteString([0; 32]),
-        )
-        .unwrap();
+        let data = inherent_data(slot, Some(cardano));
         let (header, inherents) = discarded(|| run(&pre, None, &data));
         (Block::new(header, inherents), data)
     }

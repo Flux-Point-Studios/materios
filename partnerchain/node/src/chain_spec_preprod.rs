@@ -338,8 +338,9 @@ mod tests {
     use crate::chain_spec::{
         authority_keys_from_seed,
         tests::{
-            cardano, genesis_header, peers_check, play, propose, seated_after_first_rotation,
-            seated_at_genesis, seated_now, start, stored_attestor_rewards, Seated,
+            cardano, genesis_header, inherent_data, peers_check, play, propose,
+            seated_after_first_rotation, seated_at_genesis, seated_now, start,
+            stored_attestor_rewards, Seated,
         },
     };
     use materios_runtime::{
@@ -347,7 +348,8 @@ mod tests {
     };
     use pallet_orinq_receipts::types::PinnedMember;
     use pallet_session_validator_management::Call;
-    use sp_core::Encode;
+    use sp_core::{Decode, Encode};
+    use sp_inherents::InherentData;
     use sp_runtime::{traits::Block as _, BuildStorage};
 
     /// The permissioned candidates on Cardano preprod: each authority's
@@ -506,6 +508,57 @@ mod tests {
         Ok(scheduled)
     }
 
+    /// `block` with its committee inherent seating `committee` instead.
+    fn seating(block: &Block, committee: Vec<Authority>) -> Block {
+        let (header, mut inherents) = block.clone().deconstruct();
+        let set = inherents
+            .iter_mut()
+            .find_map(|inherent| match &mut inherent.function {
+                RuntimeCall::SessionCommitteeManagement(Call::set { validators, .. }) => {
+                    Some(validators)
+                }
+                _ => None,
+            })
+            .expect("the block carries a committee inherent");
+        *set = committee.try_into().unwrap();
+        Block::new(header, inherents)
+    }
+
+    /// Whether a peer that runs `code`, the runtime a spec carries, in the
+    /// node's WASM executor accepts `block`'s inherents, checked with `data`
+    /// on `state` as the parent's. What the check writes is thrown away.
+    fn compiled_peers_accept(
+        state: &mut sp_io::TestExternalities,
+        code: &[u8],
+        block: &Block,
+        data: &InherentData,
+    ) -> bool {
+        use sp_core::traits::{
+            CallContext, CodeExecutor, Externalities, RuntimeCode, WrappedRuntimeCode,
+        };
+        let fetcher = WrappedRuntimeCode(code.into());
+        let runtime_code = RuntimeCode {
+            code_fetcher: &fetcher,
+            heap_pages: None,
+            hash: sp_core::blake2_256(code).to_vec(),
+        };
+        let mut ext = state.ext();
+        ext.storage_start_transaction();
+        let (checked, _) = sc_executor::WasmExecutor::<sp_io::SubstrateHostFunctions>::builder()
+            .build()
+            .call(
+                &mut ext,
+                &runtime_code,
+                "BlockBuilder_check_inherents",
+                &(block, data).encode(),
+                CallContext::Offchain,
+            );
+        ext.storage_rollback_transaction().unwrap();
+        sp_inherents::CheckInherentsResult::decode(&mut &checked.expect("the runtime runs")[..])
+            .unwrap()
+            .ok()
+    }
+
     fn next_committee() -> Option<Vec<Authority>> {
         SessionCommitteeManagement::next_committee_storage().map(|next| next.committee.to_vec())
     }
@@ -625,15 +678,7 @@ mod tests {
                 epoch_start(1_001),
                 &cardano(&the_four_and_charlie()),
             );
-            let (header, mut inherents) = block.deconstruct();
-            for inherent in &mut inherents {
-                if let RuntimeCall::SessionCommitteeManagement(Call::set { validators, .. }) =
-                    &mut inherent.function
-                {
-                    *validators = cardano_candidates().try_into().unwrap();
-                }
-            }
-            let kept = Block::new(header, inherents);
+            let kept = seating(&block, cardano_candidates());
             assert_eq!(
                 peers_check(&kept, &data),
                 Err("/ariadne: The validators in the block do not match the calculated \
@@ -663,6 +708,30 @@ mod tests {
             }
             assert_eq!(next_committee(), Some(cardano_candidates()));
         });
+    }
+
+    /// Peers run the runtime the spec carries, compiled, not the native one
+    /// the harness plays. While their Ariadne data is absent, that code
+    /// accepts an honest block 1, which re-seats the genesis committee, and
+    /// refuses the same block seating outsiders.
+    #[test]
+    fn the_compiled_runtime_refuses_a_first_block_seating_outsiders_while_peers_have_no_ariadne_data(
+    ) {
+        let storage = preprod_config().unwrap().build_storage().unwrap();
+        let code = storage.top[sp_core::storage::well_known_keys::CODE].clone();
+        let mut state = sp_io::TestExternalities::new(storage);
+        let slot = epoch_start(1_001) - 1;
+        let (honest, _) = state
+            .execute_with(|| propose(&genesis_header(), slot, &cardano(&cardano_candidates())));
+        let outsiders = ["Mallory1", "Mallory2"]
+            .map(authority_keys_from_seed)
+            .to_vec();
+        let injected = seating(&honest, in_seating_order(outsiders));
+        let without_ariadne = inherent_data(slot, None);
+        let mut accepts =
+            |block: &Block| compiled_peers_accept(&mut state, &code, block, &without_ariadne);
+        assert!(accepts(&honest));
+        assert!(!accepts(&injected));
     }
 
     #[test]
