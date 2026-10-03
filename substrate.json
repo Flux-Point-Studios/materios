@@ -50,10 +50,11 @@
     {
       "id": "committee-seating-gate",
       "name": "Committee seating gate",
-      "desc": "Composed authority-selection gate: input sanitizer, dead-registered and dead-core liveness filters, seat-ramp clamp, live-quorum floor, growth-slack invariant, break-glass floor and pinned-committee override; refuses (keep-current) rather than seat a committee that cannot finalize.",
+      "desc": "Composed authority-selection gate: input sanitizer, dead-registered and dead-core liveness filters, seat-ramp clamp, live-quorum floor, growth-slack invariant, break-glass floor and pinned-committee override; refuses (keep-current) rather than seat a committee that cannot finalize, so a fresh chain keeps the genesis committee its chain spec declares until a quorum of Cardano's draw has authored. The author and every importing peer judge it on the same state: the runtime's check_inherents initialises the block first. Genesis refuses a chain spec whose committee is empty, has Aura or GRANDPA authorities seeded beside it, has more seats than MaxValidators, lists an authority twice or out of ascending cross-chain-key order, or gives two authorities one Aura or GRANDPA key.",
       "kind": "engine",
       "paths": [
         "partnerchain/runtime/src/committee_liveness.rs",
+        "partnerchain/runtime/src/genesis_committee.rs",
         "partnerchain/runtime/src/input_sanity.rs",
         "partnerchain/vendor/authority-selection-inherents",
         "partnerchain/vendor/pallet-session-validator-management"
@@ -87,6 +88,18 @@
       "consumes": [
         "orinq-receipts-pallet"
       ],
+      "status": "experimental"
+    },
+    {
+      "id": "runtime-build",
+      "name": "Reproducible runtime build",
+      "desc": "Builds a commit's runtime blob at a fixed path in a digest-pinned Rust image, with the runtime's build script remapping the toolchain, Cargo home and repository directories its panic messages name, so every builder gets the same bytes and code hash: the code a signed launch manifest pins can be rebuilt from source, and a genesis built from a plain spec carrying it does not depend on the node that ran build-spec.",
+      "kind": "toolkit",
+      "paths": [
+        "tools/runtime-build",
+        "partnerchain/runtime/build.rs"
+      ],
+      "consumes": [],
       "status": "experimental"
     },
     {
