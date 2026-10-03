@@ -209,9 +209,11 @@ pub mod pallet {
         type Classifier: ClassifyCall<<Self as Config>::RuntimeCall>;
 
         /// Delays used until genesis or a migration stores others.
+        #[pallet::constant]
         type DefaultDelays: Get<DelayTable<BlockNumberFor<Self>>>;
 
         /// No delay may exceed this.
+        #[pallet::constant]
         type MaxDelay: Get<BlockNumberFor<Self>>;
 
         /// Blocks after `ready_at` during which a call may still be enacted.

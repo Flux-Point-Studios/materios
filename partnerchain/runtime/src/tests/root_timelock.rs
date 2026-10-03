@@ -1538,6 +1538,32 @@ fn mainnet_defaults() {
     assert!(TESTNET_TIMELOCK_DELAYS.is_valid(RootTimelockMaxDelay::get()));
 }
 
+/// The launch preflight reads the mainnet delays and their ceiling from the
+/// runtime metadata, which is all it has of the runtime.
+#[test]
+fn metadata_declares_the_mainnet_delays_and_their_ceiling() {
+    let pallet = Runtime::metadata_ir()
+        .pallets
+        .into_iter()
+        .find(|pallet| pallet.name == "RootTimelock")
+        .expect("RootTimelock is in the metadata");
+    let constant = |name: &str| {
+        pallet
+            .constants
+            .iter()
+            .find(|constant| constant.name == name)
+            .map(|constant| constant.value.clone())
+    };
+    assert_eq!(
+        constant("DefaultDelays"),
+        Some(RootTimelockDefaultDelays::get().encode())
+    );
+    assert_eq!(
+        constant("MaxDelay"),
+        Some(RootTimelockMaxDelay::get().encode())
+    );
+}
+
 fn bare_ext() -> TestExternalities {
     frame_system::GenesisConfig::<Runtime>::default()
         .build_storage()
@@ -2011,6 +2037,43 @@ fn a_multisig_guardian_wrapper_is_taken_first_and_bounded() {
             .expect("Operational has a budget");
         let inflated = wrap(veto.clone(), op_budget, Charlie);
         assert!(pool_priority(Charlie, &inflated) < TransactionPriority::MAX);
+    });
+}
+
+/// The launch preflight refuses a guardian with a nested multisig member
+/// because of this: such a member's veto competes with fee-paying calls.
+#[test]
+fn a_veto_through_a_nested_multisig_member_is_not_taken_first() {
+    let sorted = |mut accounts: Vec<AccountId>| {
+        accounts.sort();
+        accounts
+    };
+    let inner = pallet_multisig::Pallet::<Runtime>::multi_account_id(
+        &sorted(vec![acct(Dave), acct(Eve)]),
+        2,
+    );
+    let guardian = pallet_multisig::Pallet::<Runtime>::multi_account_id(
+        &sorted(vec![acct(Charlie), inner.clone()]),
+        2,
+    );
+    let as_multi = |others: Vec<AccountId>, call: RuntimeCall| {
+        let max_weight = call.get_dispatch_info().weight;
+        RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
+            threshold: 2,
+            other_signatories: others,
+            maybe_timepoint: None,
+            max_weight,
+            call: Box::new(call),
+        })
+    };
+    ext_with(acct(SUDO), Some(guardian)).execute_with(|| {
+        put_fee_params();
+        let direct = as_multi(vec![inner.clone()], cancel_all());
+        assert_eq!(pool_priority(Charlie, &direct), TransactionPriority::MAX);
+
+        let nested = as_multi(vec![acct(Eve)], direct);
+        assert!(pool_priority(Dave, &nested) < TransactionPriority::MAX);
+        assert!(pool_validity(Dave, &nested).provides.is_empty());
     });
 }
 
