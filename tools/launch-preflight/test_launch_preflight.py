@@ -317,7 +317,7 @@ def test_malformed_extra_table_is_an_input_error(tmp_path, entries, error):
 # Hex: each input in the one spelling its writer writes
 # ---------------------------------------------------------------------------
 
-SPEC239_RAW = FIXTURES / "preprod-spec239-raw.json"
+SPEC240_RAW = FIXTURES / "preprod-spec240-raw.json"
 GUARDIAN_KEY = "0x" + lp.storage_key("RootTimelock", "Guardian").hex()
 DELAYS_KEY = "0x" + lp.storage_key("RootTimelock", "Delays").hex()
 # 32 bytes whose digits hold letters, so an upper-case spelling differs from it.
@@ -359,8 +359,8 @@ def spelled(spellings: dict):
 
 
 def raw_spec(tmp_path, edit) -> str:
-    """The spec 239 raw spec as a file, its raw storage edited by `edit`."""
-    doc = json.loads(SPEC239_RAW.read_text())
+    """The spec 240 raw spec as a file, its raw storage edited by `edit`."""
+    doc = json.loads(SPEC240_RAW.read_text())
     edit(doc["genesis"]["raw"]["top"])
     path = tmp_path / "raw.json"
     path.write_text(json.dumps(doc))
@@ -396,7 +396,7 @@ def test_a_raw_storage_value_that_is_not_a_string_is_an_input_error(tmp_path, va
      f"chain spec raw storage key '0x{GUARDIAN_KEY[2:].upper()}' {MISSPELLED}"),
 ], ids=["twice", "once with a JSON escape", "once in upper case"])
 def test_a_raw_storage_key_given_twice_in_any_spelling_is_an_input_error(tmp_path, entries, error):
-    doc = json.loads(SPEC239_RAW.read_text())
+    doc = json.loads(SPEC240_RAW.read_text())
     doc["genesis"]["raw"]["top"] = {"@": ""}
     path = tmp_path / "raw.json"
     path.write_text(json.dumps(doc).replace('{"@": ""}', "{" + entries + "}"))
@@ -407,7 +407,7 @@ def test_a_raw_storage_key_given_twice_in_any_spelling_is_an_input_error(tmp_pat
 def test_a_spec_that_repeats_any_key_is_an_input_error(tmp_path):
     """The node refuses a field given twice; the preflight would read the last."""
     path = tmp_path / "raw.json"
-    path.write_text(SPEC239_RAW.read_text().replace('"chainType": "Live"', '"chainType": "Local", "chainType": "Live"'))
+    path.write_text(SPEC240_RAW.read_text().replace('"chainType": "Live"', '"chainType": "Local", "chainType": "Live"'))
     with pytest.raises(lp.InputError, match="an object holds the key 'chainType' twice"):
         lp.load_spec(str(path))
 
@@ -439,7 +439,7 @@ def test_a_spec_with_no_raw_storage_map_is_an_input_error(tmp_path, doc):
 
 
 def test_a_spec_with_child_tries_is_an_input_error(tmp_path):
-    doc = json.loads(SPEC239_RAW.read_text())
+    doc = json.loads(SPEC240_RAW.read_text())
     child = "0x" + b":child_storage:default:a".hex()
     doc["genesis"]["raw"]["childrenDefault"] = {child: {"0x00 ": "0x 01"}}
     path = tmp_path / "raw.json"
@@ -448,7 +448,7 @@ def test_a_spec_with_child_tries_is_an_input_error(tmp_path):
         lp.load_spec(str(path))
 
 
-@pytest.mark.parametrize("name", ["preprod-v6-raw.json.gz", "preprod-spec239-raw.json"])
+@pytest.mark.parametrize("name", ["preprod-v6-raw.json.gz", "preprod-spec240-raw.json"])
 def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
     """build-spec writes each raw storage key and value as 0x and lower case, so its output loads unchanged."""
     data = (FIXTURES / name).read_bytes()
@@ -463,10 +463,10 @@ def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
     assert spec.storage == {bytes.fromhex(key[2:]): bytes.fromhex(value[2:]) for key, value in top.items()}
 
 
-def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_of_its_type(spec, spec239):
+def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_of_its_type(spec, spec240):
     """Every account is an 80-byte AccountInfo filed under its own key, and
     what the accounts hold, free plus reserved, is TotalIssuance."""
-    for genesis in (spec, spec239[0]):
+    for genesis in (spec, spec240[0]):
         numbers = [("OrinqReceipts", item, width) for _, item, width in REWARD_WIDTHS]
         numbers += [("OrinqReceipts", "BondRequirement", 16), ("Balances", "TotalIssuance", 16),
                     ("Sidechain", "SlotsPerEpoch", 4)]
@@ -3830,31 +3830,56 @@ def test_every_item_the_preprod_v6_genesis_sets_is_on_the_allowlist(spec, meta):
 
 
 @pytest.fixture
-def spec239() -> tuple[lp.Spec, lp.Metadata]:
-    """The preprod genesis spec 239 builds, less its :code, and that code's
+def spec240() -> tuple[lp.Spec, lp.Metadata]:
+    """The preprod genesis spec 240 builds, less its :code, and that code's
     metadata trimmed to what the preflight reads. The README's Tests section
     gives the commands that build both."""
-    v14 = json.loads((FIXTURES / "spec239-metadata.json").read_text())["V14"]
-    return lp.load_spec(str(FIXTURES / "preprod-spec239-raw.json")), lp.Metadata.from_v14(v14)
+    v14 = json.loads((FIXTURES / "spec240-metadata.json").read_text())["V14"]
+    return lp.load_spec(str(FIXTURES / "preprod-spec240-raw.json")), lp.Metadata.from_v14(v14)
 
 
-def test_every_item_the_spec239_preprod_genesis_sets_is_on_the_allowlist(spec239):
+def version_fields(version: bytes) -> tuple[bytes, int, int]:
+    """The spec name, as SCALE encodes it, the spec version and the transaction version of a SCALE RuntimeVersion."""
+    length, cursor = lp.read_compact(version, 0)
+    name = version[:cursor + length]
+    length, cursor = lp.read_compact(version, cursor + length)  # the impl name
+    cursor += length
+    spec_version = int.from_bytes(version[cursor + 4:cursor + 8], "little")  # past the authoring version
+    count, cursor = lp.read_compact(version, cursor + 12)
+    cursor += lp.API_ENTRY * count
+    return name, spec_version, int.from_bytes(version[cursor:cursor + 4], "little")
+
+
+def test_the_spec240_fixtures_are_the_runtime_this_source_builds(spec240):
+    """The fixtures stand for the runtime this tree builds: its metadata's
+    System.Version and the LastRuntimeUpgrade build-spec writes carry the spec
+    and transaction versions the runtime source declares."""
+    source = (HERE.parent.parent / "partnerchain" / "runtime" / "src" / "lib.rs").read_text()
+    declared = [int(re.search(rf"\n\s*{field}: (\d+),", source).group(1))
+                for field in ("spec_version", "transaction_version")]
+    spec, meta = spec240
+    name, spec_version, transaction_version = version_fields(meta.constants[("System", "Version")])
+    assert (name, [spec_version, transaction_version]) == (b"\x20materios", declared)
+    assert spec.value("System", "LastRuntimeUpgrade") == lp.compact(spec_version) + name
+
+
+def test_every_item_the_spec240_preprod_genesis_sets_is_on_the_allowlist(spec240):
     """Rule 4 reads which items genesis sets, not what they hold: rule 7
     refuses this genesis's Root timelock delays and guardian."""
-    assert lp.check_genesis_storage(*spec239) == []
+    assert lp.check_genesis_storage(*spec240) == []
 
 
 @pytest.mark.parametrize("item", ["Tasks", "CounterForTasks", "NextTaskId", "PendingGuardianChange", "Approval"])
-def test_a_genesis_that_starts_the_root_timelock_queue_is_refused(spec239, item):
-    spec, meta = spec239
+def test_a_genesis_that_starts_the_root_timelock_queue_is_refused(spec240, item):
+    spec, meta = spec240
     put(spec, "RootTimelock", item, bytes(36))
     assert messages(lp.check_genesis_storage(spec, meta)) == [
         f"[4 supply] genesis sets RootTimelock.{item} (1 entry), which a mainnet genesis may not set: "
         "storage outside the genesis allowlist can hold a claim on MATRA that the supply check does not count"]
 
 
-def test_a_well_known_root_timelock_guardian_is_refused(spec239, known):
-    spec, meta = spec239
+def test_a_well_known_root_timelock_guardian_is_refused(spec240, known):
+    spec, meta = spec240
     spec.storage[lp.CODE_KEY] = b""
     put(spec, "RootTimelock", "Guardian", BOB)
     found = messages(lp.check_dev_keys(spec, meta, {}, NO_CARDANO, [], known))
@@ -4144,11 +4169,11 @@ def timelock_launch(sudo_members, guardian) -> dict:
 
 
 @pytest.fixture
-def guarded(spec239):
-    """The spec 239 preprod genesis with Root held by a 2-of-3 multisig of fresh
+def guarded(spec240):
+    """The spec 240 preprod genesis with Root held by a 2-of-3 multisig of fresh
     keys, and the timelock guarded by a 2-of-3 multisig of other fresh keys at
     the mainnet delays."""
-    spec, meta = spec239
+    spec, meta = spec240
     sudo, guardian = [fresh_account() for _ in range(3)], [fresh_account() for _ in range(3)]
     put(spec, "Sudo", "Key", lp.multisig_account(sudo, 2))
     put(spec, "RootTimelock", "Guardian", lp.multisig_account(guardian, 2))
@@ -4167,8 +4192,8 @@ def delay_findings(spec, meta, *blocks: int) -> list[str]:
     return messages(lp.check_delays(spec, meta))
 
 
-def test_the_spec239_metadata_declares_the_mainnet_delays_and_their_ceiling(spec239):
-    _, meta = spec239
+def test_the_spec240_metadata_declares_the_mainnet_delays_and_their_ceiling(spec240):
+    _, meta = spec240
     assert meta.constants[("RootTimelock", "DefaultDelays")] == delays(*MAINNET_DELAYS)
     assert meta.constants[("RootTimelock", "MaxDelay")] == MAX_DELAY.to_bytes(4, "little")
 
@@ -4179,8 +4204,8 @@ def test_a_guardian_apart_from_the_sudo_key_at_the_mainnet_delays_passes(guarded
     assert lp.check_delays(spec, meta) == []
 
 
-def test_the_spec239_preprod_timelock_is_refused_on_mainnet(spec239):
-    spec, meta = spec239
+def test_the_spec240_preprod_timelock_is_refused_on_mainnet(spec240):
+    spec, meta = spec240
     assert spec.value("Sudo", "Key") == lp.multisig_account(PREPROD_KEYHOLDERS, 2)
     launch = timelock_launch(PREPROD_KEYHOLDERS, msig(3, *PREPROD_KEYHOLDERS))
     assert messages(lp.check_guardian(spec, meta, launch)) == [
@@ -4388,15 +4413,15 @@ def test_a_sudo_key_that_does_not_decode_leaves_the_guardian_checked(guarded):
         "who can veto Root is unchecked"]
 
 
-def test_the_mainnet_delays_and_delays_up_to_max_delay_pass(spec239):
-    spec, meta = spec239
+def test_the_mainnet_delays_and_delays_up_to_max_delay_pass(spec240):
+    spec, meta = spec240
     assert delay_findings(spec, meta, *MAINNET_DELAYS) == []
     assert delay_findings(spec, meta, MAX_DELAY, MAX_DELAY, MAX_DELAY) == []
 
 
 @pytest.mark.parametrize("index, name", enumerate(("recovery", "standard", "long")))
-def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec239, index, name):
-    spec, meta = spec239
+def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec240, index, name):
+    spec, meta = spec240
     blocks = [*MAINNET_DELAYS]
     blocks[index] -= 1
     assert delay_findings(spec, meta, *blocks) == [
@@ -4405,30 +4430,30 @@ def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec239, index, na
 
 
 @pytest.mark.parametrize("long", [MAX_DELAY + 1, 2**32 - 1])
-def test_a_long_delay_above_max_delay_is_refused(spec239, long):
-    spec, meta = spec239
+def test_a_long_delay_above_max_delay_is_refused(spec240, long):
+    spec, meta = spec240
     assert delay_findings(spec, meta, DAYS, 7 * DAYS, long) == [
         f"[7 timelock] RootTimelock.Delays holds long calls {long} blocks, above the runtime's MaxDelay {MAX_DELAY}: "
         "a guardian change, or a cut to the long delay itself, would wait longer than the runtime lets any delay be"]
 
 
-def test_delays_out_of_the_runtime_order_are_refused(spec239):
-    spec, meta = spec239
+def test_delays_out_of_the_runtime_order_are_refused(spec240):
+    spec, meta = spec240
     assert delay_findings(spec, meta, 20 * DAYS, 7 * DAYS, 30 * DAYS) == [
         f"[7 timelock] RootTimelock.Delays (recovery {20 * DAYS}, standard {7 * DAYS}, long {30 * DAYS} blocks) "
         "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
 
 
-def test_a_standard_delay_above_the_long_delay_is_refused_within_every_other_bound(spec239):
+def test_a_standard_delay_above_the_long_delay_is_refused_within_every_other_bound(spec240):
     """Each delay at least its mainnet delay and long at most MaxDelay: only the order refuses."""
-    spec, meta = spec239
+    spec, meta = spec240
     assert delay_findings(spec, meta, DAYS, 60 * DAYS, 30 * DAYS) == [
         f"[7 timelock] RootTimelock.Delays (recovery {DAYS}, standard {60 * DAYS}, long {30 * DAYS} blocks) "
         "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
 
 
-def test_zero_delays_are_refused(spec239):
-    spec, meta = spec239
+def test_zero_delays_are_refused(spec240):
+    spec, meta = spec240
     found = delay_findings(spec, meta, 0, 0, 0)
     assert len(found) == 4
     assert "[7 timelock] RootTimelock.Delays holds recovery calls 0 blocks, below the 14400 the runtime sets for " \
@@ -4436,8 +4461,8 @@ def test_zero_delays_are_refused(spec239):
     assert found[-1].startswith("[7 timelock] RootTimelock.Delays (recovery 0, standard 0, long 0 blocks) breaks")
 
 
-def test_the_bounds_are_the_runtime_constants(spec239):
-    spec, meta = spec239
+def test_the_bounds_are_the_runtime_constants(spec240):
+    spec, meta = spec240
     meta.constants[("RootTimelock", "DefaultDelays")] = delays(10, 20, 30)
     meta.constants[("RootTimelock", "MaxDelay")] = (40).to_bytes(4, "little")
     assert delay_findings(spec, meta, 10, 20, 40) == []
@@ -4451,8 +4476,8 @@ def test_the_bounds_are_the_runtime_constants(spec239):
     {"DefaultDelays": None}, {"MaxDelay": None}, {"DefaultDelays": None, "MaxDelay": None},
     {"DefaultDelays": bytes(11)}, {"MaxDelay": b""},
 ])
-def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec239, constants):
-    spec, meta = spec239
+def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec240, constants):
+    spec, meta = spec240
     for name, value in constants.items():
         if value is None:
             del meta.constants[("RootTimelock", name)]
@@ -4467,15 +4492,15 @@ def test_a_runtime_with_no_root_timelock_is_refused(spec, meta):
 
 
 @pytest.mark.parametrize("raw", [b"", bytes(11), bytes(13), bytes(24)], ids=lambda raw: f"{len(raw)} bytes")
-def test_delays_that_do_not_decode_are_refused(spec239, raw):
-    spec, meta = spec239
+def test_delays_that_do_not_decode_are_refused(spec240, raw):
+    spec, meta = spec240
     put(spec, "RootTimelock", "Delays", raw)
     assert messages(lp.check_delays(spec, meta)) == [
         f"[7 timelock] RootTimelock.Delays is {len(raw)} bytes, not three 4-byte block counts"]
 
 
-def test_a_genesis_that_stores_no_delays_is_refused(spec239):
-    spec, meta = spec239
+def test_a_genesis_that_stores_no_delays_is_refused(spec240):
+    spec, meta = spec240
     del spec.storage[lp.storage_key("RootTimelock", "Delays")]
     assert messages(lp.check_delays(spec, meta)) == [
         "[7 timelock] genesis sets no RootTimelock.Delays, which every genesis the runtime builds sets: how long "
@@ -5398,11 +5423,11 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
 
 
 def with_timelock(metadata_v14: dict) -> dict:
-    """The fixture metadata plus spec 239's RootTimelock pallet: its storage
+    """The fixture metadata plus spec 240's RootTimelock pallet: its storage
     and the delay constants rule 7 reads."""
     v14 = copy.deepcopy(metadata_v14)
-    spec239 = json.loads((FIXTURES / "spec239-metadata.json").read_text())["V14"]
-    v14["pallets"].append(next(p for p in spec239["pallets"] if p["name"] == "RootTimelock"))
+    spec240 = json.loads((FIXTURES / "spec240-metadata.json").read_text())["V14"]
+    v14["pallets"].append(next(p for p in spec240["pallets"] if p["name"] == "RootTimelock"))
     return v14
 
 
@@ -5411,7 +5436,7 @@ def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch, metadata_v14):
     """The spec's code is the preprod v6 runtime, which declares neither its
     emission reserves nor its validator reward per era and has no Root
     timelock, so the extractor returns its metadata with both declared and
-    spec 239's timelock added."""
+    spec 240's timelock added."""
     monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_timelock(with_constants(metadata_v14)))
     launch = Launch(preprod_path, tmp_path, kupo, endpoint)
     pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))
