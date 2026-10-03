@@ -1092,6 +1092,16 @@ def committee_policies(spec: Spec) -> tuple[bytes, bytes]:
     if extra:
         raise InputError(f"SessionCommitteeManagement.MainChainScriptsConfiguration has {extra} "
                          f"byte{'s' * (extra != 1)} past its second policy id, which build-spec does not write")
+    try:
+        address = raw[pos:start].decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration holds a committee candidate address "
+                         "that is not UTF-8: each node's Cardano follower formats it as text to look up registrations, "
+                         "which panics, so every authority's node exits and no block is authored") from e
+    if "\0" in address:
+        raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration holds a committee candidate address "
+                         "with a NUL byte, which the node's Cardano follower cannot pass to its Postgres query: every "
+                         "block's committee inputs fail and no block is authored")
     return policies
 
 

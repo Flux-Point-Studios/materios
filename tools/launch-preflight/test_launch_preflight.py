@@ -1415,6 +1415,46 @@ def test_a_committee_address_past_the_runtimes_bound_is_an_input_error(spec, len
         lp.committee_policies(spec)
 
 
+def set_committee_address(spec: lp.Spec, address: bytes) -> tuple[bytes, bytes]:
+    """Genesis MainChainScriptsConfiguration with `address` before the same two policies; returns those policies."""
+    raw = spec.value("SessionCommitteeManagement", "MainChainScriptsConfiguration")
+    policies = raw[-2 * 28:]
+    put(spec, "SessionCommitteeManagement", "MainChainScriptsConfiguration",
+        lp.compact(len(address)) + address + policies)
+    return policies[:28], policies[28:]
+
+
+NOT_UTF8 = ("SessionCommitteeManagement.MainChainScriptsConfiguration holds a committee candidate address that is not "
+            "UTF-8: each node's Cardano follower formats it as text to look up registrations, which panics, so every "
+            "authority's node exits and no block is authored")
+HOLDS_NUL = ("SessionCommitteeManagement.MainChainScriptsConfiguration holds a committee candidate address with a NUL "
+             "byte, which the node's Cardano follower cannot pass to its Postgres query: every block's committee "
+             "inputs fail and no block is authored")
+# The red team's PoC: Display for MainchainAddress is String::from_utf8(..).expect(..), so an address that is not
+# UTF-8 panics in either follower's get_candidates, and the node exits; such an address passed every rule.
+UNREADABLE_ADDRESSES = {
+    "one 0xff byte": (b"\xff", NOT_UTF8),
+    "continuation bytes after a prefix": (b"addr_test1" + b"\x80" * 10, NOT_UTF8),
+    "120 bytes that are not UTF-8": (b"\xc0" * 120, NOT_UTF8),
+    "a surrogate": (b"addr1\xed\xa0\x80", NOT_UTF8),
+    "a lone lead byte at the end": (b"addr1\xe2\x82", NOT_UTF8),
+    "a NUL byte": (b"addr1\x00w", HOLDS_NUL),
+}
+
+
+@pytest.mark.parametrize("address, refusal", UNREADABLE_ADDRESSES.values(), ids=UNREADABLE_ADDRESSES)
+def test_a_committee_address_the_follower_cannot_read_is_an_input_error(spec, address, refusal):
+    set_committee_address(spec, address)
+    with pytest.raises(lp.InputError, match="^" + re.escape(refusal) + "$"):
+        lp.committee_policies(spec)
+
+
+@pytest.mark.parametrize("address", [b"", b"addr1w" + b"q" * 114, "addr1é€\U0001f600".encode()],
+                         ids=["empty", "120 ASCII bytes", "multi-byte UTF-8"])
+def test_a_utf8_committee_address_is_read(spec, address):
+    assert lp.committee_policies(spec) == set_committee_address(spec, address)
+
+
 @pytest.mark.parametrize("after", [b"\0", bytes(28)], ids=["a byte", "a third policy"])
 def test_committee_scripts_with_bytes_past_the_second_policy_are_an_input_error(spec, after):
     committee_address(spec, 63, after)
@@ -5558,6 +5598,13 @@ def test_cli_refuses_a_committee_address_past_the_runtimes_bound_as_unreadable(c
     committee_address(clean.spec, 121)
     code, out = clean.run(capsys)
     assert code == 2 and address_past_bound(121) in out, out
+
+
+@pytest.mark.parametrize("address, refusal", [(b"\xff", NOT_UTF8), (b"addr1\x00", HOLDS_NUL)], ids=["0xff", "NUL"])
+def test_cli_refuses_a_committee_address_the_follower_cannot_read_as_unreadable(clean, capsys, address, refusal):
+    set_committee_address(clean.spec, address)
+    code, out = clean.run(capsys)
+    assert code == 2 and refusal in out, out
 
 
 def test_cli_refuses_a_genesis_committee_at_another_epoch(clean, capsys):

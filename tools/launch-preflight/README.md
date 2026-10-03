@@ -102,7 +102,12 @@ be at most 120 bytes, the bound of partner-chains' `MainchainAddress`, and
 nothing may follow the second policy id, as build-spec writes it: the runtime
 reads the item with a longer address as undecodable, so as its default, whose
 all-zero policies mark no D-parameter, and the node's follower then fails
-every block's committee inputs. Either refuses as unreadable.
+every block's committee inputs. The address must also be UTF-8 with no NUL
+byte: both followers format it as text (`String::from_utf8(..).expect(..)` in
+`MainchainAddress`'s Display) for the Postgres query that finds registrations
+at it, so bytes that are not UTF-8 panic the node, and Postgres refuses a NUL in
+text, which fails every block's committee inputs. Each of these refuses as
+unreadable.
 
 ```
 kupo --match <lock address> --match '<D-parameter policy>.*' \
