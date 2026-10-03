@@ -22,6 +22,7 @@ from pathlib import Path
 import base58
 import cbor2
 import pytest
+import xxhash
 import zstandard
 from nacl import signing
 
@@ -2850,6 +2851,75 @@ def test_grandpa_voters_that_do_not_decode_are_an_input_error(seated, meta, raw)
     with pytest.raises(lp.InputError, match="Grandpa.Authorities does not decode as a list of 32-byte keys and "
                                             "u64 weights"):
         committee_findings(spec, meta, launch)
+
+
+def set_id_session_key(set_id: int) -> bytes:
+    """Grandpa.SetIdSession's key for a set id: Twox64Concat of the u64."""
+    encoded = set_id.to_bytes(8, "little")
+    return (lp.storage_key("Grandpa", "SetIdSession") + xxhash.xxh64(encoded, seed=0).intdigest().to_bytes(8, "little")
+            + encoded)
+
+
+def test_build_spec_starts_grandpa_at_set_0_in_session_0(spec, spec240):
+    """What pallet_grandpa's genesis writes in both preprod genesis: the set id 0 as a u64, and the one SetIdSession
+    entry, set 0 beginning in session 0 (a u32)."""
+    prefix = lp.storage_key("Grandpa", "SetIdSession")
+    for genesis in (spec, spec240[0]):
+        assert genesis.value("Grandpa", "CurrentSetId") == bytes(8)
+        assert {key: value for key, value in genesis.storage.items() if key.startswith(prefix)} == {
+            set_id_session_key(0): bytes(4)}
+
+
+def other_set_id(set_id: int) -> str:
+    return (f"[9 committee] genesis Grandpa.CurrentSetId is {set_id}, not the 0 build-spec writes: every GRANDPA "
+            "client starts the genesis authority set at set id 0, and a node that warp- or state-syncs takes the "
+            "runtime's instead, so it holds another set id than the one its peers sign votes and justifications "
+            "under")
+
+
+OTHER_SET_ID_SESSION = ("[9 committee] genesis Grandpa.SetIdSession is not the one entry build-spec writes, set 0 "
+                        "beginning in session 0: the GRANDPA set history it holds is unchecked")
+
+
+# The red team's PoC: genesis CurrentSetId u64::MAX passed every rule, and an offline node answers
+# GrandpaApi_current_set_id with it at genesis while sc-consensus-grandpa starts the genesis set at 0.
+@pytest.mark.parametrize("set_id", [1, 2**64 - 1])
+def test_a_genesis_grandpa_set_id_other_than_0_is_refused(seated, meta, set_id):
+    spec, _, launch = seated
+    put(spec, "Grandpa", "CurrentSetId", set_id.to_bytes(8, "little"))
+    assert committee_findings(spec, meta, launch) == [other_set_id(set_id)]
+
+
+def test_a_genesis_that_sets_no_grandpa_set_id_passes(seated, meta):
+    """The runtime reads an absent CurrentSetId as its default, 0."""
+    spec, _, launch = seated
+    del spec.storage[lp.storage_key("Grandpa", "CurrentSetId")]
+    assert committee_findings(spec, meta, launch) == []
+
+
+@A_BYTE_OFF
+def test_a_grandpa_set_id_stored_at_another_width_is_an_input_error(seated, meta, change):
+    spec, _, launch = seated
+    put(spec, "Grandpa", "CurrentSetId", bytes(8 + change))
+    with pytest.raises(lp.InputError, match="^" + re.escape(mis_sized("Grandpa.CurrentSetId", 8 + change, 8))):
+        committee_findings(spec, meta, launch)
+
+
+@pytest.mark.parametrize("entries", [
+    {set_id_session_key(0): (1).to_bytes(4, "little")},
+    {set_id_session_key(0): bytes(4), set_id_session_key(1): (5).to_bytes(4, "little")},
+    {set_id_session_key(1): bytes(4)},
+    {},
+    {set_id_session_key(0): bytes(5)},
+    {set_id_session_key(0)[:-1]: bytes(4)},
+], ids=["set 0 in session 1", "a later set", "set 1 only", "none", "a long session index", "a short key"])
+def test_a_genesis_grandpa_set_history_other_than_build_specs_is_refused(seated, meta, entries):
+    spec, _, launch = seated
+    prefix = lp.storage_key("Grandpa", "SetIdSession")
+    for key in [key for key in spec.storage if key.startswith(prefix)]:
+        del spec.storage[key]
+    spec.storage.update(entries)
+    assert committee_findings(spec, meta, launch) == [OTHER_SET_ID_SESSION]
 
 
 @pytest.mark.parametrize("kind", ["aura", "grandpa"])
@@ -5782,6 +5852,12 @@ def test_cli_refuses_a_genesis_committee_at_another_epoch(clean, capsys):
     put(clean.spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value(clean.members, epoch=1))
     code, out = clean.run(capsys)
     assert code == 1 and at_epoch(1) in out, out
+
+
+def test_cli_refuses_a_genesis_grandpa_set_id_other_than_0(clean, capsys):
+    put(clean.spec, "Grandpa", "CurrentSetId", (2**64 - 1).to_bytes(8, "little"))
+    code, out = clean.run(capsys)
+    assert code == 1 and other_set_id(2**64 - 1) in out, out
 
 
 def test_cli_refuses_a_d_parameter_that_seats_registered_candidates(clean, capsys):

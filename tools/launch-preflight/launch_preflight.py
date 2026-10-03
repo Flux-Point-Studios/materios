@@ -59,7 +59,8 @@ Rules, each of which refuses on its own:
                  authorities, each once, or past the runtime's MaxValidators,
                  or serving an epoch other than 0;
                  genesis Aura or GRANDPA authorities, session validators or
-                 pallet_session keys other than theirs; two authorities that
+                 pallet_session keys other than theirs; a GRANDPA set id or
+                 set history other than build-spec's; two authorities that
                  declare one key; a Cardano permissioned candidate's gran key
                  that is not the grandpa key the authority with its aura key
                  declares; a candidates datum the runtime draws no committee
@@ -443,9 +444,12 @@ def blake2_256(data: bytes) -> bytes:
     return hashlib.blake2b(data, digest_size=32).digest()
 
 
+def twox_64(data: bytes) -> bytes:
+    return xxhash.xxh64(data, seed=0).intdigest().to_bytes(8, "little")
+
+
 def twox_128(data: bytes) -> bytes:
-    return (xxhash.xxh64(data, seed=0).intdigest().to_bytes(8, "little")
-            + xxhash.xxh64(data, seed=1).intdigest().to_bytes(8, "little"))
+    return twox_64(data) + xxhash.xxh64(data, seed=1).intdigest().to_bytes(8, "little")
 
 
 def storage_key(pallet: str, item: str) -> bytes:
@@ -2245,7 +2249,7 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                             {aura: (name, f"0x{aura.hex()}") for name, aura, _ in declared},
                             "Aura.Authorities", "aura key", "it authors the slots of two authorities",
                             "it authors blocks unchecked", "it authors no block")
-    findings += check_grandpa_voters(spec, declared)
+    findings += check_grandpa_voters(spec, declared) + check_grandpa_set(spec)
     session = compact(len(members)) + b"".join(blake2_256(cross_chain) + aura + grandpa
                                                for cross_chain, aura, grandpa in members)
     if spec.value("Session", "ValidatorsAndKeys") != session:
@@ -2360,6 +2364,27 @@ def check_grandpa_voters(spec: Spec, declared: list[tuple[str, bytes, bytes]]) -
         Finding(COMMITTEE, f"genesis Grandpa.Authorities[{i}] 0x{voter[:32].hex()} has weight {weight}, not the 1 "
                            f"build-spec writes: it counts as {weight} voters toward finality")
         for i, voter in enumerate(voters) if (weight := int.from_bytes(voter[32:], "little")) != 1]
+
+
+def check_grandpa_set(spec: Spec) -> list[Finding]:
+    """Genesis must start GRANDPA as build-spec does: Grandpa.CurrentSetId 0, or absent, which the runtime reads as 0,
+    and Grandpa.SetIdSession's one entry, set 0 beginning in session 0. Every GRANDPA client starts the genesis
+    authority set at set id 0, and a node that warp- or state-syncs takes the runtime's."""
+    findings = []
+    set_id = spec.uint("Grandpa", "CurrentSetId", 8)
+    if set_id:
+        findings.append(Finding(COMMITTEE, f"genesis Grandpa.CurrentSetId is {set_id}, not the 0 build-spec writes: "
+                                           "every GRANDPA client starts the genesis authority set at set id 0, and a "
+                                           "node that warp- or state-syncs takes the runtime's instead, so it holds "
+                                           "another set id than the one its peers sign votes and justifications "
+                                           "under"))
+    prefix = storage_key("Grandpa", "SetIdSession")
+    first_set = bytes(8)
+    history = {key: value for key, value in spec.storage.items() if key.startswith(prefix)}
+    if history != {prefix + twox_64(first_set) + first_set: bytes(4)}:
+        findings.append(Finding(COMMITTEE, "genesis Grandpa.SetIdSession is not the one entry build-spec writes, set 0 "
+                                           "beginning in session 0: the GRANDPA set history it holds is unchecked"))
+    return findings
 
 
 def node_addresses(node: dict) -> set[str]:
