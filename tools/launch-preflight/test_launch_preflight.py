@@ -4806,8 +4806,9 @@ def test_a_genesis_that_stores_no_delays_is_refused(spec240):
 # materios-node export-blocks, answering what the attestation asks: block 0 of the chain its --chain names, a raw
 # spec file or a chain built into the node, written as export-blocks --binary writes it. It builds a file's genesis
 # with the preflight's own computation, so these tests see the attestation's plumbing; test_node_attestation.py
-# runs the real node. KNOBS: tamper builds another state root, fail builds none from a file, built_in_panics none
-# from a built-in chain, export writes other bytes, log records each call.
+# runs the real node. KNOBS: tamper builds another state root, fail builds none from a file, built_in_refused none
+# from a built-in chain, as the runtime refuses its genesis committee, export writes other bytes, log records each
+# call.
 FAKE_NODE = '''#!@PYTHON@
 import hashlib
 import json
@@ -4854,8 +4855,10 @@ while i < len(args):
         out, i = args[i], i + 1
 chain = chain if chain is not None else "dev" if dev else ""
 if chain in ("", "dev", "local", "preprod"):
-    if KNOBS.get("built_in_panics"):
-        sys.exit("Thread 'main' panicked at 'genesis authorities is non-empty; all weights are non-zero; qed.'")
+    if KNOBS.get("built_in_refused"):
+        sys.exit('Error: Service(Client(Storage("the genesis committee is empty, so its first rotation would '
+                 'schedule an empty GRANDPA set; list the authorities in sessionCommitteeManagement.'
+                 'initialAuthorities for blob:\\\\n{}")))')
     root, version = lp.blake2_256(chain.encode()), 1
 elif not os.path.exists(chain):
     sys.exit(f"Error: Input(\\"Error opening spec file `{chain}`: No such file or directory (os error 2)\\")")
@@ -5294,17 +5297,18 @@ def test_a_chain_built_into_the_node_is_refused(tmp_path, preprod_path, words, n
                         rf"checked chain spec", found[0]), found[0]
 
 
-# A chain built into the node can fail to build here (the node's local chain panics once it has built genesis), and
-# a node that fails is not one that read --chain as a file: only its own error for that missing file says it did.
+# A chain built into the node can fail to build here, as one whose genesis committee the runtime refuses does, and a
+# node that fails is not one that read --chain as a file: only its own error for that missing file says it did.
 @pytest.mark.parametrize("words, name", [(["--chain", "local"], "local"), (["--chain="], "")])
 def test_a_node_that_fails_on_a_chain_name_without_missing_that_file_is_an_input_error(
         tmp_path, preprod_path, words, name):
     node = attested(tmp_path, preprod_path, argv=["materios-node", *words],
-                    exe=fake_node(tmp_path, built_in_panics=True))
+                    exe=fake_node(tmp_path, built_in_refused=True))
     with pytest.raises(lp.InputError, match=re.escape(
             f"authority val0: its node builds no genesis from --chain {name!r} here, and does not report it as a "
             "missing file: the preflight cannot tell whether the node reads it as a file or as a chain built into it "
-            "(Thread 'main' panicked at")):
+            '(Error: Service(Client(Storage("the genesis committee is empty, so its first rotation would schedule '
+            'an empty GRANDPA set')):
         node_findings(preprod_path, node)
 
 

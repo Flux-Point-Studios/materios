@@ -98,8 +98,8 @@ def test_build_spec_writes_the_session_length_the_preflight_reads(preprod):
         "committee, lasts another length than the one signed"]
 
 
-# The preprod candidates' cross-chain keys (MacBook, Gemtek, Node-2, Node-3), in the order the preprod spec lists
-# their aura and grandpa keys.
+# The preprod authorities' cross-chain keys (MacBook, Gemtek, Node-2, Node-3), in ascending order, Ariadne's when
+# every candidate gets a seat, and in the order the preprod v6 genesis lists their aura and grandpa keys.
 CROSS_CHAIN_KEYS = [bytes.fromhex(key) for key in (
     "02ec64822300713585d9b0c3eb1456bb99c3cc42d79f4ab8e53538e50c9bed0a61",
     "03477fc2a5b7b287ed89ec47556e0002aa0d7cf88b1fbd6fbe1722eb1ef7873599",
@@ -113,50 +113,76 @@ def build_spec(node: Path, chain: str, base_path: Path, *raw: str) -> bytes:
                           timeout=lp.NODE_TIMEOUT, check=True).stdout
 
 
-# The genesis the runtime builds with the preprod authorities as its committee, given as
-# sessionCommitteeManagement.initialAuthorities with Aura and GRANDPA left for the session genesis to seat: it is
-# what the CLI tests' clean launch seats, byte for byte, and rule 9 reads it as the declared authorities.
-def test_rule_9_passes_the_genesis_the_runtime_builds_for_a_seated_committee(tmp_path, node, preprod):
+# The genesis the runtime builds for the committee the preprod builder seats, the preprod authorities with the keys
+# they run preprod v6 with, given as sessionCommitteeManagement.initialAuthorities with Aura and GRANDPA left for the
+# session genesis to seat: it is what the CLI tests' clean launch seats, byte for byte, and rule 9 reads it as the
+# declared authorities. The same genesis with no committee is refused.
+def test_rule_9_passes_the_genesis_the_runtime_builds_for_a_seated_committee(tmp_path, node, preprod, preprod_path):
+    v6 = lp.load_spec(str(preprod_path))
+    members = list(zip(CROSS_CHAIN_KEYS, base.aura_keys(v6), base.grandpa_keys(v6), strict=True))
     doc = json.loads(build_spec(node, "preprod", tmp_path / "base"))
     patch = doc["genesis"]["runtimeGenesis"]["patch"]
-    members = [(cross_chain, lp.decode_public_key(aura), lp.decode_public_key(grandpa)) for cross_chain, aura,
-               (grandpa, _) in zip(CROSS_CHAIN_KEYS, patch["aura"]["authorities"], patch["grandpa"]["authorities"])]
-    patch["sessionCommitteeManagement"]["initialAuthorities"] = [
+    assert patch["aura"] == patch["grandpa"] == {"authorities": []}
+    committee = patch["sessionCommitteeManagement"]["initialAuthorities"]
+    assert committee and committee == [
         [lp.ss58(cross_chain, 42), {"aura": lp.ss58(aura, 42), "grandpa": lp.ss58(grandpa, 42)}]
         for cross_chain, aura, grandpa in members]
-    patch["aura"], patch["grandpa"] = {"authorities": []}, {"authorities": []}
     plain = tmp_path / "seated.json"
     plain.write_text(json.dumps(doc))
     path = tmp_path / "seated-raw.json"
     path.write_bytes(build_spec(node, str(plain), tmp_path / "base", "--raw"))
     seated, harness = lp.load_spec(str(path)), lp.load_spec(str(path))
     base.seat(harness, members)
-    assert seated.storage == harness.storage
+    assert seated.storage == harness.storage == lp.load_spec(str(preprod)).storage
     meta = lp.Metadata.from_v14(lp.subwasm_metadata(seated.code, base.subwasm()))
     assert lp.check_committee(seated, meta, base.members_launch(members)) == []
-    assert "is empty" in str(lp.check_committee(lp.load_spec(str(preprod)), meta, base.members_launch(members))[0])
+    base.put(seated, "SessionCommitteeManagement", "CurrentCommittee", base.committee_value([]))
+    assert [str(f) for f in lp.check_committee(seated, meta, base.members_launch(members))][0] == (
+        f"[9 committee] {base.COMMITTEE} is empty: {base.EMPTY_COMMITTEE}")
 
 
 def test_the_node_reads_a_relative_chain_path_as_a_file(tmp_path, node, pin, preprod):
     assert findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain", "mainnet-raw.json"])) == []
 
 
+def built_in(name: str, genesis: bytes) -> str:
+    return (f"[8 node] authority val0: --chain {name!r} builds genesis 0x{genesis.hex()} with no file of that name "
+            "here: the node takes it as a chain built into it, not the checked chain spec")
+
+
 # The node's own preprod spec builds the very genesis checked here, and is still refused: an authority that loads
 # the chain built into its node does not load the checked spec, its boot nodes, properties or code substitutes.
 def test_the_chain_built_into_the_node_as_preprod_is_refused_though_its_genesis_matches(tmp_path, node, pin, preprod):
-    genesis = lp.spec_genesis_hash(lp.load_spec(str(preprod))).hex()
     assert findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain=preprod"])) == [
-        f"[8 node] authority val0: --chain 'preprod' builds genesis 0x{genesis} with no file of that name here: the "
-        "node takes it as a chain built into it, not the checked chain spec"]
+        built_in("preprod", lp.spec_genesis_hash(lp.load_spec(str(preprod))))]
 
 
-# The node panics once it has built these chains' genesis, so it builds no block 0 to export from them.
+# Every other chain built into the node, the one an empty --chain names included, is refused with the genesis its
+# own build-spec writes for it.
 @pytest.mark.parametrize("name", ["local", "dev", ""])
-def test_a_chain_built_into_the_node_that_fails_here_is_an_input_error(tmp_path, node, pin, preprod, name):
+def test_a_chain_built_into_the_node_is_refused_with_the_genesis_it_builds(tmp_path, node, pin, preprod, name):
+    raw = tmp_path / "built-in-raw.json"
+    raw.write_bytes(build_spec(node, name, tmp_path / "base", "--raw"))
+    assert findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain", name])) == [
+        built_in(name, lp.spec_genesis_hash(lp.load_spec(str(raw))))]
+
+
+# A --chain the node builds no genesis from, and does not report as a missing file, is one the preflight cannot place
+# as a file or a chain built into the node: here a directory, and a path through a file.
+@pytest.mark.parametrize("path, reason", [
+    ("spec", "Error mmaping spec file `{}`: No such device (os error 19)"),
+    ("raw.json/raw.json", "Error opening spec file `{}`: Not a directory (os error 20)"),
+], ids=["a directory", "a path through a file"])
+def test_a_chain_the_node_builds_no_genesis_from_and_reports_no_missing_file_for_is_an_input_error(
+        tmp_path, node, pin, preprod, path, reason):
+    (tmp_path / "spec").mkdir()
+    (tmp_path / "raw.json").write_bytes(preprod.read_bytes())
+    value = str(tmp_path / path)
     with pytest.raises(lp.InputError, match=re.escape(
-            f"authority val0: its node builds no genesis from --chain {name!r} here, and does not report it as a "
-            "missing file") + ".*panicked"):
-        findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain", name]))
+            f"authority val0: its node builds no genesis from --chain {value!r} here, and does not report it as a "
+            "missing file: the preflight cannot tell whether the node reads it as a file or as a chain built into it "
+            f'(Error: Input("{reason.format(value)}")')):
+        findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain", value]))
 
 
 def test_an_authority_that_gives_no_chain_is_refused(tmp_path, node, pin, preprod):
@@ -389,21 +415,34 @@ def test_a_running_node_whose_chain_spec_file_was_overwritten_after_it_started_i
     assert findings(preprod, entry) == [serves_other(rehearsal, preprod)]
 
 
-def test_cli_passes_a_clean_launch_its_real_node_attests(clean, capsys, node, pin):
+def on_real_node(clean, node: Path, pin: str) -> None:
     for entry in clean.launch["nodes"]:
         if entry["authority"]:
             entry.update(exe=str(node), exe_sha256=pin)
+
+
+def test_cli_passes_a_clean_launch_its_real_node_attests(clean, capsys, node, pin):
+    on_real_node(clean, node, pin)
     code, out = clean.run(capsys)
     assert (code, out.strip()) == (0, "MAINNET LAUNCH PREFLIGHT: PASS")
 
 
 def test_cli_refuses_the_red_teams_chain_built_into_the_real_node(clean, capsys, node, pin):
-    for entry in clean.launch["nodes"]:
-        if entry["authority"]:
-            entry.update(exe=str(node), exe_sha256=pin)
+    on_real_node(clean, node, pin)
     base.with_node_argv(clean, ["--chain", "preprod"])
     code, out = clean.run(capsys)
     assert code == 1 and "[8 node] authority val0: --chain 'preprod' builds genesis 0x" in out, out
+
+
+def test_cli_stops_at_a_chain_its_real_node_builds_no_genesis_from(clean, capsys, node, pin):
+    on_real_node(clean, node, pin)
+    spec_directory = clean.tmp_path / "spec"
+    spec_directory.mkdir()
+    base.with_node_argv(clean, ["--chain", str(spec_directory)])
+    code, out = clean.run(capsys)
+    assert code == 2 and (
+        f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) authority val0: its node builds no genesis from --chain "
+        f"{str(spec_directory)!r} here, and does not report it as a missing file") in out, out
 
 
 IMPL = 0xDEAD
