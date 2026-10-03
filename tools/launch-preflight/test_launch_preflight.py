@@ -3217,7 +3217,7 @@ def test_a_cardano_follower_that_is_not_the_settings_as_strings_is_an_input_erro
 # ---------------------------------------------------------------------------
 
 def cardano_findings(spec: lp.Spec, launch: dict, cardano: lp.CardanoView) -> list[str]:
-    return messages(lp.check_candidate_grans(launch, cardano))
+    return messages(lp.check_candidate_authorities(launch, cardano))
 
 
 def genesis_authors_on_cardano(spec: lp.Spec, grans=None) -> lp.CardanoView:
@@ -3258,8 +3258,36 @@ def test_a_cardano_candidate_that_carries_another_authoritys_grandpa_key_is_refu
 
 # Rule 3 refuses a candidate whose aura key no authority declares; it has no declared grandpa key to hold here.
 def test_a_cardano_candidate_no_authority_declares_is_left_to_rule_3(spec):
-    cardano = lp.CardanoView(lock=None, candidates=[candidate(fresh_account())], d_parameter=(1, 0))
+    view = genesis_authors_on_cardano(spec)
+    cardano = dataclasses.replace(view, candidates=[*view.candidates, candidate(fresh_account())])
     assert cardano_findings(spec, voter_launch(spec), cardano) == []
+
+
+def off_cardano(name: str, aura: bytes) -> str:
+    return (f"[9 committee] authority {name}'s aura key 0x{aura.hex()} is on no Cardano permissioned candidate: every "
+            "committee drawn from Cardano leaves it out, so it stops authoring and voting at the first draw, and the "
+            "committee is smaller than the launch declares")
+
+
+# The red team's PoC: a datum naming 2 of the 4 declared authorities, with a D-parameter of (2, 0), passed. Ariadne
+# seats every candidate when all fit, and the live-quorum floor's quorum for 2 is 2, so the first draw seats a
+# committee of 2 that tolerates no fault.
+@pytest.mark.parametrize("kept", [2, 3, 0])
+def test_a_cardano_datum_that_leaves_out_a_declared_authority_is_refused(spec, kept):
+    view = genesis_authors_on_cardano(spec)
+    cardano = lp.CardanoView(lock=None, candidates=view.candidates[:kept], d_parameter=(kept, 0))
+    assert cardano_findings(spec, voter_launch(spec), cardano) == [
+        off_cardano(f"val{i}", aura) for i, aura in enumerate(aura_keys(spec)) if i >= kept]
+
+
+def test_an_authority_whose_aura_key_is_only_a_candidates_gran_key_is_left_out(spec):
+    auras = aura_keys(spec)
+    view = genesis_authors_on_cardano(spec, [auras[3], *grandpa_keys(spec)[1:3]])
+    cardano = lp.CardanoView(lock=None, candidates=view.candidates, d_parameter=(3, 0))
+    assert cardano_findings(spec, voter_launch(spec), cardano) == [
+        f"[9 committee] Cardano permissioned candidate 0 gran 0x{auras[3].hex()} is not the grandpa key authority val0 "
+        "declares with its aura key: once the committee is drawn from Cardano it votes on finality unchecked",
+        off_cardano("val3", auras[3])]
 
 
 def draw_findings(meta: lp.Metadata, candidates: list[lp.Candidate], d_parameter=None) -> list[str]:
@@ -5780,6 +5808,15 @@ def test_cli_refuses_a_launch_that_primes_the_base_path_with_a_node_subcommand(c
 
 
 # The red team's PoC: an outsider's gran key in the permissioned candidates datum passed every rule.
+def test_cli_refuses_a_cardano_datum_that_leaves_out_declared_authorities(clean, capsys):
+    clean.candidates = legacy_datum(clean.members[:2])
+    clean.d_parameter = d_parameter_datum(2)
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    for i, (_, aura, _) in enumerate(clean.members[2:], 2):
+        assert off_cardano(f"val{i}", aura) in out, out
+
+
 def test_cli_refuses_a_cardano_candidate_that_votes_with_a_key_no_authority_declares(clean, capsys):
     outsider = fresh_account()
     clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), aura, outsider if i == 0 else gran)

@@ -63,9 +63,10 @@ Rules, each of which refuses on its own:
                  set history other than build-spec's; two authorities that
                  declare one key; a Cardano permissioned candidate's gran key
                  that is not the grandpa key the authority with its aura key
-                 declares; a candidates datum the runtime draws no committee
-                 from (fewer than two candidates it can seat) or that holds a
-                 candidate it drops; a D-parameter that seats registered
+                 declares, or an authority's aura key on no candidate; a
+                 candidates datum the runtime draws no committee from (fewer
+                 than two candidates it can seat) or that holds a candidate it
+                 drops; a D-parameter that seats registered
                  candidates, fewer permissioned seats than candidates, or more
                  than MaxValidators; a genesis session length (slots per
                  epoch) other than the declared one, 0, or one whose sessions
@@ -2087,13 +2088,16 @@ def key_pair(aura: bytes, grandpa: bytes) -> str:
     return f"(aura 0x{aura.hex()}, grandpa 0x{grandpa.hex()})"
 
 
-def check_candidate_grans(launch: dict, cardano: CardanoView) -> list[Finding]:
-    """Once the committee is drawn from Cardano the permissioned candidates vote
-    on finality with their gran keys, so each must carry the grandpa key that
-    the authority with its aura key declares. Rule 3 refuses a candidate no
-    authority declares."""
+def check_candidate_authorities(launch: dict, cardano: CardanoView) -> list[Finding]:
+    """Once the committee is drawn from Cardano the permissioned candidates are
+    the committee: Ariadne seats every one when all fit. So each declared
+    authority's aura key must be on a candidate, and each candidate must carry
+    the grandpa key that the authority with its aura key declares, which it
+    votes on finality with. Rule 3 refuses a candidate no authority declares,
+    and check_cardano_committee one that repeats another's key."""
     findings, grandpa_by_aura = [], {}
-    for name, aura, grandpa in declared_authorities(launch):
+    declared = declared_authorities(launch)
+    for name, aura, grandpa in declared:
         grandpa_by_aura.setdefault(aura, {})[grandpa] = name
     for i, cand in enumerate(cardano.candidates):
         grandpas = grandpa_by_aura.get(cand.aura)
@@ -2102,6 +2106,12 @@ def check_candidate_grans(launch: dict, cardano: CardanoView) -> list[Finding]:
                                                f"the grandpa key authority {', '.join(sorted(grandpas.values()))} "
                                                "declares with its aura key: once the committee is drawn from Cardano "
                                                "it votes on finality unchecked"))
+    on_cardano = {cand.aura for cand in cardano.candidates}
+    findings += [Finding(COMMITTEE, f"authority {name}'s aura key 0x{aura.hex()} is on no Cardano permissioned "
+                                    "candidate: every committee drawn from Cardano leaves it out, so it stops "
+                                    "authoring and voting at the first draw, and the committee is smaller than the "
+                                    "launch declares")
+                 for name, aura, _ in declared if aura not in on_cardano]
     return findings
 
 
@@ -3392,7 +3402,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_committee(spec, meta, launch)
             + check_sessions(spec, meta, launch)
             + check_follower(launch)
-            + check_candidate_grans(launch, cardano)
+            + check_candidate_authorities(launch, cardano)
             + check_cardano_committee(meta, cardano)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
