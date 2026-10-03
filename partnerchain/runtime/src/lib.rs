@@ -200,7 +200,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 239,
+    spec_version: 240,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 5,
@@ -1099,11 +1099,13 @@ impl pallet_session_validator_management::Config for Runtime {
         };
 
         // NOTE: `select_authorities` runs only in the inherent build/verify
-        // path (`create_inherent` / `check_inherent`), whose storage writes are
-        // discarded — so first-selected is stamped on-chain in
-        // `pallet_orinq_receipts::on_initialize` (a committing context) from the
-        // enacted Aura authorities, NOT here. Stamping here would never persist,
-        // leaving `CandidateFirstSelected` empty and the filter inert.
+        // path (`create_inherent` / `check_inherent`), both after the block's
+        // `initialize_block` (see `check_inherents` below), so author and
+        // peers read the same rotated committee and liveness stamps. Its
+        // storage writes are discarded — so first-selected is stamped on-chain
+        // in `pallet_orinq_receipts::on_initialize` (a committing context) from
+        // the enacted Aura authorities, NOT here. Stamping here would never
+        // persist, leaving `CandidateFirstSelected` empty and the filter inert.
         let chosen: BoundedVec<(Self::AuthorityId, Self::AuthorityKeys), Self::MaxValidators> =
             select_authorities(Sidechain::genesis_utxo(), sanitized, sidechain_epoch)?;
 
@@ -1484,10 +1486,19 @@ impl_runtime_apis! {
             data.create_extrinsics()
         }
 
+        /// Checks the inherents on the state their author made them from.
+        ///
+        /// The node calls this on the parent's state, but the author made
+        /// the inherents after `initialize_block`, once `on_initialize` had
+        /// rotated the committee and stamped the author's own block. Judged
+        /// without those writes, `select_authorities` can draw a different
+        /// committee, and peers reject the block. The node discards whatever
+        /// this call writes.
         fn check_inherents(
             block: Block,
             data: sp_inherents::InherentData,
         ) -> sp_inherents::CheckInherentsResult {
+            Executive::initialize_block(block.header());
             data.check_extrinsics(&block)
         }
     }
@@ -1763,7 +1774,7 @@ impl_runtime_apis! {
     impl frame_try_runtime::TryRuntime<Block> for Runtime {
         fn on_runtime_upgrade(checks: frame_try_runtime::UpgradeCheckSelect) -> (Weight, Weight) {
             let weight = Executive::try_runtime_upgrade(checks)
-                .expect("runtime upgrade checks failed");
+                .unwrap_or_else(|e| panic!("runtime upgrade checks failed: {e:?}"));
             (weight, RuntimeBlockWeights::get().max_block)
         }
 
@@ -1774,7 +1785,7 @@ impl_runtime_apis! {
             select: frame_try_runtime::TryStateSelect,
         ) -> Weight {
             Executive::try_execute_block(block, state_root_check, signature_check, select)
-                .expect("try_execute_block failed")
+                .unwrap_or_else(|e| panic!("block execution checks failed: {e:?}"))
         }
     }
 

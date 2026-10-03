@@ -214,33 +214,39 @@ pub mod pallet {
 				_ => return Ok(()),
 			};
 
-			// [materios-patch: idp-none-fallback] If the verifier's IDP also
-			// reports "no data" (matching the proposer's view), there is
-			// nothing to reverify. Accept the call on the assumption that
-			// the proposer made the same decision our IDP would have. This
-			// mirrors the proposer-side skip in `create_inherent` above
-			// and closes the peer-ban fork loop the first v1.5.1 patch
-			// attempt hit (see feedback_iog_idp_none_panic.md §"How we
-			// recovered").
+			// [materios-patch: idp-none-fallback] Without selection inputs this
+			// node cannot recompute the draw, so it accepts only a call that
+			// re-seats the committee in force, which is what the honest skip
+			// in `create_inherent` keeps anyway. An author whose own inputs
+			// are present and whose draw keeps the committee still passes;
+			// any other committee, an empty one included, is refused.
 			let (authority_selection_inputs, computed_selection_inputs_hash) =
 				match Self::inherent_data_to_authority_selection_inputs(data) {
 					Some(inputs) => inputs,
+					None if *validators_param == CurrentCommittee::<T>::get().committee => {
+						return Ok(());
+					},
 					None => {
 						log::warn!(
 							target: "runtime::session-validator-management",
-							"[materios-patch] validator inherent data unavailable on verifier; accepting set() call for epoch {} without recomputation",
+							"[materios-patch] validator inherent data unavailable on verifier; refusing set() call for epoch {} that changes the committee",
 							for_epoch_number_param
 						);
-						return Ok(());
+						// The one variant without an input-data hash, which this node does not have.
+						#[allow(deprecated)]
+						let refused = InherentError::InvalidValidators;
+						return Err(refused);
 					},
 				};
 			let validators =
 				T::select_authorities(authority_selection_inputs, *for_epoch_number_param)
 					.unwrap_or_else(|| {
 						// Proposed block should keep the same committee if calculation of new one was impossible.
-						// This is code is executed before the committee rotation, so the NextCommittee should be used.
+						// [materios-patch: check-after-initialize] The Materios runtime runs this
+						// after initialize_block, on the state create_inherent ran on, so on a
+						// rotation block NextCommittee is already taken and this falls back to the
+						// CurrentCommittee that create_inherent re-proposes.
 						let committee_info = NextCommittee::<T>::get()
-							// Needed only for verification of the block no 1, before any `set` call is executed.
 							.unwrap_or_else(CurrentCommittee::<T>::get);
 						committee_info.committee
 					});
@@ -311,6 +317,7 @@ pub mod pallet {
 			ensure_none(origin)?;
 			let expected_epoch_number = CurrentCommittee::<T>::get().epoch + One::one();
 			ensure!(for_epoch_number == expected_epoch_number, Error::<T>::InvalidEpoch);
+			ensure!(!NextCommittee::<T>::exists(), Error::<T>::UnnecessarySetCall);
 			let len = validators.len();
 			info!("💼 Storing committee of size {len} for epoch {for_epoch_number}, input data hash: {}", selection_inputs_hash.to_hex_string());
 			NextCommittee::<T>::put(CommitteeInfo {

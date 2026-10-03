@@ -10,3 +10,4 @@ mod pinned_committee;
 mod recovery_second_root;
 mod perp_engine_removal;
 mod root_timelock;
+mod committee_inherent;
