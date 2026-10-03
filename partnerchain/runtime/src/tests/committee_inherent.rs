@@ -3,6 +3,7 @@
 //! `check_inherents` at the parent, as the node's Aura import queue does, and
 //! imports it only if that passes.
 
+use super::{authority, Authority};
 use crate::*;
 use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
 use frame_support::inherent::ProvideInherent;
@@ -16,7 +17,6 @@ use sp_api::runtime_decl_for_core::Core;
 use sp_block_builder::runtime_decl_for_block_builder::BlockBuilder;
 use sp_consensus_aura::{Slot, AURA_ENGINE_ID};
 use sp_consensus_grandpa::{ConsensusLog, GRANDPA_ENGINE_ID};
-use sp_core::{ecdsa, ed25519, sr25519, Pair};
 use sp_inherents::InherentData;
 use sp_runtime::{
     traits::{Block as _, Header as _},
@@ -25,16 +25,6 @@ use sp_runtime::{
 };
 
 const SLOTS_PER_EPOCH: u64 = 10;
-
-type Authority = (CrossChainPublic, SessionKeys);
-
-fn authority(seed: &str) -> Authority {
-    let uri = format!("//{seed}");
-    let cross_chain = ecdsa::Pair::from_string(&uri, None).unwrap().public();
-    let aura = sr25519::Pair::from_string(&uri, None).unwrap().public();
-    let grandpa = ed25519::Pair::from_string(&uri, None).unwrap().public();
-    (cross_chain.into(), (aura, grandpa).into())
-}
 
 fn authorities(seeds: &[&str]) -> Vec<Authority> {
     seeds.iter().copied().map(authority).collect()
@@ -345,6 +335,54 @@ fn peers_without_ariadne_data_refuse_a_block_that_seats_an_empty_committee() {
                     .to_string()
             )
         );
+    });
+}
+
+/// Block 1 has no parent whose reference its own must stay at or ahead of,
+/// so its author may cite any stable block the peers accept, one that leaves
+/// their Ariadne data empty included, at any time and not only inside a
+/// window.
+#[test]
+fn peers_without_ariadne_data_refuse_a_first_block_that_seats_outsiders_or_no_one() {
+    chain(&cores()).execute_with(|| {
+        let slot = epoch_start(1_000);
+        let data = inherent_data(slot, None);
+        for committee in [outsiders(), Vec::new()] {
+            let injected = propose_injected(&genesis_header(), slot, &data, committee.clone());
+            assert_eq!(
+                peers_check(&injected, &data),
+                Err(
+                    "/ariadne: The validators in the block do not match the calculated validators"
+                        .to_string()
+                ),
+                "{committee:?}"
+            );
+        }
+    });
+}
+
+/// The first block after a runtime upgrade. The peers' check initialises the
+/// block, which runs the upgrade's migrations in the check's discarded state;
+/// the import runs them again for good. Peers accept the block, and the
+/// import records the upgrade.
+#[test]
+fn peers_accept_the_first_block_after_a_runtime_upgrade_and_its_import_records_the_upgrade() {
+    chain(&cores()).execute_with(|| {
+        let version = <Runtime as Core<Block>>::version();
+        frame_system::LastRuntimeUpgrade::<Runtime>::put(frame_system::LastRuntimeUpgradeInfo {
+            spec_version: (version.spec_version - 1).into(),
+            spec_name: version.spec_name.clone(),
+        });
+        let recorded = || {
+            frame_system::LastRuntimeUpgrade::<Runtime>::get()
+                .is_some_and(|last| !last.was_upgraded(&version))
+        };
+        let slot = epoch_start(1_000);
+        let data = inherent_data(slot, Some(&cardano(&cores())));
+        let block = propose(&genesis_header(), slot, &data);
+        assert!(!recorded());
+        import(block, &data).unwrap_or_else(|rejection| panic!("{rejection}"));
+        assert!(recorded());
     });
 }
 

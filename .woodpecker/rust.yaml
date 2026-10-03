@@ -49,6 +49,10 @@ steps:
       # check it, treasury and migrations. They run natively; the blob is
       # already built by the check above.
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast
+      # The chain-spec builders: each genesis, built from the spec's own code
+      # by the runtime's genesis builder as build-spec builds it, carried
+      # through the first committee rotation.
+      - cargo test -p materios-node --locked --no-fail-fast chain_spec
 
   # The launch preflight's rule 8 against the node built above: every run is
   # offline, on a base path of its own, and a node started to serve its

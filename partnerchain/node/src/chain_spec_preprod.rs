@@ -1,6 +1,9 @@
 //! Chain specification for Materios Preprod — clean genesis, no overrides.
 
-use materios_runtime::{Multisig, TESTNET_TIMELOCK_DELAYS, WASM_BINARY};
+use crate::chain_spec::Authority;
+use materios_runtime::{
+    opaque::SessionKeys, CrossChainPublic, Multisig, TESTNET_TIMELOCK_DELAYS, WASM_BINARY,
+};
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
@@ -163,6 +166,45 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         0xe6, 0xfc, 0x6f, 0x67, 0x3c, 0x7a, 0x2b, 0x5b,
         0x50, 0x0a, 0x2b, 0x7f, 0x2a, 0x68, 0x45, 0x8e,
     ]));
+    // Cross-chain keys: each authority's sidechain key in the Cardano
+    // permissioned candidates datum, so the genesis committee names the same
+    // validators Cardano's draw does.
+    let macbook_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x02, 0xec, 0x64, 0x82, 0x23, 0x00, 0x71, 0x35,
+        0x85, 0xd9, 0xb0, 0xc3, 0xeb, 0x14, 0x56, 0xbb,
+        0x99, 0xc3, 0xcc, 0x42, 0xd7, 0x9f, 0x4a, 0xb8,
+        0xe5, 0x35, 0x38, 0xe5, 0x0c, 0x9b, 0xed, 0x0a,
+        0x61,
+    ]));
+    let gemtek_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x03, 0x47, 0x7f, 0xc2, 0xa5, 0xb7, 0xb2, 0x87,
+        0xed, 0x89, 0xec, 0x47, 0x55, 0x6e, 0x00, 0x02,
+        0xaa, 0x0d, 0x7c, 0xf8, 0x8b, 0x1f, 0xbd, 0x6f,
+        0xbe, 0x17, 0x22, 0xeb, 0x1e, 0xf7, 0x87, 0x35,
+        0x99,
+    ]));
+    let node2_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x03, 0x4f, 0x29, 0x3c, 0x28, 0x1c, 0x59, 0xb8,
+        0x20, 0x0e, 0xa3, 0x16, 0xd1, 0xc8, 0xd7, 0x15,
+        0x4c, 0x1b, 0x06, 0xa9, 0xed, 0x26, 0x03, 0x25,
+        0x10, 0x49, 0xb9, 0xfd, 0xa6, 0x3f, 0x2e, 0xd6,
+        0xce,
+    ]));
+    let node3_cross_chain = CrossChainPublic::from(sp_core::ecdsa::Public::from_raw([
+        0x03, 0xf2, 0xc1, 0xc5, 0x0d, 0x62, 0xf0, 0x23,
+        0xc6, 0x37, 0xaf, 0xe7, 0x99, 0x96, 0x84, 0x31,
+        0x57, 0xc6, 0x91, 0x4e, 0x92, 0x96, 0x05, 0xcd,
+        0xe3, 0xc5, 0x3d, 0xe4, 0x7a, 0x68, 0x96, 0xfc,
+        0x0e,
+    ]));
+    let authority =
+        |cross_chain, aura, grandpa| -> Authority { (cross_chain, SessionKeys { aura, grandpa }) };
+    let authorities = vec![
+        authority(macbook_cross_chain, macbook_aura, macbook_grandpa),
+        authority(gemtek_cross_chain, gemtek_aura, gemtek_grandpa),
+        authority(node2_cross_chain, node2_aura, node2_grandpa),
+        authority(node3_cross_chain, node3_aura, node3_grandpa),
+    ];
 
     Ok(ChainSpec::builder(
         WASM_BINARY.ok_or("WASM binary not available")?,
@@ -219,10 +261,10 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "guardian": keyholders_3_of_3,
         },
         "aura": {
-            "authorities": [macbook_aura, gemtek_aura, node2_aura, node3_aura],
+            "authorities": [],
         },
         "grandpa": {
-            "authorities": [[macbook_grandpa, 1], [gemtek_grandpa, 1], [node2_grandpa, 1], [node3_grandpa, 1]],
+            "authorities": [],
         },
         "motra": {
             // MUST mirror `MotraParams::default()` in pallets/motra/src/types.rs
@@ -269,16 +311,8 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             "genesisUtxo": "13313ea0119e0c4330f64f1809159064a371a1bbf2050b1fe13d5492280dca50#0",
             "slotsPerEpoch": PREPROD_SLOTS_PER_EPOCH,
         },
-        "session": {
-            "initialValidators": [
-                [macbook_aura, { "aura": macbook_aura, "grandpa": macbook_grandpa }],
-                [gemtek_aura,  { "aura": gemtek_aura,  "grandpa": gemtek_grandpa  }],
-                [node2_aura,   { "aura": node2_aura,   "grandpa": node2_grandpa   }],
-                [node3_aura,   { "aura": node3_aura,   "grandpa": node3_grandpa   }],
-            ],
-        },
         "sessionCommitteeManagement": {
-            "initialAuthorities": [],
+            "initialAuthorities": authorities,
             "mainChainScripts": {
                 // MainchainAddress serializes as hex of UTF-8 bytes of the
                 // bech32 string (the follower queries db-sync for the literal
@@ -300,8 +334,487 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
 
 #[cfg(test)]
 mod tests {
-    use crate::chain_spec::tests::stored_attestor_rewards;
-    use sp_runtime::BuildStorage;
+    use super::{preprod_config, Authority, ChainSpec, CrossChainPublic, GrandpaId, SessionKeys};
+    use crate::chain_spec::{
+        authority_keys_from_seed,
+        tests::{
+            cardano, genesis_header, inherent_data, peers_check, play, propose,
+            seated_after_first_rotation, seated_at_genesis, seated_now, start,
+            stored_attestor_rewards, Seated,
+        },
+    };
+    use materios_runtime::{
+        Block, Header, OrinqReceipts, RuntimeCall, RuntimeOrigin, SessionCommitteeManagement,
+    };
+    use pallet_orinq_receipts::types::PinnedMember;
+    use pallet_session_validator_management::Call;
+    use sp_core::{Decode, Encode};
+    use sp_inherents::InherentData;
+    use sp_runtime::{traits::Block as _, BuildStorage};
+
+    /// The permissioned candidates on Cardano preprod: each authority's
+    /// cross-chain, aura and grandpa keys, in the order genesis seats them
+    /// (MacBook, Gemtek, Node-2, Node-3).
+    const CARDANO_CANDIDATES: [(&str, &str, &str); 4] = [
+        (
+            "02ec64822300713585d9b0c3eb1456bb99c3cc42d79f4ab8e53538e50c9bed0a61",
+            "20cdba0a5d368c5eb0ee119d25f440f8c261ebd50f2363dae4eb3ed607f64c08",
+            "c05b56dab7a8701871a8be75aed6e2ad8c5eb5ff935ddd2b00eeca7299af35b1",
+        ),
+        (
+            "03477fc2a5b7b287ed89ec47556e0002aa0d7cf88b1fbd6fbe1722eb1ef7873599",
+            "44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9480a517a97f189964b",
+            "4558853422164939eca690f21f76a614f7957352e01a448a4986ca3d55d98f23",
+        ),
+        (
+            "034f293c281c59b8200ea316d1c8d7154c1b06a9ed2603251049b9fda63f2ed6ce",
+            "8ed446c7114fbeb751866e6752dedf36fba9b3d2832a9fc50a005e00ed0ab124",
+            "4dc9c8f9bd37df2bb9223458c897b000fe4362958da6eeb6413b93dcfbabe2ba",
+        ),
+        (
+            "03f2c1c50d62f023c637afe79996843157c6914e929605cde3c53de47a6896fc0e",
+            "925fe8605fe32a53a7b391498fc1b0ab91d3af7319607bd70b850b4f5fa9d255",
+            "750d4ba2a831a30d419009f2d8bc1ef1e6fc6f673c7a2b5b500a2b7f2a68458e",
+        ),
+    ];
+
+    fn cardano_candidates() -> Vec<Authority> {
+        let bytes = |hex: &str| sp_core::bytes::from_hex(hex).unwrap();
+        CARDANO_CANDIDATES
+            .iter()
+            .map(|(cross_chain, aura, grandpa)| {
+                (
+                    CrossChainPublic::try_from(&bytes(cross_chain)[..]).unwrap(),
+                    SessionKeys {
+                        aura: TryFrom::try_from(&bytes(aura)[..]).unwrap(),
+                        grandpa: TryFrom::try_from(&bytes(grandpa)[..]).unwrap(),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// `authorities` in the order Ariadne seats them.
+    fn in_seating_order(mut authorities: Vec<Authority>) -> Vec<Authority> {
+        authorities.sort_by(|a, b| a.0.cmp(&b.0));
+        authorities
+    }
+
+    /// `spec` with `edit` applied to its genesis patch.
+    fn patched(spec: &ChainSpec, edit: impl FnOnce(&mut serde_json::Value)) -> ChainSpec {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&spec.as_json(false).unwrap()).unwrap();
+        edit(&mut json["genesis"]["runtimeGenesis"]["patch"]);
+        ChainSpec::from_json_bytes(json.to_string().into_bytes()).unwrap()
+    }
+
+    /// The preprod spec with `committee` as its genesis committee, and the
+    /// four authorities also seeded into Aura if `aura`, and into GRANDPA if
+    /// `grandpa`.
+    fn preprod_seating(committee: Vec<Authority>, aura: bool, grandpa: bool) -> ChainSpec {
+        let authorities = cardano_candidates();
+        patched(&preprod_config().unwrap(), |patch| {
+            patch["sessionCommitteeManagement"]["initialAuthorities"] =
+                serde_json::json!(committee);
+            if aura {
+                patch["aura"] = serde_json::json!({
+                    "authorities": authorities.iter().map(|(_, keys)| &keys.aura).collect::<Vec<_>>(),
+                });
+            }
+            if grandpa {
+                patch["grandpa"] = serde_json::json!({
+                    "authorities": authorities.iter().map(|(_, keys)| (&keys.grandpa, 1)).collect::<Vec<_>>(),
+                });
+            }
+        })
+    }
+
+    /// The first slot of sidechain epoch `epoch`.
+    fn epoch_start(epoch: u64) -> u64 {
+        epoch * u64::from(super::PREPROD_SLOTS_PER_EPOCH)
+    }
+
+    /// The four authorities and Charlie, so a draw seats five, with a quorum
+    /// of four live authors.
+    fn the_four_and_charlie() -> Vec<Authority> {
+        let mut listed = cardano_candidates();
+        listed.push(authority_keys_from_seed("Charlie"));
+        listed
+    }
+
+    /// Gemtek, Node-2 and Node-3 author epoch 1000's last three blocks while
+    /// Cardano lists `the_four_and_charlie`. Returns the last. MacBook's
+    /// first block would be the next, the first of epoch 1001, which rotates
+    /// the committee and proposes the next one: a draw of five that only
+    /// MacBook's own block brings to a quorum of live authors.
+    fn three_authors_before_the_rotation() -> Result<Header, String> {
+        let listed = cardano(&the_four_and_charlie());
+        let mut parent = genesis_header();
+        for slot in epoch_start(1_001) - 3..epoch_start(1_001) {
+            parent = play(&parent, slot, &listed)?;
+        }
+        Ok(parent)
+    }
+
+    fn macbook_authors_first_at_the_rotation() -> Result<Header, String> {
+        let parent = three_authors_before_the_rotation()?;
+        play(
+            &parent,
+            epoch_start(1_001),
+            &cardano(&the_four_and_charlie()),
+        )
+    }
+
+    /// Cardano's permissioned list for each sidechain epoch from 1000 to
+    /// 1009, while FPS ramps a core onto it every other epoch from 1002,
+    /// then swaps the second one out for another at 1007.
+    fn ramped_then_swapped() -> Vec<(u64, Vec<Authority>)> {
+        let cores = cardano_candidates();
+        let [p5, p6, p7, p8] = ["Charlie", "Dave", "Eve", "Ferdie"].map(authority_keys_from_seed);
+        (1_000..=1_009)
+            .map(|epoch| {
+                let added = match epoch {
+                    ..=1_001 => vec![],
+                    1_002..=1_003 => vec![&p5],
+                    1_004..=1_005 => vec![&p5, &p6],
+                    1_006 => vec![&p5, &p6, &p7],
+                    _ => vec![&p5, &p7, &p8],
+                };
+                (epoch, cores.iter().chain(added).cloned().collect())
+            })
+            .collect()
+    }
+
+    /// Plays block 1 at epoch 1000's last slot, then the first 15 slots of
+    /// each epoch from 1001 to 1009, every slot's author online, while
+    /// Cardano lists `ramped_then_swapped`. Returns each GRANDPA set a block
+    /// scheduled.
+    fn play_the_ramp() -> Result<Vec<Vec<GrandpaId>>, String> {
+        let mut parent = genesis_header();
+        let mut scheduled = Vec::new();
+        for (epoch, listed) in ramped_then_swapped() {
+            let listed = cardano(&listed);
+            let slots = match epoch {
+                1_000 => epoch_start(1_001) - 1..epoch_start(1_001),
+                _ => epoch_start(epoch)..epoch_start(epoch) + 15,
+            };
+            for slot in slots {
+                parent = play(&parent, slot, &listed)?;
+                if let Some(change) = sc_consensus_grandpa::find_scheduled_change::<Block>(&parent)
+                {
+                    scheduled.push(
+                        change
+                            .next_authorities
+                            .into_iter()
+                            .map(|(key, _)| key)
+                            .collect(),
+                    );
+                }
+            }
+        }
+        Ok(scheduled)
+    }
+
+    /// `block` with its committee inherent seating `committee` instead.
+    fn seating(block: &Block, committee: Vec<Authority>) -> Block {
+        let (header, mut inherents) = block.clone().deconstruct();
+        let set = inherents
+            .iter_mut()
+            .find_map(|inherent| match &mut inherent.function {
+                RuntimeCall::SessionCommitteeManagement(Call::set { validators, .. }) => {
+                    Some(validators)
+                }
+                _ => None,
+            })
+            .expect("the block carries a committee inherent");
+        *set = committee.try_into().unwrap();
+        Block::new(header, inherents)
+    }
+
+    /// Whether a peer that runs `code`, the runtime a spec carries, in the
+    /// node's WASM executor accepts `block`'s inherents, checked with `data`
+    /// on `state` as the parent's. What the check writes is thrown away.
+    fn compiled_peers_accept(
+        state: &mut sp_io::TestExternalities,
+        code: &[u8],
+        block: &Block,
+        data: &InherentData,
+    ) -> bool {
+        use sp_core::traits::{
+            CallContext, CodeExecutor, Externalities, RuntimeCode, WrappedRuntimeCode,
+        };
+        let fetcher = WrappedRuntimeCode(code.into());
+        let runtime_code = RuntimeCode {
+            code_fetcher: &fetcher,
+            heap_pages: None,
+            hash: sp_core::blake2_256(code).to_vec(),
+        };
+        let mut ext = state.ext();
+        ext.storage_start_transaction();
+        let (checked, _) = sc_executor::WasmExecutor::<sp_io::SubstrateHostFunctions>::builder()
+            .build()
+            .call(
+                &mut ext,
+                &runtime_code,
+                "BlockBuilder_check_inherents",
+                &(block, data).encode(),
+                CallContext::Offchain,
+            );
+        ext.storage_rollback_transaction().unwrap();
+        sp_inherents::CheckInherentsResult::decode(&mut &checked.expect("the runtime runs")[..])
+            .unwrap()
+            .ok()
+    }
+
+    fn next_committee() -> Option<Vec<Authority>> {
+        SessionCommitteeManagement::next_committee_storage().map(|next| next.committee.to_vec())
+    }
+
+    /// Root's levers on committee selection, each as Root arms it: every
+    /// gate flag alone, all four together, and a pinned committee. The
+    /// break-glass holders are the genesis authorities.
+    fn levers() -> Vec<(&'static str, Box<dyn Fn()>)> {
+        let root = RuntimeOrigin::root;
+        let arm_break_glass = move || {
+            let holders = cardano_candidates()
+                .iter()
+                .map(|(_, keys)| keys.aura.encode().try_into().unwrap())
+                .collect();
+            OrinqReceipts::set_break_glass_aura_keys(root(), holders).unwrap();
+            OrinqReceipts::set_break_glass_floor_enabled(root(), true).unwrap();
+        };
+        vec![
+            ("no lever", Box::new(|| ())),
+            (
+                "the slack invariant",
+                Box::new(move || OrinqReceipts::set_slack_invariant_enabled(root(), true).unwrap()),
+            ),
+            (
+                "the contribution window",
+                Box::new(move || {
+                    OrinqReceipts::set_contribution_window_enabled(root(), true).unwrap()
+                }),
+            ),
+            (
+                "core eviction",
+                Box::new(move || OrinqReceipts::set_core_eviction_enabled(root(), true).unwrap()),
+            ),
+            ("the break-glass floor", Box::new(arm_break_glass)),
+            (
+                "every flag",
+                Box::new(move || {
+                    OrinqReceipts::set_slack_invariant_enabled(root(), true).unwrap();
+                    OrinqReceipts::set_contribution_window_enabled(root(), true).unwrap();
+                    OrinqReceipts::set_core_eviction_enabled(root(), true).unwrap();
+                    arm_break_glass();
+                }),
+            ),
+            (
+                "a pinned committee",
+                Box::new(move || {
+                    let members = cardano_candidates()
+                        .iter()
+                        .map(|(cross_chain, keys)| PinnedMember {
+                            cross_chain: cross_chain.encode().try_into().unwrap(),
+                            aura: keys.aura.encode().try_into().unwrap(),
+                            grandpa: keys.grandpa.encode().try_into().unwrap(),
+                        })
+                        .collect();
+                    OrinqReceipts::set_pinned_committee(root(), members, u64::MAX).unwrap()
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_fresh_preprod_chain_keeps_its_authorities_through_the_first_rotation() {
+        let spec = preprod_config().unwrap();
+        let authorities = cardano_candidates();
+        assert_eq!(
+            seated_after_first_rotation(&spec, &authorities),
+            Seated::by(&authorities)
+        );
+        assert_eq!(seated_at_genesis(&spec), Seated::by(&authorities));
+    }
+
+    /// Genesis refuses, with its reason, a committee the chain cannot run
+    /// from. Without one, block 1 proposes an empty committee and the first
+    /// rotation schedules an empty GRANDPA set, which the node's block import
+    /// refuses; a key listed twice votes twice; and Aura and GRANDPA are
+    /// seated from the committee alone.
+    #[test]
+    fn genesis_refuses_a_committee_the_chain_cannot_run_from() {
+        let four = cardano_candidates;
+        let edited = |edit: fn(&mut Vec<Authority>)| {
+            let mut committee = four();
+            edit(&mut committee);
+            preprod_seating(committee, false, false)
+        };
+        let oversized = in_seating_order(
+            (0..=materios_runtime::MAX_VALIDATORS)
+                .map(|seat| authority_keys_from_seed(&format!("Seat{seat}")))
+                .collect(),
+        );
+        let mut not_refused = Vec::new();
+        for (case, spec, reason) in [
+            (
+                "Aura and GRANDPA seeded without a committee",
+                preprod_seating(Vec::new(), true, true),
+                "the genesis committee is empty",
+            ),
+            (
+                "no committee",
+                preprod_seating(Vec::new(), false, false),
+                "the genesis committee is empty",
+            ),
+            (
+                "Aura seeded too",
+                preprod_seating(four(), true, false),
+                "leave aura and grandpa empty",
+            ),
+            (
+                "GRANDPA seeded too",
+                preprod_seating(four(), false, true),
+                "leave aura and grandpa empty",
+            ),
+            (
+                "more seats than MaxValidators",
+                preprod_seating(oversized, false, false),
+                "more seats than MaxValidators",
+            ),
+            (
+                "an authority listed twice",
+                edited(|committee| committee[3] = committee[0].clone()),
+                "ascending cross-chain-key order",
+            ),
+            (
+                "two authorities out of order",
+                edited(|committee| committee.swap(0, 1)),
+                "ascending cross-chain-key order",
+            ),
+            (
+                "two authorities sharing an Aura key",
+                edited(|committee| committee[1].1.aura = committee[0].1.aura.clone()),
+                "share an Aura or GRANDPA key",
+            ),
+            (
+                "two authorities sharing a GRANDPA key",
+                edited(|committee| committee[1].1.grandpa = committee[0].1.grandpa.clone()),
+                "share an Aura or GRANDPA key",
+            ),
+        ] {
+            match spec.build_storage() {
+                Err(error) if error.contains(reason) => {}
+                built => not_refused.push(format!(
+                    "{case}: {:?}",
+                    built
+                        .map(|_| ())
+                        .map_err(|error| error.lines().next().map(str::to_owned))
+                )),
+            }
+        }
+        assert!(not_refused.is_empty(), "{not_refused:#?}");
+        assert!(preprod_seating(four(), false, false)
+            .build_storage()
+            .is_ok());
+    }
+
+    #[test]
+    fn peers_accept_a_rotation_block_whose_author_makes_the_quorum_with_its_first_block() {
+        start(&preprod_config().unwrap()).execute_with(|| {
+            macbook_authors_first_at_the_rotation()
+                .unwrap_or_else(|rejection| panic!("{rejection}"));
+            assert_eq!(
+                next_committee(),
+                Some(in_seating_order(the_four_and_charlie()))
+            );
+        });
+    }
+
+    /// The check still bites: MacBook's rotation block re-proposing the
+    /// genesis committee, where the draw seats Charlie too, is rejected.
+    #[test]
+    fn peers_reject_a_rotation_block_that_keeps_the_committee_the_draw_replaces() {
+        start(&preprod_config().unwrap()).execute_with(|| {
+            let parent = three_authors_before_the_rotation()
+                .unwrap_or_else(|rejection| panic!("{rejection}"));
+            let (block, data) = propose(
+                &parent,
+                epoch_start(1_001),
+                &cardano(&the_four_and_charlie()),
+            );
+            let kept = seating(&block, cardano_candidates());
+            assert_eq!(
+                peers_check(&kept, &data),
+                Err("/ariadne: The validators in the block do not match the calculated \
+                     validators. Input data hash \
+                     (0xa466c3bc80bfa4daa489a7f3a3c662edd5c5d687d3d7758d3572db7b1d285e4a) is valid."
+                    .to_string())
+            );
+        });
+    }
+
+    /// Peers run the runtime the spec carries, compiled, not the native one
+    /// the harness plays. While their Ariadne data is absent, that code
+    /// accepts an honest block 1, which re-seats the genesis committee, and
+    /// refuses the same block seating outsiders.
+    #[test]
+    fn the_compiled_runtime_refuses_a_first_block_seating_outsiders_while_peers_have_no_ariadne_data(
+    ) {
+        let storage = preprod_config().unwrap().build_storage().unwrap();
+        let code = storage.top[sp_core::storage::well_known_keys::CODE].clone();
+        let mut state = sp_io::TestExternalities::new(storage);
+        let slot = epoch_start(1_001) - 1;
+        let (honest, _) = state
+            .execute_with(|| propose(&genesis_header(), slot, &cardano(&cardano_candidates())));
+        let outsiders = ["Mallory1", "Mallory2"]
+            .map(authority_keys_from_seed)
+            .to_vec();
+        let injected = seating(&honest, in_seating_order(outsiders));
+        let without_ariadne = inherent_data(slot, None);
+        let mut accepts =
+            |block: &Block| compiled_peers_accept(&mut state, &code, block, &without_ariadne);
+        assert!(accepts(&honest));
+        assert!(!accepts(&injected));
+    }
+
+    #[test]
+    fn peers_accept_every_block_while_the_slack_invariant_is_armed_and_cardano_ramps_then_swaps_a_core(
+    ) {
+        start(&preprod_config().unwrap()).execute_with(|| {
+            OrinqReceipts::set_slack_invariant_enabled(RuntimeOrigin::root(), true).unwrap();
+            play_the_ramp().unwrap_or_else(|rejection| panic!("{rejection}"));
+            let (_, swapped) = ramped_then_swapped().pop().unwrap();
+            assert_eq!(seated_now(), Seated::by(&in_seating_order(swapped)));
+        });
+    }
+
+    #[test]
+    fn peers_accept_every_block_under_each_lever_on_committee_selection() {
+        let genesis = preprod_config().unwrap().build_storage().unwrap();
+        let mut rejected = Vec::new();
+        for (lever, arm) in levers() {
+            sp_io::TestExternalities::new(genesis.clone()).execute_with(|| {
+                arm();
+                if let Err(rejection) = macbook_authors_first_at_the_rotation() {
+                    rejected.push(format!(
+                        "{lever}, MacBook first at the rotation: {rejection}"
+                    ));
+                }
+            });
+            sp_io::TestExternalities::new(genesis.clone()).execute_with(|| {
+                arm();
+                match play_the_ramp() {
+                    Ok(scheduled) => assert!(
+                        scheduled.iter().all(|set| !set.is_empty()),
+                        "{lever}: {scheduled:?}"
+                    ),
+                    Err(rejection) => rejected.push(format!("{lever}, the ramp: {rejection}")),
+                }
+            });
+        }
+        assert!(rejected.is_empty(), "{rejected:#?}");
+    }
 
     #[test]
     fn preprod_genesis_stores_its_tuned_attestor_rewards() {

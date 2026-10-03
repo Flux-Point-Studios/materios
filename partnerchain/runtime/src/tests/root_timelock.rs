@@ -2227,6 +2227,11 @@ fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
     }
 }
 
+/// The genesis committee every chain spec has to seat: here //Alice alone.
+fn alice_committee() -> serde_json::Value {
+    serde_json::json!({ "initialAuthorities": [super::authority("Alice")] })
+}
+
 /// Builds genesis storage the way a node builds it from a chain spec.
 fn build_chain_spec(patch: serde_json::Value) -> Result<(), String> {
     let mut genesis =
@@ -2249,6 +2254,7 @@ fn a_chain_spec_must_name_a_guardian_apart_from_the_sudo_key() {
         serde_json::json!({
             "sudo": { "key": sudo },
             "rootTimelock": { "delays": DELAYS, "guardian": guardian, "unguarded": unguarded },
+            "sessionCommitteeManagement": alice_committee(),
         })
     };
     assert_eq!(
@@ -2257,7 +2263,11 @@ fn a_chain_spec_must_name_a_guardian_apart_from_the_sudo_key() {
     );
     // A spec that names no guardian, as one that leaves the pallet out does.
     assert!(build_chain_spec(spec(&operators, None, false)).is_err());
-    assert!(build_chain_spec(serde_json::json!({ "sudo": { "key": operators } })).is_err());
+    assert!(build_chain_spec(serde_json::json!({
+        "sudo": { "key": operators },
+        "sessionCommitteeManagement": alice_committee(),
+    }))
+    .is_err());
     // A guardian that is the sudo key vetoes nothing the key schedules.
     assert!(build_chain_spec(spec(&operators, Some(operators.clone()), false)).is_err());
     assert!(build_chain_spec(spec(&operators, Some(custodians), true)).is_err());
@@ -2289,6 +2299,7 @@ fn only_a_development_chain_may_start_unguarded() {
         serde_json::json!({
             "sudo": { "key": sudo },
             "rootTimelock": { "delays": DELAYS, "unguarded": true },
+            "sessionCommitteeManagement": alice_committee(),
         })
     };
     let refused = build_chain_spec(unguarded(Some(AccountId::from([0x5A; 32]))));
@@ -2312,7 +2323,8 @@ fn the_benchmarking_preset_builds() {
         sp_genesis_builder::PresetId::from(sp_genesis_builder::DEV_RUNTIME_PRESET),
     ))
     .expect("the development preset exists");
-    let patch = serde_json::from_slice(&preset).expect("the preset is JSON");
+    let patch: serde_json::Value = serde_json::from_slice(&preset).expect("the preset is JSON");
+    assert_eq!(patch["sessionCommitteeManagement"], alice_committee());
     assert_eq!(build_chain_spec(patch), Ok(()));
 }
 
