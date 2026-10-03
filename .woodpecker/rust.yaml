@@ -10,7 +10,7 @@ labels:
   arm64-emu: "true"
 
 steps:
-  # Advisory, as in the GitHub workflow (continue-on-error): main is not
+  # Advisory, as in the GitHub workflow (continue-on-error): the tree is not
   # rustfmt-clean.
   - name: fmt
     image: rust:1.85.0-bookworm
@@ -36,13 +36,14 @@ steps:
       - apt-get update
       - apt-get install -y --no-install-recommends clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
       - cargo check --workspace --all-targets --locked
-      - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing -p pallet-root-timelock --no-fail-fast
+      - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing -p pallet-root-timelock -p pallet-session-validator-management --no-fail-fast
       # The timelock's try_state invariants, which only the try-runtime
       # feature compiles in.
       - cargo test -p pallet-root-timelock --features try-runtime --lib --locked
       # The runtime's own tests: the Root gate, the timelock classifier and
-      # its property test, committee seating, treasury and migrations. They
-      # run natively; the blob is already built by the check above.
+      # its property test, committee seating, the committee inherent as peers
+      # check it, treasury and migrations. They run natively; the blob is
+      # already built by the check above.
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast
       # The chain-spec builders: each genesis, built from the spec's own code
       # by the runtime's genesis builder as build-spec builds it, carried

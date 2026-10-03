@@ -200,7 +200,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 239,
+    spec_version: 240,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 5,
@@ -1774,7 +1774,7 @@ impl_runtime_apis! {
     impl frame_try_runtime::TryRuntime<Block> for Runtime {
         fn on_runtime_upgrade(checks: frame_try_runtime::UpgradeCheckSelect) -> (Weight, Weight) {
             let weight = Executive::try_runtime_upgrade(checks)
-                .expect("runtime upgrade checks failed");
+                .unwrap_or_else(|e| panic!("runtime upgrade checks failed: {e:?}"));
             (weight, RuntimeBlockWeights::get().max_block)
         }
 
@@ -1785,7 +1785,7 @@ impl_runtime_apis! {
             select: frame_try_runtime::TryStateSelect,
         ) -> Weight {
             Executive::try_execute_block(block, state_root_check, signature_check, select)
-                .expect("try_execute_block failed")
+                .unwrap_or_else(|e| panic!("block execution checks failed: {e:?}"))
         }
     }
 
