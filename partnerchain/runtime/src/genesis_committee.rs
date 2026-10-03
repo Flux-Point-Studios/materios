@@ -12,8 +12,8 @@ use crate::{RuntimeGenesisConfig, MAX_VALIDATORS};
 /// empty GRANDPA set and halts the chain; Aura or GRANDPA authorities seeded
 /// beside it; more seats than `MaxValidators`, which the pallet would cut
 /// short; an authority listed twice or out of ascending cross-chain-key
-/// order, the order Ariadne seats a committee in, so that one set of
-/// authorities makes one genesis; and an Aura or GRANDPA key two authorities
+/// order, Ariadne's order when every candidate gets a seat, so that one set
+/// of authorities makes one genesis; and an Aura or GRANDPA key two authorities
 /// share, which would author or vote twice.
 pub fn ensure_runnable_genesis_committee(
     genesis: &RuntimeGenesisConfig,

@@ -42,8 +42,8 @@ where
 /// first rotation would schedule an empty GRANDPA set and halt the chain;
 /// `aura` or `grandpa` authorities set beside it; more seats than
 /// `MaxValidators`; an authority listed twice or out of ascending
-/// cross-chain-key order, the order Ariadne seats a committee in; and an
-/// Aura or GRANDPA key two authorities share.
+/// cross-chain-key order, Ariadne's order when every candidate gets a seat;
+/// and an Aura or GRANDPA key two authorities share.
 pub type Authority = (CrossChainPublic, SessionKeys);
 
 /// The authority a development seed derives.
@@ -474,8 +474,7 @@ pub(crate) mod tests {
     }
 
     /// Every builder declares a genesis committee, and genesis seats exactly
-    /// that committee, each authority once, in the order Ariadne seats a
-    /// committee: ascending by cross-chain key.
+    /// that committee, each authority once, ascending by cross-chain key.
     #[test]
     fn every_builder_seats_the_committee_it_declares_each_authority_once_in_ascending_cross_chain_key_order(
     ) {
