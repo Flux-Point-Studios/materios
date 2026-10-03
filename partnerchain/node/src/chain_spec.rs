@@ -500,6 +500,44 @@ pub(crate) mod tests {
         }
     }
 
+    /// Every spec carries this runtime's code, so a genesis hash is only as
+    /// reproducible as that code. The code names its source files in panic
+    /// messages, by remapped paths only: the repository as /materios, the
+    /// Cargo home as /cargo-home and the toolchain as /rust-toolchain, never
+    /// where the machine that built it keeps them.
+    #[test]
+    fn the_runtime_code_names_no_directory_of_the_machine_that_built_it() {
+        let code = materios_runtime::WASM_BINARY_BLOATY.expect("the runtime is built");
+        let names = |path: &str| {
+            code.windows(path.len())
+                .any(|bytes| bytes == path.as_bytes())
+        };
+        let repository = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap()
+            .display()
+            .to_string();
+        let cargo_home = std::env::var("CARGO_HOME")
+            .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap()));
+        let sysroot = std::process::Command::new("rustc")
+            .args(["--print", "sysroot"])
+            .output()
+            .expect("rustc runs");
+        let sysroot = String::from_utf8(sysroot.stdout).unwrap().trim().to_owned();
+        for directory in [repository, cargo_home, sysroot] {
+            assert!(!names(&directory), "the runtime names {directory}");
+        }
+        for remapped in [
+            "/materios/partnerchain/runtime/src/",
+            "/cargo-home/registry/src/",
+            "/cargo-home/git/checkouts/",
+            "/rust-toolchain/lib/rustlib/src/rust/library/",
+        ] {
+            assert!(names(remapped), "the runtime never names {remapped}");
+        }
+    }
+
     #[test]
     fn fresh_development_and_local_chains_keep_their_authorities_through_the_first_rotation() {
         for (spec, seeds) in [
