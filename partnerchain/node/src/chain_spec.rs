@@ -461,16 +461,33 @@ pub(crate) mod tests {
         })
     }
 
-    /// Every builder's genesis committee names each authority once, in the
-    /// order Ariadne seats a committee: ascending by cross-chain key.
+    /// The genesis committee `spec` declares, as its genesis patch lists it.
+    fn declared_committee(spec: &ChainSpec) -> Vec<Authority> {
+        let json: serde_json::Value = serde_json::from_str(&spec.as_json(false).unwrap()).unwrap();
+        serde_json::from_value(
+            json["genesis"]["runtimeGenesis"]["patch"]["sessionCommitteeManagement"]
+                ["initialAuthorities"]
+                .clone(),
+        )
+        .unwrap()
+    }
+
+    /// Every builder declares a genesis committee, and genesis seats exactly
+    /// that committee, each authority once, in the order Ariadne seats a
+    /// committee: ascending by cross-chain key.
     #[test]
-    fn every_builder_seats_each_authority_once_in_ascending_cross_chain_key_order() {
+    fn every_builder_seats_the_committee_it_declares_each_authority_once_in_ascending_cross_chain_key_order(
+    ) {
         for (name, spec) in [
             ("development", super::development_config()),
             ("local", super::local_testnet_config()),
             ("preprod", crate::chain_spec_preprod::preprod_config()),
         ] {
-            let committee = seated_at_genesis(&spec.unwrap()).committee;
+            let spec = spec.unwrap();
+            let declared = declared_committee(&spec);
+            assert!(!declared.is_empty(), "{name} declares no genesis committee");
+            let committee = seated_at_genesis(&spec).committee;
+            assert_eq!(committee, declared, "{name}");
             assert!(
                 committee.windows(2).all(|pair| pair[0].0 < pair[1].0),
                 "{name}: {:?}",
