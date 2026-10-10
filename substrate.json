@@ -119,6 +119,17 @@
         "motra-fee-resource"
       ],
       "status": "experimental"
+    },
+    {
+      "id": "seat-keys",
+      "name": "Seat-key probe",
+      "desc": "Lists the session keys a running validator's keystore holds, resolved as the node resolves it, with no unsafe RPC; ceremonies map FPS hosts to committee seats with it.",
+      "kind": "toolkit",
+      "paths": [
+        "tools/seat-keys"
+      ],
+      "consumes": [],
+      "status": "live"
     }
   ]
 }
