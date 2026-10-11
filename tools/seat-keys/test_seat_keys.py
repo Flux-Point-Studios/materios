@@ -7,6 +7,7 @@ working directory.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -99,12 +100,12 @@ def test_a_key_type_that_is_not_four_ascii_bytes_refuses(key_type):
     [f"-d{BASE}"],
     [f"-d={BASE}"],
 ])
-def test_held_keys_come_from_the_keystore_under_the_base_path_and_running_chain(host, form):
+def test_named_keys_come_from_the_keystore_under_the_base_path_and_running_chain(host, form):
     host.key(KEYSTORE, "aura", AURA_A)
     host.key(KEYSTORE, "gran", GRAN_A)
     host.process(4242, ["/usr/local/bin/materios-node-spo", "--chain", SPEC, "--validator", *form])
     assert host.probe("aura", "gran") == {"pid": 4242, "chain_id": CHAIN_ID, "keystore": KEYSTORE,
-                                          "held": {"aura": ["0x" + AURA_A], "gran": ["0x" + GRAN_A]}}
+                                          "named": {"aura": ["0x" + AURA_A], "gran": ["0x" + GRAN_A]}}
 
 
 @pytest.mark.parametrize("chain", [SPEC, "preprod"])
@@ -117,7 +118,7 @@ def test_the_chain_is_the_one_whose_database_the_node_holds_open(host, chain):
     host.process(1, ["materios-node", "--chain", chain, "--validator", "--base-path", BASE])
     out = host.probe("aura")
     assert out["keystore"] == KEYSTORE
-    assert out["held"] == {"aura": ["0x" + AURA_A]}
+    assert out["named"] == {"aura": ["0x" + AURA_A]}
     with pytest.raises(sk.SeatKeyError, match="0 authority processes run chain materios_preprod_v5"):
         host.probe("aura", chain_id="materios_preprod_v5")
 
@@ -128,17 +129,16 @@ def test_keystore_path_overrides_the_base_path(host):
     host.process(1, validator_argv("--keystore-path", "/keys/custom"))
     out = host.probe("aura")
     assert out["keystore"] == "/keys/custom"
-    assert out["held"] == {"aura": ["0x" + AURA_B]}
+    assert out["named"] == {"aura": ["0x" + AURA_B]}
 
 
-def test_relative_paths_resolve_against_the_node_working_directory(host):
-    host.key(f"/srv/node/data/chains/{CHAIN_ID}/keystore", "aura", AURA_A)
-    host.key(KEYSTORE, "aura", AURA_B)
-    host.process(1, ["materios-node", "--validator", "--base-path", "data"], cwd="/srv/node",
-                 databases=(f"/srv/node/data/chains/{CHAIN_ID}",))
+def test_a_relative_keystore_path_resolves_against_the_node_working_directory(host):
+    host.key("/srv/node/keys", "aura", AURA_A)
+    host.key("/keys", "aura", AURA_B)
+    host.process(1, validator_argv("--keystore-path", "keys"), cwd="/srv/node")
     out = host.probe("aura")
-    assert out["keystore"] == f"data/chains/{CHAIN_ID}/keystore"
-    assert out["held"] == {"aura": ["0x" + AURA_A]}
+    assert out["keystore"] == "keys"
+    assert out["named"] == {"aura": ["0x" + AURA_A]}
 
 
 def test_absolute_paths_resolve_inside_the_node_root(host, tmp_path):
@@ -148,7 +148,7 @@ def test_absolute_paths_resolve_inside_the_node_root(host, tmp_path):
     host.key(f"/data/chains/{CHAIN_ID}/keystore", "aura", AURA_A)
     host.process(7, ["/usr/local/bin/materios-node", "--chain", "/chain-spec/chain-spec-raw.json", "--validator",
                      "--base-path", "/data"], root=container, databases=(f"/data/chains/{CHAIN_ID}",))
-    assert host.probe("aura")["held"] == {"aura": ["0x" + AURA_B]}
+    assert host.probe("aura")["named"] == {"aura": ["0x" + AURA_B]}
 
 
 @pytest.mark.parametrize("link, target, argv", [
@@ -157,7 +157,7 @@ def test_absolute_paths_resolve_inside_the_node_root(host, tmp_path):
     ("/srv/materios", "/srv/elsewhere", validator_argv()),
     (KEYSTORE, "../materios_preprod_v5/keystore", validator_argv()),
     ("/keys", "/srv/elsewhere", validator_argv("--keystore-path", "/keys/custom")),
-    ("/srv/node/data", "/srv/elsewhere", ["materios-node", "--validator", "--base-path", "data"]),
+    ("/srv/node/data", "/srv/elsewhere", validator_argv("--keystore-path", "data/custom")),
 ])
 def test_a_symbolic_link_on_the_keystore_path_refuses(host, link, target, argv):
     host.key(f"/srv/elsewhere/chains/{CHAIN_ID}/keystore", "aura", AURA_A)
@@ -180,9 +180,9 @@ def test_a_keystore_path_that_climbs_refuses(host):
         host.probe("aura")
 
 
-def test_every_key_entry_counts_as_held_whatever_the_node_can_open(host):
+def test_every_key_entry_is_named_whatever_the_node_can_open(host):
     # The probe cannot judge what the node can open (its fsuid, groups, capabilities, ACLs, security modules), so it
-    # reports every entry the node may load: a key the node holds is never missing from `held`.
+    # names every entry the node may load: a key the node holds is never missing from `named`.
     ks = host.fs / KEYSTORE.lstrip("/")
     host.key(KEYSTORE, "aura", AURA_A).chmod(0)
     (ks / ("61757261" + AURA_B)).symlink_to(host.fs / "gone")
@@ -190,8 +190,8 @@ def test_every_key_entry_counts_as_held_whatever_the_node_can_open(host):
     (ks / ("61757261" + "44" * 32)).symlink_to(host.key("/srv/other", "aura", "55" * 32))
     host.process(1, validator_argv())
     out = host.probe("aura")
-    assert out["held"] == {"aura": sorted("0x" + k for k in (AURA_A, AURA_B, GRAN_A, "44" * 32))}
-    assert set(out) == {"pid", "chain_id", "keystore", "held"}
+    assert out["named"] == {"aura": sorted("0x" + k for k in (AURA_A, AURA_B, GRAN_A, "44" * 32))}
+    assert set(out) == {"pid", "chain_id", "keystore", "named"}
 
 
 def test_only_lowercase_hex_names_of_the_asked_type_count(host):
@@ -206,7 +206,7 @@ def test_only_lowercase_hex_names_of_the_asked_type_count(host):
     host.file(f"{KEYSTORE}/6175726")
     host.file(f"{KEYSTORE}/README")
     host.process(1, validator_argv())
-    assert host.probe("aura")["held"] == {"aura": ["0x" + every_digit, "0x" + AURA_A]}
+    assert host.probe("aura")["named"] == {"aura": ["0x" + every_digit, "0x" + AURA_A]}
 
 
 def opened_path(path, dir_fd=None) -> str:
@@ -230,7 +230,7 @@ def test_the_probe_never_opens_a_key_file(host, monkeypatch, opener):
         return real(path, *a, **kw)
 
     monkeypatch.setattr(opener, guarded)
-    assert host.probe("aura")["held"] == {"aura": ["0x" + AURA_A]}
+    assert host.probe("aura")["named"] == {"aura": ["0x" + AURA_A]}
 
 
 @pytest.mark.parametrize("argv", [
@@ -242,7 +242,7 @@ def test_an_authority_is_any_process_with_an_authority_flag_on_the_chain(host, a
     host.key(KEYSTORE, "aura", AURA_A)
     host.process(31, argv)
     assert host.probe("aura") == {"pid": 31, "chain_id": CHAIN_ID, "keystore": KEYSTORE,
-                                  "held": {"aura": ["0x" + AURA_A]}}
+                                  "named": {"aura": ["0x" + AURA_A]}}
 
 
 def test_full_nodes_and_authorities_on_other_chains_are_not_probed(host):
@@ -275,16 +275,48 @@ def test_no_authority_process_on_the_chain_refuses(host):
 
 @pytest.mark.parametrize("databases, held", [
     ((), "no chain database"),
-    ((CONFIG_DIR, f"{BASE}/chains/materios_preprod_v5"), "2 chains' databases"),
+    (("/srv/w/chains/materios_preprod_v6", "/srv/w/chains/materios_preprod_v5"), "2 chains' databases"),
 ])
 def test_an_authority_whose_chain_cannot_be_told_refuses(host, databases, held):
     # A wrapper that execs nothing (timeout, sudo) passes the flag on its own argv; a node on another chain might be
     # this one's double. Either may be the validator the probe was asked about, so it gives no answer.
     host.key(KEYSTORE, "aura", AURA_A)
     host.process(1, validator_argv())
-    host.process(9, ["/usr/bin/timeout", "900", "materios-node", "--validator"], databases=databases)
-    with pytest.raises(sk.SeatKeyError, match=f"process 9 \\(timeout\\) runs with an authority flag and holds {held} "
-                                              "open"):
+    host.process(9, ["/usr/bin/timeout", "900", "materios-node", "--validator", "--base-path", "/srv/w"],
+                 databases=databases)
+    with pytest.raises(sk.SeatKeyError, match=f"^process 9 \\(timeout\\) runs with an authority flag and holds {held} "
+                                              "open, so the probe cannot tell which chain it runs$"):
+        host.probe("aura")
+
+
+@pytest.mark.parametrize("argv, databases, reason", [
+    # V2: the second authority's <config>/db links into a tree named for another chain. The kernel names the open
+    # file by its resolved path, which would credit it to that chain and hide a second authority on this one.
+    (["node", "--validator", "--base-path", "/srv/b"], ("/srv/x/chains/materios_preprod_v5",),
+     "holds a chain database open at /srv/x/chains/materios_preprod_v5/db/full/LOCK, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
+    # V2b: its base path itself is a link, so even the right chain id resolves elsewhere.
+    (["node", "--validator", "--base-path", "/srv/b"], (f"/mnt/real/chains/{CHAIN_ID}",),
+     f"holds a chain database open at /mnt/real/chains/{CHAIN_ID}/db/full/LOCK, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
+    # V2b, a mount named /db: what follows the base path's length must not be read as a chain id.
+    (["node", "--validator", "--base-path", "/srv/b"], (f"/db/chains/{CHAIN_ID}",),
+     f"holds a chain database open at /db/chains/{CHAIN_ID}/db/full/LOCK, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
+    # A database nested deeper inside the base path's chains is not where the node keeps its own.
+    (["node", "--validator", "--base-path", "/srv/b"], (f"/srv/b/chains/{CHAIN_ID}/sub/chains/{CHAIN_ID}",),
+     f"holds a chain database open at /srv/b/chains/{CHAIN_ID}/sub/chains/{CHAIN_ID}/db/full/LOCK, not at "
+     "/srv/b/chains/<id>/db or paritydb under its --base-path"),
+    # V3: no --base-path, so there is nothing to match its open database against.
+    (["node", "--validator", "--chain", "preprod"], (f"/root/.local/share/node/chains/{CHAIN_ID}",),
+     "runs with an authority flag and no --base-path, so the probe cannot tell which chain it runs"),
+    (["node", "--validator", "--base-path", "data"], (f"/srv/node/data/chains/{CHAIN_ID}",),
+     "runs with --base-path data; the probe matches its open database against an absolute path without '..'"),
+    (["node", "--validator", "--base-path", "/srv/../srv/b"], (f"/srv/b/chains/{CHAIN_ID}",),
+     "runs with --base-path /srv/../srv/b; the probe matches its open database against an absolute path without '..'"),
+])
+def test_an_authority_whose_database_is_not_under_its_own_base_path_refuses(host, argv, databases, reason):
+    host.key(KEYSTORE, "aura", AURA_A)
+    host.process(1, validator_argv())
+    host.process(2, argv, databases=databases)
+    with pytest.raises(sk.SeatKeyError, match="^process 2 \\(node\\) " + re.escape(reason) + "$"):
         host.probe("aura")
 
 
@@ -367,7 +399,10 @@ def test_a_step_swapped_after_its_check_refuses(host, monkeypatch, swap, reason)
         host.probe("aura")
 
 
-@pytest.mark.parametrize("flags", [[flag] for flag in sorted(sk.KEYRING_FLAGS)] + [["--dev", "--alice"]])
+KEYRING_FLAGS = ["--alice", "--bob", "--charlie", "--dave", "--eve", "--ferdie", "--one", "--two", "--dev"]
+
+
+@pytest.mark.parametrize("flags", [[flag] for flag in KEYRING_FLAGS] + [["--dev", "--alice"]])
 def test_a_node_with_dev_keys_in_memory_refuses(host, flags):
     # A keyring flag puts a dev seed's keys in a map has_keys checks before any file (local.rs:512-515).
     host.key(KEYSTORE, "aura", AURA_A)
@@ -378,8 +413,6 @@ def test_a_node_with_dev_keys_in_memory_refuses(host, flags):
 
 
 @pytest.mark.parametrize("argv, reason", [
-    (["materios-node", "--validator"],
-     "^the node runs with no --base-path, so it uses a platform default this probe does not guess$"),
     (validator_argv("--tmp"), r"^the node keeps its keystore in a temporary base path \(--tmp\)$"),
     (validator_argv("-d", "/b"), "--base-path is given more than once"),
     (validator_argv("--keystore-path", "/k", "--keystore-path=/j"), "--keystore-path is given more than once"),
@@ -420,12 +453,13 @@ def test_cli_prints_the_probe_as_json(host, monkeypatch, capsys):
     code, out, err = run_main(host, monkeypatch, capsys, "aura", "gran")
     assert (code, err) == (0, "")
     assert json.loads(out) == {"pid": 1, "chain_id": CHAIN_ID, "keystore": KEYSTORE,
-                               "held": {"aura": ["0x" + AURA_A], "gran": []}}
+                               "named": {"aura": ["0x" + AURA_A], "gran": []}}
 
 
 @pytest.mark.parametrize("argv, key_type, reason", [
     (["materios-node", "--validator"], "aura",
-     "the node runs with no --base-path, so it uses a platform default this probe does not guess"),
+     "process 1 (materios-node) runs with an authority flag and no --base-path, so the probe cannot tell which chain "
+     "it runs"),
     (validator_argv(), "aur", "key type 'aur' is not 4 ASCII bytes"),
 ])
 def test_cli_refusal_exits_2_with_the_reason(host, monkeypatch, capsys, argv, key_type, reason):
@@ -469,7 +503,7 @@ def test_cli_over_stdin_prints_the_probe_as_json(host):
     r = subprocess.run([sys.executable, "-", "--proc", str(host.proc), "--chain-id", CHAIN_ID, "aura"],
                        input=(HERE / "seat_keys.py").read_text(), capture_output=True, text=True, check=False, cwd="/")
     assert (r.returncode, r.stderr) == (0, "")
-    assert json.loads(r.stdout)["held"] == {"aura": ["0x" + AURA_A]}
+    assert json.loads(r.stdout)["named"] == {"aura": ["0x" + AURA_A]}
 
 
 def test_python_older_than_3_10_is_refused_before_it_crashes():

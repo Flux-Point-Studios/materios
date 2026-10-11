@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Which session keys a running Materios validator holds, read from its keystore.
+"""Which session keys a running Materios validator's keystore names: an upper bound on the keys it holds.
 
 `author_hasKey` is an unsafe RPC method, so a validator on `--rpc-methods safe`
 refuses it. At polkadot-stable2409-4, `LocalKeystore::has_keys` answers from an
@@ -7,7 +7,8 @@ in-memory map of dev keys first, then from the file
 `<keystore>/<hex key type><hex public>`, parsed as a JSON string (sc-keystore
 local.rs:166, 512-526, 556). This probe refuses a node that keeps dev keys in
 memory, finds the keystore directory the node reads, and lists the key files in
-it. It never opens one: a key file holds the secret.
+it. It never opens one: a key file holds the secret. A key it names on one host
+and no other proves no other host signs with it, never that this one does.
 
 It runs on the validator host, as the node's user or root, with the standard
 library only:
@@ -81,9 +82,19 @@ def authorities(proc: Path) -> list[tuple[int, list[str]]]:
 
 
 def running_chain_id(proc_dir: Path, argv: list[str]) -> str:
-    """The id of the chain spec the process runs: the one whose database it holds open. The node reads its spec once,
-    at its start, so the file its --chain names may hold another spec by now, and a spec built into the node has no
-    file."""
+    """The id of the chain spec the process runs: the one whose database it holds open under its --base-path, at
+    <base path>/chains/<id>/db or paritydb. The node reads its spec once, at its start, so the file its --chain names
+    may hold another spec by now, and a spec built into the node has no file. The kernel names an open file by its
+    resolved path, so a database reached through a link lands outside the base path, and refuses."""
+    name = f"process {proc_dir.name} ({os.path.basename(argv[0])})"
+    base = option(argv, "--base-path", "-d")
+    if base is None:
+        raise SeatKeyError(f"{name} runs with an authority flag and no --base-path, so the probe cannot tell which "
+                           "chain it runs")
+    if not base.startswith("/") or ".." in base.split("/"):
+        raise SeatKeyError(f"{name} runs with --base-path {base}; the probe matches its open database against an "
+                           "absolute path without '..'")
+    chains = os.path.join(os.path.normpath(base), "chains") + "/"
     fd_dir = proc_dir / "fd"
     links = []
     try:
@@ -98,12 +109,17 @@ def running_chain_id(proc_dir: Path, argv: list[str]) -> str:
     ids = set()
     for link in links:
         parts = link.split("/")
-        ids.update(parts[i + 1] for i in range(len(parts) - 2)
-                   if parts[i] == "chains" and parts[i + 2] in DATABASE_DIRS)
+        if not any(parts[i] == "chains" and parts[i + 2] in DATABASE_DIRS for i in range(len(parts) - 2)):
+            continue
+        rest = link[len(chains):].split("/")
+        if not link.startswith(chains) or len(rest) < 2 or rest[1] not in DATABASE_DIRS:
+            raise SeatKeyError(f"{name} holds a chain database open at {link}, not at {chains}<id>/db or paritydb "
+                               "under its --base-path")
+        ids.add(rest[0])
     if len(ids) != 1:
         held = "no chain database" if not ids else f"{len(ids)} chains' databases"
-        raise SeatKeyError(f"process {proc_dir.name} ({os.path.basename(argv[0])}) runs with an authority flag and "
-                           f"holds {held} open, so the probe cannot tell which chain it runs")
+        raise SeatKeyError(f"{name} runs with an authority flag and holds {held} open, so the probe cannot tell which "
+                           "chain it runs")
     return ids.pop()
 
 
@@ -114,10 +130,7 @@ def keystore_path(argv: list[str], chain_id: str) -> str:
         return path
     if "--tmp" in argv:
         raise SeatKeyError("the node keeps its keystore in a temporary base path (--tmp)")
-    base = option(argv, "--base-path", "-d")
-    if base is None:
-        raise SeatKeyError("the node runs with no --base-path, so it uses a platform default this probe does not guess")
-    return os.path.join(base, "chains", chain_id, "keystore")
+    return os.path.join(option(argv, "--base-path", "-d"), "chains", chain_id, "keystore")
 
 
 def keystore_names(proc_dir: Path, keystore: str) -> list[str]:
@@ -177,7 +190,7 @@ def probe(proc: Path, chain_id: str, key_types: list[str]) -> dict:
     keystore = keystore_path(argv, chain_id)
     names = keystore_names(proc / str(pid), keystore)
     return {"pid": pid, "chain_id": chain_id, "keystore": keystore,
-            "held": {t: keys_of_type(names, t) for t in key_types}}
+            "named": {t: keys_of_type(names, t) for t in key_types}}
 
 
 def main() -> int:
