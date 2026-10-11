@@ -119,6 +119,17 @@
         "motra-fee-resource"
       ],
       "status": "experimental"
+    },
+    {
+      "id": "seat-keys",
+      "name": "Seat-key probe",
+      "desc": "Lists the session keys a running validator's keystore names, with no unsafe RPC: finds every process with an authority flag, tells its chain by the database it holds open, refuses dev keys held in memory, and walks to the keystore in the node's own root without following a link. Its named set is an upper bound that never leaves out a key the node can sign with, so it can refuse a seat named on two hosts but never prove a host signs; positive claims come from chain evidence.",
+      "kind": "toolkit",
+      "paths": [
+        "tools/seat-keys"
+      ],
+      "consumes": [],
+      "status": "experimental"
     }
   ]
 }
