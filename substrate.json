@@ -123,7 +123,7 @@
     {
       "id": "seat-keys",
       "name": "Seat-key probe",
-      "desc": "Lists the session keys a running validator's keystore holds, resolved as the node resolves it, with no unsafe RPC; ceremonies map FPS hosts to committee seats with it.",
+      "desc": "Lists the session keys a running validator's keystore holds, with no unsafe RPC: finds every process with an authority flag, tells its chain by the database it holds open, refuses dev keys held in memory, and walks to the keystore in the node's own root without following a link; held never leaves out a key the node can sign with. Ceremonies map FPS hosts to committee seats with it.",
       "kind": "toolkit",
       "paths": [
         "tools/seat-keys"

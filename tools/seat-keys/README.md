@@ -2,7 +2,8 @@
 
 Lists the session keys a running Materios validator's keystore holds, without
 an RPC call. Ceremonies use it to map each FPS host to its committee seat and to
-refuse a seat held on two hosts.
+refuse a seat held on two hosts, so it fails closed: when it answers, `held`
+leaves out no key the node can sign with.
 
 ## Why not `author_hasKey`
 
@@ -10,57 +11,75 @@ refuse a seat held on two hosts.
 refuses it with `-32601 "RPC call is unsafe to be called externally"`, so a
 ceremony that asks it fails closed once the fleet's RPC is locked down.
 
-At polkadot-stable2409-4 (`c455194`), `author_hasKey` answers from the key file
-alone. `LocalKeystore::has_keys` opens `<keystore>/<hex key type><hex public>`
-and parses it as a JSON string (`substrate/client/keystore/src/local.rs:166`,
-`:512`, `:556`). It does not check that the secret derives the public key.
+At polkadot-stable2409-4 (`c455194`), `LocalKeystore::has_keys` answers from
+two places (`substrate/client/keystore/src/local.rs:166`, `:512-526`, `:556`):
 
-This probe reads the same file names in the same directory:
+1. an in-memory map, which holds the dev seed's keys of a node started with a
+   keyring flag (`--alice` … `--two`, or `--dev`), and nothing otherwise;
+2. the file `<keystore>/<hex key type><hex public>`, parsed as a JSON string.
+
+It does not check that the secret derives the public key.
+
+## How the probe answers
 
 | Step | How the probe does it |
 |---|---|
-| Find the node | The one `materios-node*` process with `--validator` whose `--chain` ends in `--chain-suffix`; zero or several refuse. |
-| Find its keystore | `--keystore-path`, else `<--base-path>/chains/<chain spec id>/keystore`, the way sc-cli resolves it (`keystore_params.rs:78-81`, `run_cmd.rs:584-595`). The spec id comes from the file the node's `--chain` names. Paths resolve inside the node's root and working directory, so a containerised node works. |
-| Check each key | A file named `<hex key type><lowercase hex public>` that is a regular file the node's user can read. |
+| Find the node | Every process with an authority flag of its own: `--validator`, a keyring flag or `--dev` (sc-cli `run_cmd.rs:413-416`), whatever its binary is called. |
+| Tell its chain | The chain spec id whose database the process holds open, `<base path>/chains/<id>/db` or `paritydb`, read from `/proc/<pid>/fd`. The node read its spec once, at its start: the file its `--chain` names may hold another spec by now, and a spec built into the node (`--chain preprod`) has no file. |
+| Pick one | Exactly one authority process must run the asked chain. Any authority process whose chain cannot be told refuses the probe too, since it may be that one. |
+| Refuse dev keys | A node with a keyring flag or `--dev` holds keys no file shows. |
+| Find its keystore | `--keystore-path`, else `<--base-path>/chains/<id>/keystore`, the way sc-cli resolves it (`keystore_params.rs:78-81`, `run_cmd.rs:584-595`). |
+| Walk to it | From the node's root (`/proc/<pid>/root`) for an absolute path, its working directory (`/proc/<pid>/cwd`) for a relative one, one directory at a time. A containerised node's paths resolve in its own filesystem. A symbolic link or `..` on the path refuses: the node follows a link from its own root, and the kernel would follow it from the probe's. |
+| List the keys | Every entry named `<hex key type><lowercase hex public>`. |
 
-The one thing `author_hasKey` checked that this probe does not is that the file
-parses as JSON. The probe never opens a key file, because the file holds the
-secret. To prove a seat's keys actually sign, use the chain: blocks authored in
-that seat's Aura slots, and its GRANDPA precommits in justifications.
+`held` lists every key entry, whatever it is. The probe cannot judge what the
+node can open: that turns on the node's fsuid, groups, capabilities, ACLs and
+security modules. So `held` may include a key the node cannot read, but never
+leaves out one it can.
+
+The probe never opens a key file, because the file holds the secret. So it
+cannot check that a file parses as JSON, as `author_hasKey` does. To prove a
+seat's keys actually sign, use the chain: blocks authored in that seat's Aura
+slots, and its GRANDPA precommits in justifications.
 
 ## Run
 
-On the validator host, as the node's user, with the standard library only:
+On the validator host, as the node's user or root, with Python 3.10 or newer
+and the standard library only:
 
 ```
-ssh HOST python3 - --chain-suffix chain-spec-v6-raw.json aura gran < seat_keys.py
+ssh HOST python3 - --chain-id materios_preprod_v6 aura gran < seat_keys.py
 ```
 
 It prints one JSON object and exits 0:
 
 ```json
 {"pid": 6161,
+ "chain_id": "materios_preprod_v6",
  "keystore": "/srv/materios/data/chains/materios_preprod_v6/keystore",
- "held": {"aura": ["0x1a2b…"], "gran": ["0x3c4d…"]},
- "unreadable": {"aura": [], "gran": []}}
+ "held": {"aura": ["0x1a2b…"], "gran": ["0x3c4d…"]}}
 ```
 
-`held` lists every key of that type in the keystore. Intersect it with the
-committee yourself. `unreadable` lists key files the node cannot open: a
-dangling link, a directory, or a file its user lacks read access to.
+Intersect `held` with the committee yourself. On a host whose `/proc` is
+mounted with `hidepid`, run it as root, or another user's validator is
+invisible to it.
 
 ## Refusals
 
 It exits 2 with the reason on stderr, and prints nothing on stdout, when:
 
-- not exactly one validator process runs a matching chain spec;
-- the node runs as another user, since file access is judged as the node judges it;
-- the keystore is temporary (`--tmp`, or `--dev` with no base path);
+- `/proc` cannot be listed, or an authority process's argv, open files or root
+  cannot be read;
+- not exactly one authority process runs the asked chain;
+- an authority process holds no chain database open, or two chains' databases;
+- the node runs with a keyring flag or `--dev`;
+- the keystore is temporary (`--tmp`);
 - the node has no `--base-path` and no `--keystore-path`;
 - an option is given twice, or has no value;
-- `--chain` is not a readable chain spec file, or the spec has no `id`;
-- the keystore directory does not exist;
-- a key type is not 4 ASCII bytes.
+- the keystore path holds a symbolic link or `..`, or a step on it is missing
+  or not a directory;
+- a key type is not 4 ASCII bytes;
+- Python is older than 3.10.
 
 ## Test
 

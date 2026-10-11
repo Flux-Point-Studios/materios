@@ -2,27 +2,40 @@
 """Which session keys a running Materios validator holds, read from its keystore.
 
 `author_hasKey` is an unsafe RPC method, so a validator on `--rpc-methods safe`
-refuses it. At polkadot-stable2409-4 it answers from the key file alone:
-`LocalKeystore::has_keys` opens `<keystore>/<hex key type><hex public>` and
-parses it as a JSON string (sc-keystore local.rs:166, 512, 556). This probe finds
-that directory the way the node does and checks that the node's user can open
-each file. It never opens one: a key file holds the secret.
+refuses it. At polkadot-stable2409-4, `LocalKeystore::has_keys` answers from an
+in-memory map of dev keys first, then from the file
+`<keystore>/<hex key type><hex public>`, parsed as a JSON string (sc-keystore
+local.rs:166, 512-526, 556). This probe refuses a node that keeps dev keys in
+memory, finds the keystore directory the node reads, and lists the key files in
+it. It never opens one: a key file holds the secret.
 
-It runs on the validator host with the standard library only:
+It runs on the validator host, as the node's user or root, with the standard
+library only:
 
-    ssh HOST python3 - --chain-suffix chain-spec-v6-raw.json aura gran < seat_keys.py
+    ssh HOST python3 - --chain-id materios_preprod_v6 aura gran < seat_keys.py
 """
 import argparse
 import json
 import os
+import stat
 import sys
 from pathlib import Path
 
+if sys.version_info < (3, 10):
+    print("seat-keys: needs Python 3.10 or newer", file=sys.stderr)
+    sys.exit(2)
+
 HEX = frozenset("0123456789abcdef")
+# Each makes the node an authority (sc-cli run_cmd.rs:413-416) and keeps a dev
+# seed's keys in its keystore's in-memory map (run_cmd.rs:386-393).
+KEYRING_FLAGS = frozenset({"--alice", "--bob", "--charlie", "--dave", "--eve", "--ferdie", "--one", "--two", "--dev"})
+AUTHORITY_FLAGS = KEYRING_FLAGS | {"--validator"}
+# The node's database sits at <base path>/chains/<chain spec id>/db or paritydb (sc-cli config.rs:230-231, 486).
+DATABASE_DIRS = ("db", "paritydb")
 
 
 class SeatKeyError(Exception):
-    """The keystore the node reads cannot be determined, so the probe gives no answer."""
+    """The probe cannot tell which keys the node holds, so it gives no answer."""
 
 
 def key_type_hex(key_type: str) -> str:
@@ -38,7 +51,7 @@ def option(argv: list[str], long: str, short: str | None = None) -> str | None:
             values.append(argv[i + 1] if i + 1 < len(argv) else None)
         elif a.startswith(long + "="):
             values.append(a[len(long) + 1:])
-        elif short and a.startswith(short) and not a.startswith("--"):
+        elif short and a.startswith(short):
             values.append(a[len(short):].removeprefix("="))
     if len(values) > 1:
         raise SeatKeyError(f"{long} is given more than once")
@@ -47,39 +60,54 @@ def option(argv: list[str], long: str, short: str | None = None) -> str | None:
     return values[0] if values else None
 
 
-def on_host(proc_dir: Path, path: str) -> Path:
-    # Paths are the node's own: absolute ones live under its root (a container's
-    # filesystem), relative ones under its working directory.
-    p = Path(path)
-    return proc_dir / "root" / p.relative_to("/") if p.is_absolute() else proc_dir / "cwd" / p
-
-
-def find_validator(proc: Path, chain_suffix: str) -> tuple[int, list[str]]:
+def authorities(proc: Path) -> list[tuple[int, list[str]]]:
+    """Every process with an authority flag of its own. A process that exits while the probe reads it is skipped."""
+    try:
+        pids = sorted(int(d.name) for d in proc.iterdir() if d.name.isdigit())
+    except OSError as e:
+        raise SeatKeyError(f"cannot list the processes in {proc}: {e.strerror}; the probe reads Linux's /proc") from e
     found = []
-    for d in proc.iterdir():
-        if not d.name.isdigit():
-            continue
+    for pid in pids:
         try:
-            argv = [a.decode(errors="surrogateescape") for a in (d / "cmdline").read_bytes().split(b"\0") if a]
-        except OSError:
+            raw = (proc / str(pid) / "cmdline").read_bytes()
+        except (FileNotFoundError, ProcessLookupError):
             continue
-        if (argv and os.path.basename(argv[0]).startswith("materios-node") and "--validator" in argv
-                and (option(argv, "--chain") or "").endswith(chain_suffix)):
-            found.append((int(d.name), argv))
-    if len(found) != 1:
-        raise SeatKeyError(f"{len(found)} validator processes run a chain spec ending in {chain_suffix}; "
-                           "expected exactly 1")
-    return found[0]
+        except OSError as e:
+            raise SeatKeyError(f"cannot read the argv of process {pid}: {e.strerror}") from e
+        argv = [a.decode(errors="surrogateescape") for a in raw.split(b"\0") if a]
+        if AUTHORITY_FLAGS.intersection(argv):
+            found.append((pid, argv))
+    return found
 
 
-def effective_uid(proc_dir: Path) -> int:
-    for line in (proc_dir / "status").read_text().splitlines():
-        if line.startswith("Uid:"):
-            return int(line.split()[2])
-    raise SeatKeyError(f"{proc_dir}/status has no Uid line")
+def running_chain_id(proc_dir: Path, argv: list[str]) -> str:
+    """The id of the chain spec the process runs: the one whose database it holds open. The node reads its spec once,
+    at its start, so the file its --chain names may hold another spec by now, and a spec built into the node has no
+    file."""
+    fd_dir = proc_dir / "fd"
+    links = []
+    try:
+        for fd in os.listdir(fd_dir):
+            try:
+                links.append(os.readlink(fd_dir / fd))
+            except FileNotFoundError:
+                continue
+    except OSError as e:
+        raise SeatKeyError(f"cannot read the open files of process {proc_dir.name}: {e.strerror}; run the probe as "
+                           "the node's user or root") from e
+    ids = set()
+    for link in links:
+        parts = link.split("/")
+        ids.update(parts[i + 1] for i in range(len(parts) - 2)
+                   if parts[i] == "chains" and parts[i + 2] in DATABASE_DIRS)
+    if len(ids) != 1:
+        held = "no chain database" if not ids else f"{len(ids)} chains' databases"
+        raise SeatKeyError(f"process {proc_dir.name} ({os.path.basename(argv[0])}) runs with an authority flag and "
+                           f"holds {held} open, so the probe cannot tell which chain it runs")
+    return ids.pop()
 
 
-def keystore_dir(proc_dir: Path, argv: list[str]) -> str:
+def keystore_path(argv: list[str], chain_id: str) -> str:
     """The keystore path as the node resolves it (sc-cli keystore_params.rs:78-81, run_cmd.rs:584-595)."""
     path = option(argv, "--keystore-path")
     if path is not None:
@@ -88,64 +116,79 @@ def keystore_dir(proc_dir: Path, argv: list[str]) -> str:
         raise SeatKeyError("the node keeps its keystore in a temporary base path (--tmp)")
     base = option(argv, "--base-path", "-d")
     if base is None:
-        if "--dev" in argv:
-            raise SeatKeyError("the node keeps its keystore in a temporary base path (--dev)")
         raise SeatKeyError("the node runs with no --base-path, so it uses a platform default this probe does not guess")
-    chain = option(argv, "--chain")
-    if chain is None:
-        raise SeatKeyError("the node runs with no --chain")
-    try:
-        spec = json.loads(on_host(proc_dir, chain).read_text())
-    except (OSError, ValueError) as e:
-        raise SeatKeyError(f"--chain {chain} is not a chain spec file the probe can read: {e}") from e
-    spec_id = spec.get("id") if isinstance(spec, dict) else None
-    if not isinstance(spec_id, str) or not spec_id:
-        raise SeatKeyError(f"chain spec {chain} has no id")
-    return os.path.join(base, "chains", spec_id, "keystore")
+    return os.path.join(base, "chains", chain_id, "keystore")
 
 
-def keys_in(directory: Path, keystore: str, key_type: str) -> tuple[list[str], list[str]]:
+def keystore_names(proc_dir: Path, keystore: str) -> list[str]:
+    """The entries of the keystore directory, reached from the node's root for an absolute path and its working
+    directory for a relative one. Every step must be a directory: the node follows a symbolic link from its own root,
+    and the kernel would follow it from the probe's."""
+    parts = [p for p in keystore.split("/") if p]
+    if ".." in parts:
+        raise SeatKeyError(f"the keystore path {keystore} climbs with '..'; the probe walks it one directory at a time")
+    start = "root" if keystore.startswith("/") else "cwd"
     try:
-        names = os.listdir(directory)
+        fd = os.open(proc_dir / start, os.O_RDONLY)
     except OSError as e:
-        raise SeatKeyError(f"no keystore at {keystore}: {e.strerror}") from e
+        raise SeatKeyError(f"cannot open the {start} of process {proc_dir.name}: {e.strerror}; run the probe as the "
+                           "node's user or root") from e
+    try:
+        for i, part in enumerate(parts):
+            step = "/".join(parts[:i + 1])
+            try:
+                mode = os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode
+                if stat.S_ISLNK(mode):
+                    raise SeatKeyError(f"{step}, on the keystore path {keystore}, is a symbolic link")
+                if not stat.S_ISDIR(mode):
+                    raise SeatKeyError(f"{step}, on the keystore path {keystore}, is not a directory")
+                step_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError as e:
+                raise SeatKeyError(f"no keystore at {keystore}: {step} does not exist") from e
+            except OSError as e:
+                raise SeatKeyError(f"cannot open {step}, on the keystore path {keystore}: {e.strerror}") from e
+            os.close(fd)
+            fd = step_fd
+        return os.listdir(fd)
+    finally:
+        os.close(fd)
+
+
+def keys_of_type(names: list[str], key_type: str) -> list[str]:
+    """Every entry named `<hex key type><lowercase hex public>`, whatever it is: the probe cannot judge what the node
+    can open (its fsuid, groups, capabilities, ACLs, security modules), so it lists every key the node may load."""
     prefix = key_type_hex(key_type)
-    held, unreadable = [], []
-    for name in names:
-        public = name[len(prefix):]
-        if not (name.startswith(prefix) and public and len(public) % 2 == 0 and set(public) <= HEX):
-            continue
-        path = directory / name
-        (held if os.path.isfile(path) and os.access(path, os.R_OK) else unreadable).append("0x" + public)
-    return sorted(held), sorted(unreadable)
+    publics = [name[len(prefix):] for name in names if name.startswith(prefix)]
+    return sorted("0x" + p for p in publics if p and len(p) % 2 == 0 and set(p) <= HEX)
 
 
-def probe(proc: Path, chain_suffix: str, key_types: list[str]) -> dict:
+def probe(proc: Path, chain_id: str, key_types: list[str]) -> dict:
     for t in key_types:
         key_type_hex(t)
-    pid, argv = find_validator(Path(proc), chain_suffix)
-    proc_dir = Path(proc) / str(pid)
-    uid = effective_uid(proc_dir)
-    if uid != os.geteuid():
-        raise SeatKeyError(f"the node runs as uid {uid}; run the probe as that user, "
-                           "so file access is judged as the node judges it")
-    keystore = keystore_dir(proc_dir, argv)
-    directory = on_host(proc_dir, keystore)
-    found = {t: keys_in(directory, keystore, t) for t in key_types}
-    return {"pid": pid, "keystore": keystore,
-            "held": {t: h for t, (h, _) in found.items()},
-            "unreadable": {t: u for t, (_, u) in found.items()}}
+    proc = Path(proc)
+    found = [(pid, argv) for pid, argv in authorities(proc) if running_chain_id(proc / str(pid), argv) == chain_id]
+    if len(found) != 1:
+        raise SeatKeyError(f"{len(found)} authority processes run chain {chain_id}; expected exactly 1")
+    pid, argv = found[0]
+    dev = sorted(KEYRING_FLAGS.intersection(argv))
+    if dev:
+        raise SeatKeyError(f"the node runs with {' '.join(dev)}, which keeps a dev seed's keys in memory, where no "
+                           "file shows them")
+    keystore = keystore_path(argv, chain_id)
+    names = keystore_names(proc / str(pid), keystore)
+    return {"pid": pid, "chain_id": chain_id, "keystore": keystore,
+            "held": {t: keys_of_type(names, t) for t in key_types}}
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="List the session keys a running validator's keystore holds.")
     ap.add_argument("--proc", type=Path, default=Path("/proc"))
-    ap.add_argument("--chain-suffix", required=True,
-                    help="end of the validator's --chain path, e.g. chain-spec-v6-raw.json")
+    ap.add_argument("--chain-id", required=True, help="the id of the chain spec the validator runs, e.g. "
+                                                      "materios_preprod_v6")
     ap.add_argument("key_types", nargs="+", help="4-byte key types, e.g. aura gran")
     a = ap.parse_args()
     try:
-        out = probe(a.proc, a.chain_suffix, a.key_types)
+        out = probe(a.proc, a.chain_id, a.key_types)
     except SeatKeyError as e:
         print(f"seat-keys: {e}", file=sys.stderr)
         return 2

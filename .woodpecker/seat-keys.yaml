@@ -7,6 +7,13 @@ labels:
   arm64-emu: "true"
 
 steps:
+  # The probe ships to each host's own python3, so it runs on the oldest it supports too.
+  - name: test-3.10
+    image: python:3.10-slim-bookworm
+    directory: tools/seat-keys
+    commands:
+      - pip install --no-cache-dir pytest==9.0.3
+      - python3 -m pytest -q -p no:cacheprovider test_seat_keys.py
   - name: test
     image: python:3.12-slim-bookworm
     directory: tools/seat-keys
