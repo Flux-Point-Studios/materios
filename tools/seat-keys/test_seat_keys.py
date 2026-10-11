@@ -293,16 +293,16 @@ def test_an_authority_whose_chain_cannot_be_told_refuses(host, databases, held):
     # V2: the second authority's <config>/db links into a tree named for another chain. The kernel names the open
     # file by its resolved path, which would credit it to that chain and hide a second authority on this one.
     (["node", "--validator", "--base-path", "/srv/b"], ("/srv/x/chains/materios_preprod_v5",),
-     "holds a chain database open at /srv/x/chains/materios_preprod_v5/db/full/LOCK, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
+     "holds a chain database open at /srv/x/chains/materios_preprod_v5/db/full/[^,]+, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
     # V2b: its base path itself is a link, so even the right chain id resolves elsewhere.
     (["node", "--validator", "--base-path", "/srv/b"], (f"/mnt/real/chains/{CHAIN_ID}",),
-     f"holds a chain database open at /mnt/real/chains/{CHAIN_ID}/db/full/LOCK, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
+     f"holds a chain database open at /mnt/real/chains/{CHAIN_ID}/db/full/[^,]+, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
     # V2b, a mount named /db: what follows the base path's length must not be read as a chain id.
     (["node", "--validator", "--base-path", "/srv/b"], (f"/db/chains/{CHAIN_ID}",),
-     f"holds a chain database open at /db/chains/{CHAIN_ID}/db/full/LOCK, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
+     f"holds a chain database open at /db/chains/{CHAIN_ID}/db/full/[^,]+, not at /srv/b/chains/<id>/db or paritydb under its --base-path"),
     # A database nested deeper inside the base path's chains is not where the node keeps its own.
     (["node", "--validator", "--base-path", "/srv/b"], (f"/srv/b/chains/{CHAIN_ID}/sub/chains/{CHAIN_ID}",),
-     f"holds a chain database open at /srv/b/chains/{CHAIN_ID}/sub/chains/{CHAIN_ID}/db/full/LOCK, not at "
+     f"holds a chain database open at /srv/b/chains/{CHAIN_ID}/sub/chains/{CHAIN_ID}/db/full/[^,]+, not at "
      "/srv/b/chains/<id>/db or paritydb under its --base-path"),
     # V3: no --base-path, so there is nothing to match its open database against.
     (["node", "--validator", "--chain", "preprod"], (f"/root/.local/share/node/chains/{CHAIN_ID}",),
@@ -316,7 +316,20 @@ def test_an_authority_whose_database_is_not_under_its_own_base_path_refuses(host
     host.key(KEYSTORE, "aura", AURA_A)
     host.process(1, validator_argv())
     host.process(2, argv, databases=databases)
-    with pytest.raises(sk.SeatKeyError, match="^process 2 \\(node\\) " + re.escape(reason) + "$"):
+    with pytest.raises(sk.SeatKeyError, match="^process 2 \\(node\\) " + re.escape(reason).replace(re.escape("[^,]+"), "[^,]+") + "$"):
+        host.probe("aura")
+
+
+def test_a_refusal_names_the_lowest_numbered_open_file(host, monkeypatch):
+    # /proc lists a process's descriptors in no set order; the probe reads them by number, so a refusal names
+    # the same file on every filesystem. Descriptors 9 and 10 tell numeric order from string order.
+    host.key(KEYSTORE, "aura", AURA_A)
+    host.process(1, validator_argv())
+    fd = host.process(2, ["node", "--validator", "--base-path", "/srv/b"], databases=("/srv/x/chains/materios_preprod_v5",),
+                      files=("/dev/zero", "/dev/zero", "/dev/zero", "/dev/zero")) / "fd"
+    listdir = os.listdir
+    monkeypatch.setattr(os, "listdir", lambda p: sorted(listdir(p), key=int, reverse=True) if p == fd else listdir(p))
+    with pytest.raises(sk.SeatKeyError, match="open at /srv/x/chains/materios_preprod_v5/db/full/LOCK, not at"):
         host.probe("aura")
 
 

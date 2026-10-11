@@ -98,7 +98,7 @@ def running_chain_id(proc_dir: Path, argv: list[str]) -> str:
     fd_dir = proc_dir / "fd"
     links = []
     try:
-        for fd in os.listdir(fd_dir):
+        for fd in sorted(os.listdir(fd_dir), key=int):
             try:
                 links.append(os.readlink(fd_dir / fd))
             except FileNotFoundError:
