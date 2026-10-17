@@ -1,0 +1,99 @@
+    Checking typenum v1.20.1
+    Checking subtle v2.6.1
+    Checking rand_core v0.6.4
+    Checking zerocopy v0.8.63
+    Checking generic-array v0.14.7
+    Checking crypto-common v0.1.7
+    Checking zeroize v1.9.1
+    Checking num-traits v0.2.19
+    Checking cfg-if v1.0.5
+    Checking num-integer v0.1.47
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking num-bigint v0.4.8
+    Checking either v1.19.0
+    Checking itertools v0.10.5
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.8
+    Checking inout v0.1.4
+    Checking cipher v0.4.4
+    Checking ff v0.13.1
+    Checking once_cell v1.21.4
+    Checking ark-std v0.4.0
+    Checking constant_time_eq v0.4.2
+    Checking arrayvec v0.7.8
+    Checking ark-serialize v0.4.2
+    Checking ahash v0.8.12
+    Checking ark-ff v0.4.2
+    Checking group v0.13.0
+    Checking tracing-core v0.1.36
+    Checking pin-project-lite v0.2.17
+    Checking tap v1.0.1
+    Checking wyz v0.5.1
+    Checking tracing v0.1.44
+    Checking radium v0.7.0
+    Checking hashbrown v0.13.2
+    Checking blake2b_simd v1.0.5
+    Checking funty v2.0.0
+    Checking scopeguard v1.2.0
+    Checking lock_api v0.4.14
+    Checking bitvec v1.1.1
+    Checking bls12_381 v0.8.0
+    Checking universal-hash v0.5.1
+    Checking static_assertions v1.1.0
+    Checking opaque-debug v0.3.1
+    Checking poly1305 v0.8.0
+    Checking pasta_curves v0.5.2
+    Checking ark-poly v0.4.2
+    Checking ark-relations v0.4.0
+    Checking jubjub v0.10.0
+    Checking spin v0.9.9
+    Checking ark-ec v0.4.2
+    Checking chacha20 v0.9.1
+    Checking aead v0.5.2
+    Checking hex v0.4.3
+    Checking byteorder v1.5.0
+    Checking reddsa v0.5.2
+    Checking chacha20poly1305 v0.10.1
+    Checking ark-snark v0.4.0
+    Checking libm v0.2.16
+    Checking zcash_spec v0.2.1
+    Checking cbc v0.1.2
+    Checking sha2 v0.10.9
+    Checking blake2 v0.10.6
+    Checking bech32 v0.11.1
+    Checking memchr v2.8.3
+    Checking memuse v0.2.2
+    Checking core2 v0.3.3 (/home/deci/work/wt-materios-zk-p0/tools/zk-spec/vendor/core2)
+    Checking zip32 v0.2.1
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+warning: `core2` (lib) generated 2 warnings
+    Checking ark-crypto-primitives v0.4.0
+    Checking fpe v0.6.1
+    Checking zcash_note_encryption v0.4.2
+    Checking redjubjub v0.8.0
+    Checking lazy_static v1.5.0
+    Checking blake2s_simd v1.0.5
+    Checking aes v0.8.4
+    Checking incrementalmerkletree v0.8.2
+    Checking ark-groth16 v0.4.0
+    Checking sapling-crypto v0.5.0
+    Checking ark-bls12-381 v0.4.0
+    Checking lol_alloc v0.4.1
+    Checking materios-zk-core v0.1.0 (/home/deci/work/wt-materios-zk-p0/tools/zk-spec/core)
+    Checking materios-zk-wasm v0.1.0 (/home/deci/work/wt-materios-zk-p0/tools/zk-spec/wasm)
+    Finished `release` profile [optimized] target(s) in 17.48s

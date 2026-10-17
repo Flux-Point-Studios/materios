@@ -26,8 +26,16 @@ Run heavy work serially under `nice -n 10` with two Cargo jobs and
 ## Progress
 
 - Phase selector: test-first RED (missing implementation), then GREEN.
-- P0 runtime driver and primitives: implementation pending.
-- Hosted CI and independent CTO review: pending.
+- Real Rust driver, standalone no_std Sapling verifier and Rust/Aiken codec implemented.
+- `--full`: all six P0 checks GREEN; 45 Python tests and three core integration tests GREEN.
+- Wasm: 42 genuine proofs accepted, all 64,512 single-bit mutations rejected.
+- Complete-bundle measurements recorded on Gemtek and the M4 Pro MacBook.
+  Worst observed Gemtek call: 724.832242 ms, requiring fallback A. See
+  [P0 evidence](docs/native-zk-p0.md). P3's 100-bundle obligation remains open.
+- `--all`: six P0 GREEN checks; all 13 original later-phase checks RED with
+  missing implementation/evidence reasons. `c-motra-66` names AJ's missing tests.
+- Draft [PR #69](https://github.com/Flux-Point-Studios/materios/pull/69) tracks
+  hosted CI. Independent materios CTO review is required before further action.
 
 ## Lock commands
 

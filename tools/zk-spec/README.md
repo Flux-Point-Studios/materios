@@ -1,9 +1,57 @@
-# Executable RED acceptance contracts
+# Phase-aware native ZK acceptance contracts
+
+## Setup and replay
+
+Measured results, scope boundaries and raw captures are in
+[the P0 evidence report](../../docs/native-zk-p0.md).
+
+Run `tools/zk-spec/setup.sh`, then `scripts/harness.sh --full` or `--all` from
+this checkout. Setup installs only into ignored task artifacts and builds the
+runtime/core with two jobs at low priority. It requires Rust 1.85.0, Node,
+Python 3, Aiken 1.1.22 and the normal runtime build prerequisites. The no-egress
+check requires an available `unshare --net` privilege; on Gemtek it uses
+`sudo -n unshare --net runuser -u deci` and drops back to the caller before Cargo.
+It never changes host routes or firewall rules. Missing privileges fail.
+
+CI's new `zk-p0` workflow builds/tests the primitive and verifies the Wasm
+proof corpus without timing service hosts. The existing Rust workflow tests
+actual rebuilt-runtime metadata. The namespace-isolated build/test and Gemtek
+benchmark are recorded local acceptance runs, repeated by `--full`.
+
+## P0 execution
+
+`driver` is the Rust dispatcher. It calls the standalone `materios-zk-core`
+production primitive for bridge decoding and activation refusal; the Aiken CEK
+evaluator for codec assertions; the existing #494 structural gate on metadata
+extracted from the actual rebuilt runtime by pinned subwasm 0.21.3; and the
+no_std Wasm spike in Node/V8. Core build/tests run inside a new network namespace
+with a fresh target directory; Cargo must report newly compiled core artifacts.
+Every command exit and required artifact is checked. Unknown operations fail.
+
+P0 does not append or activate runtime pallets. The named mainnet target surface
+is derived from `node/src/command.rs::load_spec`: this source has no built-in
+mainnet builder, so all mainnet targets enter through the generic JSON-file
+route (plain or raw). The core refuses that route even when a file adopts the
+preprod id. The named preprod builder is a positive control. P5 must still prove
+the nonempty pallet cross product and all runtime activation routes.
+
+The P0 metadata baseline is an explicit pre-AJ source identity, with complete
+metadata extracted from an unchanged-source runtime build. It is not an approved
+genesis baseline. The spike measures full standalone 1-spend/2-output bundle
+verification, signatures, decoding and tree work. It does not claim production
+pool execution or the later 100-bundle reviewed-slowest-hardware obligation.
+
+`scripts/harness.sh --full` runs through CURRENT_PHASE in WORK.md. `--all`
+executes every original check and reports later-phase RED results. Original
+`contracts.py` is intentionally byte-identical to the first locked packet.
+
+The following contract describes the end-state driver operations; P0 only
+implements its distinctly named `p0-*` operations.
 
 Run from the repository root. Each packet `argv` is a literal argument array,
 not a shell command. The adapter forces Cargo artifacts into this checkout's
 `.zk-spec-target` and uses two build jobs with `nice -n 10`. Run heavy suites
-one at a time. No driver is included in this specification pass.
+one at a time. The P0 driver is included; later operations fail until implemented.
 
 `test_adapter.py` tests the adapter itself. `contracts.py` contains the semantic
 scaffolds. `check.py c-...` selects a nonempty suite and fails on any failure,
@@ -14,7 +62,7 @@ one passing, non-ignored result. Source names alone never produce GREEN.
 
 ## Future implementation adapter
 
-Add `tools/zk-spec/driver/Cargo.toml` with a locked Rust binary named
+The end-state implementation extends `tools/zk-spec/driver/Cargo.toml`, whose locked Rust binary is named
 `materios-zk-spec-driver`. It must depend on the actual production crates and
 instantiate their built runtime through the pinned Substrate Wasm executor.
 Do not copy state transition logic into the driver. Codec operations call actual

@@ -1,0 +1,20 @@
+when:
+  - event: push
+    branch: main
+  - event: pull_request
+
+labels:
+  arm64-emu: "true"
+
+steps:
+  - name: p0-primitives
+    image: rust:1.85.0-bookworm
+    commands:
+      - apt-get update -qq
+      - apt-get install -y --no-install-recommends python3 nodejs
+      - mkdir -p .zk-spec-scratch/aiken
+      - curl -fsSL https://github.com/aiken-lang/aiken/releases/download/v1.1.22/aiken-x86_64-unknown-linux-musl.tar.gz -o .zk-spec-scratch/aiken.tar.gz
+      - echo 'd443f9deab109fd75ae19e22f7dfce4cdd2f70b3f68c152a6a23db6bc1ea76e1  .zk-spec-scratch/aiken.tar.gz' | sha256sum -c -
+      - tar xzf .zk-spec-scratch/aiken.tar.gz -C .zk-spec-scratch/aiken
+      - install .zk-spec-scratch/aiken/aiken-x86_64-unknown-linux-musl/aiken /usr/local/bin/aiken
+      - tools/zk-spec/ci.sh

@@ -1,0 +1,16 @@
+test_core_build_and_real_tests_without_network (p0_contracts.CoreNoEgress.test_core_build_and_real_tests_without_network) ... ERROR
+
+======================================================================
+ERROR: test_core_build_and_real_tests_without_network (p0_contracts.CoreNoEgress.test_core_build_and_real_tests_without_network)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/p0_contracts.py", line 15, in test_core_build_and_real_tests_without_network
+    self.assertTrue(r['compiled_packages'])
+                    ~^^^^^^^^^^^^^^^^^^^^^
+KeyError: 'compiled_packages'
+
+----------------------------------------------------------------------
+Ran 1 test in 6.968s
+
+FAILED (errors=1)
+RED: selected=1 ran=1 skipped=0

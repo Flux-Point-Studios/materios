@@ -1,0 +1,12 @@
+error[E0432]: unresolved imports `materios_zk_core::activation`, `materios_zk_core::bridge`, `materios_zk_core::sapling`
+ --> .zk-spec-scratch/red/api.rs:1:24
+  |
+1 | use materios_zk_core::{activation, bridge, sapling};
+  |                        ^^^^^^^^^^  ^^^^^^  ^^^^^^^ no `sapling` in the root
+  |                        |           |
+  |                        |           no `bridge` in the root
+  |                        no `activation` in the root
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0432`.

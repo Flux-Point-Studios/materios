@@ -14,9 +14,7 @@ case "${1:---full}" in
     ;;
   --full|--all)
     bash "$zk_plugin_root/scripts/py.sh" specification.py --check
-    zk_adapter_relative="$(realpath --relative-to="$zk_plugin_root/scripts" tools/zk-spec/test_adapter.py)"
-    nice -n 10 bash "$zk_plugin_root/scripts/py.sh" "$zk_adapter_relative"
-    nice -n 10 python3 tools/zk-spec/test_phases.py
+    nice -n 10 python3 -m unittest discover -s tools/zk-spec -p 'test_*.py'
     zk_phase_args=()
     if [ "${1:---full}" = --all ]; then zk_phase_args+=(--all); fi
     nice -n 10 python3 tools/zk-spec/phases.py "${zk_phase_args[@]}"

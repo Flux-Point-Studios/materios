@@ -47,7 +47,7 @@ def run_argv(argv, root, timeout=300, input_text=None):
     except subprocess.TimeoutExpired as error:
         raise CheckFailure(f"timeout after {timeout}s: {argv[0]}") from error
     if result.returncode:
-        raise CheckFailure(f"command exit {result.returncode}: {argv[0]}")
+        raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
     return result.stdout
 
 
@@ -91,7 +91,7 @@ class Driver:
             run_argv(["nice", "-n", "10", "cargo", "+1.85.0", "build", "--locked", "--offline",
                       "--manifest-path", str(manifest)], self.root, timeout=1800)
             self.binary = self.root / ".zk-spec-target/debug/materios-zk-spec-driver"
-        output = run_argv([str(self.binary)], self.root, timeout=300,
+        output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
                           input_text=json.dumps({"version": 1, "operation": operation, "payload": payload}))
         try:
             response = json.loads(output, object_pairs_hook=driver_object)
@@ -117,8 +117,10 @@ def run_suite(suite, stream):
 
 def main():
     from contracts import SUITES
+    from p0_contracts import P0_SUITES
+    suites = {**SUITES, **P0_SUITES}
     parser = argparse.ArgumentParser()
-    parser.add_argument("check", choices=sorted([*SUITES, "c-motra-66"]))
+    parser.add_argument("check", choices=sorted([*suites, "c-motra-66"]))
     args = parser.parse_args()
     if Path.cwd().resolve() != ROOT:
         parser.error("run from the repository root")
@@ -126,7 +128,7 @@ def main():
         if args.check == "c-motra-66":
             motra66(ROOT)
             return 0
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(SUITES[args.check])
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(suites[args.check])
         return run_suite(suite, sys.stdout)
     except (CheckFailure, OSError, ValueError) as error:
         print(f"RED {args.check}: {error}", file=sys.stderr)

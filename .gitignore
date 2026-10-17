@@ -74,3 +74,4 @@ __pycache__/
 .zk-spec-scratch/
 tools/zk-spec/artifacts/
 tools/zk-spec/aiken/build/
+.claude/fluxpoint/
