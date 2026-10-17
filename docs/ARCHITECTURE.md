@@ -182,11 +182,40 @@ Three forces act on the MOTRA supply:
 
 **Generation** (adds to supply):
 
-- MOTRA is generated proportionally to an account's MATRA free balance
+- MOTRA is generated proportionally to the lowest MATRA free balance held throughout its checkpoint interval
 - Rate: `generation_per_matra_per_block` (configurable at genesis and via governance)
-- Formula per block: `matra_balance * rate / 10^12`
+- Formula: `held_matra * rate * elapsed_blocks / 10^6` (MATRA has six decimals)
 - Generation is credited lazily — the balance is reconciled on the next interaction
 - Tracked in `TotalIssued` (global cumulative counter)
+
+`AccrualCheckpoint` stores `(held_matra, start_block)`. The balances
+`MatraAccountStore` records every successful free-balance decrease, including
+transfers, reserves, holds, slashes and dust removal. This prevents moving MATRA
+out and back between reconciliations from restoring its earning history.
+First funding, including funding after a zero balance, starts a new interval at
+that block. Top-ups of a nonzero balance enter the earning base at the next
+reconciliation; earlier blocks use the lower balance. This deliberately
+under-credits holdings that changed during an interval instead of charging every
+MATRA mutation for MOTRA's decay loop. Reconcile before moving MATRA to realize
+the completed interval. The read-only RPC uses the same accounting function.
+
+The system account-creation hook initializes `LastTouched`, the separate decay
+clock. Re-funding an account does not reset decay of existing MOTRA. Accounts
+whose SCALE encoding starts with `modl` (PalletId sovereign accounts and their
+subaccounts) never generate MOTRA from MATRA. Delegation continues to route only
+new generation; it does not transfer existing MOTRA.
+
+Runtime spec 241 adds this map without changing existing storage encodings,
+call/event/error indices, `SignedExtra`, or transaction version 5. The pallet's
+storage-version 0→1 migration is constant-cost and lazy: legacy accounts have no
+checkpoint, so projection and their first reconciliation generate zero. That
+first reconciliation records their current balance and block, including accounts
+whose `LastTouched` is absent or zero. Subsequent intervals earn normally.
+Previously stored MOTRA remains subject to its existing decay clock, and
+delegations remain intact. Unreconciled pre-upgrade generation is discarded
+because its holding history cannot be proven. `try-runtime` verifies preservation
+of existing accounting state. The launch preflight permits only canonical
+genesis checkpoints at block zero, bounded by the account's actual free MATRA.
 
 **Decay** (reduces individual balances):
 
@@ -229,6 +258,10 @@ Both values are available via the `motra_getParams` RPC method and displayed on 
 - Delegation only affects **future** generation, not existing balances
 - Clear delegation with `set_delegatee(None)`
 - A single account can receive delegations from multiple delegators
+- A freshly funded account has no historical generation. For immediate first
+  fees, a sponsor sets `set_delegatee(Some(recipient))` and later reconciles its
+  own balance to credit the recipient. The recipient still pays through
+  `ChargeMotra`; delegation does not authorize charging the sponsor's balance.
 
 ### Design Rationale
 

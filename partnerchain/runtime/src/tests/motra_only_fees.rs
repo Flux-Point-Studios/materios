@@ -32,9 +32,7 @@ fn new_test_ext() -> TestExternalities {
 
     pallet_sidechain::GenesisConfig::<Runtime> {
         genesis_utxo: sidechain_domain::UtxoId::new(
-            hex_literal::hex!(
-                "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"
-            ),
+            hex_literal::hex!("abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"),
             0,
         ),
         slots_per_epoch: sidechain_slots::SlotsPerEpoch(7),
@@ -119,5 +117,91 @@ fn matra_total_issuance_conserved_across_n_extrinsics() {
             post_recipient.saturating_sub(pre_recipient), total_transferred,
             "recipient must gain exactly the sum transferred"
         );
+    });
+}
+
+#[test]
+fn fresh_funding_rpc_and_sponsored_first_fee() {
+    use frame_support::assert_ok;
+    use parity_scale_codec::{Decode, Encode};
+    use sp_runtime::traits::SignedExtension;
+
+    new_test_ext().execute_with(|| {
+        let recipient = sp_keyring::Sr25519Keyring::Eve.to_account_id();
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.generation_per_matra_per_block = 1_000;
+            p.min_fee = 20_000;
+            p.length_fee_per_byte = 0;
+            p.congestion_rate = 0;
+            p.decay_rate_per_block = sp_runtime::Perbill::one();
+            p.max_balance = u128::MAX;
+        });
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(fee_payer()),
+            recipient.clone().into(),
+            1_000_000,
+        ));
+        let rpc = || {
+            let encoded = crate::api::dispatch("MotraApi_motra_balance", &recipient.encode())
+                .expect("runtime API dispatch");
+            u128::decode(&mut &encoded[..]).expect("MOTRA response")
+        };
+        assert_eq!(Motra::last_touched(&recipient), 100);
+        assert_eq!(rpc(), 0);
+        let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+        let info = frame_support::dispatch::GetDispatchInfo::get_dispatch_info(&call);
+        assert!(pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&recipient, &call, &info, 0)
+            .is_err());
+        assert_ok!(Motra::set_delegatee(
+            RuntimeOrigin::signed(fee_payer()),
+            Some(recipient.clone())
+        ));
+        System::set_block_number(110);
+        let root = sp_io::storage::root(sp_runtime::StateVersion::V1);
+        assert_eq!(rpc(), 10_000);
+        assert_eq!(sp_io::storage::root(sp_runtime::StateVersion::V1), root);
+        assert_ok!(Motra::reconcile(&recipient), rpc());
+        assert!(pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&recipient, &call, &info, 0)
+            .is_err());
+        assert_ok!(Motra::reconcile(&fee_payer()));
+        let sponsored = Motra::motra_balance(&recipient);
+        assert!(sponsored > 10_000);
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&recipient, &call, &info, 0));
+        assert_eq!(Motra::motra_balance(&recipient), sponsored - 20_000);
+    });
+}
+
+#[test]
+fn sovereign_pots_and_subaccounts_do_not_generate_motra() {
+    use frame_support::assert_ok;
+    use sp_runtime::traits::AccountIdConversion;
+
+    new_test_ext().execute_with(|| {
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.generation_per_matra_per_block = 1_000;
+            p.max_balance = u128::MAX;
+        });
+        let pot = PalletId(*b"test/pot");
+        let accounts: [AccountId; 2] = [
+            pot.into_account_truncating(),
+            pot.into_sub_account_truncating(42u32),
+        ];
+        System::set_block_number(100);
+        for account in &accounts {
+            assert_ok!(Balances::transfer_keep_alive(
+                RuntimeOrigin::signed(fee_payer()),
+                sp_runtime::MultiAddress::Id(account.clone()),
+                1_000_000,
+            ));
+        }
+        System::set_block_number(200);
+        for account in accounts {
+            assert_eq!(Motra::projected_balance(&account), 0);
+            assert_ok!(Motra::reconcile(&account), 0);
+        }
     });
 }

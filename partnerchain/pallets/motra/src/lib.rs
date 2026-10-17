@@ -3,9 +3,11 @@
 extern crate alloc;
 
 pub use pallet::*;
+mod account_store;
 pub mod fee;
 pub mod types;
 pub mod weights;
+pub use account_store::MatraAccountStore;
 
 #[cfg(test)]
 mod tests;
@@ -22,7 +24,10 @@ pub mod pallet {
     use crate::types::MotraParams;
     use crate::weights::WeightInfo;
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     #[pallet::config]
@@ -81,6 +86,11 @@ pub mod pallet {
     #[pallet::getter(fn insufficient_motra_failures)]
     pub type InsufficientMotraFailures<T: Config> = StorageValue<_, u64, ValueQuery>;
 
+    /// Lowest free MATRA held since the checkpoint block. Missing means no proven history.
+    #[pallet::storage]
+    pub type AccrualCheckpoint<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, (u128, BlockNumberFor<T>), OptionQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -122,6 +132,37 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_runtime_upgrade() -> Weight {
+            if StorageVersion::get::<Self>() == StorageVersion::new(0) {
+                // Legacy accounts have no checkpoint and earn nothing until their first touch.
+                // This makes migration constant-cost regardless of the account count.
+                StorageVersion::new(1).put::<Self>();
+            }
+            crate::account_store::checkpoint_weight::<T>()
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn pre_upgrade() -> Result<alloc::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
+            ensure!(
+                StorageVersion::get::<Self>() <= STORAGE_VERSION,
+                "unexpected MOTRA version"
+            );
+            Ok(Self::accounting_state())
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn post_upgrade(state: alloc::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+            ensure!(
+                StorageVersion::get::<Self>() == StorageVersion::new(1),
+                "MOTRA version not migrated"
+            );
+            ensure!(
+                Self::accounting_state() == state,
+                "migration changed existing MOTRA state"
+            );
+            Ok(())
+        }
+
         /// At end of each block, adjust congestion_rate based on block fullness.
         fn on_finalize(_n: BlockNumberFor<T>) {
             Self::adjust_congestion_rate();
@@ -221,34 +262,55 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        #[cfg(feature = "try-runtime")]
+        fn accounting_state() -> alloc::vec::Vec<u8> {
+            (
+                LastTouched::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                MotraBalances::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                Delegatees::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                AccrualCheckpoint::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                Params::<T>::get(),
+                TotalIssued::<T>::get(),
+                TotalBurned::<T>::get(),
+                InsufficientMotraFailures::<T>::get(),
+            )
+                .encode()
+        }
+
+        fn accrual(who: &T::AccountId, params: &MotraParams) -> (u128, u128) {
+            let now = frame_system::Pallet::<T>::block_number();
+            let last = LastTouched::<T>::get(who);
+            let elapsed: u64 = now.saturating_sub(last).try_into().unwrap_or(u64::MAX);
+            let decayed = Self::apply_decay_iterative(
+                MotraBalances::<T>::get(who),
+                params.decay_rate_per_block,
+                elapsed,
+            );
+            // PalletId accounts and subaccounts carry the SCALE type prefix `modl`.
+            let generated = if who.encode().starts_with(b"modl") {
+                0
+            } else if let Some((held, since)) = AccrualCheckpoint::<T>::get(who) {
+                let blocks: u64 = now
+                    .saturating_sub(since.max(last))
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                held.min(Self::get_matra_balance(who))
+                    .saturating_mul(params.generation_per_matra_per_block)
+                    .saturating_mul(blocks as u128)
+                    / 1_000_000
+            } else {
+                0
+            };
+            (decayed, generated)
+        }
+
         /// Read-only projection of what the MOTRA balance would be if reconciled now.
         ///
         /// Unlike `reconcile()`, this does NOT write to storage. Used by RPC queries
         /// so that freshly funded accounts show their projected balance immediately.
         pub fn projected_balance(who: &T::AccountId) -> u128 {
-            let current_block = frame_system::Pallet::<T>::block_number();
-            let last = LastTouched::<T>::get(who);
             let params = Params::<T>::get();
-
-            let elapsed: u64 = current_block
-                .saturating_sub(last)
-                .try_into()
-                .unwrap_or(u64::MAX);
-
-            let stored = MotraBalances::<T>::get(who);
-            if elapsed == 0 {
-                return stored;
-            }
-
-            let decayed = Self::apply_decay_iterative(stored, params.decay_rate_per_block, elapsed);
-
-            let matra_balance: u128 = Self::get_matra_balance(who);
-            // MATRA has 6 decimals; normalize to compute generated MOTRA.
-            let generated = matra_balance
-                .saturating_mul(params.generation_per_matra_per_block)
-                .saturating_mul(elapsed as u128)
-                / 1_000_000u128;
-
+            let (decayed, generated) = Self::accrual(who, &params);
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
             if &generation_target == who {
                 decayed.saturating_add(generated).min(params.max_balance)
@@ -263,31 +325,18 @@ pub mod pallet {
         /// This is called on every fee payment and explicit claim.
         pub fn reconcile(who: &T::AccountId) -> Result<u128, DispatchError> {
             let current_block = frame_system::Pallet::<T>::block_number();
-            let last = LastTouched::<T>::get(who);
+            let matra = Self::get_matra_balance(who);
             let params = Params::<T>::get();
-
-            let elapsed: u64 = current_block
-                .saturating_sub(last)
-                .try_into()
-                .unwrap_or(u64::MAX);
-
-            if elapsed == 0 {
-                return Ok(MotraBalances::<T>::get(who));
-            }
-
             let old_balance = MotraBalances::<T>::get(who);
-
-            let decayed_balance =
-                Self::apply_decay_iterative(old_balance, params.decay_rate_per_block, elapsed);
-
+            if LastTouched::<T>::get(who) == current_block
+                && AccrualCheckpoint::<T>::get(who).is_some_and(|(held, _)| held == matra)
+                && old_balance <= params.max_balance
+            {
+                return Ok(old_balance);
+            }
+            crate::account_store::charge_checkpoint_weight::<T>();
+            let (decayed_balance, generated) = Self::accrual(who, &params);
             let decay_amount = old_balance.saturating_sub(decayed_balance);
-
-            // MATRA has 6 decimals; normalize to compute generated MOTRA.
-            let matra_balance: u128 = Self::get_matra_balance(who);
-            let generated = matra_balance
-                .saturating_mul(params.generation_per_matra_per_block)
-                .saturating_mul(elapsed as u128)
-                / 1_000_000u128;
 
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
 
@@ -301,6 +350,7 @@ pub mod pallet {
 
             MotraBalances::<T>::insert(who, new_self_balance);
             LastTouched::<T>::insert(who, current_block);
+            AccrualCheckpoint::<T>::insert(who, (matra, current_block));
 
             if &generation_target != who && generated > 0 {
                 let delegatee_balance = MotraBalances::<T>::get(&generation_target);
@@ -383,10 +433,15 @@ pub mod pallet {
         /// TxFee = min_fee + congestion_rate * (ref_time / 1_000_000) + length_fee_per_byte * len
         pub fn compute_fee(weight: frame_support::weights::Weight, len: usize) -> u128 {
             let params = Params::<T>::get();
-            let weight_component =
-                params.congestion_rate.saturating_mul(weight.ref_time() as u128) / 1_000_000u128;
+            let weight_component = params
+                .congestion_rate
+                .saturating_mul(weight.ref_time() as u128)
+                / 1_000_000u128;
             let length_fee = params.length_fee_per_byte.saturating_mul(len as u128);
-            params.min_fee.saturating_add(weight_component).saturating_add(length_fee)
+            params
+                .min_fee
+                .saturating_add(weight_component)
+                .saturating_add(length_fee)
         }
 
         /// Adjust congestion rate based on block fullness using EMA smoothing.

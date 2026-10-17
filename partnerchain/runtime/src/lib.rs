@@ -201,7 +201,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 240,
+    spec_version: 241,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 5,
@@ -263,6 +263,7 @@ impl frame_system::Config for Runtime {
     type Hash = Hash;
     type AccountId = AccountId;
     type AccountData = pallet_balances::AccountData<Balance>;
+    type OnNewAccount = Motra;
     type Version = Version;
     type BaseCallFilter = root_gate::SudoRootGate;
 }
@@ -328,7 +329,7 @@ impl pallet_balances::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type DustRemoval = ();
     type ExistentialDeposit = ExistentialDeposit;
-    type AccountStore = System;
+    type AccountStore = pallet_motra::MatraAccountStore<Runtime>;
     type WeightInfo = pallet_balances::weights::SubstrateWeight<Runtime>;
     type FreezeIdentifier = ();
     type MaxFreezes = ConstU32<0>;

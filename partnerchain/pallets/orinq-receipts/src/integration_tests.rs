@@ -45,6 +45,7 @@ impl frame_system::Config for Test {
     type AccountId = MockAccountId;
     type Lookup = IdentityLookup<Self::AccountId>;
     type AccountData = pallet_balances::AccountData<u128>;
+    type OnNewAccount = Motra;
 }
 
 parameter_types! {
@@ -85,7 +86,7 @@ impl pallet_balances::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type DustRemoval = ();
     type ExistentialDeposit = ExistentialDeposit;
-    type AccountStore = System;
+    type AccountStore = pallet_motra::MatraAccountStore<Test>;
     type WeightInfo = ();
     type FreezeIdentifier = ();
     type MaxFreezes = ConstU32<0>;

@@ -4,10 +4,7 @@ use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
     traits::{ConstU32, Hooks},
 };
-use sp_runtime::{
-    traits::IdentityLookup,
-    BuildStorage, Perbill,
-};
+use sp_runtime::{traits::IdentityLookup, BuildStorage, Perbill};
 
 // ---------------------------------------------------------------------------
 // Mock runtime
@@ -30,6 +27,7 @@ impl frame_system::Config for Test {
     type AccountId = u64;
     type Lookup = IdentityLookup<Self::AccountId>;
     type AccountData = pallet_balances::AccountData<u128>;
+    type OnNewAccount = Motra;
 }
 
 parameter_types! {
@@ -52,7 +50,7 @@ impl pallet_balances::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type DustRemoval = ();
     type ExistentialDeposit = ExistentialDeposit;
-    type AccountStore = System;
+    type AccountStore = crate::MatraAccountStore<Test>;
     type WeightInfo = ();
     type FreezeIdentifier = ();
     type MaxFreezes = ConstU32<0>;
@@ -76,8 +74,8 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     pallet_balances::GenesisConfig::<Test> {
         balances: vec![
             (1, 1_000_000_000_000_000), // 1000 MATRA (12 decimals)
-            (2, 500_000_000_000_000),    // 500 MATRA
-            (3, 1),                      // minimal MATRA (must be >= existential deposit)
+            (2, 500_000_000_000_000),   // 500 MATRA
+            (3, 1),                     // minimal MATRA (must be >= existential deposit)
         ],
     }
     .assimilate_storage(&mut t)
@@ -358,7 +356,10 @@ fn congestion_rate_stays_zero_when_blocks_empty() {
         run_to_block(10);
 
         let after = Motra::params().congestion_rate;
-        assert_eq!(after, 0, "Congestion rate should stay at 0 for empty blocks");
+        assert_eq!(
+            after, 0,
+            "Congestion rate should stay at 0 for empty blocks"
+        );
     });
 }
 
@@ -498,7 +499,10 @@ fn genesis_params_are_set() {
         assert_eq!(params.min_fee, 1_000);
         assert_eq!(params.congestion_rate, 0);
         assert_eq!(params.target_fullness, Perbill::from_percent(50));
-        assert_eq!(params.decay_rate_per_block, Perbill::from_parts(999_000_000));
+        assert_eq!(
+            params.decay_rate_per_block,
+            Perbill::from_parts(999_000_000)
+        );
         assert_eq!(params.generation_per_matra_per_block, 1_000);
         assert_eq!(params.max_balance, 1_000_000_000_000_000);
         assert_eq!(params.max_congestion_step, 500);
@@ -538,7 +542,12 @@ fn large_extrinsic_pays_proportional_length_fee() {
             10_000,
         );
         // Same weight, bigger length = bigger fee
-        assert!(large_fee > small_fee, "Larger extrinsic should cost more: {} vs {}", large_fee, small_fee);
+        assert!(
+            large_fee > small_fee,
+            "Larger extrinsic should cost more: {} vs {}",
+            large_fee,
+            small_fee
+        );
     });
 }
 
@@ -559,5 +568,327 @@ fn total_burned_tracks_fee_burns() {
 
         assert_ok!(pallet_motra::Pallet::<Test>::burn_fee(&1, 30_000));
         assert_eq!(Motra::total_burned(), 80_000);
+    });
+}
+
+#[test]
+fn accrual_fresh_account_starts_at_funding() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        System::set_block_number(110);
+        assert_ok!(Motra::reconcile(&10));
+        assert_eq!(Motra::motra_balance(&10), 10_000);
+    });
+}
+
+#[test]
+fn accrual_cycling_ten_accounts_cannot_multiply_generation() {
+    new_test_ext().execute_with(|| {
+        pallet::Params::<Test>::mutate(|p| p.decay_rate_per_block = Perbill::one());
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            30,
+            1_000_000
+        ));
+        let mut generated = 0;
+        for who in 10..20 {
+            System::set_block_number(101 + who - 10);
+            assert_ok!(Motra::reconcile(&who));
+            generated += Motra::motra_balance(&who);
+            if who < 19 {
+                assert_ok!(Balances::transfer_allow_death(
+                    RuntimeOrigin::signed(who),
+                    who + 1,
+                    1_000_000
+                ));
+            }
+        }
+        assert_ok!(Motra::reconcile(&30));
+        assert_eq!(generated, 10_000);
+        assert!(generated <= 10_000, "cycling generated {generated}");
+        assert!(generated <= Motra::motra_balance(&30));
+    });
+}
+
+#[test]
+fn accrual_top_up_does_not_backdate_holdings() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert_ok!(Motra::reconcile(&10));
+        let before = Motra::motra_balance(&10);
+        System::set_block_number(110);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            9_000_000
+        ));
+        assert_ok!(Motra::reconcile(&10));
+        assert!(Motra::motra_balance(&10) <= before + 10_000);
+    });
+}
+
+#[test]
+fn accrual_sovereign_accounts_never_generate() {
+    use sp_runtime::traits::AccountIdConversion;
+    new_test_ext().execute_with(|| {
+        let who: u64 = frame_support::PalletId(*b"testfund").into_account_truncating();
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            who,
+            1_000_000
+        ));
+        assert_ok!(Motra::reconcile(&who));
+        System::set_block_number(100);
+        assert_eq!(Motra::projected_balance(&who), 0);
+        assert_ok!(Motra::reconcile(&who));
+        assert_eq!(Motra::motra_balance(&who), 0);
+    });
+}
+
+#[test]
+fn accrual_projection_matches_safe_reconciliation() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        System::set_block_number(110);
+        let projected = Motra::projected_balance(&10);
+        assert!(
+            projected <= 10_000,
+            "projection backdated funding: {projected}"
+        );
+        assert_eq!(Motra::reconcile(&10), Ok(projected));
+    });
+}
+
+#[test]
+fn accrual_account_creation_initializes_clock() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        System::inc_sufficients(&10);
+        assert_eq!(Motra::last_touched(&10), 100);
+    });
+}
+
+#[test]
+fn accrual_round_trip_cannot_restore_spent_interval() {
+    new_test_ext().execute_with(|| {
+        pallet::Params::<Test>::mutate(|p| p.decay_rate_per_block = Perbill::one());
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_001
+        ));
+        assert_ok!(Motra::reconcile(&10));
+        let before = Motra::motra_balance(&10);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(10),
+            11,
+            1_000_000
+        ));
+        System::set_block_number(110);
+        assert_ok!(Balances::transfer_allow_death(
+            RuntimeOrigin::signed(11),
+            10,
+            1_000_000
+        ));
+        assert_ok!(Motra::reconcile(&10));
+        assert_eq!(Motra::motra_balance(&10), before);
+    });
+}
+
+#[test]
+fn accrual_sovereign_cannot_generate_for_delegatee() {
+    use sp_runtime::traits::AccountIdConversion;
+    new_test_ext().execute_with(|| {
+        let who: u64 = frame_support::PalletId(*b"testfund").into_account_truncating();
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            who,
+            1_000_000
+        ));
+        assert_ok!(Motra::set_delegatee(RuntimeOrigin::signed(who), Some(10)));
+        let before = Motra::motra_balance(&10);
+        System::set_block_number(110);
+        assert_ok!(Motra::reconcile(&who));
+        assert_eq!(Motra::motra_balance(&10), before);
+    });
+}
+
+#[test]
+fn accrual_legacy_accounts_start_without_unproven_history() {
+    use frame_support::traits::StorageVersion;
+    new_test_ext().execute_with(|| {
+        for who in 1..=3 {
+            pallet::AccrualCheckpoint::<Test>::remove(who);
+        }
+        pallet::LastTouched::<Test>::remove(1);
+        pallet::LastTouched::<Test>::insert(2, 20);
+        pallet::MotraBalances::<Test>::insert(1, 20_000);
+        pallet::Delegatees::<Test>::insert(1, 3);
+        pallet::Params::<Test>::mutate(|p| p.decay_rate_per_block = Perbill::one());
+        StorageVersion::new(0).put::<Motra>();
+        System::set_block_number(1_000_000);
+        #[cfg(feature = "try-runtime")]
+        let pre = Motra::pre_upgrade().expect("legacy preflight");
+        Motra::on_runtime_upgrade();
+        #[cfg(feature = "try-runtime")]
+        Motra::post_upgrade(pre).expect("legacy postflight");
+        assert_eq!(StorageVersion::get::<Motra>(), StorageVersion::new(1));
+        assert_eq!(Motra::projected_balance(&1), 20_000);
+        assert_eq!(Motra::projected_balance(&2), 0);
+        assert_ok!(Motra::reconcile(&1), 20_000);
+        assert_ok!(Motra::reconcile(&2), 0);
+        assert_eq!(Motra::last_touched(&1), 1_000_000);
+        assert_eq!(Motra::motra_balance(&3), 0);
+        assert_eq!(Motra::delegatee(&1), Some(3));
+        let root = sp_io::storage::root(sp_runtime::StateVersion::V1);
+        #[cfg(feature = "try-runtime")]
+        let repeated_pre = Motra::pre_upgrade().expect("already migrated preflight");
+        Motra::on_runtime_upgrade();
+        #[cfg(feature = "try-runtime")]
+        Motra::post_upgrade(repeated_pre).expect("already migrated postflight");
+        assert_eq!(sp_io::storage::root(sp_runtime::StateVersion::V1), root);
+        System::set_block_number(1_000_001);
+        assert_ok!(Motra::reconcile(&1));
+        assert_eq!(Motra::motra_balance(&3), 1_000_000_000_000);
+    });
+}
+
+#[test]
+fn accrual_refunding_preserves_decay_and_starts_at_new_funding() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        pallet::MotraBalances::<Test>::insert(10, 1_000_000);
+        assert_ok!(Balances::transfer_allow_death(
+            RuntimeOrigin::signed(10),
+            1,
+            1_000_000
+        ));
+        System::set_block_number(200);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert_eq!(Motra::last_touched(&10), 100);
+        let projected = Motra::projected_balance(&10);
+        assert!((850_000..950_000).contains(&projected));
+        assert_ok!(Motra::reconcile(&10), projected);
+        System::set_block_number(201);
+        assert_eq!(
+            Motra::projected_balance(&10),
+            Perbill::from_parts(999_000_000) * projected + 1_000
+        );
+    });
+}
+
+#[test]
+fn accrual_delayed_funding_does_not_backdate_to_system_creation() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        System::inc_sufficients(&10);
+        System::set_block_number(200);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert_eq!(Motra::projected_balance(&10), 0);
+        System::set_block_number(210);
+        assert_eq!(Motra::projected_balance(&10), 10_000);
+    });
+}
+
+#[test]
+fn accrual_failed_balance_mutation_preserves_checkpoint() {
+    new_test_ext().execute_with(|| {
+        let checkpoint = pallet::AccrualCheckpoint::<Test>::get(1);
+        assert_noop!(
+            Balances::transfer_keep_alive(RuntimeOrigin::signed(1), 10, u128::MAX),
+            sp_runtime::ArithmeticError::Underflow
+        );
+        assert_eq!(pallet::AccrualCheckpoint::<Test>::get(1), checkpoint);
+    });
+}
+
+#[test]
+fn accrual_hooks_account_for_database_work_even_with_default_db_weights() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        let weight = System::block_weight();
+        let normal = weight.get(frame_support::dispatch::DispatchClass::Normal);
+        assert!(normal.ref_time() >= 375_000_000);
+        assert!(normal.proof_size() >= 10_500);
+    });
+}
+
+#[test]
+fn accrual_projection_matches_reconcile_after_same_block_cap_change() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Motra::reconcile(&1));
+        pallet::Params::<Test>::mutate(|p| p.max_balance = 1);
+        assert_eq!(Motra::reconcile(&1), Ok(Motra::projected_balance(&1)));
+    });
+}
+
+#[test]
+fn accrual_first_funding_preserves_decay_of_prior_sponsorship() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Motra::set_delegatee(RuntimeOrigin::signed(1), Some(10)));
+        System::set_block_number(110);
+        assert_ok!(Motra::reconcile(&1));
+        assert!(!frame_system::Account::<Test>::contains_key(10));
+        System::set_block_number(200);
+        let before = Motra::projected_balance(&10);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert_eq!(Motra::projected_balance(&10), before);
+    });
+}
+
+#[test]
+fn accrual_reconcile_accounts_for_checkpoint_storage_work() {
+    new_test_ext().execute_with(|| {
+        let before = *System::block_weight().get(frame_support::dispatch::DispatchClass::Normal);
+        assert_ok!(Motra::reconcile(&1));
+        let after = *System::block_weight().get(frame_support::dispatch::DispatchClass::Normal);
+        let charged = after.saturating_sub(before);
+        assert!(charged.ref_time() >= 150_000_000);
+        assert!(charged.proof_size() >= 7_000);
     });
 }
