@@ -108,12 +108,11 @@ sp-storage = { workspace = true }
 sp-consensus-slots = { workspace = true }
 pallet-session = { workspace = true }
 log = { workspace = true }
-# The well-known development accounts, which a genesis may not make its
-# root-timelock guardian unless its sudo key is one too.
-sp-keyring = { workspace = true }
 
 [dev-dependencies]
 sp-io = { workspace = true }
+# Tests only: runtime code holding a development key fails the launch preflight.
+sp-keyring = { workspace = true, features = ["std"] }
 hex-literal = { workspace = true }
 proptest = { workspace = true }
 
@@ -129,7 +128,6 @@ std = [
     "sp-runtime/std",
     "sp-std/std",
     "sp-io/std",
-    "sp-keyring/std",
     "sp-version/std",
     "sp-genesis-builder/std",
     "sp-inherents/std",
@@ -189,7 +187,12 @@ std = [
     "pallet-session/std",
     "log/std",
 ]
+# The `development` genesis preset, which seats //Alice. The runtime a chain
+# spec carries leaves it off.
+dev-presets = []
 runtime-benchmarks = [
+    # frame-omni-bencher builds its genesis from the `development` preset.
+    "dev-presets",
     "frame-benchmarking/runtime-benchmarks",
     "frame-system-benchmarking/runtime-benchmarks",
     "frame-support/runtime-benchmarks",

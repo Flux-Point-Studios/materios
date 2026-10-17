@@ -654,8 +654,9 @@ SUBWASM=./subwasm python3 -m pytest test_launch_preflight.py
 
 The CLI tests run the real subwasm, a local server that answers like Kupo, one
 that answers JSON-RPC over HTTP and a WebSocket like a node or a filter, and a
-script that answers `export-blocks` like the node. The rule 8 tests against
-the real node take its path:
+script that answers `export-blocks` like the node. The tests against the real
+node take its path: rule 8's, and the clean launch carrying the runtime this
+tree builds, which rule 1 scans for well-known keys:
 
 ```
 MATERIOS_NODE=../../partnerchain/target/debug/materios-node SUBWASM=./subwasm \

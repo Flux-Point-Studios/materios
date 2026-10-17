@@ -309,7 +309,10 @@ a well-known sr25519 development account (`//Alice` to `//Ferdie`, their
 `//stash` accounts, `//One`, `//Two`) or there is no sudo key, as in the
 benchmarking preset. It refuses a guardian equal to the sudo key, and a
 development-account guardian unless the sudo key is one too, as on a
-development chain. The preprod spec names the keyholders' 3-of-3 multisig: an
+development chain. It knows those accounts by their blake2-256 hashes, and
+only a runtime built with `runtime-benchmarks` has the benchmarking preset,
+which seats `//Alice`, so the runtime a chain spec carries holds no
+development key. The preprod spec names the keyholders' 3-of-3 multisig: an
 account apart from the 2-of-3 sudo key, held by the same keyholders, which is
 enough to rehearse vetoes and co-signs but not to answer a stolen sudo key. A
 raw spec written by hand never passes through `build_state`; the mainnet

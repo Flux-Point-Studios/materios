@@ -19,11 +19,46 @@ use frame_support::{
     weights::{constants::RocksDbWeight, Weight},
 };
 use pallet_root_timelock::{CallClass, ClassifyCall, Guardian};
-use sp_keyring::Sr25519Keyring;
+use sp_core::hex2array;
 
 /// The ceiling on [`max_exempt_stall_delay`]: the delay the recorded
 /// recoveries and the recovery tooling use.
 pub const MAX_EXEMPT_STALL_DELAY: BlockNumber = 30;
+
+/// blake2-256 of each well-known sr25519 development account, in
+/// `sp_keyring::Sr25519Keyring` order. The runtime holds the hashes, not the
+/// keys: the mainnet launch preflight refuses runtime code that holds a
+/// well-known key.
+pub(crate) const DEVELOPMENT_ACCOUNT_HASHES: [[u8; 32]; 14] = [
+    // //Alice
+    hex2array!("2e3fb4c297a84c5cebc0e78257d213d0927ccc7596044c6ba013dd05522aacba"),
+    // //Bob
+    hex2array!("94772f97f5f6b539aac74e798bc395119f39603402d0c85bc9eda5dfc5ae2160"),
+    // //Charlie
+    hex2array!("77d14a2289dda9bbb32dd9313db096ef628101ac5bbb3b19301ede2c61915b89"),
+    // //Dave
+    hex2array!("c4a80eb5e32005323fb878ca749473d7e5f40d60ed5e74e887bc125a3659f258"),
+    // //Eve
+    hex2array!("54b75224d766c852ac60eb44e1329aec5058574ae8daf703d43bc2fbd9f33d6c"),
+    // //Ferdie
+    hex2array!("927407fbcfe5afa14bcfb44714a843c532f291a9c33612677cb9e0ae5e2bd5de"),
+    // //Alice//stash
+    hex2array!("4724e5390fcf0d08afc9608ff4c45df257266ae599ac7a32baba26155dcf4402"),
+    // //Bob//stash
+    hex2array!("9a9304efeee429067b2e8dfbcfd8a22d96f9d996a5d6daa02899b96bd7a667b1"),
+    // //Charlie//stash
+    hex2array!("a315ee9e56d2f3bb24992a1cff6617b0f7510628a15722b680c42c2be8bb7452"),
+    // //Dave//stash
+    hex2array!("024cd62ab7726e039438193d4bbd915427f2d7de85afbcf00bd16fadbcad6aed"),
+    // //Eve//stash
+    hex2array!("65d0de2c1f75d898c078307a00486016783280c8f3407db41dc9547d3e3d651e"),
+    // //Ferdie//stash
+    hex2array!("9ea52149af6b15f4d523ad4342f63089646e29232a1777737159c7bc84173597"),
+    // //One
+    hex2array!("ecedc68cce6769d8124a762f1e71d292795e56c49dbc91b33c1ad559347f6be4"),
+    // //Two
+    hex2array!("84c8c68174e6ccdec1c93f38ad1fd890215b930ac92a079ad67c7d24c5c87b06"),
+];
 
 /// The longest `Grandpa.note_stalled` delay the sudo key may set without
 /// waiting. The forced change it asks for is applied that many blocks after
@@ -49,7 +84,7 @@ pub fn ensure_guarded_genesis(genesis: &RuntimeGenesisConfig) -> Result<(), &'st
     genesis.root_timelock.ensure_guarded()?;
     let sudo = genesis.sudo.key.as_ref();
     let development = |who: &AccountId| {
-        Sr25519Keyring::iter().any(|dev| AccountId::from(<[u8; 32]>::from(dev)) == *who)
+        DEVELOPMENT_ACCOUNT_HASHES.contains(&sp_io::hashing::blake2_256(who.as_ref()))
     };
     let Some(guardian) = &genesis.root_timelock.guardian else {
         return if sudo.is_some_and(|key| !development(key)) {

@@ -429,6 +429,17 @@ def test_cli_passes_a_clean_launch_its_real_node_attests(clean, capsys, node, pi
     assert (code, out.strip()) == (0, "MAINNET LAUNCH PREFLIGHT: PASS")
 
 
+# The clean launch carrying the runtime this tree builds, the code a mainnet genesis carries, in place of preprod v6's,
+# with the System.LastRuntimeUpgrade build-spec writes for it: rule 1 scans that code for every well-known key.
+def test_cli_passes_a_clean_launch_carrying_the_runtime_this_tree_builds(clean, capsys, node, pin, preprod):
+    on_real_node(clean, node, pin)
+    built = lp.load_spec(str(preprod))
+    for key in (lp.CODE_KEY, lp.storage_key("System", "LastRuntimeUpgrade")):
+        clean.spec.storage[key] = built.storage[key]
+    code, out = clean.run(capsys)
+    assert (code, out.strip()) == (0, "MAINNET LAUNCH PREFLIGHT: PASS")
+
+
 def test_cli_refuses_the_red_teams_chain_built_into_the_real_node(clean, capsys, node, pin):
     on_real_node(clean, node, pin)
     base.with_node_argv(clean, ["--chain", "preprod"])
