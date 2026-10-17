@@ -21,19 +21,67 @@ caller/recipient clocks and intervals of 100,000, 1,000,000 and u32::MAX blocks.
 An additional legacy baseline read covers the fallback branch even when the
 longer two-clock benchmark uses an existing checkpoint.
 
-Paid transactions price the complete signed ref_time:
-`min_fee + R * (base_extrinsic + call_weight) / 1_000_000 + length_fee_per_byte * length`.
+Paid transactions price the complete signed ref_time, the feeless duty work
+the call commits validators to, and length as work:
+`min_fee + R * (base_extrinsic + call_weight + deferred_duty_weight + length * weight_per_byte) / 1_000_000 + length_fee_per_byte * length`,
+where `weight_per_byte` is the Normal ref_time budget over the Normal length
+budget.
 The signed base contains ExtrinsicBaseWeight and the complete MOTRA fee path.
 The flat minimum is an additional floor; it does not replace congestion pricing
 of the signed base. Arithmetic uses the SDK's wide rational multiplication.
-Post-dispatch refunds retain the signed base, minimum and length charge at the
-pre-dispatch rate, including at saturation. Credit is bounded by max_balance;
+Post-dispatch refunds retain the signed base, length work, minimum and length
+charge at the pre-dispatch rate, including at saturation; the deferred duty
+work is never refunded. Credit is bounded by max_balance;
 TotalBurned and FeeRefunded reflect only the amount actually credited.
 
 Paid pool priority is `min_fee + R * base_extrinsic / 1_000_000`, capped at
 u64::MAX-2. Length and refundable call declarations earn no extra priority.
 This deliberately gives equal priority to ordinary paid calls at a given R.
 The guardian remains at u64::MAX with its existing per-signer tag.
+
+R measures the fuller of two dimensions, each against its Normal budget and
+saturating at one. Weight is Normal plus Operational consumption: a block full
+of Normal traffic reads 100% as before, and Operational traffic, which may take
+the whole block beyond the Normal share, raises R as well. Length is the
+encoded bytes of every extrinsic, which all classes share. A block half full
+by each reads half full. Mandatory weight is excluded. The guardian's taken-first veto
+is excluded too: the fee extension moves its consumed weight to the Mandatory
+class after dispatch, leaving the block total unchanged.
+
+Operational-class calls are refused before payment, in pool validation and
+again in pre_dispatch, unless the guardian's veto takes them first or the
+runtime's `paid_operational::admits` names the signer's path. A call that fails
+before running keeps its declared weight, so an unnamed Operational call such
+as `Utility.with_weight` around `cancel_all`, or `System.kill_prefix` with a
+chosen key count, would otherwise fill the block for the minimum fee. The
+runtime test `operational_sweep_names_every_operational_call_and_wrapper`
+decodes every call variant and pins the Operational set and the wrapper set,
+so a new Operational call or wrapper fails CI until its path is decided.
+
+| Operational call | Who may pay for it |
+|---|---|
+| `RootTimelock.cancel`, `fast_track`, `cancel_all`, `approve` | The guardian, taken first |
+| `Sudo.sudo` | The sudo key, for calls `SudoRootGate` lets run at once |
+| `RootTimelock.enact` (inner Operational) | Anyone, for a ready, unexpired task with the matching hash |
+| `System.apply_authorized_upgrade` | Anyone, while that code is authorized; the unsigned path is unchanged |
+| `IntentSettlement` committee calls: `attest_intent`, `request_voucher`, `settle_claim`, `expire_policy_mirror`, `credit_deposit`, `settle_batch_atomic`, `attest_batch_intents`, `request_batch_vouchers`, `attest_settle`, `attest_batch_settle`, `attest_expire_policy` | An attestation committee member |
+| `IntentSettlement` keeper and watcher calls: `request_settle`, `request_batch_settle`, `request_expire_policy`, `post_settlement_bond`, `release_settlement_bond`, `slash_bad_settlement_evidence` | Anyone; bounded declared weight, metered by R |
+| `Utility.batch`, `batch_all`, `force_batch` | The signer, when non-empty and every inner call is admitted |
+| `Utility.as_derivative`, `Multisig.as_multi_threshold_1`, `Recovery.as_recovered` | As the derived, multisig or recovered account; a rescuer must be that account's proxy |
+| `System.set_heap_pages`, `set_code`, `set_code_without_checks`, `set_storage`, `kill_storage`, `kill_prefix`, `authorize_upgrade`, `authorize_upgrade_without_checks`; `Treasury.remove_approval`; `IntentSettlement.set_pool_utilization`, `set_min_signer_threshold`; `Utility.with_weight`, `dispatch_as`; `Sudo.sudo_unchecked_weight`, `sudo_as`; `RootTimelock.enact_approved` | Nobody: Root reaches them through the timelock or the exempt sudo path |
+
+Settlement committee duties stay paid at the flat paid priority. Each carries
+the full M-of-N signature bundle, so it is one transaction per settled item. A
+failed settlement attest leaves its item pending, so a feeless path would need
+the complete bundle verified in pool validation to stop free replays, and the
+pinned pallet's checks are internal and changing in settlement #55.
+
+Receipt submissions price the certification they trigger. For each
+`submit_receipt` or `submit_receipt_v2` a call carries, at any wrapper depth,
+the deferred duty weight at threshold `t` is `t` duty bases
+(ExtrinsicBaseWeight), `t - 1` non-threshold attests at the largest signer
+count before payout, and the payout attest with `t + 2` balance changes.
+Each submission's own weight also carries the threshold read this makes.
 
 Canonical committee attestation is a feeless validator duty at the fixed
 priority u64::MAX-1, independent of R and batch width. ChargeMotra calls the
@@ -47,7 +95,10 @@ a signer slot and would permit unlimited free retries. The dispatch's late
 certification no-op remains a backstop for paid wrappers and privileged paths.
 
 Nonempty Utility.batch and Utility.batch_all containing only direct attests
-receive the same policy and one tag per receipt. Mixed, nested and other wrappers
+receive the same policy and one tag per new attest. A batch may also carry
+stale attests, for a certified receipt or one this member already signed,
+which dispatch as benign no-ops, but no more of them than new ones; a batch
+with no new attest is refused. Mixed, nested and other wrappers
 retain paid behavior; no arbitrary inner call inherits the exemption. A pure
 batch cannot certify or remove a member for a different inner receipt before
 its turn: receipt IDs are unique and every hash is canonical. Pre-dispatch
@@ -176,35 +227,71 @@ RocksDB and import/commit work and is not evidence of full block-import latency.
 
 Fees below are MOTRA (15 decimals). Length is the SCALE-encoded signed
 extrinsic length with an sr25519 signature, immortal era and nonce zero.
-These calls have no fee refund beyond the duty exemption; fee equals escrow.
-Non-members are invalid before payment. At R=0, only minimum and length remain.
+Where two figures appear, the first is the fee after the post-dispatch refund
+and the second the escrow taken before dispatch; elsewhere they are equal.
+Non-members and the Operational stuffer (`Utility.with_weight` around
+`cancel_all` from a non-guardian) are invalid before payment. At R=0, only
+minimum and length remain. `submit_receipt` is priced with the certification
+of a 3-member committee at threshold 2. Since length is priced as work, a
+transfer at R=1e9 costs 0.001684018191, 3.25% above round five's 0.001630994.
 
-| R | Call | Bytes | Fee / escrow (MOTRA) | Priority |
-|---:|---|---:|---:|---:|
+| R | Call | Bytes | Fee (MOTRA) | Priority |
+|---|---|---:|---:|---:|
 | 0 | transfer | 139 | 0.000001139 | 1000000000 |
 | 0 | remark | 106 | 0.000001106 | 1000000000 |
 | 0 | attest_member | 169 | 0 | 18446744073709551614 |
 | 0 | attest_non_member | 169 | Rejected | — |
+| 0 | submit_receipt | 395 | 0.000001395 | 1000000000 |
 | 0 | claim | 105 | 0.000001105 | 1000000000 |
 | 0 | set_delegatee | 138 | 0.000001138 | 1000000000 |
-| 1,000,000,000 | transfer | 139 | 0.001630994 | 1294926000000 |
-| 1,000,000,000 | remark | 106 | 0.001296169744 | 1294926000000 |
+| 0 | Operational stuffer | 114 | Rejected | — |
+| 1,000,000,000 | transfer | 139 | 0.001684018191 | 1294926000000 |
+| 1,000,000,000 | remark | 106 | 0.001336605458 | 1294926000000 |
 | 1,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 1,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 1,000,000,000 | claim | 105 | 0.002342045 | 1294926000000 |
-| 1,000,000,000 | set_delegatee | 138 | 0.002443721 | 1294926000000 |
-| 50,000,000,000 | transfer | 139 | 0.081493889 | 64697300000000 |
-| 50,000,000,000 | remark | 106 | 0.0647542932 | 64697300000000 |
+| 1,000,000,000 | submit_receipt | 395 | 0.003323116122 / 0.003472001122 | 1294926000000 |
+| 1,000,000,000 | claim | 105 | 0.002382099245 | 1294926000000 |
+| 1,000,000,000 | set_delegatee | 138 | 0.002496363722 | 1294926000000 |
+| 1,000,000,000 | Operational stuffer | 114 | Rejected | — |
+| 50,000,000,000 | transfer | 139 | 0.08414509855 | 64697300000000 |
+| 50,000,000,000 | remark | 106 | 0.0667760789 | 64697300000000 |
 | 50,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 50,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 50,000,000,000 | claim | 105 | 0.117048105 | 64697300000000 |
-| 50,000,000,000 | set_delegatee | 138 | 0.122130288 | 64697300000000 |
+| 50,000,000,000 | submit_receipt | 395 | 0.1660874511 / 0.1735317011 | 64697300000000 |
+| 50,000,000,000 | claim | 105 | 0.11905081725 | 64697300000000 |
+| 50,000,000,000 | set_delegatee | 138 | 0.1247624241 | 64697300000000 |
+| 50,000,000,000 | Operational stuffer | 114 | Rejected | — |
+
+Length is a priced and metered dimension. A byte of signed extrinsic stands
+for the Normal ref_time budget over the Normal length budget
+(1.5e12 / 3,932,160, 381,469 ref_time per byte), so a block filled by either
+dimension costs alike, and R reads the fuller of the two.
 
 The 1,000-full-block empty-remark simulation reaches R=50,000,000,000 at a total
-cost of 37455.9095174112 MOTRA, with the same R-priced signed-weight formula as a
-transfer at every step. A zero-MOTRA member then certifies a receipt through
-the fee extension and runtime dispatch. Regressions also reproduce and close
-priority inflation from early-failing Utility batches and multisig max_weight.
+cost of 38,868.07 MOTRA at 128 bytes per remark, with the same R-priced
+formula as a transfer at every step. A zero-MOTRA member then certifies a
+receipt through the fee extension and runtime dispatch. Regressions also
+reproduce and close priority inflation from early-failing Utility batches and
+multisig max_weight.
+
+Stuffers from R=0 over 1,000 blocks, each admitted as the author would admit
+it (`stuffers_of_weight_or_length_ramp_r_like_the_remark_ramp`). Each must
+raise R at least as fast as the remark ramp at every block and cost the same
+order:
+
+| Stuffer | Bytes | Weight share | Length share | Final R | Cost (MOTRA) |
+|---|---:|---:|---:|---:|---:|
+| Remark ramp (weight) | 108 | 74.98% | 2.39% | 49,978,920,005 | 38,631.10 |
+| `request_batch_settle`, 0 entries | 108 | 99.98% | 3.09% | 50,000,000,000 | 51,482.92 |
+| `request_batch_settle`, 256 entries | 37,229 | 23.67% | 99.41% | 50,000,000,000 | 61,486.53 |
+| Normal-length-filling remark | 3,932,160 | 0.14% | 75% (all of Normal's) | 50,000,000,000 | 37,536.71 |
+
+Shares are of the whole block. Before round six, the first keeper stuffer
+cost 1.66 MOTRA over the same 1,000 blocks with R at zero. The 256-entry
+stuffer cost 5.35 MOTRA, and the length-filling remark cost its minimum and
+length fees, 0.00393 MOTRA per block, both with R at zero. Either length stuffer shut out every Normal
+transaction, since all classes share the block length and Normal's cap is
+3,932,160 bytes.
 
 ## Conditional Currency refunds
 

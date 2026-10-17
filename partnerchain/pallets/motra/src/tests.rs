@@ -2,7 +2,7 @@ use crate as pallet_motra;
 use crate::{pallet, types::MotraParams};
 use frame_support::{
     assert_noop, assert_ok, construct_runtime, derive_impl, parameter_types,
-    traits::{ConstU32, Hooks},
+    traits::{ConstU32, Get, Hooks},
 };
 use sp_runtime::{traits::IdentityLookup, BuildStorage, Perbill};
 
@@ -364,6 +364,166 @@ fn congestion_rate_stays_zero_when_blocks_empty() {
             after, 0,
             "Congestion rate should stay at 0 for empty blocks"
         );
+    });
+}
+
+/// R after one block with `consumed` in each class and `length` bytes of
+/// extrinsics, from R = 0.
+fn rate_after_block(
+    consumed: [(frame_support::dispatch::DispatchClass, u64); 3],
+    length: u32,
+) -> u128 {
+    pallet_motra::Params::<Test>::mutate(|p| p.congestion_rate = 0);
+    frame_system::BlockWeight::<Test>::kill();
+    frame_system::BlockWeight::<Test>::mutate(|weight| {
+        for (class, ref_time) in consumed {
+            weight.set(
+                frame_support::weights::Weight::from_parts(ref_time, 0),
+                class,
+            );
+        }
+    });
+    frame_system::AllExtrinsicsLen::<Test>::put(length);
+    Motra::on_finalize(System::block_number());
+    Motra::params().congestion_rate
+}
+
+fn rate_after(consumed: [(frame_support::dispatch::DispatchClass, u64); 3]) -> u128 {
+    rate_after_block(consumed, 0)
+}
+
+fn block_weights() -> frame_system::limits::BlockWeights {
+    <<Test as frame_system::Config>::BlockWeights as Get<_>>::get()
+}
+
+fn normal_length() -> u32 {
+    *<<Test as frame_system::Config>::BlockLength as Get<frame_system::limits::BlockLength>>::get()
+        .max
+        .get(frame_support::dispatch::DispatchClass::Normal)
+}
+
+#[test]
+fn congestion_meters_length_as_its_own_dimension() {
+    use frame_support::dispatch::DispatchClass::{Mandatory, Normal, Operational};
+    new_test_ext().execute_with(|| {
+        let normal = block_weights()
+            .get(Normal)
+            .max_total
+            .expect("Normal budget")
+            .ref_time();
+        let none = [(Normal, 0), (Operational, 0), (Mandatory, 0)];
+        let full = rate_after([(Normal, normal), (Operational, 0), (Mandatory, 0)]);
+        assert_eq!(
+            rate_after_block(none, normal_length()),
+            full,
+            "a length-full block is a full block"
+        );
+        assert_eq!(
+            rate_after_block(none, normal_length() * 4 / 3),
+            full,
+            "length fullness saturates at one"
+        );
+        assert_eq!(
+            rate_after_block(
+                [(Normal, normal / 2), (Operational, 0), (Mandatory, 0)],
+                normal_length() / 2
+            ),
+            rate_after([(Normal, normal / 2), (Operational, 0), (Mandatory, 0)]),
+            "half the weight and half the length is half full, not full"
+        );
+    });
+}
+
+#[test]
+fn compute_fee_prices_length_as_congestion_work() {
+    use frame_support::dispatch::DispatchClass::Normal;
+    new_test_ext().execute_with(|| {
+        pallet_motra::Params::<Test>::mutate(|p| p.congestion_rate = 1_000_000_000);
+        let per_byte = block_weights()
+            .get(Normal)
+            .max_total
+            .expect("Normal budget")
+            .ref_time()
+            / u64::from(normal_length());
+        let params = Motra::params();
+        let base = block_weights().get(Normal).base_extrinsic.ref_time();
+        for len in [0usize, 139, normal_length() as usize] {
+            assert_eq!(
+                pallet_motra::Pallet::<Test>::compute_fee(
+                    frame_support::weights::Weight::zero(),
+                    len
+                ),
+                params.min_fee
+                    + params.congestion_rate * u128::from(base + len as u64 * per_byte) / 1_000_000
+                    + params.length_fee_per_byte * len as u128
+            );
+        }
+    });
+}
+
+#[test]
+fn congestion_meters_operational_weight_against_the_normal_budget() {
+    use frame_support::dispatch::DispatchClass::{Mandatory, Normal, Operational};
+    new_test_ext().execute_with(|| {
+        let normal = block_weights()
+            .get(Normal)
+            .max_total
+            .expect("Normal budget")
+            .ref_time();
+        let full = rate_after([(Normal, normal), (Operational, 0), (Mandatory, 0)]);
+        assert!(full > 0);
+        assert_eq!(
+            rate_after([(Normal, 0), (Operational, normal), (Mandatory, 0)]),
+            full,
+            "Operational weight moves R like Normal weight"
+        );
+        assert_eq!(
+            rate_after([
+                (Normal, normal / 2),
+                (Operational, normal / 2),
+                (Mandatory, 0)
+            ]),
+            full
+        );
+        assert_eq!(
+            rate_after([(Normal, normal), (Operational, normal), (Mandatory, 0)]),
+            full,
+            "fullness saturates at one"
+        );
+        assert_eq!(
+            rate_after([(Normal, 0), (Operational, 0), (Mandatory, normal)]),
+            0,
+            "Mandatory weight is not congestion"
+        );
+    });
+}
+
+#[test]
+fn charge_motra_refuses_unnamed_paid_operational_calls() {
+    use frame_support::dispatch::{DispatchClass, DispatchInfo};
+    use sp_runtime::{traits::SignedExtension, transaction_validity::InvalidTransaction};
+    new_test_ext().execute_with(|| {
+        pallet_motra::MotraBalances::<Test>::insert(1u64, 1_000_000_000_000);
+        let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+        let info = |class| DispatchInfo {
+            class,
+            ..Default::default()
+        };
+        let extension = crate::fee::ChargeMotra::<Test>::new;
+        assert_ok!(extension().validate(&1, &call, &info(DispatchClass::Normal), 0));
+        let failures = Motra::insufficient_motra_failures();
+        assert_eq!(
+            extension().validate(&1, &call, &info(DispatchClass::Operational), 0),
+            Err(InvalidTransaction::Call.into())
+        );
+        assert_eq!(
+            extension()
+                .pre_dispatch(&1, &call, &info(DispatchClass::Operational), 0)
+                .err(),
+            Some(InvalidTransaction::Call.into())
+        );
+        assert_eq!(Motra::insufficient_motra_failures(), failures);
+        assert_eq!(Motra::total_burned(), 0, "refused before payment");
     });
 }
 

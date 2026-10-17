@@ -9,6 +9,7 @@ mod vesting_schedule;
 mod motra_only_fees;
 mod checkpoint_weights;
 mod motra_refunds;
+mod motra_operational;
 mod motra_benchmarks;
 mod treasury_drip_migration;
 mod tee_attestation_integration;

@@ -12,6 +12,7 @@ mod seating_model_check;
 
 mod balance_weights;
 mod motra_duty;
+mod paid_operational;
 pub mod committee_liveness;
 pub mod genesis_committee;
 pub mod input_sanity;
@@ -744,6 +745,14 @@ impl pallet_motra::pallet::Config for Runtime {
         call: &RuntimeCall,
     ) -> Option<sp_runtime::transaction_validity::TransactionValidity> {
         motra_duty::validate(who, call)
+    }
+
+    fn pays_for_operational(who: &AccountId, call: &RuntimeCall) -> bool {
+        paid_operational::admits(who, call)
+    }
+
+    fn deferred_duty_weight(call: &RuntimeCall) -> Weight {
+        motra_duty::deferred_weight(call)
     }
 }
 

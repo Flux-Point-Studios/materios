@@ -230,6 +230,40 @@ fn benchmark_attestation_weights_bound_each_signer_count_median() {
     assert!(W::attest_non_threshold(95).ref_time() > W::attest_non_threshold(1).ref_time());
 }
 
+/// The non-threshold benchmark populates its prior signers: the proof grows
+/// with every signer count it measures.
+#[test]
+fn benchmark_non_threshold_proof_grows_with_prior_signers() {
+    let samples: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
+    ))
+    .expect("attestation samples");
+    let proofs: std::collections::BTreeMap<u64, std::collections::BTreeSet<u64>> = samples
+        .iter()
+        .find(|s| s["benchmark"] == "attest_non_threshold")
+        .expect("non-threshold samples")["db_results"]
+        .as_array()
+        .expect("db results")
+        .iter()
+        .fold(Default::default(), |mut proofs, row| {
+            let n = row["components"][0][1].as_u64().expect("signer count");
+            proofs
+                .entry(n)
+                .or_default()
+                .insert(row["proof_size"].as_u64().expect("proof size"));
+            proofs
+        });
+    assert!(proofs.len() > 2, "the benchmark varies the signer count");
+    let largest: Vec<u64> = proofs
+        .values()
+        .map(|p| *p.last().expect("sampled"))
+        .collect();
+    assert!(
+        largest.windows(2).all(|pair| pair[0] < pair[1]),
+        "proof sizes {proofs:?} do not grow with the prior signer count"
+    );
+}
+
 #[test]
 fn benchmark_maximum_dormant_claim_batch_fits_its_declared_execution_budget() {
     use frame_support::assert_ok;

@@ -1048,32 +1048,33 @@ pub mod pallet {
             before.iter().filter(|(who, balance)| T::Currency::free_balance(who) != **balance).count() as u32
         }
 
-        /// A duty slot is consumed only by a new canonical attestation.
+        /// Classifies a member's attestation by what dispatch would do. Errors
+        /// are attestations dispatch would fail or strike: a non-member, an
+        /// unknown receipt, or a non-canonical hash on a pending receipt.
         pub fn validate_attestation(
             who: &T::AccountId,
             receipt_id: H256,
             claimed_hash: [u8; 32],
-        ) -> DispatchResult {
+        ) -> Result<crate::types::Attestation, DispatchError> {
             ensure!(
                 CommitteeMembers::<T>::get().contains(who),
                 Error::<T>::NotCommitteeMember
             );
             let record = Receipts::<T>::get(receipt_id).ok_or(Error::<T>::ReceiptNotFound)?;
-            ensure!(
-                record.availability_cert_hash == [0; 32],
-                Error::<T>::CertHashMismatch
-            );
-            if let Some((hash, signers)) = Attestations::<T>::get(receipt_id) {
-                ensure!(
-                    hash == H256::from(claimed_hash) && !signers.contains(who),
-                    Error::<T>::CertHashMismatch
-                );
+            if record.availability_cert_hash != [0; 32] {
+                return Ok(crate::types::Attestation::Stale);
             }
             ensure!(
                 Self::canonical_cert_hash(receipt_id) == Some(H256::from(claimed_hash)),
                 Error::<T>::CertHashMismatch
             );
-            Ok(())
+            match Attestations::<T>::get(receipt_id) {
+                Some((hash, _)) if hash != H256::from(claimed_hash) => {
+                    Err(Error::<T>::CertHashMismatch.into())
+                }
+                Some((_, signers)) if signers.contains(who) => Ok(crate::types::Attestation::Stale),
+                _ => Ok(crate::types::Attestation::New),
+            }
         }
 
         /// Construct the canonical `Cert` for `receipt_id` and return its

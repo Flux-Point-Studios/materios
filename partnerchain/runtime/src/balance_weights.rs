@@ -137,6 +137,7 @@ impl pallet_orinq_receipts::weights::WeightInfo for WithMotra {
 
     fn submit_receipt() -> Weight {
         pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::submit_receipt()
+            .saturating_add(crate::motra_duty::threshold_read())
     }
 
     fn set_availability_cert() -> Weight {

@@ -110,9 +110,12 @@ impl pallet_motra::Config for Test {
         }) = call
         {
             Some(
-                OrinqReceipts::validate_attestation(who, *receipt_id, *claimed_hash)
-                    .map(|()| sp_runtime::transaction_validity::ValidTransaction::default())
-                    .map_err(|_| sp_runtime::transaction_validity::InvalidTransaction::Call.into()),
+                match OrinqReceipts::validate_attestation(who, *receipt_id, *claimed_hash) {
+                    Ok(crate::types::Attestation::New) => {
+                        Ok(sp_runtime::transaction_validity::ValidTransaction::default())
+                    }
+                    _ => Err(sp_runtime::transaction_validity::InvalidTransaction::Call.into()),
+                },
             )
         } else {
             None

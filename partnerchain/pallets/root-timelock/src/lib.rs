@@ -536,18 +536,7 @@ pub mod pallet {
             call: Box<<T as Config>::RuntimeCall>,
         ) -> DispatchResultWithPostInfo {
             ensure_signed(origin)?;
-            let task = Tasks::<T>::get(id).ok_or(Error::<T>::UnknownTask)?;
-            ensure!(
-                T::Hashing::hash_of(&call) == task.call_hash,
-                Error::<T>::CallHashMismatch
-            );
-            let now = frame_system::Pallet::<T>::block_number();
-            ensure!(now >= task.ready_at, Error::<T>::NotReady);
-            ensure!(now <= Self::enactable_until(&task), Error::<T>::Expired);
-            ensure!(
-                T::Classifier::class_of(&call) <= task.class,
-                Error::<T>::ClassRaised
-            );
+            let task = Self::enactable(id, &call)?;
             Self::remove_task(id, &task);
             let post = Self::dispatch_as_root(call)?;
             Self::deposit_event(Event::Enacted { id });
@@ -696,6 +685,27 @@ pub mod pallet {
         /// any task while no guardian is set.
         pub fn root_may_cancel(id: TaskId) -> bool {
             Guardian::<T>::get().is_none() || PendingGuardianChange::<T>::get() == Some(id)
+        }
+
+        /// Task `id`, if `call` is its call and may run now: ready, unexpired
+        /// and of no higher class than when it was scheduled.
+        pub fn enactable(
+            id: TaskId,
+            call: &<T as Config>::RuntimeCall,
+        ) -> Result<Task<T::Hash, BlockNumberFor<T>>, DispatchError> {
+            let task = Tasks::<T>::get(id).ok_or(Error::<T>::UnknownTask)?;
+            ensure!(
+                T::Hashing::hash_of(call) == task.call_hash,
+                Error::<T>::CallHashMismatch
+            );
+            let now = frame_system::Pallet::<T>::block_number();
+            ensure!(now >= task.ready_at, Error::<T>::NotReady);
+            ensure!(now <= Self::enactable_until(&task), Error::<T>::Expired);
+            ensure!(
+                T::Classifier::class_of(call) <= task.class,
+                Error::<T>::ClassRaised
+            );
+            Ok(task)
         }
 
         fn vetoable_tasks() -> u32 {

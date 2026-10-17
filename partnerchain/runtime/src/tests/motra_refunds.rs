@@ -150,11 +150,15 @@ fn pricing_remark_ramp_prices_the_complete_signed_weight() {
                     .weight
                     .saturating_add(normal.base_extrinsic);
                 let fee = Motra::compute_fee(call.get_dispatch_info().weight, 128);
+                let length_work = capacity.ref_time()
+                    / u64::from(*RuntimeBlockLength::get().max.get(DispatchClass::Normal))
+                    * 128;
                 assert_eq!(
                     fee,
                     params.min_fee
                         + params.length_fee_per_byte * 128
-                        + params.congestion_rate * u128::from(signed.ref_time()) / 1_000_000,
+                        + params.congestion_rate * u128::from(signed.ref_time() + length_work)
+                            / 1_000_000,
                     "signed work is underpriced at block {block}"
                 );
             }
@@ -427,8 +431,10 @@ fn pricing_fee_and_priority_table() {
             "remark",
             "attest_member",
             "attest_non_member",
+            "submit_receipt",
             "claim",
             "set_delegatee",
+            "operational_stuffer",
         ] {
             externalities().execute_with(|| {
                 let (id, hash) = receipt(3, 2, 0);
@@ -439,7 +445,12 @@ fn pricing_fee_and_priority_table() {
                     "transfer" => RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive { dest: account(2).into(), value: 1 }),
                     "remark" => RuntimeCall::System(frame_system::Call::remark { remark: vec![] }),
                     "attest_member" | "attest_non_member" => attest(id, hash),
+                    "submit_receipt" => submit(H256::repeat_byte(9)),
                     "claim" => RuntimeCall::Motra(pallet_motra::Call::claim_motra {}),
+                    "operational_stuffer" => RuntimeCall::Utility(pallet_utility::Call::with_weight {
+                        call: Box::new(RuntimeCall::RootTimelock(pallet_root_timelock::Call::cancel_all {})),
+                        weight: Weight::from_parts(1_000_000_000_000, 0),
+                    }),
                     _ => RuntimeCall::Motra(pallet_motra::Call::set_delegatee { delegatee: Some(account(2)) }),
                 };
                 let extra: SignedExtra = (
@@ -454,8 +465,8 @@ fn pricing_fee_and_priority_table() {
                 let len = signed.encoded_size();
                 let info = call.get_dispatch_info();
                 let validity = pallet_motra::fee::ChargeMotra::<Runtime>::new().validate(&who, &call, &info, len);
-                if name == "attest_non_member" {
-                    assert!(validity.is_err(), "non-member rejected before payment");
+                if name == "attest_non_member" || name == "operational_stuffer" {
+                    assert!(validity.is_err(), "{name} rejected before payment");
                     eprintln!("PRICING {{\"R\":{rate},\"call\":\"{name}\",\"status\":\"rejected\",\"length\":{len}}}");
                     return;
                 }
@@ -466,7 +477,31 @@ fn pricing_fee_and_priority_table() {
                 let post = call.dispatch(RuntimeOrigin::signed(who)).expect("dispatch");
                 assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(Some(pre), &info, &post, len, &Ok(())));
                 let fee = Motra::total_burned() - before;
-                if name == "attest_member" { assert_eq!(fee, 0); }
+                if ["transfer", "remark", "claim", "set_delegatee"].contains(&name) {
+                    let class = frame_support::dispatch::DispatchClass::Normal;
+                    let per_byte = RuntimeBlockWeights::get().get(class).max_total.expect("Normal budget").ref_time()
+                        / u64::from(*RuntimeBlockLength::get().max.get(class));
+                    let params = Motra::params();
+                    let work = info.weight.ref_time()
+                        + RuntimeBlockWeights::get().get(class).base_extrinsic.ref_time()
+                        + len as u64 * per_byte;
+                    assert_eq!(
+                        fee,
+                        params.min_fee + rate * u128::from(work) / 1_000_000
+                            + params.length_fee_per_byte * len as u128,
+                        "{name} prices call, signed base and length at R={rate}"
+                    );
+                }
+                if name == "transfer" && rate == 1_000_000_000 {
+                    // Round five priced 1,630,994,000,000 without length work.
+                    assert_eq!(fee, 1_684_018_191_000);
+                }
+                if name == "attest_member" {
+                    assert_eq!(fee, 0);
+                    assert_eq!(priority, sp_runtime::transaction_validity::TransactionPriority::MAX - 1);
+                } else {
+                    assert!(priority < sp_runtime::transaction_validity::TransactionPriority::MAX - 1);
+                }
                 eprintln!("PRICING {{\"R\":{rate},\"call\":\"{name}\",\"fee\":{fee},\"escrow\":{escrow},\"priority\":{priority},\"length\":{len},\"call_weight\":{}}}", info.weight.ref_time());
             });
         }
@@ -1092,5 +1127,363 @@ fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
         assert!(accepted >= 15_138, "{accepted} batched attests < round-four capacity 15138");
         assert!(System::block_weight().get(DispatchClass::Normal).all_lte(cap));
         eprintln!("batched non-threshold attests/block: {accepted} in {batches} signed batches; historical {historical}; consumed {:?}", System::block_weight());
+    });
+}
+
+fn remark() -> RuntimeCall {
+    RuntimeCall::System(frame_system::Call::remark { remark: vec![] })
+}
+
+fn utility(call: pallet_utility::Call<Runtime>) -> RuntimeCall {
+    RuntimeCall::Utility(call)
+}
+
+fn submit(id: H256) -> RuntimeCall {
+    RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::submit_receipt {
+        receipt_id: id,
+        content_hash: H256::repeat_byte(66),
+        base_root_sha256: [1; 32],
+        zk_root_poseidon: None,
+        poseidon_params_hash: None,
+        base_manifest_hash: [2; 32],
+        safety_manifest_hash: [3; 32],
+        monitor_config_hash: [4; 32],
+        attestation_evidence_hash: [5; 32],
+        storage_locator_hash: [6; 32],
+        schema_hash: [7; 32],
+    })
+}
+
+fn submit_v2(id: H256) -> RuntimeCall {
+    RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::submit_receipt_v2 {
+        player_pubkey: [8; 32],
+        player_sig: [9; 64],
+        sig_type: 0,
+        receipt_id: id,
+        content_hash: H256::repeat_byte(66),
+        base_root_sha256: [1; 32],
+        zk_root_poseidon: None,
+        poseidon_params_hash: None,
+        base_manifest_hash: [2; 32],
+        safety_manifest_hash: [3; 32],
+        monitor_config_hash: [4; 32],
+        attestation_evidence_hash: [5; 32],
+        storage_locator_hash: [6; 32],
+        schema_hash: [7; 32],
+    })
+}
+
+/// Runs a signed call through block admission, ChargeMotra and dispatch;
+/// returns the MOTRA its signer paid and the block weight it consumed.
+fn apply_signed(who: &AccountId, call: &RuntimeCall) -> (u128, Weight) {
+    use frame_support::dispatch::DispatchClass;
+    use parity_scale_codec::Encode;
+    let info = call.get_dispatch_info();
+    let len = call.encoded_size() + 128;
+    let consumed = || {
+        let weight = System::block_weight();
+        weight
+            .get(DispatchClass::Normal)
+            .saturating_add(*weight.get(DispatchClass::Operational))
+    };
+    let (balance, before) = (Motra::motra_balance(who), consumed());
+    assert_ok!(validity(who, call));
+    assert_ok!(frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+        &info, len
+    ));
+    let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+        .pre_dispatch(who, call, &info, len)
+        .expect("admitted");
+    let post = call
+        .clone()
+        .dispatch(RuntimeOrigin::signed(who.clone()))
+        .expect("dispatch");
+    assert_ok!(frame_system::CheckWeight::<Runtime>::post_dispatch(
+        None,
+        &info,
+        &post,
+        len,
+        &Ok(())
+    ));
+    assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+        Some(pre),
+        &info,
+        &post,
+        len,
+        &Ok(())
+    ));
+    (
+        balance - Motra::motra_balance(who),
+        consumed().saturating_sub(before),
+    )
+}
+
+#[test]
+fn certification_receipt_fee_covers_its_committee_attestations() {
+    use parity_scale_codec::Encode;
+    for (committee, threshold) in [(1u32, 1u32), (3, 2), (5, 3), (96, 96)] {
+        for path in ["v1", "v2", "batch", "derivative"] {
+            externalities().execute_with(|| {
+                receipt(committee, threshold, 1_000_000);
+                pricing_params(1_000_000_000);
+                let submitter = account(200);
+                pallet_motra::MotraBalances::<Runtime>::insert(&submitter, u128::MAX / 4);
+                let id = H256::repeat_byte(9);
+                let call = match path {
+                    "v1" => submit(id),
+                    "v2" => submit_v2(id),
+                    "batch" => utility(pallet_utility::Call::batch { calls: vec![submit(id)] }),
+                    _ => utility(pallet_utility::Call::as_derivative {
+                        index: 0,
+                        call: Box::new(submit(id)),
+                    }),
+                };
+                // A derived account submits and escrows the MATRA fee itself.
+                fund(
+                    &pallet_utility::Pallet::<Runtime>::derivative_account_id(submitter.clone(), 0),
+                    1_000_000_000_000,
+                );
+                let (fee, submission) = apply_signed(&submitter, &call);
+                let hash = OrinqReceipts::canonical_cert_hash(id)
+                    .expect("submitted")
+                    .0;
+                let mut certification = Weight::zero();
+                for member in 1..=threshold {
+                    let (paid, consumed) = apply_signed(&account(member as u8), &attest(id, hash));
+                    assert_eq!(paid, 0, "attestation is a feeless duty");
+                    certification = certification.saturating_add(consumed);
+                }
+                assert_ne!(
+                    pallet_orinq_receipts::Receipts::<Runtime>::get(id)
+                        .expect("receipt")
+                        .availability_cert_hash,
+                    [0; 32],
+                    "certified"
+                );
+                let params = Motra::params();
+                let floor = params.min_fee
+                    + params.length_fee_per_byte * (call.encoded_size() + 128) as u128
+                    + params.congestion_rate
+                        * u128::from(submission.saturating_add(certification).ref_time())
+                        / 1_000_000;
+                assert!(
+                    fee >= floor,
+                    "{path} t={threshold}/{committee}: fee {fee} < {floor} for submission {submission:?} and certification {certification:?}"
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn duty_wrapped_attests_stay_on_the_paid_path() {
+    use parity_scale_codec::Encode;
+    use sp_runtime::transaction_validity::InvalidTransaction;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 0);
+        pricing_params(1_000_000_000);
+        let who = account(1);
+        let single = attest(id, hash);
+        let wrapped = [
+            utility(pallet_utility::Call::batch {
+                calls: vec![utility(pallet_utility::Call::batch {
+                    calls: vec![single.clone()],
+                })],
+            }),
+            utility(pallet_utility::Call::force_batch {
+                calls: vec![single.clone()],
+            }),
+            utility(pallet_utility::Call::as_derivative {
+                index: 0,
+                call: Box::new(single.clone()),
+            }),
+            RuntimeCall::Multisig(pallet_multisig::Call::as_multi_threshold_1 {
+                other_signatories: vec![account(2)],
+                call: Box::new(single.clone()),
+            }),
+            utility(pallet_utility::Call::batch {
+                calls: vec![single.clone(), remark()],
+            }),
+        ];
+        for call in &wrapped {
+            assert_eq!(
+                validity(&who, call),
+                Err(InvalidTransaction::Payment.into()),
+                "a wrapped attest must pay: {call:?}"
+            );
+        }
+        pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+        for call in &wrapped {
+            let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(
+                    &who,
+                    call,
+                    &call.get_dispatch_info(),
+                    call.encoded_size() + 128,
+                )
+                .expect("paid");
+            assert!(
+                pre.is_some(),
+                "a wrapped attest took the duty path: {call:?}"
+            );
+        }
+    });
+}
+
+#[test]
+fn duty_priority_outranks_paid_traffic_and_tags_each_signer() {
+    use sp_runtime::transaction_validity::TransactionPriority;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 3, 0);
+        pricing_params(50_000_000_000);
+        for who in [account(1), account(2)] {
+            pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+        }
+        let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+            dest: account(3).into(),
+            value: 1,
+        });
+        let duty = validity(&account(1), &attest(id, hash)).expect("duty");
+        let paid = validity(&account(1), &transfer).expect("paid");
+        assert_eq!(duty.priority, TransactionPriority::MAX - 1);
+        assert!(duty.priority > paid.priority);
+        let second = validity(&account(2), &attest(id, hash)).expect("second member");
+        assert_eq!(duty.provides.len(), 1);
+        assert_eq!(second.provides.len(), 1);
+        assert_ne!(
+            duty.provides, second.provides,
+            "members attesting one receipt must not collide in the pool"
+        );
+    });
+}
+
+#[test]
+fn duty_batch_tolerates_as_many_stale_attests_as_new_ones() {
+    use parity_scale_codec::Encode;
+    externalities().execute_with(|| {
+        let (certified, certified_hash) = receipt(3, 2, 0);
+        pricing_params(50_000_000_000);
+        let pending = |tag: u8| {
+            let id = H256::repeat_byte(tag);
+            pallet_orinq_receipts::Receipts::<Runtime>::insert(
+                id,
+                pallet_orinq_receipts::Receipts::<Runtime>::get(certified).expect("receipt"),
+            );
+            (id, OrinqReceipts::canonical_cert_hash(id).expect("hash").0)
+        };
+        let (b, b_hash) = pending(55);
+        let (c, c_hash) = pending(56);
+        let (d, d_hash) = pending(57);
+        assert_ok!(attest(certified, certified_hash).dispatch(RuntimeOrigin::signed(account(1))));
+        assert_ok!(attest(certified, certified_hash).dispatch(RuntimeOrigin::signed(account(2))));
+        assert_ok!(attest(d, d_hash).dispatch(RuntimeOrigin::signed(account(3))));
+        let who = account(3);
+        let batch = |calls: Vec<RuntimeCall>| utility(pallet_utility::Call::batch { calls });
+        let tag = |id: H256| {
+            validity(&who, &attest(id, if id == b { b_hash } else { c_hash }))
+                .expect("new duty")
+                .provides
+        };
+
+        // One certified and one pending: the pending attest stays a duty.
+        let mixed = batch(vec![attest(certified, certified_hash), attest(b, b_hash)]);
+        let valid = validity(&who, &mixed).expect("stale items do not drop new ones");
+        assert_eq!(valid.provides, tag(b));
+        // An item this member already signed counts as stale, too.
+        let resigned = batch(vec![attest(d, d_hash), attest(c, c_hash)]);
+        assert_eq!(
+            validity(&who, &resigned)
+                .expect("re-signed is stale")
+                .provides,
+            tag(c)
+        );
+        // Stale items may not outnumber new ones, or stand alone.
+        assert!(validity(&who, &batch(vec![attest(certified, certified_hash)])).is_err());
+        assert!(validity(&who, &attest(certified, certified_hash)).is_err());
+        assert!(validity(
+            &who,
+            &batch(vec![
+                attest(certified, certified_hash),
+                attest(d, d_hash),
+                attest(b, b_hash)
+            ])
+        )
+        .is_err());
+        // Invalid items still reject the batch.
+        for bad in [attest(H256::zero(), b_hash), attest(c, [9; 32])] {
+            assert!(validity(&who, &batch(vec![bad, attest(b, b_hash)])).is_err());
+        }
+        assert!(validity(&account(4), &mixed).is_err(), "non-member");
+
+        // Pre-dispatch admits it for free, and dispatch records the new item.
+        let info = mixed.get_dispatch_info();
+        let len = mixed.encoded_size() + 128;
+        let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&who, &mixed, &info, len)
+            .expect("free batch");
+        assert!(pre.is_none());
+        assert_ok!(mixed.dispatch(RuntimeOrigin::signed(who.clone())));
+        assert!(pallet_orinq_receipts::Attestations::<Runtime>::get(b)
+            .expect("attested")
+            .1
+            .contains(&who));
+        assert_eq!(Motra::total_burned(), 0);
+    });
+}
+
+#[test]
+fn pricing_new_signer_after_95_prior_signers_reports_their_count() {
+    use pallet_orinq_receipts::weights::WeightInfo;
+    use parity_scale_codec::Encode;
+    type W = <Runtime as pallet_orinq_receipts::Config>::WeightInfo;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(96, 97, 0);
+        let signers: BoundedBTreeSet<
+            AccountId,
+            <Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize,
+        > = (2..=96)
+            .map(account)
+            .collect::<std::collections::BTreeSet<_>>()
+            .try_into()
+            .expect("95 signers");
+        pallet_orinq_receipts::Attestations::<Runtime>::insert(id, (H256::from(hash), signers));
+        let who = account(1);
+        let call = attest(id, hash);
+        let info = call.get_dispatch_info();
+        let len = call.encoded_size() + 128;
+        let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&who, &call, &info, len)
+            .expect("duty");
+        let post = call
+            .dispatch(RuntimeOrigin::signed(who.clone()))
+            .expect("96th signer");
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+            Some(pre),
+            &info,
+            &post,
+            len,
+            &Ok(())
+        ));
+        let actual = post.actual_weight.expect("actual");
+        assert_eq!(
+            actual,
+            W::attest_non_threshold(96).saturating_add(W::balance_mutations(0))
+        );
+        let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
+        ))
+        .expect("attestation samples");
+        let mut times: Vec<u64> = samples
+            .iter()
+            .find(|s| s["benchmark"] == "attest_non_threshold")
+            .expect("non-threshold samples")["time_results"]
+            .as_array()
+            .expect("timings")
+            .iter()
+            .filter(|s| s["components"][0][1].as_u64() == Some(95))
+            .map(|s| s["extrinsic_time"].as_u64().expect("time") * 1_000)
+            .collect();
+        times.sort_unstable();
+        assert!(actual.ref_time() >= times[times.len() / 2]);
     });
 }

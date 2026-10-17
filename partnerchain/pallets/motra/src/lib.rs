@@ -48,6 +48,24 @@ pub mod pallet {
             None
         }
 
+        /// Whether `who` may pay for this Operational-class call. Operational
+        /// weight may take the whole block, beyond the Normal share, so every
+        /// other paid Operational call is invalid. `TakenFirst` calls are
+        /// always admitted.
+        fn pays_for_operational(
+            _who: &Self::AccountId,
+            _call: &<Self as frame_system::Config>::RuntimeCall,
+        ) -> bool {
+            false
+        }
+
+        /// Weight of the feeless duties `call` commits validators to in later
+        /// transactions. It is priced at R with the call, and neither reserved
+        /// in this block nor refunded.
+        fn deferred_duty_weight(_call: &<Self as frame_system::Config>::RuntimeCall) -> Weight {
+            Weight::zero()
+        }
+
         /// Weight information for extrinsics in this pallet.
         type WeightInfo: WeightInfo;
 
@@ -488,19 +506,48 @@ pub mod pallet {
 
         /// Compute the fee for a transaction given its weight and encoded length.
         ///
-        /// TxFee = min_fee + R * (call + signed base) / 1_000_000 + length_fee_per_byte * len
+        /// TxFee = min_fee + R * (call + signed base + length work) / 1_000_000
+        ///     + length_fee_per_byte * len
         pub fn compute_fee(weight: frame_support::weights::Weight, len: usize) -> u128 {
             let params = Params::<T>::get();
-            let base = T::BlockWeights::get()
-                .get(frame_support::dispatch::DispatchClass::Normal)
-                .base_extrinsic;
-            let weight_component =
-                Self::weight_fee(weight.saturating_add(base), params.congestion_rate);
+            let weight_component = Self::weight_fee(
+                weight.saturating_add(Self::signed_work(len)),
+                params.congestion_rate,
+            );
             let length_fee = params.length_fee_per_byte.saturating_mul(len as u128);
             params
                 .min_fee
                 .saturating_add(weight_component)
                 .saturating_add(length_fee)
+        }
+
+        /// The Normal class's ref_time and length budgets.
+        fn normal_budget() -> (u64, u32) {
+            use frame_support::dispatch::DispatchClass;
+            let weights = T::BlockWeights::get();
+            (
+                weights
+                    .get(DispatchClass::Normal)
+                    .max_total
+                    .unwrap_or(weights.max_block)
+                    .ref_time()
+                    .max(1),
+                (*T::BlockLength::get().max.get(DispatchClass::Normal)).max(1),
+            )
+        }
+
+        /// The signed base plus the length work of an extrinsic of `len`
+        /// bytes. A byte stands for the Normal ref_time budget over the
+        /// Normal length budget, so a block filled by either costs alike.
+        pub(crate) fn signed_work(len: usize) -> Weight {
+            let (weight, length) = Self::normal_budget();
+            T::BlockWeights::get()
+                .get(frame_support::dispatch::DispatchClass::Normal)
+                .base_extrinsic
+                .saturating_add(Weight::from_parts(
+                    (len as u64).saturating_mul(weight / u64::from(length)),
+                    0,
+                ))
         }
 
         pub(crate) fn weight_fee(weight: Weight, rate: u128) -> u128 {
@@ -515,19 +562,25 @@ pub mod pallet {
 
         /// Adjust congestion rate based on block fullness using EMA smoothing.
         ///
+        /// Fullness is the fuller of two dimensions, each against its Normal
+        /// budget and saturating at one, so either drives R when it is the
+        /// bottleneck. Weight is Normal plus Operational consumption:
+        /// Operational traffic may exceed the Normal budget and must still
+        /// raise R. Mandatory weight, which also holds the guardian's veto, is
+        /// excluded. Length is every extrinsic's encoded bytes.
+        ///
         /// Called at `on_finalize`.
         fn adjust_congestion_rate() {
+            use frame_support::dispatch::DispatchClass;
             let consumed = frame_system::Pallet::<T>::block_weight();
-            let max_weight = <T as frame_system::Config>::BlockWeights::get()
-                .get(frame_support::dispatch::DispatchClass::Normal)
-                .max_total
-                .unwrap_or(frame_support::weights::Weight::from_parts(1, 0));
-
-            let consumed_normal = consumed
-                .get(frame_support::dispatch::DispatchClass::Normal)
-                .ref_time();
-            let max_normal = max_weight.ref_time().max(1);
-            let fullness = Perbill::from_rational(consumed_normal, max_normal);
+            let (max_normal, max_length) = Self::normal_budget();
+            let metered = consumed
+                .get(DispatchClass::Normal)
+                .ref_time()
+                .saturating_add(consumed.get(DispatchClass::Operational).ref_time());
+            let length = frame_system::Pallet::<T>::all_extrinsics_len();
+            let fullness = Perbill::from_rational(metered.min(max_normal), max_normal)
+                .max(Perbill::from_rational(length.min(max_length), max_length));
 
             Params::<T>::mutate(|params| {
                 let old_rate = params.congestion_rate;
