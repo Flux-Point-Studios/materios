@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -4846,9 +4847,10 @@ def test_a_genesis_that_stores_no_delays_is_refused(spec241):
 # materios-node export-blocks, answering what the attestation asks: block 0 of the chain its --chain names, a raw
 # spec file or a chain built into the node, written as export-blocks --binary writes it. It builds a file's genesis
 # with the preflight's own computation, so these tests see the attestation's plumbing; test_node_attestation.py
-# runs the real node. KNOBS: tamper builds another state root, fail builds none from a file, built_in_refused none
-# from a built-in chain, as the runtime refuses its genesis committee, export writes other bytes, log records each
-# call.
+# runs the real node. Its chain-id reports that genesis as settlement's and the oracle's chain ids. KNOBS: tamper
+# builds another state root, fail builds none from a file, built_in_refused none from a built-in chain, as the
+# runtime refuses its genesis committee, export writes other bytes, chain_ids reports other chain ids, no_chain_id
+# has no chain-id subcommand, log records each call.
 FAKE_NODE = '''#!@PYTHON@
 import hashlib
 import json
@@ -4870,6 +4872,16 @@ if "log" in KNOBS:
                               "registrations": registrations and Path(registrations).read_text(),
                               "chain_sha256": chain_file and chain_file.is_file()
                               and hashlib.sha256(chain_file.read_bytes()).hexdigest()}) + "\\n")
+if sys.argv[1] == "chain-id":
+    if KNOBS.get("no_chain_id"):
+        sys.exit("error: unrecognized subcommand 'chain-id'")
+    genesis = lp.spec_genesis_hash(lp.load_spec(sys.argv[sys.argv.index("--chain") + 1]))
+    ids = {"IntentSettlement.MateriosChainId": list(genesis), "Oracle.MateriosChainId": list(genesis),
+           **KNOBS.get("chain_ids", {})}
+    print(json.dumps({"genesis_hash": "0x" + genesis.hex(),
+                      "constants": [[*constant.split("."), value] for constant, value in ids.items()]}))
+    sys.exit(0)
+
 VALUED = {"--base-path", "--from", "--to", "--database", "--db", "--db-cache", "--state-pruning", "--pruning",
           "--blocks-pruning", "--keep-blocks", "--tracing-targets", "--tracing-receiver"}
 FLAGS = {"--binary", "--detailed-log-output", "--disable-log-color", "--enable-log-reloading"}
@@ -5364,7 +5376,8 @@ def test_a_chain_spec_path_that_names_the_checked_spec_on_this_host_is_attested(
     node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", str(here)],
                     exe=fake_node(tmp_path, log=str(log)))
     assert node_findings(preprod_path, node) == []
-    assert [call["argv"][call["argv"].index("--chain") + 1] == str(here) for call in node_calls(log)] == [True, False]
+    assert [call["argv"][call["argv"].index("--chain") + 1] == str(here) for call in node_calls(log)
+            if call["argv"][1] == "export-blocks"] == [True, False]
 
 
 def test_a_chain_spec_path_that_names_another_file_on_this_host_is_an_input_error(tmp_path, preprod_path):
@@ -5406,7 +5419,13 @@ def test_the_node_runs_offline_on_a_fresh_base_path_with_only_the_options_export
             "--telemetry-url", "wss://telemetry.example/submit 0", "--no-mdns", "--prometheus-external"]
     node = attested(tmp_path, preprod_path, argv=argv, exe=fake_node(tmp_path, log=str(log)))
     assert node_findings(preprod_path, node) == []
-    calls = node_calls(log)
+    all_calls = node_calls(log)
+    assert len(all_calls) == 3
+    chain_id = next(call for call in all_calls if call["argv"][1] == "chain-id")
+    assert set(chain_id["env"]) <= {"LC_CTYPE"}
+    assert chain_id["argv"][1:3] == ["chain-id", "--chain"]
+    assert len(chain_id["argv"]) == 4
+    calls = [call for call in all_calls if call["argv"][1] == "export-blocks"]
     assert len(calls) == 2
     for call in calls:
         base = call["argv"][call["argv"].index("--base-path") + 1]
@@ -5435,7 +5454,7 @@ def test_authorities_that_give_their_node_the_same_options_share_its_runs(tmp_pa
     nodes = [attested(tmp_path, preprod_path, argv=["materios-node", *chain, "--name", name], exe=exe, name=name)
              for name in ("val0", "val1", "val2")]
     assert node_findings(preprod_path, *nodes) == []
-    assert len(node_calls(log)) == 2
+    assert len(node_calls(log)) == 3
 
 
 NOT_GENESIS = "authority val0: its node's export of block 0 is not one genesis block"
@@ -6572,3 +6591,69 @@ def test_cli_refuses_a_non_raw_spec_as_an_input_error(tmp_path, capsys):
                     "--manifest-key", "0x00", "--kupo", "http://127.0.0.1:9", "--subwasm", "subwasm"])
     assert code == 2
     assert "needs the raw chain spec" in capsys.readouterr().err
+
+
+# The runtime a spec carries pins another chain's genesis into settlement's or the oracle's signed payloads, or a
+# later pallet pins one of its own: every signature the chain's committee makes fails from block one.
+@pytest.mark.parametrize("constant", ["IntentSettlement.MateriosChainId", "Oracle.MateriosChainId",
+                                      "Bridge.GenesisHash"])
+def test_a_spec_runtime_that_holds_another_chain_id_is_refused(tmp_path, preprod_path, constant):
+    other = bytes([37]) * 32
+    node = attested(tmp_path, preprod_path, exe=fake_node(tmp_path, chain_ids={constant: list(other)}))
+    assert node_findings(preprod_path, node) == [
+        f"[8 node] authority val0: the spec's runtime holds {constant} 0x{other.hex()} at block one, not the genesis "
+        f"hash 0x{preprod_genesis_hex(preprod_path)}: a payload signed for this chain does not verify on it"]
+
+
+def test_a_node_binary_with_no_chain_id_is_an_input_error(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path, exe=fake_node(tmp_path, no_chain_id=True))
+    with pytest.raises(lp.InputError, match="authority val0: its node binary's chain-id failed: error: unrecognized "
+                                            "subcommand 'chain-id'"):
+        node_findings(preprod_path, node)
+
+
+def chain_id_report(monkeypatch, report) -> None:
+    """Every node run answers with `report` as its chain-id output."""
+    monkeypatch.setattr(lp.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, report, ""))
+
+
+GENESIS = bytes([31]) * 32
+
+
+def chain_ids(genesis: bytes = GENESIS, **ids: bytes) -> list:
+    return [[*name.split("."), list(value)] for name, value in
+            {"IntentSettlement.MateriosChainId": genesis, "Oracle.MateriosChainId": genesis, **ids}.items()]
+
+
+@pytest.mark.parametrize("report", [
+    "", "null", "[]", "{}", json.dumps({"genesis_hash": "0x" + GENESIS.hex()}),
+    json.dumps({"genesis_hash": "0x00", "constants": []}),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex().upper(), "constants": []}),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": {}}),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": [["Oracle", "MateriosChainId"]]}),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": [["Oracle", "MateriosChainId", [256]]]}),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": [["Oracle", "MateriosChainId", [True]]]}),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": [["Oracle", 7, list(GENESIS)]]}),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": chain_ids() + chain_ids()[:1]}),
+    '{"genesis_hash": "0x%s", "genesis_hash": "0x%s", "constants": []}' % (GENESIS.hex(), GENESIS.hex()),
+], ids=["empty", "null", "list", "no-fields", "no-constants", "short-hash", "upper-hex", "constants-object",
+        "two-field-constant", "byte-past-255", "bool-byte", "number-name", "repeated-constant", "repeated-key"])
+def test_an_unreadable_chain_id_report_is_an_input_error(monkeypatch, tmp_path, report):
+    chain_id_report(monkeypatch, report)
+    with pytest.raises(lp.InputError, match="authority val0: its node's chain-id"):
+        lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0")
+
+
+def test_a_chain_id_report_of_the_genesis_passes_and_cardanos_genesis_is_its_own(monkeypatch, tmp_path):
+    report = {"genesis_hash": "0x" + GENESIS.hex(),
+              "constants": chain_ids(**{"IntentSettlement.MainchainGenesisHash": bytes([32]) * 32})}
+    chain_id_report(monkeypatch, json.dumps(report))
+    assert lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0") == []
+
+
+def test_a_chain_id_report_built_on_another_genesis_is_refused(monkeypatch, tmp_path):
+    other = bytes([33]) * 32
+    chain_id_report(monkeypatch, json.dumps({"genesis_hash": "0x" + other.hex(), "constants": chain_ids(other)}))
+    assert messages(lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0")) == [
+        f"[8 node] authority val0: its node's chain-id builds genesis 0x{other.hex()} from the checked chain spec, and "
+        f"the preflight computes 0x{GENESIS.hex()}"]
