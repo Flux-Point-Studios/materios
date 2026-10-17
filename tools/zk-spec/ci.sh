@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 export CARGO_TARGET_DIR="$PWD/.zk-spec-target"
 export CARGO_BUILD_JOBS=2
+rustup component add --toolchain 1.85.0 rustfmt clippy
 rustup target add --toolchain 1.85.0 wasm32-unknown-unknown
 nice -n 10 cargo +1.85.0 fetch --locked --manifest-path tools/zk-spec/Cargo.toml
 nice -n 10 cargo +1.85.0 fmt --manifest-path tools/zk-spec/Cargo.toml --all -- --check

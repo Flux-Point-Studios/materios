@@ -1,0 +1,688 @@
+Clean-image replay: rust:1.85.0-bookworm
+Image: sha256:0ff31c9ffa641a62e48d543fb00b4960955ea375f40776f40f585b89e654cc5e
+Commands copied from .woodpecker/zk-p0.yaml; tools/zk-spec/ci.sh explicitly installs rustfmt and clippy.
+Isolated clone, fresh target, --cpus=2 and nice -n 10; mounted /work explicitly trusted by git for the container UID.
+Exit: 0
+
+Reading package lists...
+Building dependency tree...
+Reading state information...
+python3 is already the newest version (3.11.2-1+b1).
+python3 set to manually installed.
+The following additional packages will be installed:
+  libc-ares2 libnode108 libuv1 node-acorn node-busboy node-cjs-module-lexer
+  node-undici node-xtend
+Suggested packages:
+  npm
+Recommended packages:
+  nodejs-doc
+The following NEW packages will be installed:
+  libc-ares2 libnode108 libuv1 node-acorn node-busboy node-cjs-module-lexer
+  node-undici node-xtend nodejs
+0 upgraded, 9 newly installed, 0 to remove and 165 not upgraded.
+Need to get 11.7 MB of archives.
+After this operation, 54.8 MB of additional disk space will be used.
+Get:1 http://deb.debian.org/debian bookworm/main amd64 libc-ares2 amd64 1.18.1-3 [102 kB]
+Get:2 http://deb.debian.org/debian bookworm/main amd64 libuv1 amd64 1.44.2-1+deb12u1 [136 kB]
+Get:3 http://deb.debian.org/debian bookworm/main amd64 node-xtend all 4.0.2-3 [3932 B]
+Get:4 http://deb.debian.org/debian-security bookworm-security/main amd64 nodejs amd64 18.20.4+dfsg-1~deb12u3 [322 kB]
+Get:5 http://deb.debian.org/debian bookworm/main amd64 node-acorn all 8.8.1+ds+~cs25.17.7-2 [128 kB]
+Get:6 http://deb.debian.org/debian bookworm/main amd64 node-cjs-module-lexer all 1.2.2+dfsg-5 [30.1 kB]
+Get:7 http://deb.debian.org/debian bookworm/main amd64 node-busboy all 1.6.0+~cs2.6.0-2 [16.9 kB]
+Get:8 http://deb.debian.org/debian bookworm/main amd64 node-undici all 5.15.0+dfsg1+~cs20.10.9.3-1+deb12u4 [285 kB]
+Get:9 http://deb.debian.org/debian-security bookworm-security/main amd64 libnode108 amd64 18.20.4+dfsg-1~deb12u3 [10.6 MB]
+debconf: delaying package configuration, since apt-utils is not installed
+Fetched 11.7 MB in 0s (30.4 MB/s)
+Selecting previously unselected package libc-ares2:amd64.
+(Reading database ... 
+(Reading database ... 5%
+(Reading database ... 10%
+(Reading database ... 15%
+(Reading database ... 20%
+(Reading database ... 25%
+(Reading database ... 30%
+(Reading database ... 35%
+(Reading database ... 40%
+(Reading database ... 45%
+(Reading database ... 50%
+(Reading database ... 55%
+(Reading database ... 60%
+(Reading database ... 65%
+(Reading database ... 70%
+(Reading database ... 75%
+(Reading database ... 80%
+(Reading database ... 85%
+(Reading database ... 90%
+(Reading database ... 95%
+(Reading database ... 100%
+(Reading database ... 23250 files and directories currently installed.)
+Preparing to unpack .../0-libc-ares2_1.18.1-3_amd64.deb ...
+Unpacking libc-ares2:amd64 (1.18.1-3) ...
+Selecting previously unselected package libuv1:amd64.
+Preparing to unpack .../1-libuv1_1.44.2-1+deb12u1_amd64.deb ...
+Unpacking libuv1:amd64 (1.44.2-1+deb12u1) ...
+Selecting previously unselected package node-xtend.
+Preparing to unpack .../2-node-xtend_4.0.2-3_all.deb ...
+Unpacking node-xtend (4.0.2-3) ...
+Selecting previously unselected package nodejs.
+Preparing to unpack .../3-nodejs_18.20.4+dfsg-1~deb12u3_amd64.deb ...
+Unpacking nodejs (18.20.4+dfsg-1~deb12u3) ...
+Selecting previously unselected package node-acorn.
+Preparing to unpack .../4-node-acorn_8.8.1+ds+~cs25.17.7-2_all.deb ...
+Unpacking node-acorn (8.8.1+ds+~cs25.17.7-2) ...
+Selecting previously unselected package node-cjs-module-lexer.
+Preparing to unpack .../5-node-cjs-module-lexer_1.2.2+dfsg-5_all.deb ...
+Unpacking node-cjs-module-lexer (1.2.2+dfsg-5) ...
+Selecting previously unselected package node-busboy.
+Preparing to unpack .../6-node-busboy_1.6.0+~cs2.6.0-2_all.deb ...
+Unpacking node-busboy (1.6.0+~cs2.6.0-2) ...
+Selecting previously unselected package node-undici.
+Preparing to unpack .../7-node-undici_5.15.0+dfsg1+~cs20.10.9.3-1+deb12u4_all.deb ...
+Unpacking node-undici (5.15.0+dfsg1+~cs20.10.9.3-1+deb12u4) ...
+Selecting previously unselected package libnode108:amd64.
+Preparing to unpack .../8-libnode108_18.20.4+dfsg-1~deb12u3_amd64.deb ...
+Unpacking libnode108:amd64 (18.20.4+dfsg-1~deb12u3) ...
+Setting up node-cjs-module-lexer (1.2.2+dfsg-5) ...
+Setting up libc-ares2:amd64 (1.18.1-3) ...
+Setting up libuv1:amd64 (1.44.2-1+deb12u1) ...
+Setting up node-xtend (4.0.2-3) ...
+Setting up node-busboy (1.6.0+~cs2.6.0-2) ...
+Setting up node-undici (5.15.0+dfsg1+~cs20.10.9.3-1+deb12u4) ...
+Setting up node-acorn (8.8.1+ds+~cs25.17.7-2) ...
+Setting up libnode108:amd64 (18.20.4+dfsg-1~deb12u3) ...
+Setting up nodejs (18.20.4+dfsg-1~deb12u3) ...
+update-alternatives: using /usr/bin/nodejs to provide /usr/bin/js (js) in auto mode
+Processing triggers for libc-bin (2.36-9+deb12u10) ...
+.zk-spec-scratch/aiken.tar.gz: OK
+info: downloading component 'rustfmt'
+info: installing component 'rustfmt'
+info: downloading component 'clippy'
+info: installing component 'clippy'
+info: downloading component 'rust-std' for 'wasm32-unknown-unknown'
+info: installing component 'rust-std' for 'wasm32-unknown-unknown'
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded sha2 v0.10.9
+  Downloaded aead v0.5.2
+  Downloaded zmij v1.0.23
+  Downloaded serde_json v1.0.154
+  Downloaded quote v1.0.47
+  Downloaded ark-snark v0.4.0
+  Downloaded inout v0.1.4
+  Downloaded ark-ff-macros v0.4.2
+  Downloaded version_check v0.9.5
+  Downloaded zeroize_derive v1.5.0
+  Downloaded block-buffer v0.10.4
+  Downloaded subtle v2.6.1
+  Downloaded ark-ff-asm v0.4.2
+  Downloaded opaque-debug v0.3.1
+  Downloaded funty v2.0.0
+  Downloaded lol_alloc v0.4.1
+  Downloaded unicode-ident v1.0.27
+  Downloaded zcash_spec v0.2.1
+  Downloaded blake2 v0.10.6
+  Downloaded scopeguard v1.2.0
+  Downloaded lazy_static v1.5.0
+  Downloaded hex v0.4.3
+  Downloaded memuse v0.2.2
+  Downloaded ark-crypto-primitives v0.4.0
+  Downloaded rustc_version v0.4.1
+  Downloaded generic-array v0.14.7
+  Downloaded rand_chacha v0.3.1
+  Downloaded ark-serialize v0.4.2
+  Downloaded ark-serialize-derive v0.4.2
+  Downloaded cpufeatures v0.2.17
+  Downloaded crypto-common v0.1.7
+  Downloaded cfg-if v1.0.5
+  Downloaded itoa v1.0.18
+  Downloaded ark-bls12-381 v0.4.0
+  Downloaded ff v0.13.1
+  Downloaded universal-hash v0.5.1
+  Downloaded either v1.19.0
+  Downloaded tap v1.0.1
+  Downloaded proc-macro2 v1.0.107
+  Downloaded serde_derive v1.0.229
+  Downloaded ark-std v0.4.0
+  Downloaded ark-relations v0.4.0
+  Downloaded digest v0.10.7
+  Downloaded paste v1.0.15
+  Downloaded ark-poly v0.4.2
+  Downloaded serde_core v1.0.229
+  Downloaded ahash v0.8.12
+  Downloaded once_cell v1.21.4
+  Downloaded spin v0.9.9
+  Downloaded semver v1.0.28
+  Downloaded blake2s_simd v1.0.5
+  Downloaded cbc v0.1.2
+  Downloaded ark-ec v0.4.2
+  Downloaded derivative v2.2.0
+  Downloaded rand v0.8.8
+  Downloaded hashbrown v0.13.2
+  Downloaded itertools v0.10.5
+  Downloaded sapling-crypto v0.5.0
+  Downloaded libm v0.2.16
+  Downloaded zerocopy-derive v0.8.63
+  Downloaded aes v0.8.4
+  Downloaded reddsa v0.5.2
+  Downloaded bitvec v1.1.1
+  Downloaded syn v1.0.109
+  Downloaded typenum v1.20.1
+  Downloaded syn v3.0.9
+  Downloaded num-bigint v0.4.8
+  Downloaded memchr v2.8.3
+  Downloaded zerocopy v0.8.63
+  Downloaded pasta_curves v0.5.2
+  Downloaded syn v2.0.119
+  Downloaded serde v1.0.229
+  Downloaded redjubjub v0.8.0
+  Downloaded ark-ff v0.4.2
+  Downloaded chacha20poly1305 v0.10.1
+  Downloaded tracing v0.1.44
+  Downloaded bech32 v0.11.1
+  Downloaded num-traits v0.2.19
+  Downloaded tracing-core v0.1.36
+  Downloaded jubjub v0.10.0
+  Downloaded bls12_381 v0.8.0
+  Downloaded group v0.13.0
+  Downloaded arrayvec v0.7.8
+  Downloaded byteorder v1.5.0
+  Downloaded constant_time_eq v0.4.2
+  Downloaded blake2b_simd v1.0.5
+  Downloaded lock_api v0.4.14
+  Downloaded rand_core v0.6.4
+  Downloaded autocfg v1.5.1
+  Downloaded fpe v0.6.1
+  Downloaded incrementalmerkletree v0.8.2
+  Downloaded zip32 v0.2.1
+  Downloaded libc v0.2.191
+  Downloaded ark-groth16 v0.4.0
+  Downloaded num-integer v0.1.47
+  Downloaded getset v0.1.7
+  Downloaded radium v0.7.0
+  Downloaded wyz v0.5.1
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded static_assertions v1.1.0
+  Downloaded pin-project-lite v0.2.17
+  Downloaded chacha20 v0.9.1
+  Downloaded poly1305 v0.8.0
+  Downloaded cipher v0.4.4
+  Downloaded zeroize v1.9.1
+  Downloaded zcash_note_encryption v0.4.2
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling unicode-ident v1.0.27
+   Compiling quote v1.0.47
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.1
+   Compiling subtle v2.6.1
+   Compiling rand_core v0.6.4
+   Compiling zerocopy v0.8.63
+   Compiling crypto-common v0.1.7
+   Compiling syn v2.0.119
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling ppv-lite86 v0.2.21
+   Compiling zeroize_derive v1.5.0
+   Compiling rand_chacha v0.3.1
+   Compiling zeroize v1.9.1
+   Compiling syn v1.0.109
+   Compiling rand v0.8.8
+   Compiling num-integer v0.1.47
+   Compiling cfg-if v1.0.5
+   Compiling num-bigint v0.4.8
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling either v1.19.0
+   Compiling paste v1.0.15
+   Compiling ark-std v0.4.0
+   Compiling cpufeatures v0.2.17
+   Compiling itertools v0.10.5
+   Compiling inout v0.1.4
+   Compiling ahash v0.8.12
+   Compiling ark-serialize-derive v0.4.2
+   Compiling ark-ff-macros v0.4.2
+   Compiling ark-serialize v0.4.2
+   Compiling ark-ff-asm v0.4.2
+   Compiling derivative v2.2.0
+   Compiling cipher v0.4.4
+   Compiling ff v0.13.1
+   Compiling once_cell v1.21.4
+   Compiling arrayvec v0.7.8
+   Compiling radium v0.7.0
+   Compiling constant_time_eq v0.4.2
+   Compiling group v0.13.0
+   Compiling tracing-core v0.1.36
+   Compiling pin-project-lite v0.2.17
+   Compiling ark-ff v0.4.2
+   Compiling tap v1.0.1
+   Compiling wyz v0.5.1
+   Compiling tracing v0.1.44
+   Compiling hashbrown v0.13.2
+   Compiling blake2b_simd v1.0.5
+   Compiling funty v2.0.0
+   Compiling bitvec v1.1.1
+   Compiling bls12_381 v0.8.0
+   Compiling universal-hash v0.5.1
+   Compiling libm v0.2.16
+   Compiling static_assertions v1.1.0
+   Compiling opaque-debug v0.3.1
+   Compiling poly1305 v0.8.0
+   Compiling pasta_curves v0.5.2
+   Compiling jubjub v0.10.0
+   Compiling ark-poly v0.4.2
+   Compiling ark-relations v0.4.0
+   Compiling chacha20 v0.9.1
+   Compiling aead v0.5.2
+   Compiling ark-ec v0.4.2
+   Compiling hex v0.4.3
+   Compiling byteorder v1.5.0
+   Compiling memchr v2.8.3
+   Compiling reddsa v0.5.2
+   Compiling chacha20poly1305 v0.10.1
+   Compiling ark-snark v0.4.0
+   Compiling zcash_spec v0.2.1
+   Compiling cbc v0.1.2
+   Compiling sha2 v0.10.9
+   Compiling blake2 v0.10.6
+   Compiling spin v0.9.9
+   Compiling zmij v1.0.23
+   Compiling bech32 v0.11.1
+   Compiling memuse v0.2.2
+   Compiling serde_core v1.0.229
+   Compiling zip32 v0.2.1
+   Compiling lazy_static v1.5.0
+   Compiling fpe v0.6.1
+   Compiling ark-crypto-primitives v0.4.0
+   Compiling zcash_note_encryption v0.4.2
+   Compiling redjubjub v0.8.0
+   Compiling core2 v0.3.3 (/work/tools/zk-spec/vendor/core2)
+   Compiling blake2s_simd v1.0.5
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+warning: `core2` (lib) generated 2 warnings
+   Compiling aes v0.8.4
+   Compiling incrementalmerkletree v0.8.2
+   Compiling getset v0.1.7
+   Compiling serde_json v1.0.154
+   Compiling ark-groth16 v0.4.0
+   Compiling sapling-crypto v0.5.0
+   Compiling ark-bls12-381 v0.4.0
+   Compiling itoa v1.0.18
+   Compiling materios-zk-core v0.1.0 (/work/tools/zk-spec/core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.15s
+     Running unittests src/lib.rs (.zk-spec-target/debug/deps/materios_zk_core-3242a67deba9b756)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/core.rs (.zk-spec-target/debug/deps/core-cdc3ba45f61ab13a)
+
+running 3 tests
+test mainnet_and_unknown_targets_refuse_enablement ... ok
+test canonical_bridge_roundtrips_and_reserved_tags_refuse ... ok
+test public_mainnet_proofs_and_complete_bundles ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.71s
+
+   Doc-tests materios_zk_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Checking typenum v1.20.1
+    Checking subtle v2.6.1
+    Checking rand_core v0.6.4
+    Checking zerocopy v0.8.63
+    Checking generic-array v0.14.7
+    Checking crypto-common v0.1.7
+    Checking zeroize v1.9.1
+    Checking num-traits v0.2.19
+    Checking cfg-if v1.0.5
+    Checking num-integer v0.1.47
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking num-bigint v0.4.8
+    Checking either v1.19.0
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.3.1
+    Checking rand v0.8.8
+    Checking ark-std v0.4.0
+    Checking cpufeatures v0.2.17
+    Checking ark-serialize v0.4.2
+    Checking itertools v0.10.5
+   Compiling ark-ff-macros v0.4.2
+    Checking inout v0.1.4
+    Checking cipher v0.4.4
+    Checking ff v0.13.1
+    Checking once_cell v1.21.4
+    Checking arrayvec v0.7.8
+    Checking constant_time_eq v0.4.2
+    Checking ahash v0.8.12
+    Checking group v0.13.0
+    Checking pin-project-lite v0.2.17
+    Checking tap v1.0.1
+    Checking ark-ff v0.4.2
+    Checking tracing-core v0.1.36
+    Checking tracing v0.1.44
+    Checking wyz v0.5.1
+    Checking hashbrown v0.13.2
+    Checking radium v0.7.0
+    Checking blake2b_simd v1.0.5
+    Checking funty v2.0.0
+    Checking bitvec v1.1.1
+    Checking bls12_381 v0.8.0
+    Checking universal-hash v0.5.1
+    Checking opaque-debug v0.3.1
+    Checking static_assertions v1.1.0
+    Checking pasta_curves v0.5.2
+    Checking poly1305 v0.8.0
+    Checking jubjub v0.10.0
+    Checking chacha20 v0.9.1
+    Checking aead v0.5.2
+    Checking hex v0.4.3
+    Checking byteorder v1.5.0
+    Checking memchr v2.8.3
+    Checking reddsa v0.5.2
+    Checking chacha20poly1305 v0.10.1
+    Checking libm v0.2.16
+    Checking zcash_spec v0.2.1
+    Checking cbc v0.1.2
+    Checking sha2 v0.10.9
+    Checking ark-poly v0.4.2
+    Checking ark-relations v0.4.0
+    Checking ark-snark v0.4.0
+    Checking blake2 v0.10.6
+    Checking bech32 v0.11.1
+    Checking ark-ec v0.4.2
+    Checking spin v0.9.9
+    Checking memuse v0.2.2
+    Checking zip32 v0.2.1
+    Checking lazy_static v1.5.0
+    Checking fpe v0.6.1
+    Checking zcash_note_encryption v0.4.2
+    Checking redjubjub v0.8.0
+    Checking core2 v0.3.3 (/work/tools/zk-spec/vendor/core2)
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+warning: `core2` (lib) generated 2 warnings
+    Checking blake2s_simd v1.0.5
+    Checking aes v0.8.4
+    Checking ark-crypto-primitives v0.4.0
+    Checking incrementalmerkletree v0.8.2
+    Checking ark-groth16 v0.4.0
+    Checking sapling-crypto v0.5.0
+    Checking ark-bls12-381 v0.4.0
+    Checking serde_core v1.0.229
+    Checking zmij v1.0.23
+    Checking itoa v1.0.18
+    Checking materios-zk-core v0.1.0 (/work/tools/zk-spec/core)
+    Checking serde_json v1.0.154
+    Checking materios-zk-spec-driver v0.1.0 (/work/tools/zk-spec/driver)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 13.20s
+.............................................
+----------------------------------------------------------------------
+Ran 45 tests in 8.554s
+
+OK
+test_source_routes_refuse_mainnet_and_impersonation (p0_contracts.MainnetRefusal.test_source_routes_refuse_mainnet_and_impersonation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.443s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_injected_dependency_fails_exclusion_gate (p0_contracts.MidnightNegativeControl.test_injected_dependency_fails_exclusion_gate) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.173s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_rust_and_aiken_evaluation (p0_contracts.BridgeCodec.test_rust_and_aiken_evaluation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.154s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+   Compiling version_check v0.9.5
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling generic-array v0.14.7
+   Compiling typenum v1.20.1
+   Compiling subtle v2.6.1
+   Compiling autocfg v1.5.1
+   Compiling num-traits v0.2.19
+   Compiling rand_core v0.6.4
+   Compiling zerocopy v0.8.63
+   Compiling crypto-common v0.1.7
+   Compiling syn v2.0.119
+   Compiling ppv-lite86 v0.2.21
+   Compiling zeroize_derive v1.5.0
+   Compiling rand_chacha v0.3.1
+   Compiling zeroize v1.9.1
+   Compiling syn v1.0.109
+   Compiling rand v0.8.8
+   Compiling cfg-if v1.0.5
+   Compiling num-integer v0.1.47
+   Compiling block-buffer v0.10.4
+   Compiling digest v0.10.7
+   Compiling num-bigint v0.4.8
+   Compiling either v1.19.0
+   Compiling paste v1.0.15
+   Compiling ark-serialize-derive v0.4.2
+   Compiling ark-std v0.4.0
+   Compiling ark-serialize v0.4.2
+   Compiling ark-ff-asm v0.4.2
+   Compiling ark-ff-macros v0.4.2
+   Compiling derivative v2.2.0
+   Compiling itertools v0.10.5
+   Compiling inout v0.1.4
+   Compiling ahash v0.8.12
+   Compiling cipher v0.4.4
+   Compiling ark-ff v0.4.2
+   Compiling ff v0.13.1
+   Compiling arrayvec v0.7.8
+   Compiling constant_time_eq v0.4.2
+   Compiling radium v0.7.0
+   Compiling once_cell v1.21.4
+   Compiling group v0.13.0
+   Compiling pin-project-lite v0.2.17
+   Compiling tap v1.0.1
+   Compiling tracing-core v0.1.36
+   Compiling tracing v0.1.44
+   Compiling wyz v0.5.1
+   Compiling hashbrown v0.13.2
+   Compiling blake2b_simd v1.0.5
+   Compiling scopeguard v1.2.0
+   Compiling funty v2.0.0
+   Compiling bitvec v1.1.1
+   Compiling lock_api v0.4.14
+   Compiling bls12_381 v0.8.0
+   Compiling ark-poly v0.4.2
+   Compiling universal-hash v0.5.1
+   Compiling libm v0.2.16
+   Compiling static_assertions v1.1.0
+   Compiling opaque-debug v0.3.1
+   Compiling poly1305 v0.8.0
+   Compiling pasta_curves v0.5.2
+   Compiling ark-ec v0.4.2
+   Compiling ark-relations v0.4.0
+   Compiling jubjub v0.10.0
+   Compiling spin v0.9.9
+   Compiling chacha20 v0.9.1
+   Compiling aead v0.5.2
+   Compiling hex v0.4.3
+   Compiling byteorder v1.5.0
+   Compiling reddsa v0.5.2
+   Compiling chacha20poly1305 v0.10.1
+   Compiling ark-snark v0.4.0
+   Compiling zcash_spec v0.2.1
+   Compiling cbc v0.1.2
+   Compiling blake2 v0.10.6
+   Compiling sha2 v0.10.9
+   Compiling memuse v0.2.2
+   Compiling bech32 v0.11.1
+   Compiling memchr v2.8.3
+   Compiling zip32 v0.2.1
+   Compiling ark-crypto-primitives v0.4.0
+   Compiling core2 v0.3.3 (/work/tools/zk-spec/vendor/core2)
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+   Compiling fpe v0.6.1
+warning: `core2` (lib) generated 2 warnings
+   Compiling zcash_note_encryption v0.4.2
+   Compiling redjubjub v0.8.0
+   Compiling lazy_static v1.5.0
+   Compiling blake2s_simd v1.0.5
+   Compiling aes v0.8.4
+   Compiling incrementalmerkletree v0.8.2
+   Compiling getset v0.1.7
+   Compiling ark-groth16 v0.4.0
+   Compiling ark-bls12-381 v0.4.0
+   Compiling sapling-crypto v0.5.0
+   Compiling materios-zk-core v0.1.0 (/work/tools/zk-spec/core)
+   Compiling lol_alloc v0.4.1
+   Compiling materios-zk-wasm v0.1.0 (/work/tools/zk-spec/wasm)
+    Finished `release` profile [optimized] target(s) in 26.82s
+    Checking typenum v1.20.1
+    Checking subtle v2.6.1
+    Checking rand_core v0.6.4
+    Checking zerocopy v0.8.63
+    Checking generic-array v0.14.7
+    Checking crypto-common v0.1.7
+    Checking zeroize v1.9.1
+    Checking num-traits v0.2.19
+    Checking cfg-if v1.0.5
+    Checking num-integer v0.1.47
+    Checking block-buffer v0.10.4
+    Checking digest v0.10.7
+    Checking num-bigint v0.4.8
+    Checking either v1.19.0
+    Checking itertools v0.10.5
+    Checking ppv-lite86 v0.2.21
+    Checking rand_chacha v0.3.1
+    Checking inout v0.1.4
+    Checking cipher v0.4.4
+    Checking rand v0.8.8
+    Checking ff v0.13.1
+    Checking arrayvec v0.7.8
+    Checking once_cell v1.21.4
+    Checking constant_time_eq v0.4.2
+    Checking ark-std v0.4.0
+    Checking ahash v0.8.12
+    Checking ark-serialize v0.4.2
+    Checking group v0.13.0
+    Checking ark-ff v0.4.2
+    Checking tap v1.0.1
+    Checking tracing-core v0.1.36
+    Checking pin-project-lite v0.2.17
+    Checking tracing v0.1.44
+    Checking wyz v0.5.1
+    Checking hashbrown v0.13.2
+    Checking radium v0.7.0
+    Checking blake2b_simd v1.0.5
+    Checking scopeguard v1.2.0
+    Checking funty v2.0.0
+    Checking bitvec v1.1.1
+    Checking lock_api v0.4.14
+    Checking bls12_381 v0.8.0
+    Checking universal-hash v0.5.1
+    Checking opaque-debug v0.3.1
+    Checking static_assertions v1.1.0
+    Checking pasta_curves v0.5.2
+    Checking poly1305 v0.8.0
+    Checking jubjub v0.10.0
+    Checking spin v0.9.9
+    Checking ark-poly v0.4.2
+    Checking ark-relations v0.4.0
+    Checking chacha20 v0.9.1
+    Checking aead v0.5.2
+    Checking hex v0.4.3
+    Checking byteorder v1.5.0
+    Checking ark-ec v0.4.2
+    Checking reddsa v0.5.2
+    Checking chacha20poly1305 v0.10.1
+    Checking ark-snark v0.4.0
+    Checking libm v0.2.16
+    Checking zcash_spec v0.2.1
+    Checking cbc v0.1.2
+    Checking sha2 v0.10.9
+    Checking blake2 v0.10.6
+    Checking memchr v2.8.3
+    Checking memuse v0.2.2
+    Checking bech32 v0.11.1
+    Checking core2 v0.3.3 (/work/tools/zk-spec/vendor/core2)
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+warning: `core2` (lib) generated 2 warnings
+    Checking ark-crypto-primitives v0.4.0
+    Checking zip32 v0.2.1
+    Checking fpe v0.6.1
+    Checking zcash_note_encryption v0.4.2
+    Checking redjubjub v0.8.0
+    Checking lazy_static v1.5.0
+    Checking blake2s_simd v1.0.5
+    Checking aes v0.8.4
+    Checking incrementalmerkletree v0.8.2
+    Checking ark-groth16 v0.4.0
+    Checking sapling-crypto v0.5.0
+    Checking ark-bls12-381 v0.4.0
+    Checking lol_alloc v0.4.1
+    Checking materios-zk-core v0.1.0 (/work/tools/zk-spec/core)
+    Checking materios-zk-wasm v0.1.0 (/work/tools/zk-spec/wasm)
+    Finished `release` profile [optimized] target(s) in 9.75s
+public provenance and all derived corpus bytes verified
+
+Verification summary: {"accepted_mutations": 0, "engine": {"node": "v18.20.4", "v8": "10.2.154.26-node.37"}, "proofs_accepted": 42, "single_bit_mutations_rejected": 64512, "timing_samples": 0, "wasm_sha256": "104a771dad24c58ec7071b898e37d8e4a57aa410db8c055ac3ac2898a0b5509b"}

@@ -202,6 +202,16 @@ build and exhaustive mutations in the Wasm engine. Hosted CI repeats primitive
 tests and exhaustive proof verification without timing service hosts; the
 existing Rust workflow also checks metadata from its own rebuilt runtime.
 
+The first hosted ZK job exposed a clean-image setup failure: Rust's container
+did not include `cargo-fmt`. The CI script now explicitly installs `rustfmt`
+and Clippy for 1.85.0. The [hosted RED](native-zk-evidence/ci-components-red.log)
+precedes the fix; the [clean-image GREEN](native-zk-evidence/ci-components-green.log)
+replays the workflow commands in `rust:1.85.0-bookworm`, with an isolated clone,
+fresh target and two CPUs at low priority. It passes the three core tests,
+45 helper tests, policy/dependency/codec gates, native and Wasm Clippy, and
+42 proofs plus all 64,512 mutations. The rebuilt Wasm hash is identical to the
+measured artifact; the CI replay records zero timing samples.
+
 The existing partnerchain `fmt` step is advisory and has pre-existing failures
 in 56 files, tracked by [LOW #67](https://github.com/Flux-Point-Studios/materios/issues/67).
 P0 leaves those source files and that CI policy unchanged. Formatting and Clippy

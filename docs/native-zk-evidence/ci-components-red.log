@@ -1,0 +1,4 @@
+Hosted CI 100, d39d7aa284b03ad10133fe39b722b456d75820dd
+https://ci.fluxpointstudios.com/repos/26/pipeline/100/4
+error: 'cargo-fmt' is not installed for the toolchain '1.85.0-x86_64-unknown-linux-gnu'.
+To install, run `rustup component add rustfmt`
