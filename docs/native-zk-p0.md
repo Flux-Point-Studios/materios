@@ -91,10 +91,24 @@ Faster repetitions do not erase the recorded 724.832242 ms observation.
 ## P0 boundary and replay
 
 `tools/zk-spec/setup.sh` prepares pinned tools/artifacts, then
-`nice -n 10 scripts/harness.sh --full` runs the lock, 45 adapter/selector/tool
-tests and the six P0 checks. `nice -n 10 scripts/harness.sh --all` also executes
+`nice -n 10 scripts/harness.sh --full` always runs the lock and 58
+adapter/selector/tool tests. It runs the six P0 checks when `tools/zk-spec/**`
+or either spec file changed against `FPL_DIFF_BASE`, falling back to the
+merge-base with `origin/main`. Runtime-only changes report the resolved base
+and that P0 phase checks were not selected, without requiring runtime artifacts.
+`nice -n 10 scripts/harness.sh --all` runs every check regardless of paths and also executes
 the 13 original checks, preserving their honest later-phase RED results.
 The driver refuses unknown operations and missing artifacts.
+
+The required Rust workflow has no P0 launch-baseline comparison. The separate
+`c-p0-metadata-compat` step in `.woodpecker/zk-p0.yaml` shares the Sapling
+ZK/spec path filter and builds only `materios-runtime` with Rust 1.85.0 before
+extracting metadata with checksum-pinned subwasm 0.21.3. PR #68's exact file
+list at `58eb0456be7a77829b6e0344955999ef5eadeaf6` is pinned in
+`tools/zk-spec/fixtures/pr-68-changed-files.txt` and selects no metadata step.
+The pre-AJ fixture remains historical evidence; [issue #70](https://github.com/Flux-Point-Studios/materios/issues/70)
+tracks re-pinning it after #68 merges and the post-AJ runtime is reviewed,
+under decision `reviewed-post-aj-launch-baseline-no-zk`.
 
 The no-egress check creates a new kernel network namespace, drops back to the
 calling user, demonstrates failed direct-IP/SRS/Midnight probes and no routes,

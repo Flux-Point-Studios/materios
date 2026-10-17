@@ -13,29 +13,34 @@ check requires an available `unshare --net` privilege; on Gemtek it uses
 `sudo -n unshare --net runuser -u deci` and drops back to the caller before Cargo.
 It never changes host routes or firewall rules. Missing privileges fail.
 
-CI's new `zk-p0` workflow builds/tests the primitive and verifies the Wasm
-proof corpus without timing service hosts. The existing Rust workflow tests
-actual rebuilt-runtime metadata. The namespace-isolated build/test and Gemtek
-benchmark are recorded local acceptance runs, repeated by `--full`.
+CI's `zk-p0` workflow builds/tests the primitive, verifies the Wasm proof corpus
+without timing service hosts, and checks actual rebuilt-runtime metadata. Its
+metadata step uses a runtime-only Cargo check with Rust 1.85.0 and checksum-pinned
+subwasm 0.21.3. The namespace-isolated build/test and Gemtek benchmark are local
+acceptance runs, repeated when `--full` selects ZK work.
 
 The workflow runs on pushes to `main` and on pull requests to any base branch
 when at least one changed path matches `tools/zk-spec/**`, `.fluxpoint-spec.json`,
 `.fluxpoint-spec-lock.json`, `WORK.md`, `scripts/harness.sh`,
 `.woodpecker/zk-p0.yaml`, `partnerchain/runtime/**`, `partnerchain/pallets/**`, or
-`chain-spec/**`. The `c-p0-sapling-spike` step runs only for `tools/zk-spec/**`
-or either spec file. Other matching paths run the cheap primitive checks;
-the Rust workflow still checks rebuilt-runtime metadata. Both path conditions
+`chain-spec/**`. The `c-p0-sapling-spike` and `c-p0-metadata-compat` steps run
+only for `tools/zk-spec/**` or either spec file. Other matching paths run the
+cheap primitive checks. The required Rust workflow has no P0 baseline gate.
+Both path conditions
 set `on_empty: false`. Docs-only changes outside these paths select no ZK steps.
 
 [Woodpecker path conditions](https://woodpecker-ci.org/docs/usage/workflow-syntax#path)
 use include globs for both push and pull-request events. Pull requests supply
 the entire PR diff, so a docs-only commit on a PR containing ZK changes still
-runs the spike. `ci_paths_test.py` exercises the workflow's actual conditions
+runs the spike and metadata comparison. `ci_paths_test.py` exercises the workflow's actual conditions
 with the checksum-pinned Woodpecker 3.16.0 CLI and harmless local step markers.
 CI runs this test before `ci.sh`; replay it with PyYAML installed and
 `WOODPECKER_CLI=/path/to/woodpecker-cli python3 tools/zk-spec/ci_paths_test.py`.
 The separate `ci-sapling.sh` consumes the shared Cargo cache populated by
 `ci.sh` in the preceding step.
+`fixtures/pr-68-changed-files.txt` pins the GitHub changed-file list for PR #68
+at `58eb0456be7a77829b6e0344955999ef5eadeaf6`; that runtime fix selects only
+the cheap ZK step.
 
 ## P0 execution
 
@@ -60,8 +65,15 @@ genesis baseline. The spike measures full standalone 1-spend/2-output bundle
 verification, signatures, decoding and tree work. It does not claim production
 pool execution or the later 100-bundle reviewed-slowest-hardware obligation.
 
-`scripts/harness.sh --full` runs through CURRENT_PHASE in WORK.md. `--all`
-executes every original check and reports later-phase RED results. Original
+`scripts/harness.sh --full` always validates the specification lock and runs the
+tools/zk-spec unit tests. It runs phases through CURRENT_PHASE in WORK.md only
+when `tools/zk-spec/**` or either spec file changed against `FPL_DIFF_BASE`, or
+against the merge-base with `origin/main` when that variable is unset or empty.
+Committed, staged, unstaged, deleted and untracked paths count; ignored artifacts
+do not. Invalid or unavailable bases fail closed. Runtime-only work prints the
+resolved base and reports that P0 phase checks were not selected. `--spec-check`
+validates only the lock. `--all` executes every check regardless of paths and
+reports later-phase RED results. Original
 `contracts.py` is intentionally byte-identical to the first locked packet.
 
 The following contract describes the end-state driver operations; P0 only

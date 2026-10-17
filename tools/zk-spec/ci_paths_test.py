@@ -13,7 +13,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 CLI = os.environ.get("WOODPECKER_CLI", "woodpecker-cli")
 CHEAP = {"p0-primitives"}
-ALL = CHEAP | {"c-p0-sapling-spike"}
+ALL = CHEAP | {"c-p0-sapling-spike", "c-p0-metadata-compat"}
 
 
 class CIPathsTests(unittest.TestCase):
@@ -48,7 +48,7 @@ class CIPathsTests(unittest.TestCase):
             self.assertTrue(output.exists(), result.stdout + result.stderr)
             return set(output.read_text().splitlines())
 
-    def test_zk_and_spec_changes_run_both_steps(self):
+    def test_zk_and_spec_changes_run_all_steps(self):
         for event in ("push", "pull_request"):
             for path in ("tools/zk-spec/ci.sh", "tools/zk-spec/core/src/lib.rs",
                          ".fluxpoint-spec.json", ".fluxpoint-spec-lock.json"):
@@ -78,6 +78,38 @@ class CIPathsTests(unittest.TestCase):
             with self.subTest(event=event):
                 self.assertEqual(self.selected([], event), set())
 
+    def test_motra_pr_68_does_not_select_metadata_compat(self):
+        files = (ROOT / "tools/zk-spec/fixtures/pr-68-changed-files.txt").read_text().splitlines()
+        self.assertIn("partnerchain/pallets/motra/src/lib.rs", files)
+        self.assertIn(".woodpecker/rust.yaml", files)
+        for event in ("push", "pull_request"):
+            with self.subTest(event=event):
+                self.assertEqual(self.selected(files, event), CHEAP)
+
+    def test_required_rust_workflow_has_no_zk_baseline_gate(self):
+        rust = (ROOT / ".woodpecker/rust.yaml").read_text()
+        for name in ("p0_tools", "metadata-compat", "launch-baseline"):
+            with self.subTest(name=name):
+                self.assertNotIn(name, rust)
+
+    def test_metadata_step_builds_only_runtime_with_pinned_tools(self):
+        metadata = next((step for step in self.workflow["steps"]
+                         if step["name"] == "c-p0-metadata-compat"), None)
+        self.assertIsNotNone(metadata, "metadata comparison must run in the ZK workflow")
+        self.assertEqual(metadata["image"], "rust:1.85.0-bookworm")
+        commands = "\n".join(metadata["commands"])
+        self.assertIn("cargo +1.85.0 check --locked --manifest-path partnerchain/Cargo.toml -p materios-runtime", commands)
+        self.assertNotIn("--workspace", commands)
+        self.assertNotIn("-p materios-node", commands)
+        self.assertIn("rustup target add --toolchain 1.85.0 wasm32-unknown-unknown", commands)
+        self.assertIn("rustup component add --toolchain 1.85.0 rust-src", commands)
+        self.assertIn("subwasm_linux_amd64_v0.21.3.deb", commands)
+        self.assertIn("0560d1b8785be9a0d04cb0bf939feaaa621c2d0809f818225698d5c44198550c", commands)
+        self.assertIn("sha256sum -c -", commands)
+        self.assertIn("p0_tools.py metadata-compat", commands)
+        self.assertIn("assert r['gate_exit']==0", commands)
+        self.assertIn("assert all(r['mutants'].values())", commands)
+
     def test_pr_uses_whole_diff_and_accepts_stacked_base(self):
         self.assertEqual(self.selected(["docs/guide.md", "tools/zk-spec/core/src/lib.rs"],
                                        branch="spec/native-zk-hybrid"), ALL)
@@ -97,8 +129,6 @@ class CIPathsTests(unittest.TestCase):
             self.assertIn(f"check.py {check}", script)
         spike = next(step for step in self.workflow["steps"] if step["name"] == "c-p0-sapling-spike")
         self.assertIn("tools/zk-spec/ci-sapling.sh", spike["commands"])
-        rust = (ROOT / ".woodpecker/rust.yaml").read_text()
-        self.assertIn("p0_tools.py metadata-compat", rust)
 
 
 if __name__ == "__main__":
