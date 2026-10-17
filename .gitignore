@@ -73,3 +73,4 @@ __pycache__/
 .zk-spec-target/
 .zk-spec-scratch/
 tools/zk-spec/artifacts/
+tools/zk-spec/aiken/build/

@@ -1,0 +1,72 @@
+[
+  {
+    "file": "block-main-0-419-201.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-419-201.txt",
+    "sha256": "e9d7903b20cc62fc701b670c6922ad158efe6739c768444199593757f5852d97",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "block-main-0-434-873.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-434-873.txt",
+    "sha256": "4b882ebeab309da213f5a5b9cc57780c1c68b788bd2d12477d0068dd7fe31dc5",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "block-main-0-903-000.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-903-000.txt",
+    "sha256": "e41d544ed3e8fcc6d2a1f61bad47cd4985322b00feaa2996fc3809664990b21a",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "block-main-0-982-681.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-982-681.txt",
+    "sha256": "f1e1bdd8a1fcad309662c9625deda5b5b12992f2dbb1ddf719afa9c073af67e5",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "sapling-spend.vk",
+    "url": "https://download.z.cash/downloads/sapling-spend.params",
+    "parameter_blake2b512": "8270785a1a0d0bc77196f000ee6d221c9c9894f55307bd9357c3f0105d31ca63991ab91324160d8f53e2bbd3c2633a6eb8bdf5205d822e7f3f73edac51b2b70c",
+    "parameter_bytes": 47958396,
+    "sha256": "e0e847a3937ce78989e3416e908439a1d853287863645095d5e2bbadeeec9869",
+    "ic_count": 8
+  },
+  {
+    "file": "sapling-output.vk",
+    "url": "https://download.z.cash/downloads/sapling-output.params",
+    "parameter_blake2b512": "657e3d38dbb5cb5e7dd2970e8b03d69b4787dd907285b5a7f0790dcc8072f60bf593b32cc2d1c030e00ff5ae64bf84c5c3beb84ddc841d48264b4a171744d028",
+    "parameter_bytes": 3592860,
+    "sha256": "d7a655f6f58745f17bf5344682d25d15967e39b575d072335e14ace0a871bd0c",
+    "ic_count": 6
+  },
+  {
+    "file": "block-main-0-419-202.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-419-202.txt",
+    "sha256": "37cf8b5735bf849c38df6533b02279717b928446d1f184f9af16c168293660c0",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "block-main-0-653-601.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-653-601.txt",
+    "sha256": "a25c77d12a74a9861087be88d2fe1abc7449c51ee2a6268eedf3321c232d6e9f",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "block-main-0-903-001.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-903-001.txt",
+    "sha256": "ec6f7cd172e42f456309471591c592ba86fcf4091f93d4c821755787c7c96975",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "block-main-0-949-496.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-949-496.txt",
+    "sha256": "486e55ba49949388792ff59a117348be7fa1390de4f0995e893225bcb56ea5a8",
+    "network": "zcash-mainnet"
+  },
+  {
+    "file": "block-main-0-975-066.txt",
+    "url": "https://raw.githubusercontent.com/ZcashFoundation/zebra/2c3930dacd4ddfb4cf605a216d4bd20eda99725c/zebra-test/src/vectors/block-main-0-975-066.txt",
+    "sha256": "85df4aa2c21d4a9d1999bf9bacbc7e0aa42d1e6786cdb7100bf2974de7dbdd92",
+    "network": "zcash-mainnet"
+  }
+]

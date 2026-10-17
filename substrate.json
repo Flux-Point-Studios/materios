@@ -151,6 +151,17 @@
         "root-timelock"
       ],
       "status": "experimental"
+    },
+    {
+      "id": "native-zk-bridge-codec",
+      "name": "Native ZK bridge recipient codec",
+      "desc": "Standalone canonical v1 Account and Utxo CBOR recipient codec evaluated by Aiken, with round trips and refusal of reserved Shielded, unknown version/tag/lock, malformed length, trailing bytes and noncanonical integers. P0 primitive only; no deployed bridge or value activation.",
+      "kind": "toolkit",
+      "paths": [
+        "tools/zk-spec/aiken"
+      ],
+      "consumes": [],
+      "status": "experimental"
     }
   ]
 }
