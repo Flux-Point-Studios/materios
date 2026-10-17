@@ -1,0 +1,69 @@
+specification: validated 4328b0ee893357524ad91c5f2dfc0c962ba8dcfa92e239fb061b8c903161926d
+.............................................
+----------------------------------------------------------------------
+Ran 45 tests in 0.494s
+
+OK
+test_core_build_and_real_tests_without_network (p0_contracts.CoreNoEgress.test_core_build_and_real_tests_without_network) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 18.003s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_injected_dependency_fails_exclusion_gate (p0_contracts.MidnightNegativeControl.test_injected_dependency_fails_exclusion_gate) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.388s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_source_routes_refuse_mainnet_and_impersonation (p0_contracts.MainnetRefusal.test_source_routes_refuse_mainnet_and_impersonation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.922s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_actual_runtime_against_explicit_source_baseline_and_mutants (p0_contracts.MetadataCompat.test_actual_runtime_against_explicit_source_baseline_and_mutants) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 15.537s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_rust_and_aiken_evaluation (p0_contracts.BridgeCodec.test_rust_and_aiken_evaluation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.409s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_mainnet_proofs_mutations_and_complete_wasm_bundles (p0_contracts.SaplingSpike.test_mainnet_proofs_mutations_and_complete_wasm_bundles) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 331.614s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+
+Phase check report
+c-p0-core-no-egress: GREEN
+c-p0-midnight-negative-control: GREEN
+c-p0-mainnet-refusal: GREEN
+c-p0-metadata-compat: GREEN
+c-p0-bridge-codec: GREEN
+c-p0-sapling-spike: GREEN
+c-mainnet-isolation: NOT RUN (Phase P1; run --all)
+c-sapling-wasm: NOT RUN (Phase P3; run --all)
+c-supply-invariant: NOT RUN (Phase P3; run --all)
+c-midnight-blackhole: NOT RUN (Phase P3; run --all)
+c-metadata-append-only: NOT RUN (Phase P1; run --all)
+c-bridge-datum: NOT RUN (Phase P1; run --all)
+c-motra-66: NOT RUN (Phase P1; run --all)
+c-hub-other-chains: NOT RUN (Phase P1; run --all)
+c-fees: NOT RUN (Phase P2; run --all)
+c-hybrid-utxo: NOT RUN (Phase P3; run --all)
+c-shielded-e2e: NOT RUN (Phase P3; run --all)
+c-host-coverage: NOT RUN (Phase P4; run --all)
+c-activation-gates: NOT RUN (Phase P5; run --all)

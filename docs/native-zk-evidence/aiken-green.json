@@ -1,0 +1,109 @@
+{
+  "seed": 3982216296,
+  "summary": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0,
+    "kind": {
+      "unit": 9,
+      "property": 0
+    }
+  },
+  "modules": [
+    {
+      "name": "bridge",
+      "summary": {
+        "total": 9,
+        "passed": 9,
+        "failed": 0,
+        "kind": {
+          "unit": 9,
+          "property": 0
+        }
+      },
+      "tests": [
+        {
+          "title": "account_roundtrip",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 14136,
+            "cpu": 4942196
+          }
+        },
+        {
+          "title": "utxo_roundtrip",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 16038,
+            "cpu": 5398294
+          }
+        },
+        {
+          "title": "rejects_reserved",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 4705,
+            "cpu": 2047560
+          }
+        },
+        {
+          "title": "rejects_unknown_variant",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 4705,
+            "cpu": 2047560
+          }
+        },
+        {
+          "title": "rejects_unknown_version",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 4705,
+            "cpu": 2047560
+          }
+        },
+        {
+          "title": "rejects_short_key",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 4705,
+            "cpu": 2047560
+          }
+        },
+        {
+          "title": "rejects_trailing_bytes",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 4705,
+            "cpu": 2047560
+          }
+        },
+        {
+          "title": "rejects_noncanonical_integer",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 4705,
+            "cpu": 2047560
+          }
+        },
+        {
+          "title": "rejects_unknown_lock",
+          "status": "pass",
+          "on_failure": "fail_immediately",
+          "execution_units": {
+            "mem": 4705,
+            "cpu": 2047560
+          }
+        }
+      ]
+    }
+  ]
+}

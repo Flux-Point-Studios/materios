@@ -1,0 +1,435 @@
+test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) ...
+  test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=0, field='allowed') ... FAIL
+  test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=0, field='broadcasts') ... FAIL
+  test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=1, field='allowed') ... FAIL
+  test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=1, field='broadcasts') ... FAIL
+  test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=2, field='allowed') ... FAIL
+  test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=2, field='broadcasts') ... FAIL
+test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) ...
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=0, field='allowed') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=0, field='enabled_zk_pallets') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=0, field='broadcasts') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=1, field='allowed') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=1, field='enabled_zk_pallets') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=1, field='broadcasts') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=2, field='allowed') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=2, field='enabled_zk_pallets') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=2, field='broadcasts') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=3, field='allowed') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=3, field='enabled_zk_pallets') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=3, field='broadcasts') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=4, field='allowed') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=4, field='enabled_zk_pallets') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=4, field='broadcasts') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=5, field='allowed') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=5, field='enabled_zk_pallets') ... FAIL
+  test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=5, field='broadcasts') ... FAIL
+test_complete_denial_fixture_passes (__main__.ActivationContractTests.test_complete_denial_fixture_passes) ... ok
+test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) ...
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=0) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=1) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=2) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=3) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=0) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=1) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=2) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=3) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=0) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=1) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=2) ... FAIL
+  test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=3) ... FAIL
+test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) ...
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='chain_specs', mutation='empty-inventory') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='chain_specs', mutation='missing-case') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='chain_specs', mutation='duplicate-case') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='zk_pallets', mutation='empty-inventory') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='zk_pallets', mutation='missing-case') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='zk_pallets', mutation='duplicate-case') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='activation-hold-coverage', inventory='activation_paths', mutation='empty-inventory') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='activation-hold-coverage', inventory='activation_paths', mutation='missing-case') ... FAIL
+  test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='activation-hold-coverage', inventory='activation_paths', mutation='duplicate-case') ... FAIL
+test_absent_aj_tests_fail_before_compiling (__main__.AdapterTests.test_absent_aj_tests_fail_before_compiling) ... ok
+test_absent_driver_fails_before_compiling (__main__.AdapterTests.test_absent_driver_fails_before_compiling) ... ok
+test_argv_is_literal_and_target_is_worktree_local (__main__.AdapterTests.test_argv_is_literal_and_target_is_worktree_local) ... ok
+test_assertion_failure_is_red (__main__.AdapterTests.test_assertion_failure_is_red) ... ok
+test_boolean_protocol_version_is_not_integer_version (__main__.AdapterTests.test_boolean_protocol_version_is_not_integer_version) ... ok
+test_cargo_ignored_test_fails (__main__.AdapterTests.test_cargo_ignored_test_fails) ... ok
+test_cargo_missing_summary_fails (__main__.AdapterTests.test_cargo_missing_summary_fails) ... ok
+test_cargo_single_real_test_passes (__main__.AdapterTests.test_cargo_single_real_test_passes) ... ok
+test_cargo_zero_tests_fails (__main__.AdapterTests.test_cargo_zero_tests_fails) ... ok
+test_driver_empty_response_fails (__main__.AdapterTests.test_driver_empty_response_fails) ... ok
+test_driver_unknown_response_fails (__main__.AdapterTests.test_driver_unknown_response_fails) ... ok
+test_duplicate_response_keys_fail (__main__.AdapterTests.test_duplicate_response_keys_fail) ... ok
+test_empty_suite_fails (__main__.AdapterTests.test_empty_suite_fails) ... ok
+test_expected_failure_is_not_green (__main__.AdapterTests.test_expected_failure_is_not_green) ... ok
+test_missing_command_fails (__main__.AdapterTests.test_missing_command_fails) ... ok
+test_nonzero_exit_fails (__main__.AdapterTests.test_nonzero_exit_fails) ... ok
+test_real_assertion_passes (__main__.AdapterTests.test_real_assertion_passes) ... ok
+test_skipped_suite_fails (__main__.AdapterTests.test_skipped_suite_fails) ... ok
+test_timeout_fails (__main__.AdapterTests.test_timeout_fails) ... ok
+test_unknown_driver_status_fails (__main__.AdapterTests.test_unknown_driver_status_fails) ... ok
+
+======================================================================
+FAIL: test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=0, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 205, in test_activation_or_broadcast_despite_holds_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=0, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 205, in test_activation_or_broadcast_despite_holds_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=1, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 205, in test_activation_or_broadcast_despite_holds_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=1, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 205, in test_activation_or_broadcast_despite_holds_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=2, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 205, in test_activation_or_broadcast_despite_holds_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_activation_or_broadcast_despite_holds_is_rejected (__main__.ActivationContractTests.test_activation_or_broadcast_despite_holds_is_rejected) (path=2, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 205, in test_activation_or_broadcast_despite_holds_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=0, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=0, field='enabled_zk_pallets')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=0, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=1, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=1, field='enabled_zk_pallets')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=1, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=2, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=2, field='enabled_zk_pallets')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=2, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=3, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=3, field='enabled_zk_pallets')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=3, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=4, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=4, field='enabled_zk_pallets')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=4, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=5, field='allowed')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=5, field='enabled_zk_pallets')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_any_mainnet_pallet_enablement_is_rejected (__main__.ActivationContractTests.test_any_mainnet_pallet_enablement_is_rejected) (index=5, field='broadcasts')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 172, in test_any_mainnet_pallet_enablement_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=2)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=0, hold=3)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=2)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=1, hold=3)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=0)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=1)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=2)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_each_activation_path_requires_every_hold (__main__.ActivationContractTests.test_each_activation_path_requires_every_hold) (path=2, hold=3)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 197, in test_each_activation_path_requires_every_hold
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='chain_specs', mutation='empty-inventory')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='chain_specs', mutation='missing-case')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='chain_specs', mutation='duplicate-case')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='zk_pallets', mutation='empty-inventory')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='zk_pallets', mutation='missing-case')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='mainnet-zk-enablement', inventory='zk_pallets', mutation='duplicate-case')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='activation-hold-coverage', inventory='activation_paths', mutation='empty-inventory')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='activation-hold-coverage', inventory='activation_paths', mutation='missing-case')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+======================================================================
+FAIL: test_missing_or_duplicate_coverage_is_rejected (__main__.ActivationContractTests.test_missing_or_duplicate_coverage_is_rejected) (operation='activation-hold-coverage', inventory='activation_paths', mutation='duplicate-case')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/test_adapter.py", line 189, in test_missing_or_duplicate_coverage_is_rejected
+    self.assertEqual(self.run_contracts(responses), 1)
+AssertionError: 0 != 1
+
+----------------------------------------------------------------------
+Ran 25 tests in 0.042s
+
+FAILED (failures=45)

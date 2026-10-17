@@ -131,6 +131,55 @@
       ],
       "consumes": [],
       "status": "experimental"
+    },
+    {
+      "id": "native-zk-specification",
+      "name": "Native ZK and hybrid MATRA specification",
+      "desc": "Phase-aware PREPROD native ZK acceptance harness with a real Rust driver, namespace-isolated core tests and dependency negative control, source-derived mainnet file-route refusal, actual runtime metadata compatibility and mutants, Aiken codec evaluation and measured no_std Sapling Wasm verification. --full always validates the lock and unit tests, selecting phases through CURRENT_PHASE only for ZK/spec changes against FPL_DIFF_BASE or the origin/main merge-base; --all retains every end-state check regardless of paths. CI filters ZK, spec, harness, runtime, pallet and chain-spec paths; the Sapling spike and independently rebuilt runtime metadata comparison, pinned to partnerchain/Cargo.lock, run only for ZK/spec changes. The required Rust workflow has no P0 baseline gate. Mainnet, spend and external commitments remain denied.",
+      "kind": "toolkit",
+      "paths": [
+        ".fluxpoint-spec.json",
+        ".fluxpoint-spec-lock.json",
+        "tools/zk-spec",
+        "scripts/harness.sh",
+        ".woodpecker/zk-p0.yaml"
+      ],
+      "consumes": [
+        "orinq-receipts-pallet",
+        "tee-attestation-pallet",
+        "motra-fee-resource",
+        "launch-preflight",
+        "runtime-build",
+        "root-timelock",
+        "native-zk-bridge-codec",
+        "native-zk-sapling-core"
+      ],
+      "status": "experimental"
+    },
+    {
+      "id": "native-zk-bridge-codec",
+      "name": "Native ZK bridge recipient codec",
+      "desc": "Standalone canonical v1 Account and Utxo CBOR recipient codecs in no_std Rust and Aiken, with actual CEK evaluator round trips and refusal of reserved Shielded, unknown version/tag/lock, malformed length, trailing bytes and noncanonical integers. P0 primitive only; no deployed bridge or value activation.",
+      "kind": "toolkit",
+      "paths": [
+        "tools/zk-spec/aiken",
+        "tools/zk-spec/core/src/bridge.rs"
+      ],
+      "consumes": [],
+      "status": "experimental"
+    },
+    {
+      "id": "native-zk-sapling-core",
+      "name": "Native ZK Sapling verification core",
+      "desc": "Experimental no_std Sapling verification core using arkworks Groth16/BLS12-381 and upstream Sapling/Jubjub signatures and tree primitives. Rust 1.85.0 wasm32 build, pinned real Zcash mainnet corpus, exhaustive proof-bit mutations and public-input controls that reject a pairing-result bypass and complete one-spend/two-output bundle measurements. Standalone P0 feasibility primitive; no runtime pool, value activation or reviewed slowest-hardware claim.",
+      "kind": "toolkit",
+      "paths": [
+        "tools/zk-spec/core/src/sapling.rs",
+        "tools/zk-spec/wasm",
+        "tools/zk-spec/fixtures"
+      ],
+      "consumes": [],
+      "status": "experimental"
     }
   ]
 }

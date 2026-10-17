@@ -1,0 +1,1842 @@
+{
+  "version": 1,
+  "goal": "Specify native other-chain verification and shielded/unshielded MATRA on a hybrid account/UTXO ledger, built and verified on preprod for later separately authorized forkless mainnet upgrades; Midnight is optional.",
+  "asset": "Materios's existing runtime, canonical balances, MOTRA sponsorship, receipts and TEE/Witness consumers, orynq finality/anchoring, bridge work and launch/ceremony tooling gain reusable verification and value-lane primitives.",
+  "scope": [
+    "Phase-aware native ZK packet: CURRENT_PHASE in WORK.md selects the build obligations. P0 builds the offline core, refusal and compatibility gates, bridge codec and measured Sapling spike; original end-state obligations remain unchanged at P1-P5.",
+    "All baselines are model defaults. d-compliance, d-audit, d-budget and d-mainnet-rollout are defaulted DENY holds under E-lock-brief, not approvals. No choice has user-confirmed status. Dependencies are a decision DAG, not blanket permission to execute.",
+    "Implementation and verification scope is PREPROD only. None of the four authority approvals is needed to build or verify preprod; offline refusal checks retain every hold and cannot authorize mainnet or external commitments.",
+    "Hub-first other-chain finality/inclusion consumer and parallel Sapling spike; MATRA-only A/U/S, MOTRA-only fees, open relayer, native prover and viewing keys.",
+    "Preserve existing runtime semantics and launch artifacts after mandatory #66 correction. New pallets append at >=26; preprod tests precede any separately authorized mainnet review.",
+    "Pure Wasm verification first. A later optional math-only node acceleration is separately gated; runtime upgrades cannot install missing host functions.",
+    "Checks are executable tests/properties/runtime probes, not formal proofs. The production driver and immutable provenance must support every GREEN claim. --full runs phases through CURRENT_PHASE; --all runs every check and reports every failure."
+  ],
+  "outOfScope": [
+    "Implementing AJ's MOTRA #66 fix, modifying another checkout, updating running services, merging, tagging or deploying. Pushing both branches and opening a draft PR are authorized by the AK2 handoff.",
+    "Mainnet activation, broadcasts, deployments, ceremonies, custody/key changes and immutable bridge commitments. A future separate CEO-approved native-ZK authority packet with actual evidence is required; see docs/native-zk-handoff.md#future-ceo-approval-packet.",
+    "Counsel engagement, audit booking or commissioning, budget approval, spending and external commitments. Each remains denied pending the CEO's separate approval in the future native-ZK authority packet; see docs/native-zk-handoff.md#future-ceo-approval-packet.",
+    "Generalized private contracts, arbitrary assets, full Compact ledger embedding, per-note/per-UTXO MOTRA and private fee circuits; each needs a new soundness/spec decision.",
+    "Promised launch dates, throughput, formal soundness or privacy/anonymity claims derived from unreplicated benchmarks or small preprod traffic."
+  ],
+  "decisions": [
+    {
+      "id": "d-arch",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "Where do ledger rules and cryptographic operations execute?",
+        "options": [
+          {
+            "option": "wasm-semantics-rfc163-math",
+            "argued_by": "Codex; composable-primitives design",
+            "strongest_objection": "Pure Wasm may be too slow on the weakest validator; the encoding adapter and later ABI need independent review."
+          },
+          {
+            "option": "native-midnight-ledger",
+            "argued_by": "Midnight-compatible design",
+            "strongest_objection": "Every ledger-major change needs a binary rollout and off-trie state handling; it defeats the core forkless-semantics constraint."
+          },
+          {
+            "option": "keep-account-ledger-only",
+            "argued_by": "Minimal launch-risk position",
+            "strongest_objection": "Preserves the current chain but supplies neither the requested hybrid ledger nor native shielded value."
+          }
+        ],
+        "chosen": "wasm-semantics-rfc163-math",
+        "rationale": "Keep supply, nullifiers, conversions, fees, verifier policy and storage in the runtime. Begin with pure Wasm; a later optional node release may add only pinned RFC-163-shaped curve arithmetic. This preserves forkless ledger upgrades without an external ledger release dependency.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-code, E-rfc, E-study in docs/native-zk-research.md"
+        ]
+      },
+      "costs": [
+        {
+          "option": "wasm-semantics-rfc163-math",
+          "cost": "Spike and integration effort; later permanent host ABI maintenance. Runtime cost unknown until the full Sapling spike.",
+          "basis": "unknown",
+          "evidence": [
+            "E-code, E-rfc, E-study in docs/native-zk-research.md",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "native-midnight-ledger",
+          "cost": "Study estimates 12-17 weeks for its broader preprod path; adds FFI, off-trie recovery and fleet coordination. Not measured here.",
+          "basis": "estimate",
+          "evidence": [
+            "E-code, E-rfc, E-study in docs/native-zk-research.md",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "keep-account-ledger-only",
+          "cost": "No ZK implementation cost; foregoes the requested interoperability and private-value capabilities.",
+          "basis": "estimate",
+          "evidence": [
+            "E-code, E-rfc, E-study in docs/native-zk-research.md",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-order",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch"
+      ],
+      "record": {
+        "question": "Should shielded value or other-chain verification be the first delivery?",
+        "options": [
+          {
+            "option": "narrow-hub-first-parallel-sapling-spike",
+            "argued_by": "Codex; CEO multi-chain thesis",
+            "strongest_objection": "A generic registry can expand into infrastructure with no user; the first release must include a real foreign-chain consumer."
+          },
+          {
+            "option": "shielded-matra-first",
+            "argued_by": "Baseline study recommendation",
+            "strongest_objection": "Delays the strategic other-chain job and starts with custody before the verifier's multi-consumer surface is hardened."
+          },
+          {
+            "option": "defer-both-until-after-launch",
+            "argued_by": "Launch capacity protection",
+            "strongest_objection": "Eliminates early learning about the ledger and bridge interfaces that need design before immutable deployments."
+          }
+        ],
+        "chosen": "narrow-hub-first-parallel-sapling-spike",
+        "rationale": "Deliver a bounded hub with Groth16 verification and a checkpointed foreign-chain finality/inclusion consumer first, while running the Sapling feasibility spike. This makes other chains a first-class job without committing to five backends at once. Lane S follows the spike, fees and supply gates; Lane U follows its own tests.",
+        "overturned_prior": true,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-brief, E-study and E-ops; memory's multi-chain priority supersedes shield-first recommendation"
+        ]
+      },
+      "costs": [
+        {
+          "option": "narrow-hub-first-parallel-sapling-spike",
+          "cost": "Reorders the study rather than adding five backends at once; no measured delivery date. Lane S arrives later than shield-first.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study and E-ops; memory's multi-chain priority supersedes shield-first recommendation",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "shielded-matra-first",
+          "cost": "Study estimates five weeks including soak; complete Wasm integration remains unmeasured.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study and E-ops; memory's multi-chain priority supersedes shield-first recommendation",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "defer-both-until-after-launch",
+          "cost": "Avoids present engineering load; delays all native-ZK value and feasibility feedback.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study and E-ops; memory's multi-chain priority supersedes shield-first recommendation",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-shield-circuit",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch",
+        "d-order"
+      ],
+      "record": {
+        "question": "Which proof relation should shielded MATRA use first?",
+        "options": [
+          {
+            "option": "unchanged-sapling-groth16-bls12381",
+            "argued_by": "Codex; shield-first and composable designs",
+            "strongest_objection": "Trusted setup assumptions remain, and historical audits do not cover new Materios encodings, signatures, custody or wallet code."
+          },
+          {
+            "option": "orchard-halo2-pasta",
+            "argued_by": "Modern shielded-design position",
+            "strongest_objection": "A different proof/curve stack adds porting and acceleration work at the pinned SDK; current upstream support does not prove a compatible build."
+          },
+          {
+            "option": "midnight-zswap",
+            "argued_by": "Full Compact compatibility design",
+            "strongest_objection": "Imports ledger/version and toolchain coupling; the study reports a rustc incompatibility and no audited Materios integration."
+          },
+          {
+            "option": "leave-shielded-lane-disabled",
+            "argued_by": "Safety fallback",
+            "strongest_objection": "Does not deliver shielded MATRA; it is only a safe state while the spike or assurance gates fail."
+          }
+        ],
+        "chosen": "unchanged-sapling-groth16-bls12381",
+        "rationale": "Use the unchanged single-asset Sapling relation and hash-pinned public parameters, conditional on the no_std/full-bundle spike. Native proof, signature, tree and serialization checks are all required. No committee-attested fallback may authorize shielded spending. Over 400 ms blocks pure-Wasm activation and reorders acceleration.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-sapling, E-study, E-code; thresholds are acceptance policy, not measured results"
+        ]
+      },
+      "costs": [
+        {
+          "option": "unchanged-sapling-groth16-bls12381",
+          "cost": "Reuse avoids a new ceremony only if the relation is unchanged. Wasm timing, memory and integration effort are unknown.",
+          "basis": "unknown",
+          "evidence": [
+            "E-sapling, E-study, E-code; thresholds are acceptance policy, not measured results",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "orchard-halo2-pasta",
+          "cost": "Additional toolchain and curve work, benchmarks and audit surface; no local estimate or measurement establishes feasibility.",
+          "basis": "unknown",
+          "evidence": [
+            "E-sapling, E-study, E-code; thresholds are acceptance policy, not measured results",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "midnight-zswap",
+          "cost": "Ledger adaptation, SRS distribution, toolchain work and audit; cost and portable verification timing unmeasured here.",
+          "basis": "unknown",
+          "evidence": [
+            "E-sapling, E-study, E-code; thresholds are acceptance policy, not measured results",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "leave-shielded-lane-disabled",
+          "cost": "No active pool risk; foregone privacy functionality and continuing sponsor-only fee design.",
+          "basis": "estimate",
+          "evidence": [
+            "E-sapling, E-study, E-code; thresholds are acceptance policy, not measured results",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-hub-scope",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch",
+        "d-order"
+      ],
+      "record": {
+        "question": "What does the verifier hub establish about another chain?",
+        "options": [
+          {
+            "option": "bounded-versioned-hub-with-consensus-consumer",
+            "argued_by": "Codex; composable-primitives design",
+            "strongest_objection": "Checkpoint freshness and consensus assumptions remain; a proof service must never silently become an authorization to bridge or mint."
+          },
+          {
+            "option": "five-backends-in-first-release",
+            "argued_by": "Broad baseline P2 plan",
+            "strongest_objection": "Too many proof formats, trust models and licensing surfaces before any narrow consumer is proven."
+          },
+          {
+            "option": "proof-validity-only",
+            "argued_by": "Smallest crypto service",
+            "strongest_objection": "A valid arbitrary proof says nothing about canonical chain history, consensus finality or transaction inclusion without a pinned statement."
+          }
+        ],
+        "chosen": "bounded-versioned-hub-with-consensus-consumer",
+        "rationale": "Start with Groth16-BLS12-381 and a bounded GRANDPA finality plus inclusion adapter using pinned genesis/checkpoints and authority changes. Statements bind source chain, checkpoint, height, root, backend/version, VK, public-input hash, consumer domain and trust class. Registration is deposit-backed; consumers pin acceptable keys and classes. ConsensusVerified, CryptographicProof, HardwareAttested and CommitteeAttested are distinct. zkVM, TDX, Compact and Mithril each need a later backend-specific gate.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-substrate, E-hub, E-mithril; current orynq finality primitive supplies transition and inclusion patterns"
+        ]
+      },
+      "costs": [
+        {
+          "option": "bounded-versioned-hub-with-consensus-consumer",
+          "cost": "Registry, bounded verifier and at least receipts/attestation/foreign-chain interfaces require integration. Verification and wrapper proving costs remain unknown.",
+          "basis": "unknown",
+          "evidence": [
+            "E-substrate, E-hub, E-mithril; current orynq finality primitive supplies transition and inclusion patterns",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "five-backends-in-first-release",
+          "cost": "Study estimates 3-4 weeks for P2 but supplies no reproducible full-stack benchmark or delivery proof.",
+          "basis": "estimate",
+          "evidence": [
+            "E-substrate, E-hub, E-mithril; current orynq finality primitive supplies transition and inclusion patterns",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "proof-validity-only",
+          "cost": "Smaller initial surface; defers the first-class other-chain requirement and may mislead consumers.",
+          "basis": "estimate",
+          "evidence": [
+            "E-substrate, E-hub, E-mithril; current orynq finality primitive supplies transition and inclusion patterns",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-supply",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch"
+      ],
+      "record": {
+        "question": "How is MATRA conserved across accounts, UTXOs and shielded notes?",
+        "options": [
+          {
+            "option": "single-issuance-sovereign-escrows",
+            "argued_by": "Codex; all three designs",
+            "strongest_objection": "An unsound circuit can counterfeit hidden claims while the public turnstile balances, draining the pool and downstream recipients within caps."
+          },
+          {
+            "option": "burn-and-mint-per-lane",
+            "argued_by": "Separate ledger accounting",
+            "strongest_objection": "A lane bug can inflate canonical supply; additional privileged issuance paths increase the blast radius."
+          },
+          {
+            "option": "independent-wrapped-shielded-token",
+            "argued_by": "Contract-vault design",
+            "strongest_objection": "Creates an additional token and redemption semantics instead of the requested one-MATRA ledger."
+          }
+        ],
+        "chosen": "single-issuance-sovereign-escrows",
+        "rationale": "Keep pallet_balances TotalIssuance canonical. A excludes lane sovereign accounts; U and S are liabilities backed by separate escrows. All conversions are atomic transfers, with no mint/burn privileges in lane code. U escrow equals live UTXOs; S escrow equals cumulative shields minus unshields. For controlled test wallets, decrypted unspent note value independently equals S escrow. That test and the public turnstile do not prove real-world hidden-note soundness.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-study, E-code, E-ops; mainnet supply cap must be verified from its reviewed genesis, not inferred from preprod"
+        ]
+      },
+      "costs": [
+        {
+          "option": "single-issuance-sovereign-escrows",
+          "cost": "Escrow, cap, watcher, try-runtime and 10,000-transition property testing; no measured implementation cost.",
+          "basis": "estimate",
+          "evidence": [
+            "E-study, E-code, E-ops; mainnet supply cap must be verified from its reviewed genesis, not inferred from preprod",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "burn-and-mint-per-lane",
+          "cost": "Multiple issuance paths and reconciliation work; greater audit surface than transfer custody.",
+          "basis": "estimate",
+          "evidence": [
+            "E-study, E-code, E-ops; mainnet supply cap must be verified from its reviewed genesis, not inferred from preprod",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "independent-wrapped-shielded-token",
+          "cost": "Extra wallet/indexer asset handling and bridge-like custody review; no quote or benchmark available.",
+          "basis": "unknown",
+          "evidence": [
+            "E-study, E-code, E-ops; mainnet supply cap must be verified from its reviewed genesis, not inferred from preprod",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-utxo",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch",
+        "d-supply",
+        "d-hub-scope"
+      ],
+      "record": {
+        "question": "Which transparent UTXO semantics complement existing accounts?",
+        "options": [
+          {
+            "option": "bounded-matra-hybridtx",
+            "argued_by": "Codex; hybrid ledger research",
+            "strongest_objection": "Unsigned admission and multi-domain signatures create DoS/replay risks; current signed extensions do not automatically secure this path."
+          },
+          {
+            "option": "accounts-with-outpoint-references",
+            "argued_by": "Lower-surface interim option",
+            "strongest_objection": "Auditable bridge ids alone do not provide exclusive UTXO ownership or nonce-independent value spends."
+          },
+          {
+            "option": "full-generalized-script-ledger",
+            "argued_by": "Programmable UTXO option",
+            "strongest_objection": "Expands script execution, resource metering and assets beyond the requested MATRA value lane."
+          }
+        ],
+        "chosen": "bounded-matra-hybridtx",
+        "rationale": "Keep shared state in accounts and add MATRA-only UTXOs for exclusive value, with atomic HybridTx conversions. Bound inputs, outputs, signatures and TTL before crypto. Consumed outpoints and fee vouchers conflict in the pool and are rechecked at dispatch. Account-only debits require a replay nonce/intent commitment. Cardano bridge ids include network, transaction hash and output index; key locks verify CIP-8/30 domains and key hashes. No parallel-execution claim is made.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-study, E-substrate and E-code; FRAME still executes extrinsics serially"
+        ]
+      },
+      "costs": [
+        {
+          "option": "bounded-matra-hybridtx",
+          "cost": "Study estimates 5-6 weeks for Lane U; wallet, pool, fee-voucher and chaos work not measured here.",
+          "basis": "estimate",
+          "evidence": [
+            "E-study, E-substrate and E-code; FRAME still executes extrinsics serially",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "accounts-with-outpoint-references",
+          "cost": "Smaller implementation but fails the central hybrid-ledger goal.",
+          "basis": "estimate",
+          "evidence": [
+            "E-study, E-substrate and E-code; FRAME still executes extrinsics serially",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "full-generalized-script-ledger",
+          "cost": "New VM/contract and audit work with unknown cost; forecloses a narrow first release.",
+          "basis": "unknown",
+          "evidence": [
+            "E-study, E-substrate and E-code; FRAME still executes extrinsics serially",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-fees",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-supply",
+        "d-utxo",
+        "d-motra-accrual"
+      ],
+      "record": {
+        "question": "How do fresh note or UTXO owners pay for verification?",
+        "options": [
+          {
+            "option": "motra-only-account-or-authorized-sponsor",
+            "argued_by": "Codex; existing fee/relayer substrate",
+            "strongest_objection": "A relayer can censor or correlate submissions, and sponsor authorization must not be confused with Delegatees generation routing."
+          },
+          {
+            "option": "shielded-motra-from-day-one",
+            "argued_by": "Full private-fee mirror",
+            "strongest_objection": "Requires a new sound generation relation and auditing; it is not achieved merely by reusing Sapling's unchanged MATRA circuit."
+          },
+          {
+            "option": "charge-matra-for-zk",
+            "argued_by": "Simple native-value fee path",
+            "strongest_objection": "Changes the chain's MOTRA-only transaction-fee contract and lane supply accounting."
+          }
+        ],
+        "chosen": "motra-only-account-or-authorized-sponsor",
+        "rationale": "Use MOTRA only, including a nonzero weight-proportional crypto surcharge at zero congestion. Lane S starts with signed permissionless relayers and client-side proofs; Delegatees funds the relayer rather than authorizing arbitrary debits from another account. Lane U needs bounded sponsor-authorized single-use fee vouchers on its unsigned path. Validate cheaply before crypto; recheck fees and conflicts in dispatch. Per-note and per-UTXO accrual are deferred until separately soundly specified.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-code, E-66, E-study; no spend, fee-rate deployment or mainnet change authorized"
+        ]
+      },
+      "costs": [
+        {
+          "option": "motra-only-account-or-authorized-sponsor",
+          "cost": "New surcharge and unsigned fee-voucher testing; shielded/UTXO holders do not earn fees in v0. No fee rate chosen without benchmarking.",
+          "basis": "estimate",
+          "evidence": [
+            "E-code, E-66, E-study; no spend, fee-rate deployment or mainnet change authorized",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "shielded-motra-from-day-one",
+          "cost": "Study estimates 6-10 weeks plus an external audit for a later phase; costs and setup choice remain unknown.",
+          "basis": "estimate",
+          "evidence": [
+            "E-code, E-66, E-study; no spend, fee-rate deployment or mainnet change authorized",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "charge-matra-for-zk",
+          "cost": "Smaller fee machinery but a visible economic/compatibility change and additional authorization boundary.",
+          "basis": "estimate",
+          "evidence": [
+            "E-code, E-66, E-study; no spend, fee-rate deployment or mainnet change authorized",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-motra-accrual",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "When and by whom is the existing MOTRA accrual exploit fixed?",
+        "options": [
+          {
+            "option": "aj-66-before-genesis",
+            "argued_by": "Codex; issue #66 launch-blocker instruction",
+            "strongest_objection": "The fix changes lazy accounting and needs exhaustive transition/migration integration, beyond the five original examples."
+          },
+          {
+            "option": "defer-fix-to-postlaunch-m1",
+            "argued_by": "Superseded baseline schedule",
+            "strongest_objection": "Launches with a known fee-resource bypass and violates the explicit launch-blocker instruction."
+          }
+        ],
+        "chosen": "aj-66-before-genesis",
+        "rationale": "AJ owns issue #66, including balance-transition accounting, initialization, sovereign exclusion, projection/delegation consistency and migration tests. The genesis launch baseline must include its reviewed fix. This spec references AJ's eight exact tests and adds no competing accrual implementation. min(last,current) alone is insufficient when value leaves and returns between touches.",
+        "overturned_prior": true,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "https://github.com/Flux-Point-Studios/materios/issues/66",
+          "E-66: AJ's eight named tests observed read-only"
+        ]
+      },
+      "costs": [
+        {
+          "option": "aj-66-before-genesis",
+          "cost": "AJ implementation, full runtime suite and migration/metadata validation are required launch work; time not measured in this spec.",
+          "basis": "unknown",
+          "evidence": [
+            "https://github.com/Flux-Point-Studios/materios/issues/66",
+            "E-66: AJ's eight named tests observed read-only",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "defer-fix-to-postlaunch-m1",
+          "cost": "Avoids immediate integration effort but leaves repeated fresh-account farming possible.",
+          "basis": "estimate",
+          "evidence": [
+            "https://github.com/Flux-Point-Studios/materios/issues/66",
+            "E-66: AJ's eight named tests observed read-only",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-bridge-datum",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-utxo",
+        "d-scope"
+      ],
+      "record": {
+        "question": "What recipient encoding must the future Cardano bridge support?",
+        "options": [
+          {
+            "option": "versioned-account-utxo-reserved-shielded",
+            "argued_by": "Codex; hybrid design",
+            "strongest_objection": "Reservation does not make an immutable validator support future semantics; activation may still need a new contract/migration."
+          },
+          {
+            "option": "account-only-datum",
+            "argued_by": "Minimal bridge interface",
+            "strongest_objection": "Future UTXO recipients require redeployment or an extra account conversion, losing direct bridge ownership semantics."
+          },
+          {
+            "option": "opaque-unversioned-recipient-bytes",
+            "argued_by": "Flexible payload interface",
+            "strongest_objection": "Ambiguous decoding and fallback permit funds to be routed under an unintended interpretation."
+          }
+        ],
+        "chosen": "versioned-account-utxo-reserved-shielded",
+        "rationale": "Specify canonical CBOR v1 Recipient Account(AccountId32) or Utxo(versioned bounded Lock). Reserve the Shielded tag but reject it until a new reviewed version activates it. Rust and Aiken must round-trip identical bytes and reject unknown versions, tags, locks, lengths and trailing bytes without account fallback. Design is preprod/offline; immutable mainnet validator deployment remains blocked by d-mainnet-rollout.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-study and E-ops; no existing mainnet bridge address or datum is assumed"
+        ]
+      },
+      "costs": [
+        {
+          "option": "versioned-account-utxo-reserved-shielded",
+          "cost": "Codec and cross-language vectors before deployment; no deployment or audit fee is authorized.",
+          "basis": "estimate",
+          "evidence": [
+            "E-study and E-ops; no existing mainnet bridge address or datum is assumed",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "account-only-datum",
+          "cost": "Less immediate codec work; future redeployment and migration cost unknown.",
+          "basis": "unknown",
+          "evidence": [
+            "E-study and E-ops; no existing mainnet bridge address or datum is assumed",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "opaque-unversioned-recipient-bytes",
+          "cost": "Less initial schema work but larger permanent parser, upgrade and recovery risk.",
+          "basis": "estimate",
+          "evidence": [
+            "E-study and E-ops; no existing mainnet bridge address or datum is assumed",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-midnight-optional",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch",
+        "d-hub-scope"
+      ],
+      "record": {
+        "question": "What happens when all Midnight software and endpoints are unavailable?",
+        "options": [
+          {
+            "option": "core-without-midnight-offline-adapters",
+            "argued_by": "Codex; CEO optionality direction",
+            "strongest_objection": "Maintaining local pins and optional format adapters costs effort and dual-deploy compatibility may drift."
+          },
+          {
+            "option": "shared-midnight-ledger-core",
+            "argued_by": "Maximum source reuse",
+            "strongest_objection": "Core liveness and ledger upgrades inherit external release/toolchain decisions even if hosted endpoints are replaced."
+          },
+          {
+            "option": "drop-all-midnight-integrations",
+            "argued_by": "Simplest independence",
+            "strongest_objection": "Discards useful existing anchors and finality compatibility that can remain optional without controlling core behavior."
+          }
+        ],
+        "chosen": "core-without-midnight-offline-adapters",
+        "rationale": "The core builds and executes shielded, UTXO, fee and foreign-finality fixtures with every Midnight adapter excluded and all external egress denied. Optional Compact adapters use reviewed pinned local artifacts and explicit trust classes, never runtime network/SRS fetches. Offline Midnight-derived finality vectors are test data, not an availability dependency.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-brief, E-study, E-substrate"
+        ]
+      },
+      "costs": [
+        {
+          "option": "core-without-midnight-offline-adapters",
+          "cost": "Separate dependency profiles, artifact provenance and isolated-network CI; exact storage cost unmeasured.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study, E-substrate",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "shared-midnight-ledger-core",
+          "cost": "Higher reuse but ongoing ledger major migrations, SRS and native state operations.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study, E-substrate",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "drop-all-midnight-integrations",
+          "cost": "Lower adapter upkeep; loses the existing orynq optional-integration asset.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study, E-substrate",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-genesis-isolation",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch",
+        "d-motra-accrual"
+      ],
+      "record": {
+        "question": "How does preprod ZK development avoid changing launch artifacts?",
+        "options": [
+          {
+            "option": "reviewed-post-aj-launch-baseline-no-zk",
+            "argued_by": "Codex; corrected launch safety",
+            "strongest_objection": "No approved launch artifact is supplied here, so isolation cannot yet prove a passing comparison; build-profile coupling needs a real test."
+          },
+          {
+            "option": "freeze-52829ca-byte-for-byte",
+            "argued_by": "Literal baseline isolation",
+            "strongest_objection": "Would preserve the known MOTRA exploit and block AJ's required genesis correction."
+          },
+          {
+            "option": "include-disabled-zk-in-genesis",
+            "argued_by": "Single-runtime build option",
+            "strongest_objection": "Disabled calls still add unaudited code, metadata and imports to the launch artifact."
+          }
+        ],
+        "chosen": "reviewed-post-aj-launch-baseline-no-zk",
+        "rationale": "Pin reviewed launch artifacts after mandatory launch fixes, including AJ #66. ZK development uses an isolated preprod build path and must leave the launch node, runtime, genesis, imports and metadata byte-identical to that baseline. Missing baseline is RED, not inferred approval of 52829ca. ZK cannot add pallets or host imports to genesis; launch has priority for reviewers and preprod windows.",
+        "overturned_prior": true,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-code, E-66, E-ops; actual approved launch hashes unavailable in this pass"
+        ]
+      },
+      "costs": [
+        {
+          "option": "reviewed-post-aj-launch-baseline-no-zk",
+          "cost": "Reproducible artifact comparison and reviewed baseline custody; no local build or delay measurement.",
+          "basis": "unknown",
+          "evidence": [
+            "E-code, E-66, E-ops; actual approved launch hashes unavailable in this pass",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "freeze-52829ca-byte-for-byte",
+          "cost": "Simple comparison but unacceptable launch correctness cost.",
+          "basis": "estimate",
+          "evidence": [
+            "E-code, E-66, E-ops; actual approved launch hashes unavailable in this pass",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "include-disabled-zk-in-genesis",
+          "cost": "Simpler builds but larger genesis audit and operational blast radius.",
+          "basis": "estimate",
+          "evidence": [
+            "E-code, E-66, E-ops; actual approved launch hashes unavailable in this pass",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-scope",
+      "status": "defaulted",
+      "dependsOn": [],
+      "record": {
+        "question": "What value and contract functionality belongs in the first program?",
+        "options": [
+          {
+            "option": "matra-only-three-lanes-and-verification",
+            "argued_by": "Codex; narrow complete primitive",
+            "strongest_objection": "Does not immediately match Midnight's multi-asset/contracts/private-fee feature set."
+          },
+          {
+            "option": "multiasset-private-contract-platform",
+            "argued_by": "Full feature parity",
+            "strongest_objection": "Requires new circuits, contract VM semantics and far broader licensing, custody and audit work."
+          },
+          {
+            "option": "hub-only-permanently",
+            "argued_by": "Lowest custody risk",
+            "strongest_objection": "Fails the central shielded and hybrid MATRA goal; hub-first is a sequence rather than a scope reduction."
+          }
+        ],
+        "chosen": "matra-only-three-lanes-and-verification",
+        "rationale": "Deliver native other-chain verification and a single MATRA asset across A/U/S. Include a client prover, viewing keys, open relayer and explicit aggregate balance reporting. Exclude arbitrary assets, generalized private contracts, private MOTRA and full Compact execution from this packet. A future scope decision must specify and audit those relations rather than weakening the present single-asset tests.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-brief, E-study; no multi-asset scope approval exists"
+        ]
+      },
+      "costs": [
+        {
+          "option": "matra-only-three-lanes-and-verification",
+          "cost": "Contains custody and circuit surface; broader fee/private-contract value deferred explicitly.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study; no multi-asset scope approval exists",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "multiasset-private-contract-platform",
+          "cost": "Unknown total engineering, setup and audit costs; invalidates the unchanged-Sapling reuse premise.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief, E-study; no multi-asset scope approval exists",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "hub-only-permanently",
+          "cost": "Avoids custody build but foregoes the requested value-lane outcomes.",
+          "basis": "estimate",
+          "evidence": [
+            "E-brief, E-study; no multi-asset scope approval exists",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-host-acceleration",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-arch",
+        "d-shield-circuit",
+        "d-genesis-isolation"
+      ],
+      "record": {
+        "question": "When can runtime verification depend on new node host functions?",
+        "options": [
+          {
+            "option": "pure-wasm-until-dark-rollout-proven",
+            "argued_by": "Codex; operational safety",
+            "strongest_objection": "Throughput may remain limited while slow/external nodes cannot attest coverage."
+          },
+          {
+            "option": "host-acceleration-in-genesis",
+            "argued_by": "Throughput-first choice",
+            "strongest_objection": "Adds a permanent ABI and coordinated binary dependency to the launch path before integration evidence."
+          },
+          {
+            "option": "pure-wasm-forever",
+            "argued_by": "Avoid permanent host maintenance",
+            "strongest_objection": "May cap throughput below the intended use even after demand is demonstrated."
+          }
+        ],
+        "chosen": "pure-wasm-until-dark-rollout-proven",
+        "rationale": "Keep pure Wasm valid until measured need and a separate reviewed rollout. Pin the RFC-163 ABI, preserve historical imports, compare at least 10,000 cases across x86_64/arm64/emulated-arm64 and require seven days of authenticated full inventory coverage before import activation. Any missing, stale or lagging role refuses enactment. Mainnet action remains d-mainnet-rollout-blocked.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-rfc, E-code, E-ops; coverage requires code/import evidence rather than a version string"
+        ]
+      },
+      "costs": [
+        {
+          "option": "pure-wasm-until-dark-rollout-proven",
+          "cost": "Study estimates 4-6 weeks for a fleet phase; no local speedup or rollout date has been measured.",
+          "basis": "estimate",
+          "evidence": [
+            "E-rfc, E-code, E-ops; coverage requires code/import evidence rather than a version string",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "host-acceleration-in-genesis",
+          "cost": "Potentially faster verification but new launch artifact, replay and fleet audit costs.",
+          "basis": "unknown",
+          "evidence": [
+            "E-rfc, E-code, E-ops; coverage requires code/import evidence rather than a version string",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "pure-wasm-forever",
+          "cost": "No new ABI maintenance; recurring verification CPU cost unknown until spike results.",
+          "basis": "unknown",
+          "evidence": [
+            "E-rfc, E-code, E-ops; coverage requires code/import evidence rather than a version string",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-compliance",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-scope",
+        "d-shield-circuit"
+      ],
+      "record": {
+        "question": "Who authorizes counsel and a mainnet privacy posture?",
+        "options": [
+          {
+            "option": "hold-engagement-and-activation-pending-ceo-counsel",
+            "argued_by": "Codex; authority boundary",
+            "strongest_objection": "Waiting may delay activation and counsel may require a redesign despite existing engineering work."
+          },
+          {
+            "option": "activate-with-engineering-disclosure-only",
+            "argued_by": "Fast activation position",
+            "strongest_objection": "Viewing keys and caps do not establish legal suitability or grant authorization."
+          }
+        ],
+        "chosen": "hold-engagement-and-activation-pending-ceo-counsel",
+        "rationale": "DENY counsel engagement without the CEO's separate approval. NO authority is granted by this default; this is a hold, not an approval. Recommend client-held viewing keys, public boundary disclosures and caps. Keep legal conclusions, marketing commitments and mainnet shielded activation on hold until deci authorizes scope/spend and qualified counsel reviews the actual design. Engineering safeguards are not a legal clearance. This hold does not block building or verifying preprod.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-brief explicitly blocks counsel/external commitments; E-study recommends review, not an approval",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; no counsel engagement or legal posture is approved.",
+          "Awaiting CEO decision: separately approve named counsel, engagement scope and capped spend, then review counsel's actual design advice before any mainnet privacy posture. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
+        ]
+      },
+      "costs": [
+        {
+          "option": "hold-engagement-and-activation-pending-ceo-counsel",
+          "cost": "Counsel/FTO quote and engagement scope unavailable; no spend authorized or price invented.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief explicitly blocks counsel/external commitments; E-study recommends review, not an approval",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "activate-with-engineering-disclosure-only",
+          "cost": "Avoids initial counsel cost but leaves unassessed legal and external-commitment exposure.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief explicitly blocks counsel/external commitments; E-study recommends review, not an approval",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-audit",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-shield-circuit",
+        "d-supply",
+        "d-utxo"
+      ],
+      "record": {
+        "question": "What independent assurance is needed before value-bearing activation?",
+        "options": [
+          {
+            "option": "hold-booking-external-audit-before-activation",
+            "argued_by": "Codex; baseline assurance boundary",
+            "strongest_objection": "A slot may be expensive or unavailable and the audit may expose substantial redesign after the preprod work."
+          },
+          {
+            "option": "internal-review-only",
+            "argued_by": "Lowest external cost",
+            "strongest_objection": "New custody and crypto adapters would lack independent assurance despite historical upstream audits."
+          }
+        ],
+        "chosen": "hold-booking-external-audit-before-activation",
+        "rationale": "DENY audit booking or commissioning without the CEO's separate approval. NO authority is granted by this default; this is a hold, not an approval. Recommend external review of integration, circuits/parameters, codecs, custody, fees and UTXO admission. Mainnet activation requires closure of every HIGH/MEDIUM finding with retesting; LOWs become tracked issues. Upstream audit history and passing property tests do not replace an integration audit. This hold does not block building or verifying preprod.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-brief blocks audit spend; E-study audit gaps",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; no auditor, booking or expenditure is approved.",
+          "Awaiting CEO decision: separately approve a named independent auditor, exact integration scope, deliverables, booking terms and capped cost. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
+        ]
+      },
+      "costs": [
+        {
+          "option": "hold-booking-external-audit-before-activation",
+          "cost": "No vendor quote. Study's 4-8 week lead-time range is an estimate, not a reserved slot or price.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief blocks audit spend; E-study audit gaps",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "internal-review-only",
+          "cost": "No external booking cost; internal effort and residual loss risk unmeasured.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief blocks audit spend; E-study audit gaps",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-budget",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-order",
+        "d-audit",
+        "d-compliance"
+      ],
+      "record": {
+        "question": "What expenditure or external delivery commitment is approved?",
+        "options": [
+          {
+            "option": "no-spend-or-commitments-without-explicit-approval",
+            "argued_by": "Codex; brief authorization limit",
+            "strongest_objection": "Unreserved capacity may extend the program timeline."
+          },
+          {
+            "option": "book-capacity-against-study-estimates",
+            "argued_by": "Schedule protection position",
+            "strongest_objection": "Estimates are not quotes or authority; it would create unauthorized obligations."
+          }
+        ],
+        "chosen": "no-spend-or-commitments-without-explicit-approval",
+        "rationale": "DENY spending or external commitments without the CEO's separate approval. NO authority is granted by this default; this is a hold, not an approval. Prepare reviewable scope and evidence locally. Do not book audits, counsel, hardware, hosted provers or dates; deci must approve named recipients, deliverables and capped costs. Study time ranges remain planning uncertainty, never external promises. This hold does not block building or verifying preprod with already available resources.",
+        "overturned_prior": false,
+        "frozen_by": "none",
+        "reversible": true,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-brief and E-study; no budget, quote or external commitment supplied",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; planning estimates do not authorize spend.",
+          "Awaiting CEO decision: separately approve each named recipient, deliverable, capped amount and external commitment against concrete quotes and terms. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
+        ]
+      },
+      "costs": [
+        {
+          "option": "no-spend-or-commitments-without-explicit-approval",
+          "cost": "Vendor prices, hardware budgets and available team capacity are unknown; this task authorizes no expenditure.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief and E-study; no budget, quote or external commitment supplied",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "book-capacity-against-study-estimates",
+          "cost": "Unquoted audit/counsel/compute fees and cancellation liabilities.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief and E-study; no budget, quote or external commitment supplied",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d-mainnet-rollout",
+      "status": "defaulted",
+      "dependsOn": [
+        "d-genesis-isolation",
+        "d-host-acceleration",
+        "d-audit",
+        "d-compliance",
+        "d-budget",
+        "d-bridge-datum"
+      ],
+      "record": {
+        "question": "What authorizes any mainnet artifact, deployment or activation?",
+        "options": [
+          {
+            "option": "hold-all-mainnet-actions-for-reviewed-gates-and-deci",
+            "argued_by": "Codex; hard mainnet boundary",
+            "strongest_objection": "Activation remains unscheduled and depends on independent parties and a later reviewed packet."
+          },
+          {
+            "option": "treat-spec-lock-as-mainnet-approval",
+            "argued_by": "Fast delivery interpretation",
+            "strongest_objection": "A lock establishes document identity, not authority, readiness, an audit or a safe ceremony."
+          }
+        ],
+        "chosen": "hold-all-mainnet-actions-for-reviewed-gates-and-deci",
+        "rationale": "DENY mainnet activation without its own separately CEO-approved packet and evidence. NO authority is granted by this default; this is a hold, not an approval. This packet authorizes no mainnet writes, broadcasts, deployment, custody or immutable bridge commitment. Recommend forkless delivery only after reviewed preprod evidence, metadata/source/migration review, audited value paths, counsel, explicit approval, applicable root-timelock and multisig, 30 clean preprod days for Lane S and reviewed caps. Every ZK pallet remains impossible to enable on any mainnet chain spec under this packet, and every activation path retains all four holds even with synthetic approvals. A zero-broadcast simulation may test refusal; it cannot grant approval or block preprod build/verification.",
+        "overturned_prior": false,
+        "frozen_by": "mainnet-deployment-or-activation",
+        "reversible": false,
+        "evidence": [
+          "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
+          "E-brief, E-ops; no mainnet approval exists",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; locking records identity and grants no mainnet authority.",
+          "Awaiting CEO decision: approve a separate mainnet activation packet bound to exact reviewed code/artifact hashes, target chain, ceremony, caps, migration/rollback plan and actual counsel, audit, budget, soak, metadata, timelock and multisig evidence. Mainnet execution remains deci-at-his-terminal only. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
+        ]
+      },
+      "costs": [
+        {
+          "option": "hold-all-mainnet-actions-for-reviewed-gates-and-deci",
+          "cost": "Ceremony/review/soak effort and vendor costs are not measured. Standard runtime changes normally incur the existing seven-day timelock; actual call classification must be reviewed.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief, E-ops; no mainnet approval exists",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        },
+        {
+          "option": "treat-spec-lock-as-mainnet-approval",
+          "cost": "Saves review time by accepting unbounded custody and halt risks; no legitimate authorization basis.",
+          "basis": "unknown",
+          "evidence": [
+            "E-brief, E-ops; no mainnet approval exists",
+            "No local performance, delivery-time or vendor-price measurement was made for this option in this pass."
+          ]
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "id": "r-architecture",
+      "statement": "Ledger rules and storage execute in runtime Wasm. The P0/Sapling build uses rustc 1.85.0, the pinned SDK and only baseline Substrate imports; any later node extension exposes curve math only, never ledger rules.",
+      "decisions": [
+        "d-arch",
+        "d-host-acceleration"
+      ],
+      "checks": [
+        "c-sapling-wasm",
+        "c-host-coverage"
+      ],
+      "counterexample": "A runtime imports a native apply_ledger operation or a pure-Wasm build links a new host call."
+    },
+    {
+      "id": "r-other-chains",
+      "statement": "The first hub release includes a real foreign GRANDPA finality and inclusion consumer: pinned chain/checkpoint, signed authority transitions, quorum weights, bounded history and canonical inclusion. It refuses wrong chain/set/root, duplicate signers, insufficient quorum, stale checkpoints and unsupported changes.",
+      "decisions": [
+        "d-order",
+        "d-hub-scope"
+      ],
+      "checks": [
+        "c-hub-other-chains"
+      ],
+      "counterexample": "An arbitrary valid proof or a committee signature is accepted as another chain's canonical finalized event."
+    },
+    {
+      "id": "r-hub-domains",
+      "statement": "Statements bind chain genesis, checkpoint, height, root, backend/version, VK, public inputs and consumer domain. Consumers pin keys and trust class; unknown/deprecated/oversized inputs fail closed. Existing BN254 receipt bytes and meaning remain unchanged. One identical Groth16 proof is accepted in runtime Wasm and the Cardano evaluator and confirmed on both preprod chains with block/transaction evidence, with tampered cases refused.",
+      "decisions": [
+        "d-hub-scope",
+        "d-arch"
+      ],
+      "checks": [
+        "c-hub-other-chains"
+      ],
+      "counterexample": "A CommitteeAttested Compact claim is relabeled trustless, a foreign VK satisfies a consumer, or old receipt tags change meaning."
+    },
+    {
+      "id": "r-sapling-spike",
+      "statement": "Before Lane S proceeds, build no_std Wasm and accept at least 20 distinct provenance-pinned real Zcash mainnet Sapling proofs; reject every single-bit mutation of each 192-byte proof with fixed inputs. Benchmark 100 full 1-spend/2-output bundles including signatures on the reviewed slowest hardware. Maximum <=150 ms permits normal progression; >150 to <=400 ms requires tighter caps and earlier acceleration; >400 ms refuses the pure-Wasm path. Caps use <=750 ms normal budget and measured declared weights; total runtime <=5 MiB.",
+      "decisions": [
+        "d-shield-circuit",
+        "d-host-acceleration"
+      ],
+      "checks": [
+        "c-sapling-wasm"
+      ],
+      "counterexample": "A native arkworks microbenchmark or generated trivial circuit is cited as the Sapling-in-Wasm result."
+    },
+    {
+      "id": "r-supply",
+      "statement": "With emissions disabled in the bounded test, 10,000 actual Wasm A/U/S transitions preserve initial issuance, U escrow = sum live UTXOs, S escrow = shields minus unshields and controlled-wallet unspent notes. Exclude escrows from A totals and MOTRA generation. Invalid transactions roll back value/nullifier changes; exercise overflow, dust, reserved balances and partial-failure boundaries. Production mint/burn policies remain separately accounted.",
+      "decisions": [
+        "d-supply",
+        "d-utxo",
+        "d-fees"
+      ],
+      "checks": [
+        "c-supply-invariant"
+      ],
+      "counterexample": "A custody transfer increases TotalIssuance, counts an escrow twice, or an invalid spend removes a nullifier while leaving its debit."
+    },
+    {
+      "id": "r-midnight-independent",
+      "statement": "A build profile excluding every Midnight adapter completes nonempty shielded, hybrid, fee and offline foreign-finality scenarios in an isolated network namespace with no external route. Active probes to Midnight hosts and a direct external IP must fail before scenario success is credited. No runtime SRS fetch is allowed.",
+      "decisions": [
+        "d-midnight-optional",
+        "d-scope"
+      ],
+      "checks": [
+        "c-midnight-blackhole"
+      ],
+      "counterexample": "A hosts-file entry is called a blackhole while cached DNS, direct IP or an untested empty profile still reaches Midnight."
+    },
+    {
+      "id": "r-metadata",
+      "statement": "Actual old and candidate runtime metadata preserve existing pallet, call, event, error and storage encodings; append new pallets >=26 with unique indices. Keep SignedExtra and transaction_version unchanged. Exercise migration state and the #494 gate; shifted variants, stale manifests and unreviewed shrinks must refuse. This does not replace source/origin review.",
+      "decisions": [
+        "d-arch",
+        "d-genesis-isolation"
+      ],
+      "checks": [
+        "c-metadata-append-only"
+      ],
+      "counterexample": "Adding an error in the middle shifts existing DispatchError indices, or a missing metadata tool reports green."
+    },
+    {
+      "id": "r-genesis-isolation",
+      "statement": "The reviewed post-AJ launch node/runtime/genesis/metadata/import artifacts remain identical when ZK preprod work is built. Baseline must include all eight #66 tests; the preprod artifact must positively contain the new capabilities while launch contains none. Each artifact-contamination mutant must fail isolation. Missing reviewed hashes are RED.",
+      "decisions": [
+        "d-genesis-isolation",
+        "d-motra-accrual"
+      ],
+      "checks": [
+        "c-mainnet-isolation",
+        "c-motra-66"
+      ],
+      "counterexample": "Isolation freezes vulnerable 52829ca or both build profiles silently omit the new feature and compare equal."
+    },
+    {
+      "id": "r-bridge-datum",
+      "statement": "Canonical v1 Account and Utxo recipients round-trip byte-identically through production Rust and Aiken codecs. Reserved Shielded, unknown version/tag/lock, wrong lengths, trailing bytes and noncanonical integers are rejected without account fallback. A future reserved-tag implementation requires a reviewed contract/version decision.",
+      "decisions": [
+        "d-bridge-datum",
+        "d-scope"
+      ],
+      "checks": [
+        "c-bridge-datum"
+      ],
+      "counterexample": "Unknown recipient bytes decode as Account and lock value to the wrong owner."
+    },
+    {
+      "id": "r-motra-66",
+      "statement": "AJ's eight exact accrual regressions must be compiled and run in this checkout: fresh funding, ten-account cycling, top-up, sovereign exclusion, projection agreement, creation clock, leave/return interval and sovereign delegation. Zero selected or ignored tests fail. The reviewed genesis includes AJ's fix; this packet implements none of it.",
+      "decisions": [
+        "d-motra-accrual"
+      ],
+      "checks": [
+        "c-motra-66",
+        "c-mainnet-isolation"
+      ],
+      "counterexample": "cargo test with a misspelled filter reports zero tests and the launch packet treats it as exploit closure."
+    },
+    {
+      "id": "r-fees-admission",
+      "statement": "Zero-congestion verification costs more MOTRA than an equal-length transfer; an admitted invalid proof still pays, no MATRA tx fee is charged, and a fresh zero-MOTRA owner succeeds through an authorized funded sponsor. Unauthorized sponsors fail. 10,000 malformed admissions invoke zero cryptographic verifications and accepted ZK weight stays within half the normal budget and the slot time.",
+      "decisions": [
+        "d-fees",
+        "d-motra-accrual"
+      ],
+      "checks": [
+        "c-fees"
+      ],
+      "counterexample": "Anyone can charge a victim by naming it as sponsor, or expensive malformed proofs consume CPU before structural bounds."
+    },
+    {
+      "id": "r-utxo",
+      "statement": "Atomic HybridTx implements A-U-S-U-A with conserved value. Four submitters include 200 independent owner spends without owner nonce priority errors; conflicting inputs and replayed network/txhash/index bridge deposits credit once. Account-only intents have replay protection; wrong CIP-8 key/domain/network, expiry and wrong genesis reject. Exercise a real CIP-30 test wallet signature on preprod.",
+      "decisions": [
+        "d-utxo",
+        "d-fees",
+        "d-bridge-datum"
+      ],
+      "checks": [
+        "c-hybrid-utxo",
+        "c-supply-invariant"
+      ],
+      "counterexample": "Two distinct pending spends of the same outpoint both receive valid pool tags, or a Cardano mainnet outpoint aliases a preprod deposit."
+    },
+    {
+      "id": "r-shielded-runtime",
+      "statement": "Preprod shields 100 MATRA from A, privately transfers to B through an open relayer and unshields to C with unchanged issuance, correct escrow, recipient decryption and viewing-key history. Bind chain/protocol, all actions, outputs, recipient and fee authorization in signatures. Reject doubles, stale roots, wrong genesis, signatures, caps and pause. Require seven days with >=500 finalized bundles and zero invariant/import failures including arm64; do not claim anonymity from low traffic. Reject non-MATRA assets. Notes created before an unrelated runtime upgrade remain spendable under the same explicit note-protocol version.",
+      "decisions": [
+        "d-shield-circuit",
+        "d-supply",
+        "d-fees",
+        "d-scope"
+      ],
+      "checks": [
+        "c-shielded-e2e",
+        "c-supply-invariant"
+      ],
+      "counterexample": "A valid proof is redirected to another unshield recipient, a paused lane accepts value, or a seven-day idle chain counts as a soak."
+    },
+    {
+      "id": "r-host-rollout",
+      "statement": "A future RFC-163 math-only extension requires 10,000 differential cases on x86_64, arm64 and emulated arm64, authenticated full role inventory for seven days and 24 hours without post-swap import failures. One lagging/stale/missing author, voter, RPC or external SPO refuses activation. Exercise only isolated devnet in this check; mainnet remains blocked.",
+      "decisions": [
+        "d-host-acceleration",
+        "d-mainnet-rollout"
+      ],
+      "checks": [
+        "c-host-coverage"
+      ],
+      "counterexample": "Version strings from reachable authors alone are treated as complete coverage and a voter cannot import the upgrade."
+    },
+    {
+      "id": "r-authority",
+      "statement": "This packet is PREPROD only. No spend, audit/counsel engagement, external promise, mainnet artifact change or activation is authorized. c-activation-gates fails if any ZK pallet can be enabled on any mainnet chain spec, or if any activation path lacks any of the d-compliance/d-audit/d-budget/d-mainnet-rollout DENY holds. It covers the complete source-derived chain-spec/pallet cross product and activation-path inventory, rejects empty/incomplete/duplicate coverage and requires zero broadcasts. All holds deny mainnet activation even with synthetic approvals present. Separate zero-broadcast simulations refuse absent CEO approval, budget, counsel, audit, 30-day Lane S soak, caps, metadata review, timelock or multisig, and any open HIGH/MEDIUM audit finding. Only a future separate CEO-approved packet and actual evidence can authorize work beyond preprod; none of these approvals is needed to build or verify preprod.",
+      "decisions": [
+        "d-budget",
+        "d-compliance",
+        "d-audit",
+        "d-mainnet-rollout"
+      ],
+      "checks": [
+        "c-activation-gates"
+      ],
+      "counterexample": "One mainnet chain spec permits one ZK pallet, one activation path omits a DENY hold, or a lock digest/all-green synthetic simulation is used as approval to engage a vendor or broadcast a mainnet transaction."
+    },
+    {
+      "id": "r-p0-core-no-egress",
+      "statement": "Build the no_std verification/bridge core with Midnight dependencies absent and run nonempty core tests in an isolated network namespace with denied DNS and direct-IP probes. Both build and tests run offline with no route; absence of namespace support fails.",
+      "decisions": [
+        "d-midnight-optional"
+      ],
+      "checks": [
+        "c-p0-core-no-egress"
+      ],
+      "counterexample": "A cached build or empty test command is reported as network-isolated execution."
+    },
+    {
+      "id": "r-p0-midnight-negative-control",
+      "statement": "Inject a Midnight-named dependency into a temporary copy of the core and require the same dependency exclusion gate to fail. Do not mutate the real checkout or accept an unrelated compiler error as the negative control.",
+      "decisions": [
+        "d-midnight-optional"
+      ],
+      "checks": [
+        "c-p0-midnight-negative-control"
+      ],
+      "counterexample": "The forbidden dependency is present and the core gate still passes."
+    },
+    {
+      "id": "r-p0-mainnet-refusal",
+      "statement": "Enumerate mainnet chain-spec targets from production source and reject ZK enablement at the P0 core activation boundary. Exercise refusal mutants and a preprod control. No broadcast or nonempty-pallet activation claim; c-activation-gates retains that end-state obligation.",
+      "decisions": [
+        "d-mainnet-rollout"
+      ],
+      "checks": [
+        "c-p0-mainnet-refusal"
+      ],
+      "counterexample": "A source-derived mainnet target enables ZK, or all targets are denied because the checker cannot recognize any network."
+    },
+    {
+      "id": "r-p0-metadata-compat",
+      "statement": "Compare the unchanged actual runtime metadata and runtime source identity against an explicitly pinned launch-candidate baseline using the existing compatibility gate, including rejecting gate mutants. This pre-AJ P0 baseline is not the reviewed post-AJ genesis baseline; c-mainnet-isolation and c-metadata-append-only retain their positive new-pallet and migration obligations.",
+      "decisions": [
+        "d-genesis-isolation"
+      ],
+      "checks": [
+        "c-p0-metadata-compat"
+      ],
+      "counterexample": "Metadata is manufactured from a schema or a changed runtime is accepted against a stale capture."
+    },
+    {
+      "id": "r-p0-bridge-codec",
+      "statement": "Execute Rust and Aiken codecs in the Aiken evaluator, round-trip canonical v1 Account and Utxo recipients and reject reserved Shielded, unknown versions/variants/locks, wrong lengths, trailing bytes and noncanonical integers. This standalone P0 primitive does not discharge production bridge integration c-bridge-datum.",
+      "decisions": [
+        "d-bridge-datum"
+      ],
+      "checks": [
+        "c-p0-bridge-codec"
+      ],
+      "counterexample": "Only Rust executes while Aiken results are echoed by the driver."
+    },
+    {
+      "id": "r-p0-sapling-spike",
+      "statement": "Build Groth16/BLS12-381 Sapling verification no_std for wasm32-unknown-unknown with rustc 1.85.0. Accept at least 20 distinct real Zcash mainnet proofs fetched from public Zcash repositories, and reject every single-bit proof mutation. Time complete 1-spend/2-output bundles including signatures, decoding and commitment-tree work in Wasm on Gemtek and reachable arm64 MacBook; record hardware and observations. Compare maximum bundle time to <=150 ms GO, >150 to <=400 ms GO with caps, >400 ms fallback A. The full 100-bundle run on reviewed slowest hardware remains c-sapling-wasm at P3.",
+      "decisions": [
+        "d-shield-circuit"
+      ],
+      "checks": [
+        "c-p0-sapling-spike"
+      ],
+      "counterexample": "A proof-only or native benchmark is described as a complete Wasm bundle, or synthetic proofs are labeled mainnet."
+    }
+  ],
+  "checks": [
+    {
+      "id": "c-mainnet-isolation",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-mainnet-isolation"
+      ],
+      "scope": "Phase P1. Compare independently built reviewed post-AJ launch and candidate artifacts, with positive preprod feature witness and one mutant per artifact. No launch baseline supplied yet.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-sapling-wasm",
+      "kind": "runtime",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-sapling-wasm"
+      ],
+      "scope": "Phase P3. Pinned no_std Wasm build, >=20 real proofs and all 1536 single-bit proof mutants each, plus 100 full-bundle timings on the reviewed slowest hardware. No local timings exist yet.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-supply-invariant",
+      "kind": "property",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-supply-invariant"
+      ],
+      "scope": "Phase P3. Seed 66; 2000 A-U-S-rejected-double-S-U-A cycles = 10,000 transitions, 10,001 snapshots, amounts 1..100 from 1,000,000 base units. Independent arithmetic and decrypted controlled-wallet notes; emissions off. Additional bounded adversarial amount cases; not a universal supply proof.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-midnight-blackhole",
+      "kind": "runtime",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-midnight-blackhole"
+      ],
+      "scope": "Phase P3. No-Midnight core profile; isolated network namespace with zero egress, three denied probes and four required nonempty production scenarios using offline artifacts. No host firewall changes.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-metadata-append-only",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-metadata-append-only"
+      ],
+      "scope": "Phase P1. Actual decoded old/candidate metadata plus #494 gate and migration witness; six mutation classes. Read-only pinned preprod capture; no ceremony or broadcast.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-bridge-datum",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-bridge-datum"
+      ],
+      "scope": "Phase P1. Two valid production Rust/Aiken codec round trips and seven invalid encoding classes. Offline Cardano evaluator only; no deployment.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-motra-66",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-motra-66"
+      ],
+      "scope": "Phase P1. AJ's eight exact named pallet-motra tests, source presence then compiled libtest listing then one non-ignored test per command, all from this checkout. Does not replace AJ's full runtime/migration/build checks.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-hub-other-chains",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-hub-other-chains"
+      ],
+      "scope": "Phase P1. Foreign GRANDPA authority-transition/inclusion fixture and nine invalid histories, consumer key/domain/trust bounds, nonempty legacy-receipt check and same-proof Cardano evaluator comparison. Does not establish all-chain consensus support. Require actual Materios-preprod finalization and Cardano-preprod transaction confirmation evidence for the same proof.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-fees",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-fees"
+      ],
+      "scope": "Phase P2. Actual fee accounting at zero congestion, invalid-proof debit, authorized/unauthorized sponsors and 10,000 structurally malformed admissions. Offline runtime fixture with instrumented production crypto calls.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-hybrid-utxo",
+      "kind": "runtime",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-hybrid-utxo"
+      ],
+      "scope": "Phase P3. Four submitters/200 independent spends, conflicting inputs, account-only and bridge replay, invalid wallet domains and one real preprod test-wallet roundtrip. No mainnet wallet or funds.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-shielded-e2e",
+      "kind": "runtime",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-shielded-e2e"
+      ],
+      "scope": "Phase P3. 100-MATRA preprod shield/private-transfer/unshield, recipient and viewing-key observations, nine invalid scenarios and an old-note upgrade witness, positive seven-day/500-bundle soak. Soak must be separately collected and bound to the same code.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-host-coverage",
+      "kind": "runtime",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-host-coverage"
+      ],
+      "scope": "Phase P4. Seven missing/stale coverage classes and 10,000 differential cases across three execution architectures on isolated devnet; seven-day full coverage and 24-hour import witness. No live validator operations in this spec pass.",
+      "assumptions": [
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-activation-gates",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-activation-gates"
+      ],
+      "scope": "Phase P5. Offline PREPROD-only authority enforcement: every source-derived mainnet chain-spec/ZK-pallet combination refuses enablement; every inventoried activation path retains all four DENY holds and refuses activation even with all synthetic approvals. Empty, duplicate or incomplete inventory coverage fails. Also checks nine absent authorization/evidence gates and HIGH/MEDIUM findings. Every case requires zero broadcasts. Cannot supply actual legal/audit/approval evidence.",
+      "assumptions": [
+        "Mainnet chain specs, ZK pallets and activation paths are enumerated from the reviewed production source and pinned fixtures, including plain/raw specs, genesis, runtime upgrade and governance routes where present. Review must establish inventory completeness and correspondence; synthetic adapter fixtures only test assertion behavior.",
+        "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
+        "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
+        "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-core-no-egress",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-core-no-egress"
+      ],
+      "scope": "Phase P0. Build the no_std verification/bridge core with Midnight dependencies absent and run nonempty core tests in an isolated network namespace with denied DNS and direct-IP probes. Both build and tests run offline with no route; absence of namespace support fails.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-midnight-negative-control",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-midnight-negative-control"
+      ],
+      "scope": "Phase P0. Inject a Midnight-named dependency into a temporary copy of the core and require the same dependency exclusion gate to fail. Do not mutate the real checkout or accept an unrelated compiler error as the negative control.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-mainnet-refusal",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-mainnet-refusal"
+      ],
+      "scope": "Phase P0. Enumerate mainnet chain-spec targets from production source and reject ZK enablement at the P0 core activation boundary. Exercise refusal mutants and a preprod control. No broadcast or nonempty-pallet activation claim; c-activation-gates retains that end-state obligation.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-metadata-compat",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-metadata-compat"
+      ],
+      "scope": "Phase P0. Compare the unchanged actual runtime metadata and runtime source identity against an explicitly pinned launch-candidate baseline using the existing compatibility gate, including rejecting gate mutants. This pre-AJ P0 baseline is not the reviewed post-AJ genesis baseline; c-mainnet-isolation and c-metadata-append-only retain their positive new-pallet and migration obligations.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-bridge-codec",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-bridge-codec"
+      ],
+      "scope": "Phase P0. Execute Rust and Aiken codecs in the Aiken evaluator, round-trip canonical v1 Account and Utxo recipients and reject reserved Shielded, unknown versions/variants/locks, wrong lengths, trailing bytes and noncanonical integers. This standalone P0 primitive does not discharge production bridge integration c-bridge-datum.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-sapling-spike",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-sapling-spike"
+      ],
+      "scope": "Phase P0. Build Groth16/BLS12-381 Sapling verification no_std for wasm32-unknown-unknown with rustc 1.85.0. Accept at least 20 distinct real Zcash mainnet proofs fetched from public Zcash repositories, and reject every single-bit proof mutation. Time complete 1-spend/2-output bundles including signatures, decoding and commitment-tree work in Wasm on Gemtek and reachable arm64 MacBook; record hardware and observations. Compare maximum bundle time to <=150 ms GO, >150 to <=400 ms GO with caps, >400 ms fallback A. The full 100-bundle run on reviewed slowest hardware remains c-sapling-wasm at P3.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    }
+  ],
+  "challenges": [
+    {
+      "claim": "Security C01: A valid Groth16 proof proves foreign-chain finality.",
+      "resolution": "REJECTED. r-other-chains requires chain/checkpoint/authority transitions and inclusion; r-hub-domains binds proof claims separately. No automatic bridge credit follows."
+    },
+    {
+      "claim": "Security C02: A balanced public escrow proves no counterfeit hidden notes exist.",
+      "resolution": "REJECTED. r-supply limits its claim to custody conservation and controlled-wallet witnesses. Hidden-note soundness still depends on the relation, setup, encodings and audit; caps bound only value release, not downstream damage."
+    },
+    {
+      "claim": "Security C03: A last/current minimum still permits leave-and-return MOTRA farming between touches.",
+      "resolution": "ACCEPTED. Require every eligible balance transition accounted for and AJ's exact round-trip/delegation regressions; do not duplicate AJ's implementation."
+    },
+    {
+      "claim": "Security C04: Reuse of Sapling allows arbitrary circuit edits without new setup review.",
+      "resolution": "REJECTED. Baseline relation stays unchanged; version and hash-pin parameters/VKs, reject noncanonical encodings and test every proof-bit mutant. New asset/fee circuits require a new packet and reviewed parameters."
+    },
+    {
+      "claim": "Security C05: Put consumed outpoints only in requires tags.",
+      "resolution": "REJECTED. Consumed outpoints and sponsor vouchers must conflict through provides-style tags, then be rechecked at dispatch. Account-only intents need separate replay protection."
+    },
+    {
+      "claim": "Security C06: Delegatees permits taking fees from any named sponsor.",
+      "resolution": "REJECTED. It routes generation; it does not authorize arbitrary third-party debits. Signed relayers pay their own MOTRA and unsigned Lane U requires authenticated single-use fee authorization."
+    },
+    {
+      "claim": "Security C07: Permissionless VK registration should authorize every consumer.",
+      "resolution": "REJECTED. Registration deposits bound storage; each consumer pins backend/version/VK/domain/trust. Committee and hardware attestations cannot become consensus proofs by relabeling."
+    },
+    {
+      "claim": "Security C08: Mutation testing and invariant success replace independent audit.",
+      "resolution": "REJECTED. Tests cover bounded domains. d-audit defaults to DENY audit booking without separate CEO approval and requires independent integration review before mainnet value-bearing activation; preprod build/verification does not require that approval."
+    },
+    {
+      "claim": "Security C22: Binding note identity to runtime spec_version could strand notes after unrelated upgrades.",
+      "resolution": "ACCEPTED. Use an explicit note-protocol signing domain with chain genesis and all spend effects, not automatic note identity changes on each runtime release. r-shielded-runtime adds an old-note spend witness across an unrelated pallet append; actual protocol migrations require separate review."
+    },
+    {
+      "claim": "Launch/operations C09: Freezing the base revision would preserve the MOTRA exploit.",
+      "resolution": "ACCEPTED. The reviewed launch baseline must first include AJ's fix. ZK then proves isolation against that baseline. Missing reviewed artifacts remain RED."
+    },
+    {
+      "claim": "Launch/operations C10: Disabled ZK genesis code is equivalent to absent code.",
+      "resolution": "REJECTED. Preserve launch node/runtime/genesis/metadata/import bytes; positive preprod capability is required to avoid identical empty builds passing."
+    },
+    {
+      "claim": "Launch/operations C11: Even default-off new host imports can halt unupgraded nodes at instantiation.",
+      "resolution": "ACCEPTED. Ship arithmetic dark and activate imports only after complete authenticated role coverage and differential/devnet evidence."
+    },
+    {
+      "claim": "Launch/operations C12: Reserved Shielded datum tag ensures a future immutable validator can process it.",
+      "resolution": "REJECTED. Reserved means rejected. Future semantics require a new reviewed version/contract decision; unknown data cannot fall back to accounts."
+    },
+    {
+      "claim": "Launch/operations C13: A generated #494 manifest is sufficient authority to upgrade.",
+      "resolution": "REJECTED. Test actual append-only metadata and mutants, preserve envelope, inspect migration state and require independent origin/source review and applicable timelock/multisig. No ceremony occurs here."
+    },
+    {
+      "claim": "Launch/operations C14: A locked recommendation authorizes counsel, audit or mainnet work.",
+      "resolution": "REJECTED. d-compliance, d-audit, d-budget and d-mainnet-rollout are defaulted DENY holds under E-lock-brief. NO authority is granted by this default; this is a hold, not an approval. Their evidence names each separate CEO decision and the future approval packet. Mainnet activation, audit engagement and budget are out of scope; r-authority/c-activation-gates retain enforceable refusal obligations."
+    },
+    {
+      "claim": "Feasibility/evidence C15: The native 2.41 ms arkworks result does not measure a full Sapling Wasm bundle.",
+      "resolution": "ACCEPTED. Recorded as unreplicated study evidence only. Require signatures, encodings, tree costs and slowest-hardware samples; thresholds are policy, not measurements."
+    },
+    {
+      "claim": "Feasibility/evidence C16: Other-chain priority warrants shipping all five backends together.",
+      "resolution": "REJECTED. d-order selects a narrow hub with a real foreign-chain consumer plus parallel Sapling spike; backend-specific gates avoid a generic registry without users."
+    },
+    {
+      "claim": "Feasibility/evidence C17: A hosts file or no-op optional test proves Midnight independence.",
+      "resolution": "REJECTED. r-midnight-independent requires isolated no-egress execution, positive denial probes, excluded dependencies and named nonempty core scenarios."
+    },
+    {
+      "claim": "Feasibility/evidence C18: Exit zero, names or empty JSON can make a vacuous test look successful.",
+      "resolution": "ACCEPTED. Reject missing drivers, timeouts, zero/ignored tests, unknown statuses and malformed/duplicate-key responses. Assert actual state transitions; list and run AJ tests exactly. Driver correspondence still needs review and real artifacts."
+    },
+    {
+      "claim": "Feasibility/evidence C19: An orphaned BLS library means Mithril support is ready.",
+      "resolution": "REJECTED. Official STM docs confirm a BLS12-381 backend, narrowing the study uncertainty. Wasm portability, certificate chains, stake/checkpoint semantics and bounded costs remain a separately gated spike."
+    },
+    {
+      "claim": "Feasibility/evidence C20: Trustworthy evidence must distinguish scaffold readiness from implementation readiness.",
+      "resolution": "ACCEPTED. Adapter unit tests may become GREEN; every feature check stays RED until its real dependencies and assertions run. No --run, live chain experiment or production assurance claim is made by this pass."
+    },
+    {
+      "claim": "Feasibility/evidence C21: The exact supplied runner accepts blocked decisions and uppercase D- ids at lock time.",
+      "resolution": "REJECTED by inspected code: FluxPoint 1.42.0 accepts only defaulted/user-confirmed statuses and lowercase kebab-case ids. IDs are normalized to d-* with the same meaning. E-lock-brief resolves the previous drafting conflict through grill-me.md's safe conditional or deny-by-default rule: all four authority choices default to DENY, PREPROD is the implementation scope, and future CEO decisions remain explicit holds. The canonical runner is unchanged; its lock establishes packet identity, never approval."
+    }
+  ]
+}

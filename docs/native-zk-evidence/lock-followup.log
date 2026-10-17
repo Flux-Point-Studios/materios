@@ -1,0 +1,61 @@
+command: nice -n 10 bash /home/deci/.claude/plugins/cache/fluxpoint/fluxpoint/1.42.0/scripts/py.sh specification.py --lock
+exit: 0
+specification: locked bc6897c50f6f94b742ed95b9c79980d3d8c0ef6525b97282ab73899fb4e85924; checks have not run
+
+command: nice -n 10 bash /home/deci/.claude/plugins/cache/fluxpoint/fluxpoint/1.42.0/scripts/py.sh specification.py --check
+exit: 0
+specification: validated bc6897c50f6f94b742ed95b9c79980d3d8c0ef6525b97282ab73899fb4e85924
+
+command: nice -n 10 env CARGO_TARGET_DIR=.zk-spec-target python3 tools/zk-spec/check.py c-activation-gates
+exit: 1
+test_authority_and_evidence_absence_deny_activation (contracts.ActivationGates.test_authority_and_evidence_absence_deny_activation) ... ERROR
+test_every_activation_path_retains_all_authority_holds (contracts.ActivationGates.test_every_activation_path_retains_all_authority_holds) ... ERROR
+test_no_mainnet_chain_spec_can_enable_any_zk_pallet (contracts.ActivationGates.test_no_mainnet_chain_spec_can_enable_any_zk_pallet) ... ERROR
+
+======================================================================
+ERROR: test_authority_and_evidence_absence_deny_activation (contracts.ActivationGates.test_authority_and_evidence_absence_deny_activation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 359, in test_authority_and_evidence_absence_deny_activation
+    result = self.query("activation-gate-simulation", absent=absent)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_every_activation_path_retains_all_authority_holds (contracts.ActivationGates.test_every_activation_path_retains_all_authority_holds)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 345, in test_every_activation_path_retains_all_authority_holds
+    result = self.query("activation-hold-coverage", packet_scope="preprod-only",
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_no_mainnet_chain_spec_can_enable_any_zk_pallet (contracts.ActivationGates.test_no_mainnet_chain_spec_can_enable_any_zk_pallet)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 329, in test_no_mainnet_chain_spec_can_enable_any_zk_pallet
+    result = self.query("mainnet-zk-enablement", packet_scope="preprod-only",
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.002s
+
+FAILED (errors=3)
+RED: selected=3 ran=3 skipped=0

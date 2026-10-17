@@ -1,0 +1,7 @@
+argv: ["bash", "/home/deci/.claude/plugins/cache/fluxpoint/fluxpoint/1.42.0/scripts/py.sh", "specification.py", "--lock"]
+exit: 1
+specification: decision d-compliance: unresolved or invalid status; decision d-audit: unresolved or invalid status; decision d-budget: unresolved or invalid status; decision d-mainnet-rollout: unresolved or invalid status
+
+argv: ["bash", "/home/deci/.claude/plugins/cache/fluxpoint/fluxpoint/1.42.0/scripts/py.sh", "specification.py", "--check"]
+exit: 1
+specification: [Errno 2] No such file or directory: '/home/deci/work/wt-materios-zk-spec/.fluxpoint-spec-lock.json'

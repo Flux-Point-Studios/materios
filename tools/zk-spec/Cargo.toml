@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["core", "driver", "wasm"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+
+[patch.crates-io]
+core2 = { path = "vendor/core2" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

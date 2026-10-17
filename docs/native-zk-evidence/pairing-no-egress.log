@@ -1,0 +1,7 @@
+test_core_build_and_real_tests_without_network (p0_contracts.CoreNoEgress.test_core_build_and_real_tests_without_network) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 32.742s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
