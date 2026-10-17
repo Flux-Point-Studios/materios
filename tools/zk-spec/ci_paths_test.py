@@ -103,6 +103,7 @@ class CIPathsTests(unittest.TestCase):
         self.assertNotIn("-p materios-node", commands)
         self.assertIn("rustup target add --toolchain 1.85.0 wasm32-unknown-unknown", commands)
         self.assertIn("rustup component add --toolchain 1.85.0 rust-src", commands)
+        self.assertIn('WASM_BUILD_WORKSPACE_HINT="$(pwd)/partnerchain"', commands)
         self.assertIn("subwasm_linux_amd64_v0.21.3.deb", commands)
         self.assertIn("0560d1b8785be9a0d04cb0bf939feaaa621c2d0809f818225698d5c44198550c", commands)
         self.assertIn("sha256sum -c -", commands)

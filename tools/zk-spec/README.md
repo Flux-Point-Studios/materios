@@ -16,7 +16,9 @@ It never changes host routes or firewall rules. Missing privileges fail.
 CI's `zk-p0` workflow builds/tests the primitive, verifies the Wasm proof corpus
 without timing service hosts, and checks actual rebuilt-runtime metadata. Its
 metadata step uses a runtime-only Cargo check with Rust 1.85.0 and checksum-pinned
-subwasm 0.21.3. The namespace-isolated build/test and Gemtek benchmark are local
+subwasm 0.21.3. The shared target directory uses `WASM_BUILD_WORKSPACE_HINT` to
+keep the nested Wasm build pinned to `partnerchain/Cargo.lock`.
+The namespace-isolated build/test and Gemtek benchmark are local
 acceptance runs, repeated when `--full` selects ZK work.
 
 The workflow runs on pushes to `main` and on pull requests to any base branch

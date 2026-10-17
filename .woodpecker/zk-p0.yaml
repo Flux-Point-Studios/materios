@@ -63,7 +63,7 @@ steps:
       - apt-get install -y --no-install-recommends python3 clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
       - rustup target add --toolchain 1.85.0 wasm32-unknown-unknown
       - rustup component add --toolchain 1.85.0 rust-src
-      - export CARGO_HOME="$(pwd)/.zk-spec-scratch/cargo" CARGO_TARGET_DIR="$(pwd)/.zk-spec-target"
+      - export CARGO_HOME="$(pwd)/.zk-spec-scratch/cargo" CARGO_TARGET_DIR="$(pwd)/.zk-spec-target" WASM_BUILD_WORKSPACE_HINT="$(pwd)/partnerchain"
       - nice -n 10 cargo +1.85.0 check --locked --manifest-path partnerchain/Cargo.toml -p materios-runtime
       - mkdir -p tools/zk-spec/artifacts
       - cp .zk-spec-target/debug/wbuild/materios-runtime/materios_runtime.wasm tools/zk-spec/artifacts/runtime.wasm
