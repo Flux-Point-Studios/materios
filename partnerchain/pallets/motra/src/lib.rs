@@ -5,8 +5,9 @@ extern crate alloc;
 pub use pallet::*;
 mod account_store;
 mod checkpoint_weights;
-mod delegatee_clock_weights;
+mod decay;
 pub mod fee;
+mod reconciliation_weights;
 pub mod types;
 pub mod weights;
 pub use account_store::{checkpoint_weight, reconciliation_weight, MatraAccountStore};
@@ -78,7 +79,7 @@ pub mod pallet {
     #[pallet::getter(fn total_issued)]
     pub type TotalIssued<T: Config> = StorageValue<_, u128, ValueQuery>;
 
-    /// Total MOTRA burned as fees (cumulative, never decreases).
+    /// Total MOTRA burned as fees, net of actual-weight refunds.
     #[pallet::storage]
     #[pallet::getter(fn total_burned)]
     pub type TotalBurned<T: Config> = StorageValue<_, u128, ValueQuery>;
@@ -98,7 +99,7 @@ pub mod pallet {
     pub type LegacyAccrualStart<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
 
     #[pallet::event]
-    #[pallet::generate_deposit(pub(super) fn deposit_event)]
+    #[pallet::generate_deposit(pub(crate) fn deposit_event)]
     pub enum Event<T: Config> {
         /// MOTRA balance reconciled for account (after decay + generation).
         BalanceReconciled {
@@ -122,6 +123,8 @@ pub mod pallet {
             new_rate: u128,
             block_fullness: Perbill,
         },
+        /// The unused weight portion of a pre-dispatch fee was restored.
+        FeeRefunded { who: T::AccountId, amount: u128 },
     }
 
     #[pallet::error]
@@ -145,6 +148,21 @@ pub mod pallet {
                 StorageVersion::new(1).put::<Self>();
             }
             crate::account_store::checkpoint_weight::<T>().saturating_mul(2)
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn try_state(_: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
+            for (who, (held, since)) in AccrualCheckpoint::<T>::iter() {
+                ensure!(
+                    held <= Self::get_matra_balance(&who),
+                    "MOTRA checkpoint exceeds free MATRA"
+                );
+                ensure!(
+                    since <= frame_system::Pallet::<T>::block_number(),
+                    "MOTRA checkpoint is in the future"
+                );
+            }
+            Ok(())
         }
 
         #[cfg(feature = "try-runtime")]
@@ -308,32 +326,37 @@ pub mod pallet {
             let now = frame_system::Pallet::<T>::block_number();
             let last = LastTouched::<T>::get(who);
             let elapsed: u64 = now.saturating_sub(last).try_into().unwrap_or(u64::MAX);
-            let decayed = Self::apply_decay_iterative(
-                MotraBalances::<T>::get(who),
-                params.decay_rate_per_block,
-                elapsed,
-            );
+            let balance = MotraBalances::<T>::get(who);
             // PalletId accounts and subaccounts carry the SCALE type prefix `modl`.
-            let generated = if who.encode().starts_with(b"modl") {
-                0
+            let (per_block, blocks) = if who.encode().starts_with(b"modl") {
+                (0, 0)
             } else {
                 let matra = Self::get_matra_balance(who);
-                let checkpoint = AccrualCheckpoint::<T>::get(who)
-                    .or_else(|| LegacyAccrualStart::<T>::get().map(|since| (matra, since)));
+                let checkpoint = AccrualCheckpoint::<T>::get(who).or_else(|| {
+                    LegacyAccrualStart::<T>::get().map(|since| (matra, since.max(last)))
+                });
                 if let Some((held, since)) = checkpoint {
-                    let blocks: u64 = now
-                        .saturating_sub(since.max(last))
-                        .try_into()
-                        .unwrap_or(u64::MAX);
-                    held.min(matra)
-                        .saturating_mul(params.generation_per_matra_per_block)
-                        .saturating_mul(blocks as u128)
-                        / 1_000_000
+                    let blocks: u64 = now.saturating_sub(since).try_into().unwrap_or(u64::MAX);
+                    (
+                        held.min(matra)
+                            .saturating_mul(params.generation_per_matra_per_block)
+                            / 1_000_000,
+                        blocks,
+                    )
                 } else {
-                    0
+                    (0, 0)
                 }
             };
-            (decayed, generated)
+            let (decayed, generated) =
+                crate::decay::accrue(balance, per_block, params.decay_rate_per_block, elapsed);
+            if blocks == elapsed {
+                (decayed, generated)
+            } else {
+                (
+                    decayed,
+                    crate::decay::accrue(0, per_block, params.decay_rate_per_block, blocks).1,
+                )
+            }
         }
 
         /// Read-only projection of what the MOTRA balance would be if reconciled now.
@@ -361,13 +384,14 @@ pub mod pallet {
             let params = Params::<T>::get();
             let old_balance = MotraBalances::<T>::get(who);
             if LastTouched::<T>::get(who) == current_block
-                && AccrualCheckpoint::<T>::get(who).is_some_and(|(held, _)| held == matra)
+                && AccrualCheckpoint::<T>::get(who) == Some((matra, current_block))
                 && old_balance <= params.max_balance
             {
                 return Ok(old_balance);
             }
             let (decayed_balance, generated) = Self::accrual(who, &params);
             let decay_amount = old_balance.saturating_sub(decayed_balance);
+            let mut total_decay = decay_amount;
 
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
 
@@ -385,8 +409,11 @@ pub mod pallet {
 
             if &generation_target != who && generated > 0 {
                 let delegatee_balance = MotraBalances::<T>::get(&generation_target);
-                Self::initialize_delegatee_clock(&generation_target, delegatee_balance);
-                let new_delegatee_balance = delegatee_balance
+                let current_delegatee_balance =
+                    Self::decay_delegatee(&generation_target, delegatee_balance);
+                total_decay = total_decay
+                    .saturating_add(delegatee_balance.saturating_sub(current_delegatee_balance));
+                let new_delegatee_balance = current_delegatee_balance
                     .saturating_add(generated)
                     .min(params.max_balance);
                 MotraBalances::<T>::insert(&generation_target, new_delegatee_balance);
@@ -394,7 +421,7 @@ pub mod pallet {
 
             TotalIssued::<T>::mutate(|total| {
                 *total = total.saturating_add(generated);
-                *total = total.saturating_sub(decay_amount);
+                *total = total.saturating_sub(total_decay);
             });
 
             Self::deposit_event(Event::BalanceReconciled {
@@ -407,41 +434,19 @@ pub mod pallet {
             Ok(new_self_balance)
         }
 
-        pub(crate) fn initialize_delegatee_clock(who: &T::AccountId, balance: u128) {
-            if balance == 0 && !LastTouched::<T>::contains_key(who) {
-                // Keep unclaimed MATRA generation and any pre-funding sponsorship clock.
-                let since = AccrualCheckpoint::<T>::get(who)
-                    .map(|(_, since)| since)
-                    .unwrap_or_default();
-                LastTouched::<T>::insert(who, since);
-            }
-        }
-
-        /// Apply multiplicative decay: balance * (rate ^ elapsed).
-        ///
-        /// Uses iterative multiplication of Perbill. For very large elapsed values
-        /// the iteration is capped at 100_000 to prevent DoS.
-        fn apply_decay_iterative(balance: u128, rate: Perbill, elapsed: u64) -> u128 {
-            if balance == 0 {
-                return 0;
-            }
-
-            let iterations = elapsed.min(100_000);
-            let mut result = balance;
-            let mut remaining = iterations;
-
-            while remaining > 0 {
-                let chunk = remaining.min(64);
-                for _ in 0..chunk {
-                    result = rate * result;
-                }
-                remaining -= chunk;
-                if result == 0 {
-                    break;
-                }
-            }
-
-            result
+        fn decay_delegatee(who: &T::AccountId, balance: u128) -> u128 {
+            let now = frame_system::Pallet::<T>::block_number();
+            let elapsed = now
+                .saturating_sub(LastTouched::<T>::get(who))
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let decayed =
+                crate::decay::accrue(balance, 0, Params::<T>::get().decay_rate_per_block, elapsed)
+                    .0;
+            // Decay sponsorship only from its arrival; the separate holding checkpoint
+            // retains the recipient's pending generation without recursive delegation.
+            LastTouched::<T>::insert(who, now);
+            decayed
         }
 
         /// Get MATRA (native token) free balance for an account.

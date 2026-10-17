@@ -18,14 +18,7 @@ pub fn {{benchmark.name}}<T: frame_system::Config>() -> Weight {
     };
     // Measured proof: {{benchmark.base_recorded_proof_size}} bytes; CLI prefix maximum: {{benchmark.base_calculated_proof_size}} bytes.
     // Minimum execution time: {{benchmark.min_execution_time}}_000 picoseconds.
-    {{#if (eq benchmark.name "initialize_delegatee_clock")}}
-    // CLI takes the maximum across prefixes; sum both independent bounds.
-    // AccrualCheckpoint's value is one u128 wider than LastTouched's value.
-    let proof = {{benchmark.base_calculated_proof_size}}_u64.saturating_mul(2).saturating_sub(16);
-    Weight::from_parts({{underscore benchmark.base_weight}}, proof)
-    {{else}}
     Weight::from_parts({{underscore benchmark.base_weight}}, {{benchmark.base_calculated_proof_size}})
-    {{/if}}
         .saturating_add(db.reads({{benchmark.base_reads}}))
         .saturating_add(db.writes({{benchmark.base_writes}}))
 }

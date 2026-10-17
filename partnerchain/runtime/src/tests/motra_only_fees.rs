@@ -247,7 +247,6 @@ fn legacy_holder_without_stored_motra_can_pay_after_the_upgrade() {
 #[test]
 fn checkpoint_proof_uses_the_storage_info_bound() {
     use frame_support::traits::StorageInfoTrait;
-    use pallet_motra::weights::WeightInfo;
     let storage = Motra::storage_info()
         .into_iter()
         .find(|entry| entry.storage_name == b"AccrualCheckpoint")
@@ -257,17 +256,6 @@ fn checkpoint_proof_uses_the_storage_info_bound() {
     assert_eq!(
         pallet_motra::checkpoint_weight::<Runtime>().proof_size(),
         bound
-    );
-    let clock_bound: u64 = Motra::storage_info()
-        .into_iter()
-        .filter(|entry| {
-            entry.storage_name == b"AccrualCheckpoint" || entry.storage_name == b"LastTouched"
-        })
-        .map(|entry| u64::from(entry.max_size.expect("bounded clock storage")) + 7 * 495)
-        .sum();
-    assert_eq!(
-        <Runtime as pallet_motra::Config>::WeightInfo::initialize_delegatee_clock().proof_size(),
-        clock_bound
     );
 }
 
@@ -489,24 +477,12 @@ fn checkpoint_currency_callers_and_fee_extension_have_declared_budgets() {
     covered!(pallet_intent_settlement, post_settlement_bond(), 1);
     covered!(pallet_intent_settlement, slash_bad_settlement_evidence(), 4);
     covered!(pallet_intent_settlement, release_settlement_bond(), 1);
-    assert!(RuntimeBlockWeights::get()
+    use pallet_motra::weights::WeightInfo;
+    assert_eq!(RuntimeBlockWeights::get()
         .get(frame_support::dispatch::DispatchClass::Normal)
-        .base_extrinsic
-        .all_gte(ExtrinsicBaseWeight::get().saturating_add(checkpoint)));
-    let clock = frame_support::weights::constants::RocksDbWeight::get()
-        .reads_writes(2, 1)
-        .saturating_add(Weight::from_parts(0, 7_050));
-    assert!(
-        RuntimeBlockWeights::get()
-            .get(frame_support::dispatch::DispatchClass::Normal)
-            .base_extrinsic
-            .all_gte(
-                ExtrinsicBaseWeight::get()
-                    .saturating_add(checkpoint)
-                    .saturating_add(clock)
-            ),
-        "fee reconciliation omits first delegated-credit clock work"
-    );
+        .base_extrinsic,
+        ExtrinsicBaseWeight::get().saturating_add(
+            <Runtime as pallet_motra::Config>::WeightInfo::fee_path()));
 }
 
 #[test]

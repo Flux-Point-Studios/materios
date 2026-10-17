@@ -8,9 +8,7 @@ pub fn checkpoint_weight<T: Config>() -> Weight {
 }
 
 pub fn reconciliation_weight<T: Config>() -> Weight {
-    checkpoint_weight::<T>().saturating_add(
-        <<T as Config>::WeightInfo as crate::weights::WeightInfo>::initialize_delegatee_clock(),
-    )
+    <<T as Config>::WeightInfo as crate::weights::WeightInfo>::reconcile()
 }
 
 /// Balances' system-account store, with a conservative MATRA holding checkpoint.

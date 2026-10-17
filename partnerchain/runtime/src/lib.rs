@@ -234,7 +234,7 @@ parameter_types! {
         .base_block(BlockExecutionWeight::get())
         .for_class(frame_support::dispatch::DispatchClass::all(), |weights| {
             weights.base_extrinsic = ExtrinsicBaseWeight::get()
-                .saturating_add(pallet_motra::reconciliation_weight::<Runtime>());
+                .saturating_add(<<Runtime as pallet_motra::Config>::WeightInfo as pallet_motra::weights::WeightInfo>::fee_path());
         })
         .for_class(frame_support::dispatch::DispatchClass::Normal, |weights| {
             weights.max_total = Some(NORMAL_DISPATCH_RATIO * Weight::from_parts(
@@ -1843,6 +1843,7 @@ frame_benchmarking::define_benchmarks!(
     [frame_system, SystemBench::<Runtime>]
     [pallet_balances, Balances]
     [pallet_motra, Motra]
+    [pallet_orinq_receipts, OrinqReceipts]
     [pallet_timestamp, Timestamp]
     [pallet_intent_settlement, IntentSettlement]
     [pallet_oracle, Oracle]

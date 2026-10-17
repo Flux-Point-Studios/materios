@@ -1,47 +1,35 @@
-# MOTRA checkpoint weight accounting
+# MOTRA accounting and dispatch weights
 
-Balance changes never register weight after admission. The runtime adds account
-checkpoint costs to the owning dispatch's `WeightInfo`, so `CheckWeight` admits
-the complete cost and Utility, Multisig and RootTimelock retain it when summing
-inner calls and returning actual weight.
+Balance changes carry their checkpoint costs in the owning dispatch's declared
+weight. `CheckWeight` admits the complete bound before execution; Utility,
+Multisig and RootTimelock preserve inner calls' weights and refunds.
 
-`checkpoint_weight` uses the generated MOTRA `WeightInfo::checkpoint`. Its
-benchmark executes the account-store path against an existing checkpoint with
-`LegacyAccrualStart` set, including a preceding legacy free-balance repair.
-Both visits use the same checkpoint key: one database read and one database
-write, with the repeated overlay accesses included in measured execution time.
-`System.Account` is whitelisted because its cost belongs to the base Balances
-weight; `System.Number` uses FRAME's standard whitelist. The checkpoint key is
-not whitelisted. Proof size uses storage information and `MaxEncodedLen`.
-The database cost retains the RocksDB floor when `System.DbWeight` is zero.
+A checkpoint benchmark performs two free-balance changes on one account, as a
+signer reward followed by escrow distribution can do. The key is read and
+written once in the database; repeated overlay accesses remain in execution
+time. System.Account belongs to the base Currency weight and is whitelisted;
+the MOTRA checkpoint is not. Its cost is **148,885,000 ref_time / 3,533 proof
+bytes**: 23,885,000 execution plus one RocksDB read and write. The database terms
+use `max(T::DbWeight, RocksDbWeight)` separately for reads and writes.
 
-`balance_weights::mutations(n)` adds one benchmarked checkpoint per account.
-Transfers budget two, including a reaped sender; reserve and unreserve budget
-one. Dust burns issuance (`DustRemoval = ()`) without crediting a third account.
-Dispatch annotations are admission bounds: zero-value, self-transfer, failed,
-and unchanged-balance calls can use fewer entries than their declared maximum.
+Reconciliation uses directed fixed-point exponentiation, bounded by 64 rounds,
+and decays generation within the holding interval. It settles a delegatee's
+existing stored balance before crediting sponsorship at the current block;
+the independent holding checkpoint preserves pending generation. Claim,
+delegation and fee benchmarks include nonzero stored balances, distinct
+caller/recipient clocks and intervals of 100,000, 1,000,000 and u32::MAX blocks.
+An additional legacy baseline read covers the fallback branch even when the
+longer two-clock benchmark uses an existing checkpoint.
 
-System account creation no longer writes a MOTRA decay clock. A zero MOTRA
-balance has no decay; reconciliation sets `LastTouched` when it generates MOTRA.
-Existing sponsored balances retain their previous clock, including the default
-zero clock when no reconciliation has occurred. First funding starts generation
-at the holding checkpoint, independently of account creation time.
-On the first delegated credit to an account with zero stored MOTRA and no decay
-clock, reconciliation initializes the clock from its holding checkpoint (or zero
-if never funded). This preserves its unclaimed MATRA generation interval and
-pre-funding sponsorship history. A separate benchmark prices that work; transfers
-do not pay for it.
+The complete fee path (reconcile, burn, post-dispatch refund) is added once to
+`RuntimeBlockWeights.base_extrinsic`. Validation uses discarded storage and is
+outside block execution. The minimum and length fee remain paid; the dispatch
+weight fee is refunded at the pre-dispatch congestion rate. `TotalBurned` is
+net of the amount actually credited. `FeeRefunded` is appended to the event
+enum. Existing calls, storage encodings, SignedExtra and transaction version 5
+are unchanged.
 
-The pinned SDK is `polkadot-sdk` revision `c455194a`. Its
-[balances mutation helpers](https://github.com/paritytech/polkadot-sdk/blob/c455194a2ae2f613c1c671e00dbf397b83ed8171/substrate/frame/balances/src/lib.rs)
-invoke `ensure_upgraded` before changing account data. Its
-[Utility weight calculation and refunds](https://github.com/paritytech/polkadot-sdk/blob/c455194a2ae2f613c1c671e00dbf397b83ed8171/substrate/frame/utility/src/lib.rs)
-both use the inner calls' dispatch information.
-The settlement dependency routes its three bond calls through `WeightInfo`;
-dispatch-information regressions in both repositories enforce that wiring,
-including the existing operational class and fee policy.
-No call indices, origins, SignedExtra fields or transaction-version changes are
-needed.
+## Currency path audit
 
 | Runtime entry point | Potential account mutations budgeted |
 | --- | --- |
@@ -67,104 +55,156 @@ needed.
 | Other Billing calls | 0; billing-credit storage only |
 | Receipt submit/resubmit, privileged cert, bond/unbond, fee expiry | 1 reserve/unreserve |
 | Receipt slash | 2 for repatriation |
-| Receipt attestation | `3 * MaxCommitteeSize + 3`; signer mint and two-account fee distribution per signer, treasury distribution and fallback refund; also covers bad-attestation slashing |
+| Receipt attestation | `MaxCommitteeSize + 2` distinct accounts at admission; actual changed accounts on success; zero for non-threshold and late attests |
 | Receipt era rewards | Hook returns one mutation budget per validator/treasury deposit actually attempted |
 | Fee-router pot migration | 4; two transfers |
 | Perp removal migration | One per released bond plus 2 for its pot transfer; at most 1,000 bond entries per upgrade |
 | Native token transfer inherent | 0; runtime handler records the observation without minting MATRA |
 | Genesis | No block admission; hooks write state without registering block weight |
 
-Receipt era rewards run once per 14,400 blocks and visit `BlocksAuthored`; each
-block records at most one author. Their returned initialization weight includes
-every balance mutation. This is an initialization cost, not an unchecked
-dispatch surcharge; the existing author-map traversal is not benchmarked by
-these checkpoint bounds.
 
-Reconciliation includes the checkpoint and first delegated-credit clock budgets
-in `claim_motra` and `set_delegatee`. Fee reconciliation is covered once per extrinsic by
-`RuntimeBlockWeights.base_extrinsic`, before `ChargeMotra` runs. Validation
-executes against discarded storage and does not consume a block. The account
-store accepts only `u128` balances, so reading its free balance is infallible;
-the generic projection path uses a saturating conversion.
+Billing topups and successful withdrawals return their actual checkpoint count;
+failed overflow rollback retains the admission bound. Receipt submission v1/v2,
+privileged certification, bond/unbond, slash, expiry and attestation return
+actual weight. Threshold attestation snapshots unique signer, treasury and
+escrow-payer balances and counts the accounts whose free balance changes. The
+96-signer maximum with reward and fee distribution changes 97 accounts, for
+both an existing treasury and the dead-treasury refund path. Non-threshold and
+late attestations return the measured base without checkpoints. Bad-hash
+slashing has its own measured base and counts its changed accounts.
 
-The runtime regression dispatches a Utility batch that fills the remaining
-block budget, checks its transfers and post-dispatch refund, rejects another
-transfer, and finalizes within `max_block`. Separate tests check transfer and
-Currency-caller dispatch budgets, returned reward-hook weight, absence of
-unchecked hook/reconciliation weight, and preservation of `u128::MAX`. A property
-test dispatches every Balances call plus reserve/unreserve against generated
-normal and legacy states, commits setup before each call, observes actual
-checkpoint keys in the storage overlay, and checks the declared weight covers
-them. The base-weight match is exhaustive over the pinned Balances call enum.
+Runtime regressions commit fixtures before dispatch and inspect real checkpoint
+writes across fifteen Billing/receipt paths, plus maximum committee payouts.
+Existing property tests retain every Balances call, reserve/unreserve, legacy
+repair, u128 limits, failed dispatch and checkpoint invariants. `try_state`
+rejects a holding above current free MATRA or a future checkpoint block.
 
-## Gemtek measurement, 2026-10-17
+Receipt era rewards run every 14,400 blocks; their returned initialization
+weight includes every attempted balance mutation. The separate author-map
+traversal remains outside these checkpoint bounds.
 
-Hardware: Gemtek (`deci-desktop`), AMD Ryzen 7 7730U, 8 cores / 16 threads,
-28 GiB RAM, Linux 6.17.0-22-generic. Builds and execution run through
-`flock /tmp/materios-cargo-build.lock nice -n 10`, with four Cargo jobs.
-The Wasm uses Rust 1.85.0 and pinned SDK `c455194a`.
-`frame-omni-bencher 0.7.0` embeds benchmark CLI 43.0.0.
+## Measurements and reproducibility
 
-From `partnerchain/`, with a worktree-specific `CARGO_TARGET_DIR` and
-`WASM_BUILD_WORKSPACE_HINT` pointing to the worktree's `partnerchain/` directory:
+Gemtek: AMD Ryzen 7 7730U, 8 cores / 16 threads, 28 GiB RAM, Linux
+6.17.0-22-generic. Rust 1.85.0, SDK c455194a, frame-omni-bencher 0.7.0
+(benchmark CLI 43.0.0). All local heavy work uses the shared Cargo build lock,
+`nice -n 10`, four jobs and an isolated target directory.
+
+From `partnerchain/`, set `CARGO_TARGET_DIR` to the isolated target and
+`WASM_BUILD_WORKSPACE_HINT` to this checkout's `partnerchain/` directory:
 
 ```sh
 cargo build -p materios-runtime --features runtime-benchmarks --locked
-touch pallets/motra/src/checkpoint_weights.rs
 frame-omni-bencher v1 benchmark pallet \
   --runtime "$CARGO_TARGET_DIR/debug/wbuild/materios-runtime/materios_runtime.wasm" \
-  --pallet pallet_motra --extrinsic checkpoint \
-  --steps 50 --repeat 100 --external-repeat 5 --output-analysis max \
+  --pallet pallet_motra --extrinsic '*' \
+  --steps 20 --repeat 20 --external-repeat 3 --output-analysis max \
   --map-size 1000000 --additional-trie-layers 2 \
   --genesis-builder runtime --genesis-builder-preset development \
-  --template pallets/motra/benchmarking/checkpoint-weight.hbs \
-  --output pallets/motra/src/checkpoint_weights.rs \
-  --json-file checkpoint-benchmark.json
-rustfmt --edition 2021 pallets/motra/src/checkpoint_weights.rs
+  --json-file motra-benchmarks.json
 ```
 
-The benchmark records one read and one write, 229 measured proof bytes, and a
-68-byte maximum encoded map entry. The bound is `68 + 7 * 495 = 3,533` bytes
-(five map trie layers plus two top-level layers). Measured execution is
-23,885,000 ref_time; adding RocksDB's 25,000,000/read and 100,000,000/write gives
-**148,885,000 ref_time / 3,533 proof bytes per account**. The generated file and
-template retain these inputs; the runtime regression independently derives the
-proof bound from `StorageInfo`.
-The raw samples are retained in
-`partnerchain/pallets/motra/benchmarking/checkpoint-samples.json.gz`.
-The measured Wasm SHA-256 is
-`a91044ae7c4583cb877e236bf8729429dd7e3f653c44ca3a976123cc7a1e9657`.
+The receipt command substitutes `--pallet pallet_orinq_receipts` and its own
+JSON output. Reconciliation and receipt attestation samples are retained in
+`pallets/motra/benchmarking/reconciliation-samples.json` and
+`pallets/orinq-receipts/benchmarking/attestation-samples.json`; templates beside
+them generate the weight functions using `--json-input`, `--template` and
+`--output`, followed by `rustfmt --edition 2021`. The prior checkpoint run used
+50 steps, 100 repeats and five external repeats; its raw JSON is retained as
+`checkpoint-samples.json`. Runtime tests pin the checkpoint, claim, delegation
+and fee ref_time and database counts to those samples, bound every measured
+reconciliation case, and derive proof bounds independently from StorageInfo.
 
-`initialize_delegatee_clock` is measured separately with a missing recipient
-clock, a populated clock map, and an existing holding checkpoint. It measures
-15,891,000 execution ref_time, two reads and one write: **165,891,000 total**.
-The two independent storage proof bounds are 3,517 bytes (`LastTouched`, max_size
-52) and 3,533 bytes (`AccrualCheckpoint`, max_size 68), totaling **7,050 bytes**.
-The CLI selects a maximum across storage prefixes; the template sums the two
-bounds for this benchmark. The regression independently sums `StorageInfo` bounds.
-Reconciliation therefore reserves 314,776,000 ref_time / 10,583 proof bytes.
-Reproduce with the same command using `--extrinsic initialize_delegatee_clock`,
-`--output pallets/motra/src/delegatee_clock_weights.rs`, and a separate JSON path.
-Raw samples are in `benchmarking/delegatee-clock-samples.json.gz` under the pallet.
-Its measured Wasm SHA-256 is
-`fdac7ed9d01787291c90857bf390e9f1db763e2629b74614f26509db26b1f23d`.
+Measured Wasm SHA-256:
 
-| Call | Before ref_time / proof bytes | After ref_time / proof bytes |
+- MOTRA: `792e66e68c2c864389cd7e59c13b3a4581ec8d31f5aeefef31732a783845d279`
+- Receipts: `80f2ec8f84762507082bccb2953d3a2be414fa5139bd0e7361cd7f99d9a8be0b`
+- Prior checkpoint: `a91044ae7c4583cb877e236bf8729429dd7e3f653c44ca3a976123cc7a1e9657`
+
+| Measured MOTRA path | Execution ref_time | Unique reads/writes | Charged ref_time |
+| --- | ---: | ---: | ---: |
+| Claim | 197,014,000 | 9 / 6, plus legacy read | 1,047,014,000 |
+| Set delegatee | 198,657,000 | 9 / 7, plus legacy read | 1,148,657,000 |
+| Reconcile u32::MAX | 198,197,000 | 9 / 6, plus legacy read | 1,048,197,000 |
+| Reconcile 100,000 | 106,833,000 | 9 / 6, plus legacy read | bounded by reconcile above |
+| Reconcile 1,000,000 | 112,053,000 | 9 / 6, plus legacy read | bounded by reconcile above |
+| Legacy reconcile | 138,794,000 | 10 / 6 | bounded by reconcile above |
+| Fee pre + post | 189,660,000 | 10 / 7, plus legacy read | 1,164,660,000 |
+
+Map proofs sum `max_size + 7*495` per independent key; values sum
+`max_size + 3*495`. Reconciliation covers System.Account, Params, two balances,
+two clocks, checkpoint, delegatee, TotalIssued and LegacyAccrualStart: 29,346
+bytes. The fee path adds TotalBurned: 30,847 bytes. This avoids taking only the
+largest prefix when multiple independent prefixes are accessed.
+
+Receipt measurements cover n=1..96 signers, normal and dead-treasury payout,
+non-threshold submission and bad-hash slashing. Non-threshold execution is
+48,973,000; threshold execution is the maximum of
+`129,230,520 + 55,051,141*n` and `157,357,000 + 49,530,379*n`.
+Their base proofs exclude the separately charged checkpoints: 20,083 bytes
+non-threshold, 43,329 + 7,122*n threshold, 29,185 bad-hash.
+
+## Capacity
+
+The Normal block budget is 1,500,000,000,000 ref_time. The signed base is
+107,074,000 generic execution plus 1,164,660,000 fee work = **1,271,734,000**.
+
+| Dispatch | Call ref_time | Including signed base |
 | --- | ---: | ---: |
-| `transfer_keep_alive` | 1,238,159,000 / 87,593 | 335,929,000 / 10,659 |
-| `transfer_allow_death` | 1,248,363,000 / 87,593 | 346,133,000 / 10,659 |
-| `force_transfer` | 1,249,944,000 / 90,196 | 347,714,000 / 13,262 |
-| reserve/unreserve checkpoint surcharge | 600,000,000 / 42,000 | 148,885,000 / 3,533 |
-| settlement bond/release, including base | 1,100,000,000 / 42,000 | 648,885,000 / 3,533 |
-| settlement slash, including base | 2,900,000,000 / 168,000 | 1,095,540,000 / 14,132 |
+| transfer_keep_alive | 335,929,000 | 1,607,663,000 |
+| claim_motra | 1,047,014,000 | 2,318,748,000 |
+| set_delegatee | 1,148,657,000 | 2,420,391,000 |
+| Attest non-threshold actual | 48,973,000 | 1,320,707,000 |
+| Attest 96-signer threshold actual (97 checkpoints) | 19,855,985,056 | 21,127,719,056 |
+| Attest admission bound (98 checkpoints) | 20,004,870,056 | 21,276,604,056 |
 
-Reserve/unreserve are Currency methods, not standalone Balances dispatches;
-their caller supplies the base weight. Settlement's base remains 500,000,000.
+Transfers fit **933/block** by ref_time before other initialization, length or
+proof limits. A real CheckWeight/pre-dispatch/call/post-dispatch loop admits
+**1,120 non-threshold attests**, versus 70 with no actual-weight refunds under
+these new measured declarations and about 34 at the reviewed head. The ideal
+actual-only ceiling is 1,135; admission must leave room for a possible threshold
+call. This does **not** equal pre-#68's 14,007: that figure used an unpriced fee
+extension and a 15,000-ref_time attestation base. Restoring that number while
+reserving full worst-case fee work per separate extrinsic is incompatible with
+the present block budget. This remains an explicit acceptance decision, not a
+reason to understate execution cost.
 
-The same block-limit Utility batch test increases from **1,206 to 4,398
-transfers** (3.65×), includes fee reconciliation and post-dispatch refunds,
-rejects the next transfer, and finalizes at 2,000,000,000,000 ref_time. Its normal
-dispatch budget is 75% of the block. This is an admission-capacity measurement,
-not a live-network TPS claim. The earlier approximately 52k figure omitted
-checkpoint costs and used the entire block's compute allowance; measured
-checkpoint/database costs remain real, so that figure is not restored.
+A real maximum Utility/as_derivative batch runs 1,411 dormant delegated claims
+at u32::MAX. Tests check every inner clock and compare the sum of worst Wasm
+claim samples (400,639,340,000 ref_time) against its declared total
+1,499,275,194,121. The isolated native run took 983,750,068,000 ref_time (0.984 seconds), within
+the declared bound. Concurrent test scheduling is not a runtime cost measurement.
+
+## Remaining database-weight dependency
+
+`System.DbWeight = ()` is unchanged; [#71](https://github.com/Flux-Point-Studios/materios/issues/71)
+owns the runtime-wide fix. Within this PR:
+
+- `runtime/src/balance_weights.rs` preserves SDK base weights for Balances,
+  Vesting, Multisig, Recovery, Treasury and IntentSettlement. Their underlying
+  `T::DbWeight` reads/writes remain zero; only MOTRA checkpoint additions have
+  the RocksDB floor.
+- Receipt attestation base functions use `T::DbWeight`; their non-MOTRA
+  storage remains zero-priced. Threshold DB samples include checkpoint keys
+  that are also covered by the separate checkpoint surcharge, so a future
+  nonzero DbWeight must reconcile that conservative duplication.
+- Receipt bond, unbond, slash and expiry annotations and their actual weights
+  retain zero `T::DbWeight` terms (including the free-balance snapshots used for
+  refunds). The checkpoint addition does not price their base storage work.
+- Billing topups/withdrawal and receipt submission v1/v2 and privileged
+  certification use hand-authored flat base weights with no database terms;
+  the added checkpoint budget does not repair them.
+- Reward-hook base work retains configured database terms; author-map work is
+  not covered by the checkpoint increment.
+- Capacity and exact-weight regression numbers use today's zero base database
+  terms. The checkpoint property test proves the added MOTRA delta, not full
+  Currency cost. These expected numbers must move with #71.
+
+MOTRA checkpoint, reconciliation and fee weights use the RocksDB floor and do
+not depend on zero DbWeight. The fee-router/perp-removal migrations already
+use a RocksDB floor for their base work and add the checkpoint increments.
+
+Settlement #51 must merge before #68. Both oracle and settlement currently
+resolve to ff0efeddad5dfa3a948f6b4e425b4546e39fbbe4; after #51 merges, both pins
+must move together to its merged main commit and validation must be repeated.
+No merge, deployment or enactment is authorized by this round.

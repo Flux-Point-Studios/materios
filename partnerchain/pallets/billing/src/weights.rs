@@ -3,6 +3,9 @@
 use frame_support::weights::Weight;
 
 pub trait WeightInfo {
+    fn balance_mutations(_accounts: u32) -> Weight {
+        Weight::zero()
+    }
     fn topup_self() -> Weight;
     fn topup_for() -> Weight;
     fn pay_request() -> Weight;

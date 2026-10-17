@@ -5727,8 +5727,10 @@ dependencies = [
  "pallet-balances",
  "pallet-timestamp",
  "parity-scale-codec",
+ "proptest",
  "scale-info",
  "serde",
+ "sp-arithmetic",
  "sp-io",
  "sp-runtime",
  "sp-std",
@@ -5766,7 +5768,7 @@ dependencies = [
 [[package]]
 name = "pallet-oracle"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=c60b98f6bcbb99b1745447fe7a74be321c72bd51#c60b98f6bcbb99b1745447fe7a74be321c72bd51"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=ff0efeddad5dfa3a948f6b4e425b4546e39fbbe4#ff0efeddad5dfa3a948f6b4e425b4546e39fbbe4"
 dependencies = [
  "frame-benchmarking",
  "frame-support",

@@ -4129,9 +4129,14 @@ def motra_checkpoint_metadata(meta):
 
 def test_motra_genesis_checkpoints_match_actual_endowments(spec, meta):
     account = spec.accounts()[0]
-    spec.storage[map_key("Motra", "LastTouched", account)] = bytes(4)
     spec.storage[map_key("Motra", "AccrualCheckpoint", account)] = spec.balance(account)[0].to_bytes(16, "little") + bytes(4)
     assert lp.check_genesis_storage(spec, motra_checkpoint_metadata(meta)) == []
+
+
+def test_motra_genesis_rejects_even_a_zero_decay_clock(spec, meta):
+    spec.storage[map_key("Motra", "LastTouched", spec.accounts()[0])] = bytes(4)
+    findings = lp.check_genesis_storage(spec, motra_checkpoint_metadata(meta))
+    assert any("outside the genesis allowlist" in finding.message for finding in findings)
 
 
 @pytest.mark.parametrize("item,value", [

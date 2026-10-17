@@ -1,0 +1,28 @@
+//! Generated from FRAME Wasm samples; see docs/motra-checkpoint-weights.md.
+//! Independent StorageInfo proof bounds exclude the separately charged MOTRA checkpoints.
+
+use frame_support::{traits::Get, weights::Weight};
+
+{{#each benchmarks as |benchmark|}}
+pub fn {{benchmark.name}}<T: frame_system::Config>({{#each benchmark.components as |c|}}{{c.name}}: u32,{{/each}}) -> Weight {
+    {{#if (eq benchmark.name "attest_non_threshold")}}
+    let proof = 20_083;
+    {{else}}{{#if (eq benchmark.name "attest_bad_hash")}}
+    let proof = 29_185;
+    {{else}}
+    let proof = 43_329_u64.saturating_add(7_122_u64.saturating_mul(n.into()));
+    {{/if}}{{/if}}
+    Weight::from_parts({{underscore benchmark.base_weight}}, proof)
+        {{#each benchmark.component_weight as |cw|}}
+        .saturating_add(Weight::from_parts({{underscore cw.slope}}, 0).saturating_mul({{cw.name}}.into()))
+        {{/each}}
+        .saturating_add(T::DbWeight::get().reads({{benchmark.base_reads}}))
+        {{#each benchmark.component_reads as |cr|}}
+        .saturating_add(T::DbWeight::get().reads({{cr.slope}}_u64.saturating_mul({{cr.name}}.into())))
+        {{/each}}
+        .saturating_add(T::DbWeight::get().writes({{benchmark.base_writes}}))
+        {{#each benchmark.component_writes as |cw|}}
+        .saturating_add(T::DbWeight::get().writes({{cw.slope}}_u64.saturating_mul({{cw.name}}.into())))
+        {{/each}}
+}
+{{/each}}

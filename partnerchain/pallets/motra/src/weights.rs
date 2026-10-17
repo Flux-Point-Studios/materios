@@ -2,7 +2,8 @@ use frame_support::weights::Weight;
 
 pub trait WeightInfo {
     fn checkpoint() -> Weight;
-    fn initialize_delegatee_clock() -> Weight;
+    fn reconcile() -> Weight;
+    fn fee_path() -> Weight;
     fn set_delegatee() -> Weight;
     fn set_params() -> Weight;
     fn claim_motra() -> Weight;
@@ -14,17 +15,24 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
         crate::checkpoint_weights::checkpoint::<T>()
     }
 
-    fn initialize_delegatee_clock() -> Weight {
-        crate::delegatee_clock_weights::initialize_delegatee_clock::<T>()
+    fn reconcile() -> Weight {
+        crate::reconciliation_weights::reconcile::<T>()
+            .max(crate::reconciliation_weights::reconcile_100k::<T>())
+            .max(crate::reconciliation_weights::reconcile_million::<T>())
+            .max(crate::reconciliation_weights::reconcile_legacy::<T>())
+    }
+
+    fn fee_path() -> Weight {
+        crate::reconciliation_weights::fee_path::<T>()
     }
 
     fn set_delegatee() -> Weight {
-        Weight::from_parts(30_000_000, 0)
+        crate::reconciliation_weights::set_delegatee::<T>()
     }
     fn set_params() -> Weight {
         Weight::from_parts(15_000_000, 0)
     }
     fn claim_motra() -> Weight {
-        Weight::from_parts(40_000_000, 0)
+        crate::reconciliation_weights::claim_motra::<T>()
     }
 }

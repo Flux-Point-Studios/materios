@@ -84,13 +84,14 @@ weights!(pallet_intent_settlement, pallet_intent_settlement::weights::SubstrateW
 });
 
 weights!(pallet_billing, pallet_billing::weights::SubstrateWeight, {
-    topup_self() => 1;
-    topup_for() => 1;
+    balance_mutations(accounts: u32) => u64::from(accounts);
+    topup_self() => 0;
+    topup_for() => 0;
     pay_request() => 0;
     governance_set_endpoint_price() => 0;
     governance_set_debits_enabled() => 0;
     request_withdrawal() => 0;
-    execute_withdrawal() => 2;
+    execute_withdrawal() => 0;
     cancel_withdrawal() => 0;
     prune_paid_requests(n: u32) => 0;
 });
@@ -100,13 +101,16 @@ impl pallet_motra::weights::WeightInfo for WithMotra {
         pallet_motra::weights::SubstrateWeight::<Runtime>::checkpoint()
     }
 
-    fn initialize_delegatee_clock() -> Weight {
-        pallet_motra::weights::SubstrateWeight::<Runtime>::initialize_delegatee_clock()
+    fn reconcile() -> Weight {
+        pallet_motra::weights::SubstrateWeight::<Runtime>::reconcile()
+    }
+
+    fn fee_path() -> Weight {
+        pallet_motra::weights::SubstrateWeight::<Runtime>::fee_path()
     }
 
     fn set_delegatee() -> Weight {
         pallet_motra::weights::SubstrateWeight::<Runtime>::set_delegatee()
-            .saturating_add(pallet_motra::reconciliation_weight::<Runtime>())
     }
 
     fn set_params() -> Weight {
@@ -115,17 +119,28 @@ impl pallet_motra::weights::WeightInfo for WithMotra {
 
     fn claim_motra() -> Weight {
         pallet_motra::weights::SubstrateWeight::<Runtime>::claim_motra()
-            .saturating_add(pallet_motra::reconciliation_weight::<Runtime>())
     }
 }
 
 impl pallet_orinq_receipts::weights::WeightInfo for WithMotra {
+    fn attest_non_threshold() -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_non_threshold()
+    }
+
+    fn attest_threshold(n: u32) -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_threshold(n)
+    }
+
+    fn attest_bad_hash() -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_bad_hash()
+    }
+
     fn submit_receipt() -> Weight {
-        pallet_orinq_receipts::weights::SubstrateWeight::submit_receipt()
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::submit_receipt()
     }
 
     fn set_availability_cert() -> Weight {
-        pallet_orinq_receipts::weights::SubstrateWeight::set_availability_cert()
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::set_availability_cert()
     }
 
     fn balance_mutations(accounts: u32) -> Weight {

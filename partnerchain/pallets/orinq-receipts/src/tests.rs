@@ -8,7 +8,7 @@ use frame_support::{
 use parity_scale_codec::{Decode, Encode};
 use sp_core::{crypto::AccountId32, H256};
 use sp_runtime::{
-    traits::{AccountIdConversion, BlakeTwo256, IdentityLookup},
+    traits::{AccountIdConversion, IdentityLookup},
     BuildStorage, Perbill,
 };
 
@@ -119,7 +119,7 @@ const ATTESTATION_REWARD_RESERVE: u128 = 50_000_000_000_000;
 
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = crate::weights::SubstrateWeight;
+    type WeightInfo = crate::weights::SubstrateWeight<Test>;
     type MaxResubmits = ConstU32<64>;
     // Mock mirrors the spec-203 runtime cap (64). Tests under this mock
     // must therefore be tolerant of a larger committee than spec-202's
@@ -141,7 +141,7 @@ fn acc(seed: u8) -> MockAccountId {
 }
 
 /// Build genesis storage for tests.
-fn new_test_ext() -> sp_io::TestExternalities {
+pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     let mut t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap();
@@ -204,6 +204,7 @@ fn submit(
         dummy_hash(6),       // storage_locator_hash
         dummy_hash(7),       // schema_hash
     )
+    .map(|_| ()).map_err(|error| error.error)
 }
 
 /// Produce the canonical-cert hash for `rid` as it would be

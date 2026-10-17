@@ -149,12 +149,13 @@ The burn path (`ChargeMotra` SignedExtension in `fee.rs`):
 
 1. **Pre-dispatch** — Before an extrinsic executes, `burn_fee(who, amount)` is called
 2. **Account debit** — The fee amount is subtracted from the sender's MOTRA balance
-3. **Global counter** — The fee amount is added to a monotonically increasing `TotalBurned` counter
+3. **Global counter** — The declared fee amount is added to `TotalBurned`
 4. **Event emitted** — `FeeBurned { who, amount }` is deposited for indexers
+5. **Post-dispatch** — Unused weight fees are restored and removed from `TotalBurned`; `FeeRefunded` records the actual credit
 
 Key properties:
 
-- **No refunds (MVP)** — The full pre-dispatch fee is burned regardless of actual weight consumed. A future iteration could refund unused weight.
+- **Actual-weight refunds** — Minimum and length fees remain paid; unused dispatch weight is refunded at the pre-dispatch congestion rate.
 - **Failed transactions still pay** — If the extrinsic dispatches but fails (e.g., a receipt submission hits a duplicate check), the fee is still burned. The sender pays for the chain's validation effort.
 - **Insufficient balance** — If an account's MOTRA balance is below the fee, the transaction is rejected at validation time (`InvalidTransaction::Payment`). The `InsufficientMotraFailures` counter is incremented for monitoring.
 
@@ -184,9 +185,10 @@ Three forces act on the MOTRA supply:
 
 - MOTRA is generated proportionally to the lowest MATRA free balance held throughout its checkpoint interval
 - Rate: `generation_per_matra_per_block` (configurable at genesis and via governance)
-- Formula: `held_matra * rate * elapsed_blocks / 10^6` (MATRA has six decimals)
+- Per-block generation: `g = floor(held_matra * generation_rate / 10^6)` (MATRA has six decimals)
+- An interval of `n` blocks credits conservative closed-form decayed generation: `g * (1 - r^n) / (1 - r)`, where `r` is retention; `r == 1` credits `g * n`
 - Generation is credited lazily — the balance is reconciled on the next interaction
-- Tracked in `TotalIssued` (global cumulative counter)
+- Generated amounts increase `TotalIssued`; realized decay is subtracted from it
 
 `AccrualCheckpoint` stores `(held_matra, start_block)`. The balances
 `MatraAccountStore` records every successful free-balance decrease, including
@@ -196,28 +198,37 @@ First funding, including funding after a zero balance, starts a new interval at
 that block. Top-ups of a nonzero balance enter the earning base at the next
 reconciliation; earlier blocks use the lower balance. This deliberately
 under-credits holdings that changed during an interval instead of charging every
-MATRA mutation for MOTRA's decay loop. Reconcile before moving MATRA to realize
+MATRA mutation for full MOTRA reconciliation. Reconcile before moving MATRA to realize
 the completed interval. The read-only RPC uses the same accounting function.
 
 Checkpoint work is included in dispatch weights, including batched transfers,
-and in initialization budgets for rewards and migrations. Fee reconciliation's
-checkpoint cost is reserved in the extrinsic base weight. The
+and in initialization budgets for rewards and migrations. The complete fee extension's
+reconciliation, burn and refund cost is reserved in the extrinsic base weight. The
 [checkpoint weight audit](motra-checkpoint-weights.md) lists every MATRA mutation
 path and its bound.
 
-Reconciliation sets `LastTouched`, the separate decay clock. System account
-creation does not write MOTRA state, and re-funding does not reset decay of existing MOTRA. Accounts
+Reconciliation sets `LastTouched`, the separate decay clock. System's account-creation
+callback does not write a decay clock, and re-funding does not reset decay of existing MOTRA. Accounts
 whose SCALE encoding starts with `modl` (PalletId sovereign accounts and their
 subaccounts) never generate MOTRA from MATRA. Delegation continues to route only
 new generation; it does not transfer existing MOTRA.
-The first delegated credit to a zero MOTRA balance initializes an absent clock
-from the holding checkpoint, or zero before first funding, without discarding
-the recipient's unclaimed MATRA generation. Its separately benchmarked cost is
-reserved by reconciliation.
+A delegated credit first decays the recipient's existing stored balance to the
+arrival block, then credits generation and advances its decay clock. Its
+separate holding checkpoint preserves pending generation, including when the
+recipient reconciles again in that block. No recursive delegation is needed.
+
+Retention uses directed fixed-point square-and-multiply with scale `10^27`, at
+most 64 rounds for a `u64` interval. For intervals longer than one block, stored
+retention and generated credit round down. Generation also discounts the
+geometric bound on the old nearest-integer step's half-unit losses. The exact
+one-block step retains `Perbill`'s previous nearest-integer behavior. A dormant
+zero-start holder cannot earn more than an otherwise identical every-block
+holder; the tested gap is at most `4*n + 2` units for per-block generation up to
+`10^18`. Reconciliation timing can therefore change small rounding losses.
 
 Runtime spec 241 adds this map and a `LegacyAccrualStart` block without changing
-existing storage encodings, call/event/error indices, `SignedExtra`, or
-transaction version 5. The pallet's
+existing storage encodings, existing call/event/error indices, `SignedExtra`, or
+transaction version 5. `FeeRefunded` is appended to the MOTRA event enum. The pallet's
 storage-version 0→1 migration records the upgrade's starting-state block in
 constant time. FRAME runs this hook before initializing the next block. Legacy
 accounts without a checkpoint earn only from that block: the balance hooks prove
@@ -244,7 +255,9 @@ genesis checkpoints at block zero, bounded by the account's actual free MATRA.
 **Burn** (permanently destroys supply):
 
 - Only triggered by fee payment (no other burn path exists)
-- Tracked in `TotalBurned` (global cumulative counter, never decreases)
+- Tracked in `TotalBurned`, net of post-dispatch refunds
+- The actual-weight refund uses the congestion rate captured before dispatch; minimum and length fees remain paid
+- `FeeRefunded` records the credited amount and reverses that amount in `TotalBurned`
 - `TotalBurned` is independent of `TotalIssued` — they are separate counters
 
 **Decay vs Burn distinction:**
@@ -287,9 +300,9 @@ Both values are available via the `motra_getParams` RPC method and displayed on 
 | Decay | Prevents hoarding; ensures continuous MATRA holding is necessary |
 | Fee burn | Gives fees real cost without redistribution complexity |
 | Delegation | Enables sponsorship without transferability |
-| Lazy accounting | Deterministic — same state produces same results regardless of reconciliation timing |
+| Lazy accounting | Bounded work with conservative rounding; dormancy does not increase generation |
 | Fee separation | MATRA holders never forced to sell MATRA to use the network |
-| No refunds (MVP) | Simplifies fee logic; full fee is burned pre-dispatch |
+| Actual-weight refunds | Unused dispatch weight restores MOTRA and reduces net burned fees |
 
 ## Component Descriptions
 

@@ -6,6 +6,8 @@ use frame_support::{
 };
 use sp_runtime::{traits::IdentityLookup, BuildStorage, Perbill};
 
+mod decay;
+
 // ---------------------------------------------------------------------------
 // Mock runtime
 // ---------------------------------------------------------------------------
@@ -315,6 +317,7 @@ fn fee_burn_succeeds_with_sufficient_motra() {
         // Give account 1 some MOTRA.
         pallet_motra::MotraBalances::<Test>::insert(1u64, 100_000u128);
         pallet_motra::LastTouched::<Test>::insert(1u64, 1u64);
+        pallet_motra::AccrualCheckpoint::<Test>::insert(1u64, (Balances::free_balance(1), 1));
 
         // Burn a fee.
         assert_ok!(pallet_motra::Pallet::<Test>::burn_fee(&1, 50_000));
@@ -334,6 +337,7 @@ fn fee_burn_fails_with_insufficient_motra() {
     new_test_ext().execute_with(|| {
         pallet_motra::MotraBalances::<Test>::insert(1u64, 100u128);
         pallet_motra::LastTouched::<Test>::insert(1u64, 1u64);
+        pallet_motra::AccrualCheckpoint::<Test>::insert(1u64, (Balances::free_balance(1), 1));
 
         assert_noop!(
             pallet_motra::Pallet::<Test>::burn_fee(&1, 50_000),
@@ -574,6 +578,7 @@ fn total_burned_tracks_fee_burns() {
 #[test]
 fn accrual_fresh_account_starts_at_funding() {
     new_test_ext().execute_with(|| {
+        pallet::Params::<Test>::mutate(|p| p.decay_rate_per_block = Perbill::one());
         System::set_block_number(100);
         assert_ok!(Balances::transfer_keep_alive(
             RuntimeOrigin::signed(1),
@@ -815,6 +820,7 @@ fn accrual_refunding_preserves_decay_and_starts_at_new_funding() {
 #[test]
 fn accrual_delayed_funding_does_not_backdate_to_system_creation() {
     new_test_ext().execute_with(|| {
+        pallet::Params::<Test>::mutate(|p| p.decay_rate_per_block = Perbill::one());
         System::set_block_number(100);
         System::inc_sufficients(&10);
         System::set_block_number(200);
@@ -857,6 +863,7 @@ fn accrual_hooks_do_not_register_unchecked_weight() {
 #[test]
 fn accrual_funding_only_writes_the_holding_checkpoint() {
     new_test_ext().execute_with(|| {
+        pallet::Params::<Test>::mutate(|p| p.decay_rate_per_block = Perbill::one());
         System::set_block_number(100);
         assert_ok!(Balances::transfer_keep_alive(
             RuntimeOrigin::signed(1),
@@ -897,14 +904,12 @@ fn accrual_first_credit_uses_the_funded_accounts_clock() {
         assert!(!pallet::LastTouched::<Test>::contains_key(10));
         assert_ok!(Motra::set_delegatee(RuntimeOrigin::signed(1), Some(10)));
         System::set_block_number(110);
+        let pending_generation = Motra::projected_balance(&10);
         assert_ok!(Motra::reconcile(&1));
-        assert_eq!(Motra::last_touched(&10), 100);
+        assert_eq!(Motra::last_touched(&10), 110);
         let credited = Motra::motra_balance(&10);
         assert!(credited > 0);
-        let decayed = (0..10).fold(credited, |balance, _| {
-            Perbill::from_parts(999_000_000) * balance
-        });
-        assert_eq!(Motra::projected_balance(&10), decayed + 10_000);
+        assert_eq!(Motra::projected_balance(&10), credited + pending_generation);
     });
 }
 
@@ -963,6 +968,7 @@ fn accrual_u128_max_balance_is_preserved_without_unchecked_weight() {
 fn accrual_legacy_baseline_starts_at_upgrade_and_cannot_survive_a_balance_cycle() {
     use frame_support::traits::StorageVersion;
     new_test_ext().execute_with(|| {
+        pallet::Params::<Test>::mutate(|p| p.decay_rate_per_block = Perbill::one());
         System::set_block_number(100);
         assert_ok!(Balances::transfer_keep_alive(
             RuntimeOrigin::signed(1),

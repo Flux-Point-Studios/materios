@@ -45,7 +45,7 @@ where
     type AccountId = T::AccountId;
     type Call = <T as frame_system::Config>::RuntimeCall;
     type AdditionalSigned = ();
-    type Pre = (T::AccountId, u128);
+    type Pre = (T::AccountId, u128, u128);
 
     fn additional_signed(&self) -> Result<(), TransactionValidityError> {
         Ok(())
@@ -58,8 +58,7 @@ where
         info: &DispatchInfoOf<Self::Call>,
         len: usize,
     ) -> TransactionValidity {
-        let _ =
-            crate::Pallet::<T>::reconcile(who).map_err(|_| InvalidTransaction::Payment)?;
+        let _ = crate::Pallet::<T>::reconcile(who).map_err(|_| InvalidTransaction::Payment)?;
 
         let fee = crate::Pallet::<T>::compute_fee(info.weight, len);
         let balance = crate::pallet::MotraBalances::<T>::get(who);
@@ -103,16 +102,35 @@ where
         crate::Pallet::<T>::burn_fee(who, fee)
             .map_err(|_| TransactionValidityError::Invalid(InvalidTransaction::Payment))?;
 
-        Ok((who.clone(), fee))
+        Ok((who.clone(), fee, crate::Params::<T>::get().congestion_rate))
     }
 
     fn post_dispatch(
-        _pre: Option<Self::Pre>,
-        _info: &DispatchInfoOf<Self::Call>,
-        _post_info: &sp_runtime::traits::PostDispatchInfoOf<Self::Call>,
+        pre: Option<Self::Pre>,
+        info: &DispatchInfoOf<Self::Call>,
+        post_info: &sp_runtime::traits::PostDispatchInfoOf<Self::Call>,
         _len: usize,
         _result: &sp_runtime::DispatchResult,
     ) -> Result<(), TransactionValidityError> {
+        if let Some((who, paid, rate)) = pre {
+            let declared = rate.saturating_mul(u128::from(info.weight.ref_time())) / 1_000_000;
+            let actual = rate
+                .saturating_mul(u128::from(post_info.calc_actual_weight(info).ref_time()))
+                / 1_000_000;
+            let refund = declared.saturating_sub(actual).min(paid);
+            if refund > 0 {
+                let credited = crate::MotraBalances::<T>::mutate(&who, |balance| {
+                    let credited = refund.min(u128::MAX - *balance);
+                    *balance += credited;
+                    credited
+                });
+                crate::TotalBurned::<T>::mutate(|total| *total = total.saturating_sub(credited));
+                crate::Pallet::<T>::deposit_event(crate::Event::FeeRefunded {
+                    who,
+                    amount: credited,
+                });
+            }
+        }
         Ok(())
     }
 }

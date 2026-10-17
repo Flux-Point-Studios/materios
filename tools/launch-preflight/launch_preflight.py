@@ -145,7 +145,7 @@ GENESIS_STORAGE = frozenset({
     "OrinqReceipts.AttestationRewardPerSigner", "OrinqReceipts.EraCapBase", "OrinqReceipts.EraCapBaselineAttestorCount",
     "OrinqReceipts.BondRequirement", "OrinqReceipts.ReceiptExpiryBlocks", "OrinqReceipts.ReceiptSubmissionFee",
     "OrinqReceipts.ReceiptSubmissionFeeFloor",
-    "Motra.Params", "Motra.LastTouched", "Motra.AccrualCheckpoint",
+    "Motra.Params", "Motra.AccrualCheckpoint",
     "Sidechain.GenesisUtxo", "Sidechain.SlotsPerEpoch",
     "SessionCommitteeManagement.CurrentCommittee", "SessionCommitteeManagement.MainChainScriptsConfiguration",
     "PalletSession.QueuedKeys", "PalletSession.Validators", "Session.ValidatorsAndKeys",
@@ -2677,13 +2677,12 @@ def check_genesis_storage(spec: Spec, meta: Metadata) -> list[Finding]:
             label = meta.storage_names.get(key[:32], f"storage 0x{key[:32].hex()}")
         if label not in GENESIS_STORAGE:
             outside[label] = outside.get(label, 0) + 1
-        elif label in {"Motra.LastTouched", "Motra.AccrualCheckpoint"}:
+        elif label == "Motra.AccrualCheckpoint":
             account = key[-32:]
             expected = storage_key("Motra", label.split(".")[1]) + hashlib.blake2b(account, digest_size=16).digest() + account
-            widths = (4,) if label == "Motra.LastTouched" else (16, 4)
-            fields = scale_uints(spec.storage[key], widths)
+            fields = scale_uints(spec.storage[key], (16, 4))
             if (key != expected or account not in accounts or fields is None or fields[-1] != 0
-                    or (len(fields) == 2 and fields[0] > spec.balance(account)[0])):
+                    or fields[0] > spec.balance(account)[0]):
                 findings.append(Finding(SUPPLY, f"genesis sets invalid {label}: expected a canonical System.Account "
                                                "key, block zero and no more than its free MATRA balance"))
     return findings + [Finding(SUPPLY, f"genesis sets {label} ({count} {'entry' if count == 1 else 'entries'}), which a "
