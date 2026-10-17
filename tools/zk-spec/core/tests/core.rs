@@ -32,6 +32,18 @@ fn public_mainnet_proofs_and_complete_bundles() {
                 let mut bad = action.clone();
                 bad[if kind { 128 } else { 756 }] ^= 1;
                 assert!(!verifier.proof(kind, &bad));
+                let mut wrong_statement = action.clone();
+                if kind {
+                    wrong_statement[64] ^= 1;
+                } else {
+                    assert_ne!(&wrong_statement[32..64], &[0; 32]);
+                    wrong_statement[32..64].fill(0);
+                }
+                assert!(
+                    !verifier.proof(kind, &wrong_statement),
+                    "changed public input accepted for {}",
+                    b["transaction_id"]
+                );
                 proof_count += 1;
             }
         }

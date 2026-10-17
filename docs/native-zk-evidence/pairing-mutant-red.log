@@ -1,0 +1,37 @@
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> /home/deci/work/wt-materios-zk-p0/tools/zk-spec/vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> /home/deci/work/wt-materios-zk-p0/tools/zk-spec/vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+warning: `core2` (lib) generated 2 warnings
+   Compiling materios-zk-core v0.1.0 (/home/deci/work/wt-materios-zk-p0/.zk-spec-scratch/pairing-mutant/core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.62s
+     Running tests/core.rs (.zk-spec-target/debug/deps/core-1a9948beef95c3bd)
+
+running 1 test
+test public_mainnet_proofs_and_complete_bundles ... FAILED
+
+failures:
+
+---- public_mainnet_proofs_and_complete_bundles stdout ----
+
+thread 'public_mainnet_proofs_and_complete_bundles' panicked at core/tests/core.rs:42:17:
+changed public input accepted for "66e2e3dfb9c51eb961004e0eb8bfd3820239c4f11614b65a1fffb60e01858580"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    public_mainnet_proofs_and_complete_bundles
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.18s
+
+error: test failed, to rerun pass `--test core`

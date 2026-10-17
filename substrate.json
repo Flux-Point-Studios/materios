@@ -169,7 +169,7 @@
     {
       "id": "native-zk-sapling-core",
       "name": "Native ZK Sapling verification core",
-      "desc": "Experimental no_std Sapling verification core using arkworks Groth16/BLS12-381 and upstream Sapling/Jubjub signatures and tree primitives. Rust 1.85.0 wasm32 build, pinned real Zcash mainnet corpus, exhaustive proof-bit mutation harness and complete one-spend/two-output bundle measurements. Standalone P0 feasibility primitive; no runtime pool, value activation or reviewed slowest-hardware claim.",
+      "desc": "Experimental no_std Sapling verification core using arkworks Groth16/BLS12-381 and upstream Sapling/Jubjub signatures and tree primitives. Rust 1.85.0 wasm32 build, pinned real Zcash mainnet corpus, exhaustive proof-bit mutations and public-input controls that reject a pairing-result bypass and complete one-spend/two-output bundle measurements. Standalone P0 feasibility primitive; no runtime pool, value activation or reviewed slowest-hardware claim.",
       "kind": "toolkit",
       "paths": [
         "tools/zk-spec/core/src/sapling.rs",

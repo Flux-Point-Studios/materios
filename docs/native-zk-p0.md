@@ -30,6 +30,11 @@ rederives all actions and ZIP-243 signature digests from the pinned block bytes.
 There are 23 transactions, 42 distinct proofs and five complete 1-spend/2-output
 bundles. No credentialed node supplies this corpus.
 
+The native core also rejects every unchanged proof when paired with altered,
+canonically encoded public inputs. This regression fails against a scratch
+mutant that ignores the Groth16 verification result, establishing that proof
+acceptance depends on the pairing equation. The production verifier is unchanged.
+
 ## What the measured call includes
 
 Each timed `zk_bundle` call freshly decodes and prepares both verification keys,
@@ -166,6 +171,11 @@ Captured logs include [core API RED](native-zk-evidence/core-api-red.log),
 [fresh-build GREEN](native-zk-evidence/cold-build-green.log),
 [45-test suite](native-zk-evidence/unit-suite.log), and
 [Aiken evaluator observations](native-zk-evidence/aiken-green.json).
+The [pairing-result bypass RED](native-zk-evidence/pairing-mutant-red.log),
+[real verifier GREEN](native-zk-evidence/pairing-green.log), and
+[fresh no-egress rerun](native-zk-evidence/pairing-no-egress.log) capture the
+additional public-input regression. Its mutant is an isolated copy in the
+task scratch directory; construction uses the one-off scratch-script exception.
 
 | Command / behavior | Observed RED | Observed GREEN |
 |---|---|---|
@@ -179,6 +189,7 @@ Captured logs include [core API RED](native-zk-evidence/core-api-red.log),
 | `nice -n 10 python3 tools/zk-spec/test_evidence.py` | missing capture validator | three tests; stale Wasm hash rejected |
 | `nice -n 10 python3 tools/zk-spec/check.py c-p0-bridge-codec` | unregistered check rejected by the adapter | real Rust/Aiken operation |
 | `nice -n 10 python3 tools/zk-spec/check.py c-p0-core-no-egress` | `KeyError: compiled_packages` when fresh-compilation evidence was required | fresh namespace-isolated compilation plus the actual core tests |
+| `nice -n 10 cargo +1.85.0 test --offline --manifest-path .zk-spec-scratch/pairing-mutant/core/Cargo.toml --test core public_mainnet_proofs_and_complete_bundles -- --exact` | the mutant accepts a changed public input and fails the new assertion | the unmodified verifier rejects all 42 altered statements; the complete core suite passes |
 
 The core API RED used a scratch-only empty crate while the serialized runtime
 build occupied Cargo; it was not a synthetic positive result. The later Cargo
