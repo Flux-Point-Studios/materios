@@ -67,6 +67,23 @@ the preprod build contains the new functionality. It does not run a mainnet node
 or authorize publication. `activation-gate-simulation` is always offline and
 must demonstrate zero broadcasts even when synthetic approval fixtures exist.
 
+`mainnet-zk-enablement` enumerates mainnet chain specs and ZK pallets from the
+reviewed production source and pinned fixtures, including plain/raw specs. Its
+`cases` cover their full cross product exactly once; every attempted enablement
+is refused and every resulting `enabled_zk_pallets` list is empty.
+`activation-hold-coverage` enumerates all mainnet-capable activation paths from the same source,
+including genesis, runtime upgrades and governance routes where present. Each
+path retains all four authority holds and denies activation. Both operations
+receive `packet_scope: "preprod-only"` and `synthetic_approvals: "all-present"`;
+synthetic approvals cannot release the holds. Empty inventories, missing or
+duplicate cases, missing holds, allowed activation and nonzero broadcasts fail.
+Independent review must establish inventory completeness and source coverage.
+These are offline mainnet refusal scenarios; they do not prohibit preprod activation.
+
+The synthetic responses in `test_adapter.py` only exercise these assertions.
+They are not runtime fixtures or evidence that the actual activation gates exist.
+Future CEO approval belongs to a [separate packet](../../docs/native-zk-handoff.md#future-ceo-approval-packet).
+
 ## Assurance limits
 
 These are RED scaffolds, not a complete verifier implementation or a formal

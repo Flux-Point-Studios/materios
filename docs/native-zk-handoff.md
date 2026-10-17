@@ -2,11 +2,11 @@
 
 Local specification and RED scaffolds only. No feature implementation, live verification, PR, push, vendor engagement or mainnet action.
 
-The requested lock is blocked by a brief/runner conflict: literal `blocked` statuses are required, but the specified FluxPoint 1.42.0 validator rejects them. No digest exists. Awaiting the user's clarification; no approval inferred.
+The PREPROD-only packet is locked with the unchanged FluxPoint 1.42.0 runner. Lock SHA-256: `bc6897c50f6f94b742ed95b9c79980d3d8c0ef6525b97282ab73899fb4e85924`. Both `--lock` and `--check` pass. The follow-up brief resolves the prior drafting conflict through explicit defaulted DENY holds; no approval is inferred.
 
 All decisions remain model recommendations. Labels `d-*` are the canonical lowercase versions of the brief's `D-*` names.
 
-| id | status | baseline | one-line why | blocked? |
+| id | status | baseline | one-line why | authority hold |
 |---|---|---|---|---|
 | d-arch | defaulted | wasm-semantics-rfc163-math | Forkless ledger policy, narrow optional node math. | no; mainnet separately held |
 | d-order | defaulted | narrow-hub-first-parallel-sapling-spike | Other-chain verification gets the first real consumer. | no; mainnet separately held |
@@ -21,10 +21,12 @@ All decisions remain model recommendations. Labels `d-*` are the canonical lower
 | d-genesis-isolation | defaulted | reviewed-post-aj-launch-baseline-no-zk | Pin reviewed artifacts after AJ, then exclude ZK from launch. | no; mainnet separately held |
 | d-scope | defaulted | matra-only-three-lanes-and-verification | Complete single-asset value lanes before private contracts or new assets. | no; mainnet separately held |
 | d-host-acceleration | defaulted | pure-wasm-until-dark-rollout-proven | No new import until measured need and complete role coverage. | no; mainnet separately held |
-| d-compliance | blocked | hold-engagement-and-activation-pending-ceo-counsel | Counsel and legal posture need explicit authority. | yes |
-| d-audit | blocked | hold-booking-external-audit-before-activation | Independent integration review; no unauthorized booking. | yes |
-| d-budget | blocked | no-spend-or-commitments-without-explicit-approval | No quote or approved spending/commitment exists. | yes |
-| d-mainnet-rollout | blocked | hold-all-mainnet-actions-for-reviewed-gates-and-deci | Lock identity cannot authorize deployment or value activation. | yes |
+| d-compliance | defaulted | hold-engagement-and-activation-pending-ceo-counsel | DENY counsel engagement without separate CEO approval. | yes; preprod build/verification can proceed |
+| d-audit | defaulted | hold-booking-external-audit-before-activation | DENY audit booking without separate CEO approval. | yes; preprod build/verification can proceed |
+| d-budget | defaulted | no-spend-or-commitments-without-explicit-approval | DENY spending or commitments without separate CEO approval. | yes; preprod can use available resources |
+| d-mainnet-rollout | defaulted | hold-all-mainnet-actions-for-reviewed-gates-and-deci | DENY mainnet activation without its own approved packet and evidence. | yes; preprod build/verification can proceed |
+
+Each authority decision states: **NO authority is granted by this default; this is a hold, not an approval**. Its evidence names the separate CEO decision it awaits. Mainnet activation, audit engagement and budget are outside implementation scope. `r-authority` / `c-activation-gates` reject any mainnet chain-spec/ZK-pallet enablement, any activation path missing a hold, incomplete coverage and broadcasts, including when synthetic approvals are present.
 
 Every option has an objection and cost with an evidence basis in the packet. No cost in this pass is presented as a measured performance result or vendor quote.
 
@@ -44,9 +46,9 @@ Every option has an objection and cost with an evidence basis in the packet. No 
 | r-utxo | [c-hybrid-utxo](native-zk-evidence/c-hybrid-utxo.log), [c-supply-invariant](native-zk-evidence/c-supply-invariant.log) | exit 1: missing runtime driver |
 | r-shielded-runtime | [c-shielded-e2e](native-zk-evidence/c-shielded-e2e.log), [c-supply-invariant](native-zk-evidence/c-supply-invariant.log) | exit 1: missing runtime driver |
 | r-host-rollout | [c-host-coverage](native-zk-evidence/c-host-coverage.log) | exit 1: missing runtime driver |
-| r-authority | [c-activation-gates](native-zk-evidence/c-activation-gates.log) | exit 1: missing runtime driver |
+| r-authority | [c-activation-gates](native-zk-evidence/lock-followup.log) | exit 1: missing runtime driver; three tests, zero skips |
 
-Exact commands, full outputs and adapter RED→GREEN history are in [verification evidence](native-zk-evidence/README.md). Adapter suite: 20 tests passed, zero skips. Acceptance commands: 13 expected nonzero exits. No Cargo build or live-chain operation was attempted in this pass.
+Exact commands, full outputs and adapter RED→GREEN history are in [verification evidence](native-zk-evidence/README.md). Adapter suite: 25 tests passed, zero skips. The new authority assertions reject 45 unsafe synthetic mutations that previously passed. These fixtures validate the assertions only. Acceptance commands: 13 expected nonzero exits; the revised activation suite has three expected missing-driver errors. No Cargo build or live-chain operation was attempted in this pass.
 
 Challenges were applied in the required security, launch/operations, then feasibility/evidence order. The packet contains every claim and resolution:
 
@@ -57,23 +59,34 @@ Challenges were applied in the required security, launch/operations, then feasib
 - Security C05: Put consumed outpoints only in requires tags. REJECTED. Consumed outpoints and sponsor vouchers must conflict through provides-style tags, then be rechecked at dispatch. Account-only intents need separate replay protection.
 - Security C06: Delegatees permits taking fees from any named sponsor. REJECTED. It routes generation; it does not authorize arbitrary third-party debits. Signed relayers pay their own MOTRA and unsigned Lane U requires authenticated single-use fee authorization.
 - Security C07: Permissionless VK registration should authorize every consumer. REJECTED. Registration deposits bound storage; each consumer pins backend/version/VK/domain/trust. Committee and hardware attestations cannot become consensus proofs by relabeling.
-- Security C08: Mutation testing and invariant success replace independent audit. REJECTED. Tests cover bounded domains. d-audit remains blocked for booking and requires independent integration review before value-bearing activation.
+- Security C08: Mutation testing and invariant success replace independent audit. REJECTED. Tests cover bounded domains. d-audit defaults to DENY audit booking without separate CEO approval and requires independent integration review before mainnet value-bearing activation; preprod build/verification does not require that approval.
 - Security C22: Binding note identity to runtime spec_version could strand notes after unrelated upgrades. ACCEPTED. Use an explicit note-protocol signing domain with chain genesis and all spend effects, not automatic note identity changes on each runtime release. r-shielded-runtime adds an old-note spend witness across an unrelated pallet append; actual protocol migrations require separate review.
 - Launch/operations C09: Freezing the base revision would preserve the MOTRA exploit. ACCEPTED. The reviewed launch baseline must first include AJ's fix. ZK then proves isolation against that baseline. Missing reviewed artifacts remain RED.
 - Launch/operations C10: Disabled ZK genesis code is equivalent to absent code. REJECTED. Preserve launch node/runtime/genesis/metadata/import bytes; positive preprod capability is required to avoid identical empty builds passing.
 - Launch/operations C11: Even default-off new host imports can halt unupgraded nodes at instantiation. ACCEPTED. Ship arithmetic dark and activate imports only after complete authenticated role coverage and differential/devnet evidence.
 - Launch/operations C12: Reserved Shielded datum tag ensures a future immutable validator can process it. REJECTED. Reserved means rejected. Future semantics require a new reviewed version/contract decision; unknown data cannot fall back to accounts.
 - Launch/operations C13: A generated #494 manifest is sufficient authority to upgrade. REJECTED. Test actual append-only metadata and mutants, preserve envelope, inspect migration state and require independent origin/source review and applicable timelock/multisig. No ceremony occurs here.
-- Launch/operations C14: A locked recommendation authorizes counsel, audit or mainnet work. REJECTED. d-compliance, d-audit, d-budget and d-mainnet-rollout remain blocked. Their recommendations are filled but authority must be explicit.
+- Launch/operations C14: A locked recommendation authorizes counsel, audit or mainnet work. REJECTED. d-compliance, d-audit, d-budget and d-mainnet-rollout are defaulted DENY holds under E-lock-brief. NO authority is granted by this default; this is a hold, not an approval. Their evidence names each separate CEO decision and the future approval packet. Mainnet activation, audit engagement and budget are out of scope; r-authority/c-activation-gates retain enforceable refusal obligations.
 - Feasibility/evidence C15: The native 2.41 ms arkworks result does not measure a full Sapling Wasm bundle. ACCEPTED. Recorded as unreplicated study evidence only. Require signatures, encodings, tree costs and slowest-hardware samples; thresholds are policy, not measurements.
 - Feasibility/evidence C16: Other-chain priority warrants shipping all five backends together. REJECTED. d-order selects a narrow hub with a real foreign-chain consumer plus parallel Sapling spike; backend-specific gates avoid a generic registry without users.
 - Feasibility/evidence C17: A hosts file or no-op optional test proves Midnight independence. REJECTED. r-midnight-independent requires isolated no-egress execution, positive denial probes, excluded dependencies and named nonempty core scenarios.
 - Feasibility/evidence C18: Exit zero, names or empty JSON can make a vacuous test look successful. ACCEPTED. Reject missing drivers, timeouts, zero/ignored tests, unknown statuses and malformed/duplicate-key responses. Assert actual state transitions; list and run AJ tests exactly. Driver correspondence still needs review and real artifacts.
 - Feasibility/evidence C19: An orphaned BLS library means Mithril support is ready. REJECTED. Official STM docs confirm a BLS12-381 backend, narrowing the study uncertainty. Wasm portability, certificate chains, stake/checkpoint semantics and bounded costs remain a separately gated spike.
 - Feasibility/evidence C20: Trustworthy evidence must distinguish scaffold readiness from implementation readiness. ACCEPTED. Adapter unit tests may become GREEN; every feature check stays RED until its real dependencies and assertions run. No --run, live chain experiment or production assurance claim is made by this pass.
-- Feasibility/evidence C21: The exact supplied runner accepts blocked decisions and uppercase D- ids at lock time. REJECTED by inspected code: FluxPoint 1.42.0 accepts only defaulted/user-confirmed statuses and lowercase kebab-case ids. IDs are normalized to d-* with the same meaning. Literal blocked statuses are preserved pending the user's answer; no lock digest is fabricated or validator patched.
+- Feasibility/evidence C21: The exact supplied runner accepts blocked decisions and uppercase D- ids at lock time. REJECTED by inspected code: FluxPoint 1.42.0 accepts only defaulted/user-confirmed statuses and lowercase kebab-case ids. IDs are normalized to d-* with the same meaning. E-lock-brief resolves the previous drafting conflict through grill-me.md's safe conditional or deny-by-default rule: all four authority choices default to DENY, PREPROD is the implementation scope, and future CEO decisions remain explicit holds. The canonical runner is unchanged; its lock establishes packet identity, never approval.
 
-To unblock the lock, the user must resolve the explicit choice: allow defaulted deny-action baselines with authority blocks retained in their records, or retain literal blocked statuses until the canonical runner/brief is corrected. This task does not patch the plugin or fake a lock.
+## Future CEO approval packet
+
+No approval packet exists or is approved here. A future separate native-ZK authority packet must record these CEO decisions and actual evidence before releasing any hold:
+
+| Hold | Separate CEO decision and required evidence |
+|---|---|
+| d-compliance | Named counsel, engagement scope and capped spend; qualified counsel's advice on the actual design before any mainnet privacy posture. |
+| d-audit | Named independent auditor, exact integration scope, deliverables, booking terms and capped cost; audit report and retested closure of every HIGH/MEDIUM finding before mainnet activation. |
+| d-budget | Named recipients, deliverables, capped amounts and external commitments backed by concrete quotes and terms. |
+| d-mainnet-rollout | A separately approved mainnet packet binding exact code/artifact hashes, chain, ceremony, caps and migration/rollback plan to actual counsel, audit, budget, soak, metadata, timelock and multisig evidence. Execution remains deci-at-his-terminal only. |
+
+The current lock cannot release these holds. Future authority requires a separately reviewed packet and evidence; synthetic fixtures and elapsed time grant none. None of these decisions is required to build or verify preprod with available resources.
 
 To unblock implementation evidence, add a reviewed production runtime/codec driver and immutable fixtures, land AJ's fix/tests, establish the reviewed post-AJ launch baseline, and run the actual benchmark, codec, metadata, property and preprod/soak checks. Mainnet and procurement still require deci's explicit authorization, counsel/audit evidence and the gated rollout.
 

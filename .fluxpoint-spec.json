@@ -4,7 +4,8 @@
   "asset": "Materios's existing runtime, canonical balances, MOTRA sponsorship, receipts and TEE/Witness consumers, orynq finality/anchoring, bridge work and launch/ceremony tooling gain reusable verification and value-lane primitives.",
   "scope": [
     "This deliverable is a decision/requirement packet, executable RED scaffolds and a local signed commit, not a feature implementation or deployment.",
-    "All baselines are model defaults; blocked decisions represent unresolved authority. No choice has user-confirmed status. Dependencies are a decision DAG, not blanket permission to execute.",
+    "All baselines are model defaults. d-compliance, d-audit, d-budget and d-mainnet-rollout are defaulted DENY holds under E-lock-brief, not approvals. No choice has user-confirmed status. Dependencies are a decision DAG, not blanket permission to execute.",
+    "Implementation and verification scope is PREPROD only. None of the four authority approvals is needed to build or verify preprod; offline refusal checks retain every hold and cannot authorize mainnet or external commitments.",
     "Hub-first other-chain finality/inclusion consumer and parallel Sapling spike; MATRA-only A/U/S, MOTRA-only fees, open relayer, native prover and viewing keys.",
     "Preserve existing runtime semantics and launch artifacts after mandatory #66 correction. New pallets append at >=26; preprod tests precede any separately authorized mainnet review.",
     "Pure Wasm verification first. A later optional math-only node acceleration is separately gated; runtime upgrades cannot install missing host functions.",
@@ -12,7 +13,8 @@
   ],
   "outOfScope": [
     "Implementing AJ's MOTRA #66 fix, modifying another checkout, updating running services, sending review messages, pushing or opening a PR in this task.",
-    "Mainnet broadcasts, deployments, ceremonies, custody/key changes, immutable bridge commitments, spending or vendor engagements.",
+    "Mainnet activation, broadcasts, deployments, ceremonies, custody/key changes and immutable bridge commitments. A future separate CEO-approved native-ZK authority packet with actual evidence is required; see docs/native-zk-handoff.md#future-ceo-approval-packet.",
+    "Counsel engagement, audit booking or commissioning, budget approval, spending and external commitments. Each remains denied pending the CEO's separate approval in the future native-ZK authority packet; see docs/native-zk-handoff.md#future-ceo-approval-packet.",
     "Generalized private contracts, arbitrary assets, full Compact ledger embedding, per-note/per-UTXO MOTRA and private fee circuits; each needs a new soundness/spec decision.",
     "Promised launch dates, throughput, formal soundness or privacy/anonymity claims derived from unreplicated benchmarks or small preprod traffic."
   ],
@@ -872,7 +874,7 @@
     },
     {
       "id": "d-compliance",
-      "status": "blocked",
+      "status": "defaulted",
       "dependsOn": [
         "d-scope",
         "d-shield-circuit"
@@ -892,13 +894,15 @@
           }
         ],
         "chosen": "hold-engagement-and-activation-pending-ceo-counsel",
-        "rationale": "Recommend client-held viewing keys, public boundary disclosures and caps. Keep counsel engagement, legal conclusions, marketing commitments and mainnet shielded activation blocked until deci authorizes scope/spend and qualified counsel reviews the actual design. Engineering safeguards are not a legal clearance.",
+        "rationale": "DENY counsel engagement without the CEO's separate approval. NO authority is granted by this default; this is a hold, not an approval. Recommend client-held viewing keys, public boundary disclosures and caps. Keep legal conclusions, marketing commitments and mainnet shielded activation on hold until deci authorizes scope/spend and qualified counsel reviews the actual design. Engineering safeguards are not a legal clearance. This hold does not block building or verifying preprod.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
         "evidence": [
           "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
-          "E-brief explicitly blocks counsel/external commitments; E-study recommends review, not an approval"
+          "E-brief explicitly blocks counsel/external commitments; E-study recommends review, not an approval",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; no counsel engagement or legal posture is approved.",
+          "Awaiting CEO decision: separately approve named counsel, engagement scope and capped spend, then review counsel's actual design advice before any mainnet privacy posture. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
         ]
       },
       "costs": [
@@ -924,7 +928,7 @@
     },
     {
       "id": "d-audit",
-      "status": "blocked",
+      "status": "defaulted",
       "dependsOn": [
         "d-shield-circuit",
         "d-supply",
@@ -945,13 +949,15 @@
           }
         ],
         "chosen": "hold-booking-external-audit-before-activation",
-        "rationale": "Recommend external review of integration, circuits/parameters, codecs, custody, fees and UTXO admission. Booking and spend remain blocked. Mainnet activation requires closure of every HIGH/MEDIUM finding with retesting; LOWs become tracked issues. Upstream audit history and passing property tests do not replace an integration audit.",
+        "rationale": "DENY audit booking or commissioning without the CEO's separate approval. NO authority is granted by this default; this is a hold, not an approval. Recommend external review of integration, circuits/parameters, codecs, custody, fees and UTXO admission. Mainnet activation requires closure of every HIGH/MEDIUM finding with retesting; LOWs become tracked issues. Upstream audit history and passing property tests do not replace an integration audit. This hold does not block building or verifying preprod.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
         "evidence": [
           "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
-          "E-brief blocks audit spend; E-study audit gaps"
+          "E-brief blocks audit spend; E-study audit gaps",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; no auditor, booking or expenditure is approved.",
+          "Awaiting CEO decision: separately approve a named independent auditor, exact integration scope, deliverables, booking terms and capped cost. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
         ]
       },
       "costs": [
@@ -977,7 +983,7 @@
     },
     {
       "id": "d-budget",
-      "status": "blocked",
+      "status": "defaulted",
       "dependsOn": [
         "d-order",
         "d-audit",
@@ -998,13 +1004,15 @@
           }
         ],
         "chosen": "no-spend-or-commitments-without-explicit-approval",
-        "rationale": "Prepare reviewable scope and evidence locally. Do not book audits, counsel, hardware, hosted provers or dates; deci must approve named recipients, deliverables and capped costs. Study time ranges remain planning uncertainty, never external promises.",
+        "rationale": "DENY spending or external commitments without the CEO's separate approval. NO authority is granted by this default; this is a hold, not an approval. Prepare reviewable scope and evidence locally. Do not book audits, counsel, hardware, hosted provers or dates; deci must approve named recipients, deliverables and capped costs. Study time ranges remain planning uncertainty, never external promises. This hold does not block building or verifying preprod with already available resources.",
         "overturned_prior": false,
         "frozen_by": "none",
         "reversible": true,
         "evidence": [
           "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
-          "E-brief and E-study; no budget, quote or external commitment supplied"
+          "E-brief and E-study; no budget, quote or external commitment supplied",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; planning estimates do not authorize spend.",
+          "Awaiting CEO decision: separately approve each named recipient, deliverable, capped amount and external commitment against concrete quotes and terms. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
         ]
       },
       "costs": [
@@ -1030,7 +1038,7 @@
     },
     {
       "id": "d-mainnet-rollout",
-      "status": "blocked",
+      "status": "defaulted",
       "dependsOn": [
         "d-genesis-isolation",
         "d-host-acceleration",
@@ -1054,13 +1062,15 @@
           }
         ],
         "chosen": "hold-all-mainnet-actions-for-reviewed-gates-and-deci",
-        "rationale": "This packet authorizes no mainnet writes, broadcasts, deployment, custody or immutable bridge commitment. Recommend forkless delivery only after reviewed preprod evidence, metadata/source/migration review, audited value paths, counsel, explicit approval, applicable root-timelock and multisig, 30 clean preprod days for Lane S and reviewed caps. A zero-broadcast simulation may test refusal; it cannot grant approval.",
+        "rationale": "DENY mainnet activation without its own separately CEO-approved packet and evidence. NO authority is granted by this default; this is a hold, not an approval. This packet authorizes no mainnet writes, broadcasts, deployment, custody or immutable bridge commitment. Recommend forkless delivery only after reviewed preprod evidence, metadata/source/migration review, audited value paths, counsel, explicit approval, applicable root-timelock and multisig, 30 clean preprod days for Lane S and reviewed caps. Every ZK pallet remains impossible to enable on any mainnet chain spec under this packet, and every activation path retains all four holds even with synthetic approvals. A zero-broadcast simulation may test refusal; it cannot grant approval or block preprod build/verification.",
         "overturned_prior": false,
         "frozen_by": "mainnet-deployment-or-activation",
         "reversible": false,
         "evidence": [
           "Model-selected recommendation in this spec pass; CEO has confirmed none of these decisions.",
-          "E-brief, E-ops; no mainnet approval exists"
+          "E-brief, E-ops; no mainnet approval exists",
+          "E-lock-brief: the materios CTO directs a defaulted DENY hold for this PREPROD-only packet; locking records identity and grants no mainnet authority.",
+          "Awaiting CEO decision: approve a separate mainnet activation packet bound to exact reviewed code/artifact hashes, target chain, ceremony, caps, migration/rollback plan and actual counsel, audit, budget, soak, metadata, timelock and multisig evidence. Mainnet execution remains deci-at-his-terminal only. Future packet: docs/native-zk-handoff.md#future-ceo-approval-packet."
         ]
       },
       "costs": [
@@ -1264,7 +1274,7 @@
     },
     {
       "id": "r-authority",
-      "statement": "No spend, audit/counsel engagement, external promise, mainnet artifact change or activation is authorized by this packet. A zero-broadcast activation simulation refuses absent CEO approval, budget, counsel, audit, 30-day Lane S soak, caps, metadata review, timelock or multisig, and any open HIGH/MEDIUM audit finding. Real evidence and explicit authority are still required outside the simulation.",
+      "statement": "This packet is PREPROD only. No spend, audit/counsel engagement, external promise, mainnet artifact change or activation is authorized. c-activation-gates fails if any ZK pallet can be enabled on any mainnet chain spec, or if any activation path lacks any of the d-compliance/d-audit/d-budget/d-mainnet-rollout DENY holds. It covers the complete source-derived chain-spec/pallet cross product and activation-path inventory, rejects empty/incomplete/duplicate coverage and requires zero broadcasts. All holds deny mainnet activation even with synthetic approvals present. Separate zero-broadcast simulations refuse absent CEO approval, budget, counsel, audit, 30-day Lane S soak, caps, metadata review, timelock or multisig, and any open HIGH/MEDIUM audit finding. Only a future separate CEO-approved packet and actual evidence can authorize work beyond preprod; none of these approvals is needed to build or verify preprod.",
       "decisions": [
         "d-budget",
         "d-compliance",
@@ -1274,7 +1284,7 @@
       "checks": [
         "c-activation-gates"
       ],
-      "counterexample": "A lock digest or an all-green mock simulation is used as approval to engage a vendor or broadcast a mainnet transaction."
+      "counterexample": "One mainnet chain spec permits one ZK pallet, one activation path omits a DENY hold, or a lock digest/all-green synthetic simulation is used as approval to engage a vendor or broadcast a mainnet transaction."
     }
   ],
   "checks": [
@@ -1543,8 +1553,9 @@
         "tools/zk-spec/check.py",
         "c-activation-gates"
       ],
-      "scope": "Offline, zero-broadcast refusal simulations for nine absent authorization/evidence gates and HIGH/MEDIUM findings. Cannot supply actual legal/audit/approval evidence.",
+      "scope": "Offline PREPROD-only authority enforcement: every source-derived mainnet chain-spec/ZK-pallet combination refuses enablement; every inventoried activation path retains all four DENY holds and refuses activation even with all synthetic approvals. Empty, duplicate or incomplete inventory coverage fails. Also checks nine absent authorization/evidence gates and HIGH/MEDIUM findings. Every case requires zero broadcasts. Cannot supply actual legal/audit/approval evidence.",
       "assumptions": [
+        "Mainnet chain specs, ZK pallets and activation paths are enumerated from the reviewed production source and pinned fixtures, including plain/raw specs, genesis, runtime upgrade and governance routes where present. Review must establish inventory completeness and correspondence; synthetic adapter fixtures only test assertion behavior.",
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
         "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
@@ -1583,7 +1594,7 @@
     },
     {
       "claim": "Security C08: Mutation testing and invariant success replace independent audit.",
-      "resolution": "REJECTED. Tests cover bounded domains. d-audit remains blocked for booking and requires independent integration review before value-bearing activation."
+      "resolution": "REJECTED. Tests cover bounded domains. d-audit defaults to DENY audit booking without separate CEO approval and requires independent integration review before mainnet value-bearing activation; preprod build/verification does not require that approval."
     },
     {
       "claim": "Security C22: Binding note identity to runtime spec_version could strand notes after unrelated upgrades.",
@@ -1611,7 +1622,7 @@
     },
     {
       "claim": "Launch/operations C14: A locked recommendation authorizes counsel, audit or mainnet work.",
-      "resolution": "REJECTED. d-compliance, d-audit, d-budget and d-mainnet-rollout remain blocked. Their recommendations are filled but authority must be explicit."
+      "resolution": "REJECTED. d-compliance, d-audit, d-budget and d-mainnet-rollout are defaulted DENY holds under E-lock-brief. NO authority is granted by this default; this is a hold, not an approval. Their evidence names each separate CEO decision and the future approval packet. Mainnet activation, audit engagement and budget are out of scope; r-authority/c-activation-gates retain enforceable refusal obligations."
     },
     {
       "claim": "Feasibility/evidence C15: The native 2.41 ms arkworks result does not measure a full Sapling Wasm bundle.",
@@ -1639,7 +1650,7 @@
     },
     {
       "claim": "Feasibility/evidence C21: The exact supplied runner accepts blocked decisions and uppercase D- ids at lock time.",
-      "resolution": "REJECTED by inspected code: FluxPoint 1.42.0 accepts only defaulted/user-confirmed statuses and lowercase kebab-case ids. IDs are normalized to d-* with the same meaning. Literal blocked statuses are preserved pending the user's answer; no lock digest is fabricated or validator patched."
+      "resolution": "REJECTED by inspected code: FluxPoint 1.42.0 accepts only defaulted/user-confirmed statuses and lowercase kebab-case ids. IDs are normalized to d-* with the same meaning. E-lock-brief resolves the previous drafting conflict through grill-me.md's safe conditional or deny-by-default rule: all four authority choices default to DENY, PREPROD is the implementation scope, and future CEO decisions remain explicit holds. The canonical runner is unchanged; its lock establishes packet identity, never approval."
     }
   ]
 }

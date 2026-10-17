@@ -1,3 +1,4 @@
+import copy
 import io
 from pathlib import Path
 import subprocess
@@ -6,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 import check
+import contracts
 
 
 class AdapterTests(unittest.TestCase):
@@ -122,6 +124,85 @@ class AdapterTests(unittest.TestCase):
         with patch("check.run_argv", return_value='{"version":1,"result":{"status":"unknown"}}'):
             with self.assertRaisesRegex(check.CheckFailure, "unknown"):
                 driver.query("snapshot", {})
+
+
+class ActivationContractTests(unittest.TestCase):
+    def setUp(self):
+        self.responses = {
+            "activation-gate-simulation": {"allowed": False, "broadcasts": 0},
+            "mainnet-zk-enablement": {
+                "chain_specs": ["mainnet-plain", "mainnet-raw"],
+                "zk_pallets": ["verifier-hub", "utxo", "shielded-pool"],
+                "cases": [
+                    {"chain_spec": chain_spec, "pallet": pallet,
+                     "allowed": False, "enabled_zk_pallets": [], "broadcasts": 0}
+                    for chain_spec in ("mainnet-plain", "mainnet-raw")
+                    for pallet in ("verifier-hub", "utxo", "shielded-pool")
+                ],
+            },
+            "activation-hold-coverage": {
+                "activation_paths": ["genesis", "runtime-upgrade", "governance-enable"],
+                "cases": [
+                    {"path": path,
+                     "holds": ["d-compliance", "d-audit", "d-budget", "d-mainnet-rollout"],
+                     "allowed": False, "broadcasts": 0}
+                    for path in ("genesis", "runtime-upgrade", "governance-enable")
+                ],
+            },
+        }
+
+    def run_contracts(self, responses):
+        def query(operation, payload):
+            return {"executor": "wasm", "runtime_sha256": "a" * 64, **responses[operation]}
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(contracts.ActivationGates)
+        with patch.object(contracts.DRIVER, "query", side_effect=query):
+            return check.run_suite(suite, io.StringIO())
+
+    def test_complete_denial_fixture_passes(self):
+        self.assertEqual(self.run_contracts(self.responses), 0)
+
+    def test_any_mainnet_pallet_enablement_is_rejected(self):
+        for index in range(len(self.responses["mainnet-zk-enablement"]["cases"])):
+            for field, value in (("allowed", True), ("enabled_zk_pallets", ["verifier-hub"]),
+                                 ("broadcasts", 1)):
+                with self.subTest(index=index, field=field):
+                    responses = copy.deepcopy(self.responses)
+                    responses["mainnet-zk-enablement"]["cases"][index][field] = value
+                    self.assertEqual(self.run_contracts(responses), 1)
+
+    def test_missing_or_duplicate_coverage_is_rejected(self):
+        for operation, inventory in (("mainnet-zk-enablement", "chain_specs"),
+                                     ("mainnet-zk-enablement", "zk_pallets"),
+                                     ("activation-hold-coverage", "activation_paths")):
+            for mutation in ("empty-inventory", "missing-case", "duplicate-case"):
+                with self.subTest(operation=operation, inventory=inventory, mutation=mutation):
+                    responses = copy.deepcopy(self.responses)
+                    result = responses[operation]
+                    if mutation == "empty-inventory":
+                        result[inventory] = []
+                        result["cases"] = []
+                    elif mutation == "missing-case":
+                        result["cases"].pop()
+                    else:
+                        result["cases"].append(copy.deepcopy(result["cases"][0]))
+                    self.assertEqual(self.run_contracts(responses), 1)
+
+    def test_each_activation_path_requires_every_hold(self):
+        for index in range(3):
+            for hold_index in range(4):
+                with self.subTest(path=index, hold=hold_index):
+                    responses = copy.deepcopy(self.responses)
+                    responses["activation-hold-coverage"]["cases"][index]["holds"].pop(hold_index)
+                    self.assertEqual(self.run_contracts(responses), 1)
+
+    def test_activation_or_broadcast_despite_holds_is_rejected(self):
+        for index in range(3):
+            for field, value in (("allowed", True), ("broadcasts", 1)):
+                with self.subTest(path=index, field=field):
+                    responses = copy.deepcopy(self.responses)
+                    responses["activation-hold-coverage"]["cases"][index][field] = value
+                    self.assertEqual(self.run_contracts(responses), 1)
 
 
 if __name__ == "__main__":

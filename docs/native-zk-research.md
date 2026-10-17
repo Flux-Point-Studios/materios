@@ -12,6 +12,22 @@ optional Midnight and first-class verification of other chains. It requests RED
 scaffolds and a local commit only. The baseline study is dated October 16, 2026;
 the direction it records is dated October 17. Dates do not establish approval.
 
+**E-lock-brief.** `/home/deci/.local/state/codex-tasks/materios-zk-lock/BRIEF.md`
+directs the four authority decisions to use `defaulted` DENY holds and limits
+implementation to PREPROD. The installed FluxPoint 1.42.0 `commands/grill-me.md`
+allows a safe conditional or deny-by-default choice to resolve unknown facts.
+Its unchanged `scripts/specification.py` accepts only `defaulted` and
+`user-confirmed` at lock time. This resolves the prior drafting conflict without
+granting authority. Separate CEO decisions remain required for counsel, audit,
+spend and mainnet, as listed in the [future approval packet](native-zk-handoff.md#future-ceo-approval-packet).
+The existing `ActivationGates` scaffold is extended to cover mainnet pallet
+enablement and hold coverage; no new runtime or launch-gate implementation is
+introduced. Rechecked registry overlap with
+`rg -n -i 'materios|zkverify|sapling|verifier|shielded|utxo' /home/deci/work/SUBSTRATE.md`:
+launch-preflight, runtime-build and root-timelock remain the reusable enforcement
+surfaces for the future driver. Existing upstream research and technical
+baselines are unchanged by this authority-only revision.
+
 **E-study.** Read the complete `zk-decision.md` from workflow
 `wf_f78daa70-9b0`, and the architecture, risk and optionality results of its
 composable-primitives, shield-first and Midnight-compatible designs. Reused the

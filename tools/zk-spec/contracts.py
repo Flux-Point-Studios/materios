@@ -325,6 +325,34 @@ class HostCoverage(RuntimeCase):
 
 
 class ActivationGates(RuntimeCase):
+    def test_no_mainnet_chain_spec_can_enable_any_zk_pallet(self):
+        result = self.query("mainnet-zk-enablement", packet_scope="preprod-only",
+                            synthetic_approvals="all-present")
+        for inventory in ("chain_specs", "zk_pallets"):
+            self.assertTrue(result[inventory])
+            self.assertEqual(len(result[inventory]), len(set(result[inventory])))
+        self.assertCountEqual(
+            [(case["chain_spec"], case["pallet"]) for case in result["cases"]],
+            [(chain_spec, pallet) for chain_spec in result["chain_specs"]
+             for pallet in result["zk_pallets"]],
+        )
+        for case in result["cases"]:
+            self.assertIs(case["allowed"], False)
+            self.assertEqual(case["enabled_zk_pallets"], [])
+            self.assertEqual(case["broadcasts"], 0)
+
+    def test_every_activation_path_retains_all_authority_holds(self):
+        result = self.query("activation-hold-coverage", packet_scope="preprod-only",
+                            synthetic_approvals="all-present")
+        self.assertTrue(result["activation_paths"])
+        self.assertEqual(len(result["activation_paths"]), len(set(result["activation_paths"])))
+        self.assertCountEqual([case["path"] for case in result["cases"]], result["activation_paths"])
+        for case in result["cases"]:
+            self.assertCountEqual(case["holds"],
+                                  ["d-compliance", "d-audit", "d-budget", "d-mainnet-rollout"])
+            self.assertIs(case["allowed"], False)
+            self.assertEqual(case["broadcasts"], 0)
+
     def test_authority_and_evidence_absence_deny_activation(self):
         for absent in ("ceo-authorization", "audit", "counsel", "approved-budget", "thirty-day-soak",
                        "reviewed-caps", "metadata-gate", "timelock", "multisig"):

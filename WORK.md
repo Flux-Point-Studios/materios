@@ -36,12 +36,19 @@ and will execute acceptance checks. It must NOT be run during this spec pass;
 the brief explicitly prohibits `specification.py --run`. The lock/check commands
 validate the document only and do not imply feature readiness or authorization.
 
-## Initial blockers
+## Authority holds and implementation prerequisites
 
-- The installed validator accepts only `defaulted` and `user-confirmed` during
-  lock/check; this brief requires literal `blocked` on four authority decisions.
-  Keep those statuses pending the user's answer to the explicit clarification.
-  Never invent a digest, patch the plugin, or pretend approval was received.
+The lock follow-up brief resolves the drafting conflict: all four authority
+decisions use `defaulted` DENY baselines. Implementation and verification scope
+is PREPROD only. No counsel engagement, audit booking, spend or mainnet activation
+is approved. None of those approvals is needed to build or verify preprod with
+available resources. See the [future CEO approval packet](docs/native-zk-handoff.md#future-ceo-approval-packet).
+
+`r-authority` / `c-activation-gates` require every mainnet chain-spec/ZK-pallet
+combination to refuse enablement and every activation path to retain all four
+holds, even with synthetic approvals. Missing or incomplete runtime evidence
+remains RED. The lock does not certify implementation readiness.
+
 - AJ owns #66. Its eight tests are referenced but absent at this base revision.
   They and the reviewed fix must land before the approved genesis baseline.
 - No runtime driver, Sapling corpus/benchmark, approved launch artifacts,
@@ -49,6 +56,6 @@ validate the document only and do not imply feature readiness or authorization.
 - Counsel/audit bookings, budget/commitments and all mainnet actions need deci's
   explicit authorization plus the concrete evidence described in the packet.
 
-The next engineering slice after resolving lock semantics is the narrow hub
+The next engineering slice after this locked specification is the narrow hub
 consumer plus the Sapling spike and real driver, each developed test-first.
 Launch review and execution retain priority over ZK preprod windows.
