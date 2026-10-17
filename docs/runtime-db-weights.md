@@ -45,7 +45,9 @@ Bounded weight-driving arguments: receipt committee 96; session committee 32
 batch caps 256 and 96 signature slots; Multisig 9 other signatories; Recovery 9
 friends; Billing prune 256; TEE payload 16 KiB; Vesting's declared MaxLocks 50 and
 MAX_VESTING_SCHEDULES; Treasury's declared weights. Large remark cases use
-3,932,000 bytes within the normal encoded-length limit. Constants and current
+3,932,000 bytes within the normal encoded-length limit. A separate test checks
+both remark declarations at the full normal encoded-length ceiling, ignoring
+envelope overhead to provide a conservative upper bound. Constants and current
 storage determine the other finite declarations. The fixture uses smallest
 encodings for fields that do not affect declared weight, not a claim that all
 payloads have that length or execute successfully.

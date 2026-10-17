@@ -242,6 +242,31 @@ fn runtime_database_weight_is_rocksdb() {
 }
 
 #[test]
+fn remark_weights_fit_the_full_encoded_length_ceiling() {
+    use frame_support::dispatch::DispatchClass;
+    let length = *crate::RuntimeBlockLength::get()
+        .max
+        .get(DispatchClass::Normal) as usize;
+    let limit = crate::RuntimeBlockWeights::get()
+        .get(DispatchClass::Normal)
+        .max_extrinsic
+        .expect("normal call limit");
+    // Every valid signed payload is smaller because its envelope also consumes length.
+    for call in [
+        frame_system::Call::remark {
+            remark: vec![0; length],
+        },
+        frame_system::Call::remark_with_event {
+            remark: vec![0; length],
+        },
+    ] {
+        let info = crate::RuntimeCall::System(call).get_dispatch_info();
+        assert_eq!(info.class, DispatchClass::Normal);
+        assert!(info.weight.all_lte(limit));
+    }
+}
+
+#[test]
 fn single_call_limits_match_class_budget() {
     use frame_support::dispatch::DispatchClass;
     let limits = crate::RuntimeBlockWeights::get();
