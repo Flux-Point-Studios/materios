@@ -212,6 +212,14 @@ fresh target and two CPUs at low priority. It passes the three core tests,
 42 proofs plus all 64,512 mutations. The rebuilt Wasm hash is identical to the
 measured artifact; the CI replay records zero timing samples.
 
+The next hosted run exposed the clone's missing original spec commit.
+[Woodpecker's clone plugin](https://github.com/woodpecker-ci/plugin-git/blob/main/docs.md)
+supports partial/shallow history. CI now fetches the exact `5460448` baseline
+commit only when absent, retaining the unchanged-obligation regression.
+A depth-one clone [reproduces RED](native-zk-evidence/ci-shallow-red.log);
+the complete workflow [passes in that clean shallow clone](native-zk-evidence/ci-shallow-green.log),
+including all 45 tests, all proof mutations and the identical Wasm hash.
+
 The existing partnerchain `fmt` step is advisory and has pre-existing failures
 in 56 files, tracked by [LOW #67](https://github.com/Flux-Point-Studios/materios/issues/67).
 P0 leaves those source files and that CI policy unchanged. Formatting and Clippy

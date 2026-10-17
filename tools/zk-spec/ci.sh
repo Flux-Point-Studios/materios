@@ -3,6 +3,9 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 export CARGO_TARGET_DIR="$PWD/.zk-spec-target"
 export CARGO_BUILD_JOBS=2
+if ! git cat-file -e '546044815026a643cc95ea9737d6dfd167465e6d^{commit}' 2>/dev/null; then
+  git fetch --no-tags --depth=1 origin 546044815026a643cc95ea9737d6dfd167465e6d
+fi
 rustup component add --toolchain 1.85.0 rustfmt clippy
 rustup target add --toolchain 1.85.0 wasm32-unknown-unknown
 nice -n 10 cargo +1.85.0 fetch --locked --manifest-path tools/zk-spec/Cargo.toml
