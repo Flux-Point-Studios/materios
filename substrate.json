@@ -134,7 +134,7 @@
     {
       "id": "native-zk-specification",
       "name": "Native ZK and hybrid MATRA specification",
-      "desc": "Locked PREPROD-only decision packet and executable RED acceptance scaffolds for native verification of other chains and single-asset account/UTXO/shielded MATRA. Defaulted DENY holds preserve separate CEO authority over counsel, audit, spend and mainnet. Acceptance assertions reject mainnet ZK enablement, missing activation holds and incomplete coverage; feature implementation and runtime evidence remain absent.",
+      "desc": "Phase-aware PREPROD native ZK packet and fail-closed acceptance harness. P0 checks are distinct from unchanged P1-P5 end-state obligations; --full selects through CURRENT_PHASE and --all reports every result. DENY holds preserve separate CEO authority over spend, external commitments and mainnet.",
       "kind": "toolkit",
       "paths": [
         ".fluxpoint-spec.json",

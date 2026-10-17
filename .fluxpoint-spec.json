@@ -3,16 +3,16 @@
   "goal": "Specify native other-chain verification and shielded/unshielded MATRA on a hybrid account/UTXO ledger, built and verified on preprod for later separately authorized forkless mainnet upgrades; Midnight is optional.",
   "asset": "Materios's existing runtime, canonical balances, MOTRA sponsorship, receipts and TEE/Witness consumers, orynq finality/anchoring, bridge work and launch/ceremony tooling gain reusable verification and value-lane primitives.",
   "scope": [
-    "This deliverable is a decision/requirement packet, executable RED scaffolds and a local signed commit, not a feature implementation or deployment.",
+    "Phase-aware native ZK packet: CURRENT_PHASE in WORK.md selects the build obligations. P0 builds the offline core, refusal and compatibility gates, bridge codec and measured Sapling spike; original end-state obligations remain unchanged at P1-P5.",
     "All baselines are model defaults. d-compliance, d-audit, d-budget and d-mainnet-rollout are defaulted DENY holds under E-lock-brief, not approvals. No choice has user-confirmed status. Dependencies are a decision DAG, not blanket permission to execute.",
     "Implementation and verification scope is PREPROD only. None of the four authority approvals is needed to build or verify preprod; offline refusal checks retain every hold and cannot authorize mainnet or external commitments.",
     "Hub-first other-chain finality/inclusion consumer and parallel Sapling spike; MATRA-only A/U/S, MOTRA-only fees, open relayer, native prover and viewing keys.",
     "Preserve existing runtime semantics and launch artifacts after mandatory #66 correction. New pallets append at >=26; preprod tests precede any separately authorized mainnet review.",
     "Pure Wasm verification first. A later optional math-only node acceleration is separately gated; runtime upgrades cannot install missing host functions.",
-    "The feature checks are executable tests/properties/runtime probes, not formal proofs. No model/proof obligation binding is claimed; the absent driver must implement production correspondence before any green claim."
+    "Checks are executable tests/properties/runtime probes, not formal proofs. The production driver and immutable provenance must support every GREEN claim. --full runs phases through CURRENT_PHASE; --all runs every check and reports every failure."
   ],
   "outOfScope": [
-    "Implementing AJ's MOTRA #66 fix, modifying another checkout, updating running services, sending review messages, pushing or opening a PR in this task.",
+    "Implementing AJ's MOTRA #66 fix, modifying another checkout, updating running services, merging, tagging or deploying. Pushing both branches and opening a draft PR are authorized by the AK2 handoff.",
     "Mainnet activation, broadcasts, deployments, ceremonies, custody/key changes and immutable bridge commitments. A future separate CEO-approved native-ZK authority packet with actual evidence is required; see docs/native-zk-handoff.md#future-ceo-approval-packet.",
     "Counsel engagement, audit booking or commissioning, budget approval, spending and external commitments. Each remains denied pending the CEO's separate approval in the future native-ZK authority packet; see docs/native-zk-handoff.md#future-ceo-approval-packet.",
     "Generalized private contracts, arbitrary assets, full Compact ledger embedding, per-note/per-UTXO MOTRA and private fee circuits; each needs a new soundness/spec decision.",
@@ -1285,6 +1285,72 @@
         "c-activation-gates"
       ],
       "counterexample": "One mainnet chain spec permits one ZK pallet, one activation path omits a DENY hold, or a lock digest/all-green synthetic simulation is used as approval to engage a vendor or broadcast a mainnet transaction."
+    },
+    {
+      "id": "r-p0-core-no-egress",
+      "statement": "Build the no_std verification/bridge core with Midnight dependencies absent and run nonempty core tests in an isolated network namespace with denied DNS and direct-IP probes. Both build and tests run offline with no route; absence of namespace support fails.",
+      "decisions": [
+        "d-midnight-optional"
+      ],
+      "checks": [
+        "c-p0-core-no-egress"
+      ],
+      "counterexample": "A cached build or empty test command is reported as network-isolated execution."
+    },
+    {
+      "id": "r-p0-midnight-negative-control",
+      "statement": "Inject a Midnight-named dependency into a temporary copy of the core and require the same dependency exclusion gate to fail. Do not mutate the real checkout or accept an unrelated compiler error as the negative control.",
+      "decisions": [
+        "d-midnight-optional"
+      ],
+      "checks": [
+        "c-p0-midnight-negative-control"
+      ],
+      "counterexample": "The forbidden dependency is present and the core gate still passes."
+    },
+    {
+      "id": "r-p0-mainnet-refusal",
+      "statement": "Enumerate mainnet chain-spec targets from production source and reject ZK enablement at the P0 core activation boundary. Exercise refusal mutants and a preprod control. No broadcast or nonempty-pallet activation claim; c-activation-gates retains that end-state obligation.",
+      "decisions": [
+        "d-mainnet-rollout"
+      ],
+      "checks": [
+        "c-p0-mainnet-refusal"
+      ],
+      "counterexample": "A source-derived mainnet target enables ZK, or all targets are denied because the checker cannot recognize any network."
+    },
+    {
+      "id": "r-p0-metadata-compat",
+      "statement": "Compare the unchanged actual runtime metadata and runtime source identity against an explicitly pinned launch-candidate baseline using the existing compatibility gate, including rejecting gate mutants. This pre-AJ P0 baseline is not the reviewed post-AJ genesis baseline; c-mainnet-isolation and c-metadata-append-only retain their positive new-pallet and migration obligations.",
+      "decisions": [
+        "d-genesis-isolation"
+      ],
+      "checks": [
+        "c-p0-metadata-compat"
+      ],
+      "counterexample": "Metadata is manufactured from a schema or a changed runtime is accepted against a stale capture."
+    },
+    {
+      "id": "r-p0-bridge-codec",
+      "statement": "Execute Rust and Aiken codecs in the Aiken evaluator, round-trip canonical v1 Account and Utxo recipients and reject reserved Shielded, unknown versions/variants/locks, wrong lengths, trailing bytes and noncanonical integers. This standalone P0 primitive does not discharge production bridge integration c-bridge-datum.",
+      "decisions": [
+        "d-bridge-datum"
+      ],
+      "checks": [
+        "c-p0-bridge-codec"
+      ],
+      "counterexample": "Only Rust executes while Aiken results are echoed by the driver."
+    },
+    {
+      "id": "r-p0-sapling-spike",
+      "statement": "Build Groth16/BLS12-381 Sapling verification no_std for wasm32-unknown-unknown with rustc 1.85.0. Accept at least 20 distinct real Zcash mainnet proofs fetched from public Zcash repositories, and reject every single-bit proof mutation. Time complete 1-spend/2-output bundles including signatures, decoding and commitment-tree work in Wasm on Gemtek and reachable arm64 MacBook; record hardware and observations. Compare maximum bundle time to <=150 ms GO, >150 to <=400 ms GO with caps, >400 ms fallback A. The full 100-bundle run on reviewed slowest hardware remains c-sapling-wasm at P3.",
+      "decisions": [
+        "d-shield-circuit"
+      ],
+      "checks": [
+        "c-p0-sapling-spike"
+      ],
+      "counterexample": "A proof-only or native benchmark is described as a complete Wasm bundle, or synthetic proofs are labeled mainnet."
     }
   ],
   "checks": [
@@ -1301,7 +1367,7 @@
         "tools/zk-spec/check.py",
         "c-mainnet-isolation"
       ],
-      "scope": "Compare independently built reviewed post-AJ launch and candidate artifacts, with positive preprod feature witness and one mutant per artifact. No launch baseline supplied yet.",
+      "scope": "Phase P1. Compare independently built reviewed post-AJ launch and candidate artifacts, with positive preprod feature witness and one mutant per artifact. No launch baseline supplied yet.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1322,7 +1388,7 @@
         "tools/zk-spec/check.py",
         "c-sapling-wasm"
       ],
-      "scope": "Pinned no_std Wasm build, >=20 real proofs and all 1536 single-bit proof mutants each, plus 100 full-bundle timings on the reviewed slowest hardware. No local timings exist yet.",
+      "scope": "Phase P3. Pinned no_std Wasm build, >=20 real proofs and all 1536 single-bit proof mutants each, plus 100 full-bundle timings on the reviewed slowest hardware. No local timings exist yet.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1343,7 +1409,7 @@
         "tools/zk-spec/check.py",
         "c-supply-invariant"
       ],
-      "scope": "Seed 66; 2000 A-U-S-rejected-double-S-U-A cycles = 10,000 transitions, 10,001 snapshots, amounts 1..100 from 1,000,000 base units. Independent arithmetic and decrypted controlled-wallet notes; emissions off. Additional bounded adversarial amount cases; not a universal supply proof.",
+      "scope": "Phase P3. Seed 66; 2000 A-U-S-rejected-double-S-U-A cycles = 10,000 transitions, 10,001 snapshots, amounts 1..100 from 1,000,000 base units. Independent arithmetic and decrypted controlled-wallet notes; emissions off. Additional bounded adversarial amount cases; not a universal supply proof.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1364,7 +1430,7 @@
         "tools/zk-spec/check.py",
         "c-midnight-blackhole"
       ],
-      "scope": "No-Midnight core profile; isolated network namespace with zero egress, three denied probes and four required nonempty production scenarios using offline artifacts. No host firewall changes.",
+      "scope": "Phase P3. No-Midnight core profile; isolated network namespace with zero egress, three denied probes and four required nonempty production scenarios using offline artifacts. No host firewall changes.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1385,7 +1451,7 @@
         "tools/zk-spec/check.py",
         "c-metadata-append-only"
       ],
-      "scope": "Actual decoded old/candidate metadata plus #494 gate and migration witness; six mutation classes. Read-only pinned preprod capture; no ceremony or broadcast.",
+      "scope": "Phase P1. Actual decoded old/candidate metadata plus #494 gate and migration witness; six mutation classes. Read-only pinned preprod capture; no ceremony or broadcast.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1406,7 +1472,7 @@
         "tools/zk-spec/check.py",
         "c-bridge-datum"
       ],
-      "scope": "Two valid production Rust/Aiken codec round trips and seven invalid encoding classes. Offline Cardano evaluator only; no deployment.",
+      "scope": "Phase P1. Two valid production Rust/Aiken codec round trips and seven invalid encoding classes. Offline Cardano evaluator only; no deployment.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1427,7 +1493,7 @@
         "tools/zk-spec/check.py",
         "c-motra-66"
       ],
-      "scope": "AJ's eight exact named pallet-motra tests, source presence then compiled libtest listing then one non-ignored test per command, all from this checkout. Does not replace AJ's full runtime/migration/build checks.",
+      "scope": "Phase P1. AJ's eight exact named pallet-motra tests, source presence then compiled libtest listing then one non-ignored test per command, all from this checkout. Does not replace AJ's full runtime/migration/build checks.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1448,7 +1514,7 @@
         "tools/zk-spec/check.py",
         "c-hub-other-chains"
       ],
-      "scope": "Foreign GRANDPA authority-transition/inclusion fixture and nine invalid histories, consumer key/domain/trust bounds, nonempty legacy-receipt check and same-proof Cardano evaluator comparison. Does not establish all-chain consensus support. Require actual Materios-preprod finalization and Cardano-preprod transaction confirmation evidence for the same proof.",
+      "scope": "Phase P1. Foreign GRANDPA authority-transition/inclusion fixture and nine invalid histories, consumer key/domain/trust bounds, nonempty legacy-receipt check and same-proof Cardano evaluator comparison. Does not establish all-chain consensus support. Require actual Materios-preprod finalization and Cardano-preprod transaction confirmation evidence for the same proof.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1469,7 +1535,7 @@
         "tools/zk-spec/check.py",
         "c-fees"
       ],
-      "scope": "Actual fee accounting at zero congestion, invalid-proof debit, authorized/unauthorized sponsors and 10,000 structurally malformed admissions. Offline runtime fixture with instrumented production crypto calls.",
+      "scope": "Phase P2. Actual fee accounting at zero congestion, invalid-proof debit, authorized/unauthorized sponsors and 10,000 structurally malformed admissions. Offline runtime fixture with instrumented production crypto calls.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1490,7 +1556,7 @@
         "tools/zk-spec/check.py",
         "c-hybrid-utxo"
       ],
-      "scope": "Four submitters/200 independent spends, conflicting inputs, account-only and bridge replay, invalid wallet domains and one real preprod test-wallet roundtrip. No mainnet wallet or funds.",
+      "scope": "Phase P3. Four submitters/200 independent spends, conflicting inputs, account-only and bridge replay, invalid wallet domains and one real preprod test-wallet roundtrip. No mainnet wallet or funds.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1511,7 +1577,7 @@
         "tools/zk-spec/check.py",
         "c-shielded-e2e"
       ],
-      "scope": "100-MATRA preprod shield/private-transfer/unshield, recipient and viewing-key observations, nine invalid scenarios and an old-note upgrade witness, positive seven-day/500-bundle soak. Soak must be separately collected and bound to the same code.",
+      "scope": "Phase P3. 100-MATRA preprod shield/private-transfer/unshield, recipient and viewing-key observations, nine invalid scenarios and an old-note upgrade witness, positive seven-day/500-bundle soak. Soak must be separately collected and bound to the same code.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1532,7 +1598,7 @@
         "tools/zk-spec/check.py",
         "c-host-coverage"
       ],
-      "scope": "Seven missing/stale coverage classes and 10,000 differential cases across three execution architectures on isolated devnet; seven-day full coverage and 24-hour import witness. No live validator operations in this spec pass.",
+      "scope": "Phase P4. Seven missing/stale coverage classes and 10,000 differential cases across three execution architectures on isolated devnet; seven-day full coverage and 24-hour import witness. No live validator operations in this spec pass.",
       "assumptions": [
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
@@ -1553,12 +1619,132 @@
         "tools/zk-spec/check.py",
         "c-activation-gates"
       ],
-      "scope": "Offline PREPROD-only authority enforcement: every source-derived mainnet chain-spec/ZK-pallet combination refuses enablement; every inventoried activation path retains all four DENY holds and refuses activation even with all synthetic approvals. Empty, duplicate or incomplete inventory coverage fails. Also checks nine absent authorization/evidence gates and HIGH/MEDIUM findings. Every case requires zero broadcasts. Cannot supply actual legal/audit/approval evidence.",
+      "scope": "Phase P5. Offline PREPROD-only authority enforcement: every source-derived mainnet chain-spec/ZK-pallet combination refuses enablement; every inventoried activation path retains all four DENY holds and refuses activation even with all synthetic approvals. Empty, duplicate or incomplete inventory coverage fails. Also checks nine absent authorization/evidence gates and HIGH/MEDIUM findings. Every case requires zero broadcasts. Cannot supply actual legal/audit/approval evidence.",
       "assumptions": [
         "Mainnet chain specs, ZK pallets and activation paths are enumerated from the reviewed production source and pinned fixtures, including plain/raw specs, genesis, runtime upgrade and governance routes where present. Review must establish inventory completeness and correspondence; synthetic adapter fixtures only test assertion behavior.",
         "Reviewed adapter and future driver execute production pinned runtime/codec/gate code, not a mock or separate ledger model; JSON observations are not a proof of conformance.",
         "Runtime driver, immutable fixture provenance, toolchains and artifacts are currently absent. Their absence, unknown, timeout, empty coverage or skipped cases must remain nonzero.",
         "CARGO_TARGET_DIR is forced to this checkout's .zk-spec-target, builds use nice -n 10 and two jobs; run heavy suites serially. No cryptographic or legal universal proof is claimed."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-core-no-egress",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-core-no-egress"
+      ],
+      "scope": "Phase P0. Build the no_std verification/bridge core with Midnight dependencies absent and run nonempty core tests in an isolated network namespace with denied DNS and direct-IP probes. Both build and tests run offline with no route; absence of namespace support fails.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-midnight-negative-control",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-midnight-negative-control"
+      ],
+      "scope": "Phase P0. Inject a Midnight-named dependency into a temporary copy of the core and require the same dependency exclusion gate to fail. Do not mutate the real checkout or accept an unrelated compiler error as the negative control.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-mainnet-refusal",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-mainnet-refusal"
+      ],
+      "scope": "Phase P0. Enumerate mainnet chain-spec targets from production source and reject ZK enablement at the P0 core activation boundary. Exercise refusal mutants and a preprod control. No broadcast or nonempty-pallet activation claim; c-activation-gates retains that end-state obligation.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-metadata-compat",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-metadata-compat"
+      ],
+      "scope": "Phase P0. Compare the unchanged actual runtime metadata and runtime source identity against an explicitly pinned launch-candidate baseline using the existing compatibility gate, including rejecting gate mutants. This pre-AJ P0 baseline is not the reviewed post-AJ genesis baseline; c-mainnet-isolation and c-metadata-append-only retain their positive new-pallet and migration obligations.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-bridge-codec",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-bridge-codec"
+      ],
+      "scope": "Phase P0. Execute Rust and Aiken codecs in the Aiken evaluator, round-trip canonical v1 Account and Utxo recipients and reject reserved Shielded, unknown versions/variants/locks, wrong lengths, trailing bytes and noncanonical integers. This standalone P0 primitive does not discharge production bridge integration c-bridge-datum.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
+      ],
+      "timeoutSeconds": 3600
+    },
+    {
+      "id": "c-p0-sapling-spike",
+      "kind": "test",
+      "argv": [
+        "nice",
+        "-n",
+        "10",
+        "env",
+        "CARGO_TARGET_DIR=.zk-spec-target",
+        "{python}",
+        "tools/zk-spec/check.py",
+        "c-p0-sapling-spike"
+      ],
+      "scope": "Phase P0. Build Groth16/BLS12-381 Sapling verification no_std for wasm32-unknown-unknown with rustc 1.85.0. Accept at least 20 distinct real Zcash mainnet proofs fetched from public Zcash repositories, and reject every single-bit proof mutation. Time complete 1-spend/2-output bundles including signatures, decoding and commitment-tree work in Wasm on Gemtek and reachable arm64 MacBook; record hardware and observations. Compare maximum bundle time to <=150 ms GO, >150 to <=400 ms GO with caps, >400 ms fallback A. The full 100-bundle run on reviewed slowest hardware remains c-sapling-wasm at P3.",
+      "assumptions": [
+        "No runtime activation, mainnet broadcast, external commitment or spend is authorized. Missing artifacts, unknown operations, skipped tests and empty evidence fail closed.",
+        "Production primitives and pinned public fixtures execute in their real runtimes; the JSON driver protocol is an observation boundary, not evidence by itself."
       ],
       "timeoutSeconds": 3600
     }
