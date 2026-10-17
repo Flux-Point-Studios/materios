@@ -44,8 +44,8 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design, data-flow 
 
 - **Fee formula:** `TxFee = MinFee + CongestionRate * Weight + LengthFeePerByte * Len` (paid in MOTRA)
 - **Congestion rate:** EMA smoothing, adjusts per block vs target fullness
-- **MOTRA generation:** Proportional to MATRA holdings, lazy reconciliation
-- **Delegation:** `set_delegatee` routes future MOTRA generation to a sponsor account
+- **MOTRA generation:** Proportional to free MATRA held throughout each checkpoint interval, with lazy reconciliation; funding never earns for earlier blocks. PalletId sovereign accounts do not generate MOTRA.
+- **Delegation:** A sponsor uses `set_delegatee(Some(recipient))` to route future generation to the recipient, then reconciles to credit it. A freshly funded account starts with zero generated MOTRA and needs this sponsorship for immediate first fees, or must wait for sufficient accrual.
 
 Inspired by Midnight's NIGHT/DUST model. Details in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 

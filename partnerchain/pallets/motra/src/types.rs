@@ -8,7 +8,7 @@ use sp_runtime::Perbill;
 pub struct MotraParams {
     /// Minimum fee per transaction (base fee floor).
     pub min_fee: u128,
-    /// Congestion multiplier in `TxFee = min_fee + congestion_rate * tx_weight`.
+    /// Prices signed base plus call ref_time, divided by 1,000,000.
     pub congestion_rate: u128,
     /// Target block fullness; congestion rises above it, falls below.
     pub target_fullness: Perbill,

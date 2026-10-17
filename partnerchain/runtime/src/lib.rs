@@ -10,6 +10,8 @@ mod tests;
 #[cfg(test)]
 mod seating_model_check;
 
+mod balance_weights;
+mod motra_duty;
 pub mod committee_liveness;
 pub mod genesis_committee;
 pub mod input_sanity;
@@ -201,7 +203,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 240,
+    spec_version: 241,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 5,
@@ -232,7 +234,8 @@ parameter_types! {
     pub RuntimeBlockWeights: BlockWeights = BlockWeights::builder()
         .base_block(BlockExecutionWeight::get())
         .for_class(frame_support::dispatch::DispatchClass::all(), |weights| {
-            weights.base_extrinsic = ExtrinsicBaseWeight::get();
+            weights.base_extrinsic = ExtrinsicBaseWeight::get()
+                .saturating_add(<<Runtime as pallet_motra::Config>::WeightInfo as pallet_motra::weights::WeightInfo>::fee_path());
         })
         .for_class(frame_support::dispatch::DispatchClass::Normal, |weights| {
             weights.max_total = Some(NORMAL_DISPATCH_RATIO * Weight::from_parts(
@@ -263,6 +266,7 @@ impl frame_system::Config for Runtime {
     type Hash = Hash;
     type AccountId = AccountId;
     type AccountData = pallet_balances::AccountData<Balance>;
+    type OnNewAccount = ();
     type Version = Version;
     type BaseCallFilter = root_gate::SudoRootGate;
 }
@@ -328,8 +332,8 @@ impl pallet_balances::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type DustRemoval = ();
     type ExistentialDeposit = ExistentialDeposit;
-    type AccountStore = System;
-    type WeightInfo = pallet_balances::weights::SubstrateWeight<Runtime>;
+    type AccountStore = pallet_motra::MatraAccountStore<Runtime>;
+    type WeightInfo = balance_weights::WithMotra;
     type FreezeIdentifier = ();
     type MaxFreezes = ConstU32<0>;
     type RuntimeHoldReason = RuntimeHoldReason;
@@ -370,7 +374,7 @@ impl pallet_treasury::Config for Runtime {
     type Burn = TreasuryBurn;
     type BurnDestination = ();
     type SpendFunds = ();
-    type WeightInfo = pallet_treasury::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = balance_weights::WithMotra;
     type MaxApprovals = MaxApprovals;
     type SpendOrigin = EnsureRootWithSuccess<AccountId, MaxSpend>;
     type AssetKind = ();
@@ -427,7 +431,7 @@ impl pallet_vesting::Config for Runtime {
     type Currency = Balances;
     type BlockNumberToBalance = ConvertInto;
     type MinVestedTransfer = MinVestedTransfer;
-    type WeightInfo = pallet_vesting::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = balance_weights::WithMotra;
     type UnvestedFundsAllowedWithdrawReasons = UnvestedFundsAllowedWithdrawReasons;
     type BlockNumberProvider = System;
     const MAX_VESTING_SCHEDULES: u32 = 28;
@@ -459,7 +463,7 @@ impl pallet_multisig::Config for Runtime {
     type DepositBase = DepositBase;
     type DepositFactor = DepositFactor;
     type MaxSignatories = ConstU32<10>;
-    type WeightInfo = pallet_multisig::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = balance_weights::WithMotra;
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +509,7 @@ impl pallet_recovery::Config for Runtime {
     type FriendDepositFactor = RecoveryFriendDepositFactor;
     type MaxFriends = ConstU32<9>;
     type RecoveryDeposit = RecoveryDeposit;
-    type WeightInfo = pallet_recovery::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = balance_weights::WithMotra;
 }
 
 // ---------------------------------------------------------------------------
@@ -549,7 +553,7 @@ impl pallet_root_timelock::Config for Runtime {
 
 impl pallet_orinq_receipts::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = pallet_orinq_receipts::weights::SubstrateWeight;
+    type WeightInfo = balance_weights::WithMotra;
     type MaxResubmits = ConstU32<64>;
     // MUST stay in lockstep with `input_sanity::MAX_COMMITTEE_SIZE`.
     type MaxCommitteeSize = ConstU32<96>;
@@ -704,7 +708,7 @@ impl pallet_intent_settlement::Config for Runtime {
     type SettlementTreasuryPalletId = TreasuryPalletId;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = IntentSettlementBenchmarkHelper;
-    type WeightInfo = pallet_intent_settlement::weights::SubstrateWeight<Runtime>;
+    type WeightInfo = balance_weights::WithMotra;
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -732,8 +736,15 @@ impl pallet_intent_settlement::BenchmarkHelper<AccountId>
 
 impl pallet_motra::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = pallet_motra::weights::SubstrateWeight;
+    type WeightInfo = balance_weights::WithMotra;
     type TakenFirst = root_gate::GuardianVeto;
+
+    fn validate_attestation(
+        who: &AccountId,
+        call: &RuntimeCall,
+    ) -> Option<sp_runtime::transaction_validity::TransactionValidity> {
+        motra_duty::validate(who, call)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1291,7 +1302,7 @@ impl pallet_billing::Config for Runtime {
     type GovernanceOrigin = EnsureRoot<AccountId>;
     type RequestIdRetentionBlocks = BillingRequestIdRetentionBlocks;
     type MaxPruneBatch = BillingMaxPruneBatch;
-    type WeightInfo = pallet_billing::weights::SubstrateWeight;
+    type WeightInfo = balance_weights::WithMotra;
 }
 
 // ---------------------------------------------------------------------------
@@ -1839,9 +1850,10 @@ impl frame_system_benchmarking::Config for Runtime {}
 frame_benchmarking::define_benchmarks!(
     [frame_system, SystemBench::<Runtime>]
     [pallet_balances, Balances]
+    [pallet_motra, Motra]
+    [pallet_billing, Billing]
+    [pallet_orinq_receipts, OrinqReceipts]
     [pallet_timestamp, Timestamp]
     [pallet_intent_settlement, IntentSettlement]
     [pallet_oracle, Oracle]
 );
-
-

@@ -5,6 +5,7 @@ extern crate alloc;
 pub use pallet::*;
 pub mod types;
 pub mod weights;
+mod attestation_weights;
 
 #[cfg(test)]
 mod tests;
@@ -18,8 +19,10 @@ mod benchmarking;
 #[frame_support::pallet]
 pub mod pallet {
     use alloc::vec::Vec;
+    use alloc::collections::BTreeMap;
+    use frame_support::dispatch::DispatchResultWithPostInfo;
     use frame_support::pallet_prelude::*;
-    use frame_support::traits::{BalanceStatus, ReservableCurrency};
+    use frame_support::traits::{BalanceStatus, Currency, ReservableCurrency};
     use frame_support::PalletId;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
@@ -888,6 +891,9 @@ pub mod pallet {
                                     account,
                                     balance,
                                 );
+                                weight = weight.saturating_add(
+                                    <T as Config>::WeightInfo::balance_mutations(1),
+                                );
 
                                 // Track lifetime rewards
                                 ValidatorRewards::<T>::mutate(account, |total| {
@@ -914,6 +920,9 @@ pub mod pallet {
                             let _ = pallet_balances::Pallet::<T>::deposit_creating(
                                 &Self::treasury_account(),
                                 balance,
+                            );
+                            weight = weight.saturating_add(
+                                <T as Config>::WeightInfo::balance_mutations(1),
                             );
                         }
 
@@ -1035,6 +1044,38 @@ pub mod pallet {
     // ── Component 5 + 8 helpers (no AccountId bound needed) ─────────────
 
     impl<T: Config> Pallet<T> {
+        fn changed_accounts(before: &BTreeMap<T::AccountId, BalanceOf<T>>) -> u32 {
+            before.iter().filter(|(who, balance)| T::Currency::free_balance(who) != **balance).count() as u32
+        }
+
+        /// A duty slot is consumed only by a new canonical attestation.
+        pub fn validate_attestation(
+            who: &T::AccountId,
+            receipt_id: H256,
+            claimed_hash: [u8; 32],
+        ) -> DispatchResult {
+            ensure!(
+                CommitteeMembers::<T>::get().contains(who),
+                Error::<T>::NotCommitteeMember
+            );
+            let record = Receipts::<T>::get(receipt_id).ok_or(Error::<T>::ReceiptNotFound)?;
+            ensure!(
+                record.availability_cert_hash == [0; 32],
+                Error::<T>::CertHashMismatch
+            );
+            if let Some((hash, signers)) = Attestations::<T>::get(receipt_id) {
+                ensure!(
+                    hash == H256::from(claimed_hash) && !signers.contains(who),
+                    Error::<T>::CertHashMismatch
+                );
+            }
+            ensure!(
+                Self::canonical_cert_hash(receipt_id) == Some(H256::from(claimed_hash)),
+                Error::<T>::CertHashMismatch
+            );
+            Ok(())
+        }
+
         /// Construct the canonical `Cert` for `receipt_id` and return its
         /// `sha2_256`. Returns `None` when the receipt does not exist. All
         /// inputs come from on-chain state and compile-time constants, so
@@ -1394,7 +1435,8 @@ pub mod pallet {
     {
         /// Submit a new receipt on-chain.
         #[pallet::call_index(0)]
-        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt())]
+        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn submit_receipt(
             origin: OriginFor<T>,
             receipt_id: H256,
@@ -1408,14 +1450,14 @@ pub mod pallet {
             attestation_evidence_hash: [u8; 32],
             storage_locator_hash: [u8; 32],
             schema_hash: [u8; 32],
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             let submitter = ensure_signed(origin)?;
             ensure!(!Receipts::<T>::contains_key(receipt_id), Error::<T>::ReceiptAlreadyExists);
 
             // Component 4: reserve the per-receipt submission fee from the
             // submitter BEFORE mutating any receipt storage. On failure the
             // whole extrinsic unwinds so no orphan state is left behind.
-            Self::charge_submission_fee(&submitter, receipt_id)?;
+            let charged_fee = Self::charge_submission_fee(&submitter, receipt_id)?;
 
             let now: u64 = pallet_timestamp::Pallet::<T>::get().into();
             let record = ReceiptRecord {
@@ -1439,7 +1481,8 @@ pub mod pallet {
             })?;
             ReceiptCount::<T>::mutate(|c| *c = c.saturating_add(1));
             Self::deposit_event(Event::ReceiptSubmitted { receipt_id, content_hash, submitter });
-            Ok(())
+            Ok(Some(<T as Config>::WeightInfo::submit_receipt()
+                .saturating_add(<T as Config>::WeightInfo::balance_mutations(u32::from(charged_fee > 0)))).into())
         }
 
         /// Root-only: directly set an availability certificate on a receipt.
@@ -1454,12 +1497,13 @@ pub mod pallet {
         /// drains `ReceiptFeeEscrow`. Mirrors the expire-refund event for
         /// auditability.
         #[pallet::call_index(1)]
-        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::set_availability_cert())]
+        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::set_availability_cert()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn set_availability_cert(
             origin: OriginFor<T>,
             receipt_id: H256,
             cert_hash: [u8; 32],
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             ensure_root(origin)?;
             Receipts::<T>::try_mutate(receipt_id, |maybe_record| {
                 let record = maybe_record.as_mut().ok_or(Error::<T>::ReceiptNotFound)?;
@@ -1470,11 +1514,14 @@ pub mod pallet {
             // Refund any open escrow to the submitter. Legacy (pre-Component-4)
             // receipts have no escrow entry and this is a silent no-op —
             // preserving the prior behaviour for any stale data on-chain.
+            let mut changed = 0;
             if let Some((submitter, amount_u128)) = ReceiptFeeEscrow::<T>::take(&receipt_id) {
                 if amount_u128 > 0 {
+                    let before = T::Currency::free_balance(&submitter);
                     let amount_bal: BalanceOf<T> =
                         amount_u128.try_into().unwrap_or_default();
                     let _ = T::Currency::unreserve(&submitter, amount_bal);
+                    changed = u32::from(T::Currency::free_balance(&submitter) != before);
                 }
                 Self::deposit_event(Event::ReceiptFeeRefunded {
                     receipt_id,
@@ -1488,7 +1535,8 @@ pub mod pallet {
                 receipt_id,
                 cert_hash: H256::from(cert_hash),
             });
-            Ok(())
+            Ok(Some(<T as Config>::WeightInfo::set_availability_cert()
+                .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
         /// Root-only: set the attestation committee members and threshold.
@@ -1531,15 +1579,18 @@ pub mod pallet {
         /// certificate is finalized on the receipt record (same effect as
         /// `set_availability_cert`).
         #[pallet::call_index(3)]
-        #[pallet::weight(Weight::from_parts(15_000, 0)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(2)))]
+        #[pallet::weight(<T as Config>::WeightInfo::attest_threshold(T::MaxCommitteeSize::get())
+            .max(<T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get()))
+            .max(<T as Config>::WeightInfo::attest_bad_hash())
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(
+                T::MaxCommitteeSize::get().saturating_add(2))))]
         pub fn attest_availability_cert(
             origin: OriginFor<T>,
             receipt_id: H256,
             claimed_hash: [u8; 32],
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             let attester = ensure_signed(origin)?;
+            let mut base = <T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get());
 
             let committee = CommitteeMembers::<T>::get();
             ensure!(committee.contains(&attester), Error::<T>::NotCommitteeMember);
@@ -1551,7 +1602,7 @@ pub mod pallet {
             // threshold payout a second time.
             let record = Receipts::<T>::get(receipt_id).ok_or(Error::<T>::ReceiptNotFound)?;
             if record.availability_cert_hash != [0u8; 32] {
-                return Ok(());
+                return Ok(Some(base).into());
             }
 
             // The receipt must exist and `claimed_hash` must equal the
@@ -1561,6 +1612,7 @@ pub mod pallet {
                 .ok_or(Error::<T>::ReceiptNotFound)?;
             let cert_h256 = H256::from(claimed_hash);
             if cert_h256 != canonical {
+                let mut balances_before = BTreeMap::new();
                 // Returning Err here would trigger the `#[pallet::call]`
                 // `with_storage_layer` auto-rollback, unwinding the strike +
                 // slash side effects. We must return Ok(()) so the writes
@@ -1581,6 +1633,9 @@ pub mod pallet {
                 // silently disable the gate.
                 let threshold = BadAttestSlashThreshold::<T>::get().max(1);
                 if strikes >= threshold {
+                    for who in [attester.clone(), Self::attestor_reserve_account()] {
+                        balances_before.insert(who.clone(), T::Currency::free_balance(&who));
+                    }
                     // Same rationale as above: keep Ok(()) so the strike
                     // commits even when the slash itself errors (e.g.
                     // unfunded `mat/attr`). Emit `AutoSlashFailed` for
@@ -1592,7 +1647,9 @@ pub mod pallet {
                         });
                     }
                 }
-                return Ok(());
+                let changed = Self::changed_accounts(&balances_before);
+                return Ok(Some(<T as Config>::WeightInfo::attest_bad_hash()
+                    .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into());
             }
 
             // The `*existing_hash == cert_h256` check below is tautological
@@ -1616,6 +1673,7 @@ pub mod pallet {
             })?;
 
             let threshold = AttestationThreshold::<T>::get().max(1);
+            base = <T as Config>::WeightInfo::attest_non_threshold(count);
 
             Self::deposit_event(Event::AttestationRecorded {
                 receipt_id,
@@ -1625,7 +1683,19 @@ pub mod pallet {
             });
 
             // 4. If threshold reached, finalize the cert on the receipt.
+            let mut balances_before = BTreeMap::new();
             if count >= threshold {
+                base = <T as Config>::WeightInfo::attest_threshold(count);
+                if let Some((_, signers)) = Attestations::<T>::get(receipt_id) {
+                    for signer in signers {
+                        balances_before.insert(signer.clone(), T::Currency::free_balance(&signer));
+                    }
+                }
+                if let Some((submitter, _)) = ReceiptFeeEscrow::<T>::get(receipt_id) {
+                    for who in [submitter, Self::treasury_account()] {
+                        balances_before.insert(who.clone(), T::Currency::free_balance(&who));
+                    }
+                }
                 // Pay attestation rewards BEFORE removing the attestation record.
                 // Each signer gets an equal share of the per-receipt reward.
                 //
@@ -1698,8 +1768,8 @@ pub mod pallet {
                     cert_hash: cert_h256,
                 });
             }
-
-            Ok(())
+            let changed = Self::changed_accounts(&balances_before);
+            Ok(Some(base.saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
         /// Submit an anchor — a lightweight on-chain binding for SDK-originated
@@ -1753,7 +1823,8 @@ pub mod pallet {
         /// `sig_type` — 0 = ed25519, 1 = sr25519.
         /// Remaining params are identical to `submit_receipt`.
         #[pallet::call_index(6)]
-        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt())]
+        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn submit_receipt_v2(
             origin: OriginFor<T>,
             player_pubkey: [u8; 32],
@@ -1770,14 +1841,14 @@ pub mod pallet {
             attestation_evidence_hash: [u8; 32],
             storage_locator_hash: [u8; 32],
             schema_hash: [u8; 32],
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             let submitter = ensure_signed(origin)?;
             ensure!(!Receipts::<T>::contains_key(receipt_id), Error::<T>::ReceiptAlreadyExists);
 
             // Component 4: same fee charge as submit_receipt. submit_receipt_v2
             // is the studio-pays-fees-with-player-signed-receipt path and
             // the fee flow must be identical.
-            Self::charge_submission_fee(&submitter, receipt_id)?;
+            let charged_fee = Self::charge_submission_fee(&submitter, receipt_id)?;
 
             let now: u64 = pallet_timestamp::Pallet::<T>::get().into();
             let record = ReceiptRecord {
@@ -1809,7 +1880,8 @@ pub mod pallet {
             })?;
             ReceiptCount::<T>::mutate(|c| *c = c.saturating_add(1));
             Self::deposit_event(Event::ReceiptSubmitted { receipt_id, content_hash, submitter });
-            Ok(())
+            Ok(Some(<T as Config>::WeightInfo::submit_receipt()
+                .saturating_add(<T as Config>::WeightInfo::balance_mutations(u32::from(charged_fee > 0)))).into())
         }
 
         /// Root-only: governance adds `member` to the attestation committee.
@@ -1935,11 +2007,11 @@ pub mod pallet {
         /// It can be withdrawn via `unbond` when the attestor is not in the
         /// committee.
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(20_000, 0)
-            .saturating_add(T::DbWeight::get().reads(1))
-            .saturating_add(T::DbWeight::get().writes(2)))]
-        pub fn bond(origin: OriginFor<T>, amount: u128) -> DispatchResult {
+        #[pallet::weight(<T as Config>::WeightInfo::bond()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
+        pub fn bond(origin: OriginFor<T>, amount: u128) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
+            let before = T::Currency::free_balance(&who);
 
             // Reserve the amount; propagates balances::Error::InsufficientBalance
             // on failure. `try_into` here collapses u128 into Currency::Balance
@@ -1950,6 +2022,7 @@ pub mod pallet {
             // 0, keeping the extrinsic infallible rather than panicking.
             let balance: BalanceOf<T> = amount.try_into().unwrap_or_default();
             T::Currency::reserve(&who, balance)?;
+            let changed = u32::from(T::Currency::free_balance(&who) != before);
 
             let new_total = AttestorBonds::<T>::mutate(&who, |total| {
                 *total = total.saturating_add(amount);
@@ -1961,16 +2034,16 @@ pub mod pallet {
                 amount,
                 new_total,
             });
-            Ok(())
+            Ok(Some(<T as Config>::WeightInfo::bond()
+                .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
         /// Withdraw the entire bond. Fails if the caller is still a
         /// committee member — call `leave_committee` first.
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(20_000, 0)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(2)))]
-        pub fn unbond(origin: OriginFor<T>) -> DispatchResult {
+        #[pallet::weight(<T as Config>::WeightInfo::unbond()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
+        pub fn unbond(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
 
             ensure!(
@@ -1982,14 +2055,17 @@ pub mod pallet {
             ensure!(bonded > 0, Error::<T>::NothingToUnbond);
 
             let balance: BalanceOf<T> = bonded.try_into().unwrap_or_default();
+            let before = T::Currency::free_balance(&who);
             // `unreserve` returns any remainder it couldn't unreserve; we
             // ignore it because the stored `bonded` is our own accounting
             // and we just cleared it.
             let _ = T::Currency::unreserve(&who, balance);
+            let changed = u32::from(T::Currency::free_balance(&who) != before);
             AttestorBonds::<T>::remove(&who);
 
             Self::deposit_event(Event::Unbonded { who, amount: bonded });
-            Ok(())
+            Ok(Some(<T as Config>::WeightInfo::unbond()
+                .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
         /// Root-only: slash `amount` from `attestor`'s bond, repatriating
@@ -2001,16 +2077,20 @@ pub mod pallet {
         /// want MATRA to accumulate in `mat/attr` for future reward
         /// payouts, not to shrink total issuance.
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(30_000, 0)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3)))]
+        #[pallet::weight(<T as Config>::WeightInfo::slash_attestor()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(2)))]
         pub fn slash_attestor(
             origin: OriginFor<T>,
             attestor: T::AccountId,
             amount: u128,
             reason: SlashReason,
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             ensure_root(origin)?;
+            let balances_before: BTreeMap<_, _> = [attestor.clone(), Self::attestor_reserve_account()]
+                .into_iter().map(|who| {
+                    let free = T::Currency::free_balance(&who);
+                    (who, free)
+                }).collect();
 
             let current_bond = AttestorBonds::<T>::get(&attestor);
             // Cap the slash at the actual bonded amount so repatriate_reserved
@@ -2072,7 +2152,9 @@ pub mod pallet {
                 }
             }
 
-            Ok(())
+            let changed = Self::changed_accounts(&balances_before);
+            Ok(Some(<T as Config>::WeightInfo::slash_attestor()
+                .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
         /// Update the minimum bond required to join the committee.
@@ -2169,13 +2251,12 @@ pub mod pallet {
         /// * `ReceiptNotExpired` — `ReceiptExpiryBlocks` have not yet
         ///   elapsed since submission.
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(25_000, 0)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(2)))]
+        #[pallet::weight(<T as Config>::WeightInfo::expire_receipt_fee()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn expire_receipt_fee(
             origin: OriginFor<T>,
             receipt_id: H256,
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             // Origin is required to be signed but has no other restriction —
             // anyone can kick the refund once the deadline has passed so
             // stuck reserves don't require submitter action.
@@ -2206,6 +2287,7 @@ pub mod pallet {
                 .ok_or(Error::<T>::ReceiptNotFound)?;
             ReceiptSubmittedAt::<T>::remove(receipt_id);
 
+            let before = T::Currency::free_balance(&submitter);
             if reserved_fee > 0 {
                 let balance: BalanceOf<T> = reserved_fee.try_into().unwrap_or_default();
                 // Unreserve returns any amount it couldn't return (e.g. if
@@ -2214,13 +2296,15 @@ pub mod pallet {
                 // truth and the event reports what we _intended_ to refund.
                 let _ = T::Currency::unreserve(&submitter, balance);
             }
+            let changed = u32::from(T::Currency::free_balance(&submitter) != before);
 
             Self::deposit_event(Event::ReceiptFeeRefunded {
                 receipt_id,
                 submitter,
                 amount: reserved_fee,
             });
-            Ok(())
+            Ok(Some(<T as Config>::WeightInfo::expire_receipt_fee()
+                .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
         /// Update the strikes-to-slash threshold for bad-cert attestations.

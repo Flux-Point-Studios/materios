@@ -45,6 +45,7 @@ impl frame_system::Config for Test {
     type AccountId = MockAccountId;
     type Lookup = IdentityLookup<Self::AccountId>;
     type AccountData = pallet_balances::AccountData<u128>;
+    type OnNewAccount = ();
 }
 
 parameter_types! {
@@ -85,7 +86,7 @@ impl pallet_balances::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type DustRemoval = ();
     type ExistentialDeposit = ExistentialDeposit;
-    type AccountStore = System;
+    type AccountStore = pallet_motra::MatraAccountStore<Test>;
     type WeightInfo = ();
     type FreezeIdentifier = ();
     type MaxFreezes = ConstU32<0>;
@@ -95,7 +96,7 @@ impl pallet_balances::Config for Test {
 
 impl pallet_motra::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = pallet_motra::weights::SubstrateWeight;
+    type WeightInfo = pallet_motra::weights::SubstrateWeight<Test>;
     type TakenFirst = frame_support::traits::Nothing;
 }
 
@@ -113,7 +114,7 @@ parameter_types! {
 
 impl crate::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = crate::weights::SubstrateWeight;
+    type WeightInfo = crate::weights::SubstrateWeight<Test>;
     type MaxResubmits = ConstU32<64>;
     // Integration-test mock mirrors the spec-203 runtime cap (64).
     type MaxCommitteeSize = ConstU32<64>;
@@ -215,6 +216,7 @@ fn submit_receipt_helper(
         storage_locator_hash,
         schema_hash,
     )
+    .map(|_| ()).map_err(|error| error.error)
 }
 
 /// Shorthand: submit a receipt with dummy hashes (varying only receipt_id / content_hash).
@@ -615,7 +617,7 @@ fn e2e_burn_computed_fee_amount() {
         let motra_before = pallet_motra::MotraBalances::<Test>::get(&alice);
 
         // Compute what the fee would be for a submit_receipt extrinsic.
-        let receipt_weight = <crate::weights::SubstrateWeight as OrinqWeightInfo>::submit_receipt();
+        let receipt_weight = <crate::weights::SubstrateWeight<Test> as OrinqWeightInfo>::submit_receipt();
         let encoded_len: usize = 500; // approximate encoded extrinsic length
         let fee = pallet_motra::Pallet::<Test>::compute_fee(receipt_weight, encoded_len);
 

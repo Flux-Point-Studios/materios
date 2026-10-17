@@ -8,7 +8,7 @@ use frame_support::{
 use parity_scale_codec::{Decode, Encode};
 use sp_core::{crypto::AccountId32, H256};
 use sp_runtime::{
-    traits::{AccountIdConversion, BlakeTwo256, IdentityLookup},
+    traits::{AccountIdConversion, IdentityLookup},
     BuildStorage, Perbill,
 };
 
@@ -37,6 +37,7 @@ construct_runtime! {
         Grandpa: pallet_grandpa,
         Balances: pallet_balances,
         OrinqReceipts: pallet_orinq_receipts,
+        Motra: pallet_motra,
     }
 }
 
@@ -94,6 +95,31 @@ impl pallet_balances::Config for Test {
     type RuntimeFreezeReason = RuntimeFreezeReason;
 }
 
+impl pallet_motra::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type WeightInfo = pallet_motra::weights::SubstrateWeight<Test>;
+    type TakenFirst = frame_support::traits::Nothing;
+
+    fn validate_attestation(
+        who: &MockAccountId,
+        call: &RuntimeCall,
+    ) -> Option<sp_runtime::transaction_validity::TransactionValidity> {
+        if let RuntimeCall::OrinqReceipts(crate::Call::attest_availability_cert {
+            receipt_id,
+            claimed_hash,
+        }) = call
+        {
+            Some(
+                OrinqReceipts::validate_attestation(who, *receipt_id, *claimed_hash)
+                    .map(|()| sp_runtime::transaction_validity::ValidTransaction::default())
+                    .map_err(|_| sp_runtime::transaction_validity::InvalidTransaction::Call.into()),
+            )
+        } else {
+            None
+        }
+    }
+}
+
 parameter_types! {
     /// Mock attestor reserve pot — matches the production runtime's
     /// `mat/attr` PalletId so test expectations mirror the real routing.
@@ -119,7 +145,7 @@ const ATTESTATION_REWARD_RESERVE: u128 = 50_000_000_000_000;
 
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = crate::weights::SubstrateWeight;
+    type WeightInfo = crate::weights::SubstrateWeight<Test>;
     type MaxResubmits = ConstU32<64>;
     // Mock mirrors the spec-203 runtime cap (64). Tests under this mock
     // must therefore be tolerant of a larger committee than spec-202's
@@ -141,7 +167,7 @@ fn acc(seed: u8) -> MockAccountId {
 }
 
 /// Build genesis storage for tests.
-fn new_test_ext() -> sp_io::TestExternalities {
+pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     let mut t = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap();
@@ -204,6 +230,7 @@ fn submit(
         dummy_hash(6),       // storage_locator_hash
         dummy_hash(7),       // schema_hash
     )
+    .map(|_| ()).map_err(|error| error.error)
 }
 
 /// Produce the canonical-cert hash for `rid` as it would be

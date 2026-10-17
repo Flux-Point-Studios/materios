@@ -1827,15 +1827,14 @@ fn a_refill_after_the_veto_cannot_hold_off_the_rotation() {
     });
 }
 
-/// The signed-extrinsic envelope (address, signature, era, nonce, tip, length
-/// prefix): constant across senders, so pool priority turns only on the call.
+/// Signed-extrinsic envelope used for the block-admission tests.
 const ENVELOPE: usize = 105;
 
 fn xt_len(call: &RuntimeCall) -> usize {
     call.encoded_size() + ENVELOPE
 }
 
-/// Fee params under which priority tracks declared weight, and balances that
+/// Fee params with a positive congestion price, and balances that
 /// outlast the run so `reconcile` never lowers them.
 fn put_fee_params() {
     pallet_motra::Params::<Runtime>::put(pallet_motra::types::MotraParams {
@@ -1977,11 +1976,13 @@ fn no_fee_can_outbid_the_guardians_veto() {
         let veto = cancel_all();
         assert_eq!(pool_priority(GUARDIAN, &veto), TransactionPriority::MAX);
 
-        // A fee beyond the u64 priority range is capped one below the ceiling.
+        // A fee beyond u64 is capped below the guardian and validator duties.
         pallet_motra::MotraBalances::<Runtime>::insert(acct(Bob), u128::MAX);
-        pallet_motra::Params::<Runtime>::mutate(|p| p.congestion_rate = u128::MAX / 2);
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.congestion_rate = u128::from(TransactionPriority::MAX)
+        });
         let paid = pool_priority(Bob, &stuffer());
-        assert_eq!(paid, TransactionPriority::MAX - 1);
+        assert_eq!(paid, TransactionPriority::MAX - 2);
         assert!(paid < pool_priority(GUARDIAN, &veto));
     });
 }

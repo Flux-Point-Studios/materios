@@ -211,8 +211,6 @@ runtime-benchmarks = [
     # propagates downstream crate switches. Stub benchmarks are tracked in
     # tee-attestation tasks #32 / #33.
     "pallet-tee-attestation/runtime-benchmarks",
-    # pallet-billing declares the runtime-benchmarks feature flag (PR #19)
-    # with skeletal benchmarks; runtime compiles with the feature gated.
     "pallet-billing/runtime-benchmarks",
     "pallet-root-timelock/runtime-benchmarks",
     # pallet-intent-settlement (Wave 2 W2.2 + task #43 / #177) — ships real

@@ -32,9 +32,7 @@ fn new_test_ext() -> TestExternalities {
 
     pallet_sidechain::GenesisConfig::<Runtime> {
         genesis_utxo: sidechain_domain::UtxoId::new(
-            hex_literal::hex!(
-                "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"
-            ),
+            hex_literal::hex!("abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd"),
             0,
         ),
         slots_per_epoch: sidechain_slots::SlotsPerEpoch(7),
@@ -120,4 +118,434 @@ fn matra_total_issuance_conserved_across_n_extrinsics() {
             "recipient must gain exactly the sum transferred"
         );
     });
+}
+
+#[test]
+fn fresh_funding_rpc_and_sponsored_first_fee() {
+    use frame_support::assert_ok;
+    use parity_scale_codec::{Decode, Encode};
+    use sp_runtime::traits::SignedExtension;
+
+    new_test_ext().execute_with(|| {
+        let recipient = sp_keyring::Sr25519Keyring::Eve.to_account_id();
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.generation_per_matra_per_block = 1_000;
+            p.min_fee = 20_000;
+            p.length_fee_per_byte = 0;
+            p.congestion_rate = 0;
+            p.decay_rate_per_block = sp_runtime::Perbill::one();
+            p.max_balance = u128::MAX;
+        });
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(fee_payer()),
+            recipient.clone().into(),
+            1_000_000,
+        ));
+        let rpc = || {
+            let encoded = crate::api::dispatch("MotraApi_motra_balance", &recipient.encode())
+                .expect("runtime API dispatch");
+            u128::decode(&mut &encoded[..]).expect("MOTRA response")
+        };
+        assert_eq!(
+            pallet_motra::AccrualCheckpoint::<Runtime>::get(&recipient),
+            Some((1_000_000, 100))
+        );
+        assert_eq!(rpc(), 0);
+        let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+        let info = frame_support::dispatch::GetDispatchInfo::get_dispatch_info(&call);
+        assert!(pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&recipient, &call, &info, 0)
+            .is_err());
+        assert_ok!(Motra::set_delegatee(
+            RuntimeOrigin::signed(fee_payer()),
+            Some(recipient.clone())
+        ));
+        System::set_block_number(110);
+        let root = sp_io::storage::root(sp_runtime::StateVersion::V1);
+        assert_eq!(rpc(), 10_000);
+        assert_eq!(sp_io::storage::root(sp_runtime::StateVersion::V1), root);
+        assert_ok!(Motra::reconcile(&recipient), rpc());
+        assert!(pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&recipient, &call, &info, 0)
+            .is_err());
+        assert_ok!(Motra::reconcile(&fee_payer()));
+        let sponsored = Motra::motra_balance(&recipient);
+        assert!(sponsored > 10_000);
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&recipient, &call, &info, 0));
+        assert_eq!(Motra::motra_balance(&recipient), sponsored - 20_000);
+    });
+}
+
+#[test]
+fn sovereign_pots_and_subaccounts_do_not_generate_motra() {
+    use frame_support::assert_ok;
+    use sp_runtime::traits::AccountIdConversion;
+
+    new_test_ext().execute_with(|| {
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.generation_per_matra_per_block = 1_000;
+            p.max_balance = u128::MAX;
+        });
+        let pot = PalletId(*b"test/pot");
+        let accounts: [AccountId; 2] = [
+            pot.into_account_truncating(),
+            pot.into_sub_account_truncating(42u32),
+        ];
+        System::set_block_number(100);
+        for account in &accounts {
+            assert_ok!(Balances::transfer_keep_alive(
+                RuntimeOrigin::signed(fee_payer()),
+                sp_runtime::MultiAddress::Id(account.clone()),
+                1_000_000,
+            ));
+        }
+        System::set_block_number(200);
+        for account in accounts {
+            assert_eq!(Motra::projected_balance(&account), 0);
+            assert_ok!(Motra::reconcile(&account), 0);
+        }
+    });
+}
+
+#[test]
+fn legacy_holder_without_stored_motra_can_pay_after_the_upgrade() {
+    use frame_support::{
+        assert_ok,
+        traits::{Hooks, StorageVersion},
+    };
+    use sp_runtime::traits::SignedExtension;
+
+    new_test_ext().execute_with(|| {
+        let who = fee_payer();
+        pallet_motra::AccrualCheckpoint::<Runtime>::remove(&who);
+        pallet_motra::LastTouched::<Runtime>::remove(&who);
+        pallet_motra::MotraBalances::<Runtime>::remove(&who);
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.min_fee = 20_000;
+            p.length_fee_per_byte = 0;
+            p.congestion_rate = 0;
+            p.generation_per_matra_per_block = 1_000;
+            p.decay_rate_per_block = sp_runtime::Perbill::one();
+            p.max_balance = u128::MAX;
+        });
+        StorageVersion::new(0).put::<Motra>();
+        System::set_block_number(1_000_000);
+        Motra::on_runtime_upgrade();
+        assert_eq!(Motra::projected_balance(&who), 0);
+        System::set_block_number(1_000_010);
+        let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+        let info = frame_support::dispatch::GetDispatchInfo::get_dispatch_info(&call);
+        assert_ok!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new().pre_dispatch(&who, &call, &info, 0)
+        );
+        assert_eq!(Motra::total_burned(), 20_000);
+    });
+}
+
+#[test]
+fn checkpoint_proof_uses_the_storage_info_bound() {
+    use frame_support::traits::StorageInfoTrait;
+    let storage = Motra::storage_info()
+        .into_iter()
+        .find(|entry| entry.storage_name == b"AccrualCheckpoint")
+        .expect("checkpoint storage info");
+    // CLI map-size 1,000,000: five trie layers, plus two top-level layers.
+    let bound = u64::from(storage.max_size.expect("bounded checkpoint encoding")) + 7 * 495;
+    assert_eq!(
+        pallet_motra::checkpoint_weight::<Runtime>().proof_size(),
+        bound
+    );
+}
+
+#[test]
+fn checkpoint_transfer_dispatch_weight_covers_both_accounts_and_creation() {
+    use frame_support::dispatch::GetDispatchInfo;
+    use pallet_balances::WeightInfo;
+
+    let call = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+        dest: sp_keyring::Sr25519Keyring::Eve.to_account_id().into(),
+        value: ExistentialDeposit::get(),
+    });
+    let upstream = pallet_balances::weights::SubstrateWeight::<Runtime>::transfer_keep_alive();
+    let checkpoints = pallet_motra::checkpoint_weight::<Runtime>().saturating_mul(2);
+    let actual = call.get_dispatch_info().weight;
+    assert_eq!(actual, upstream.saturating_add(checkpoints));
+    eprintln!("transfer_keep_alive weight: {upstream:?} -> {actual:?}");
+    for (name, base, actual) in [
+        (
+            "transfer_allow_death",
+            pallet_balances::weights::SubstrateWeight::<Runtime>::transfer_allow_death(),
+            <Runtime as pallet_balances::Config>::WeightInfo::transfer_allow_death(),
+        ),
+        (
+            "force_transfer",
+            pallet_balances::weights::SubstrateWeight::<Runtime>::force_transfer(),
+            <Runtime as pallet_balances::Config>::WeightInfo::force_transfer(),
+        ),
+    ] {
+        assert_eq!(actual, base.saturating_add(checkpoints));
+        eprintln!("{name} weight: {base:?} -> {actual:?}");
+    }
+    eprintln!(
+        "reserve/unreserve checkpoint surcharge: {:?}",
+        pallet_motra::checkpoint_weight::<Runtime>()
+    );
+}
+
+#[test]
+fn checkpoint_reaping_transfer_and_reserves_touch_only_changed_accounts() {
+    use frame_support::{assert_ok, traits::ReservableCurrency};
+    let mut ext = new_test_ext();
+    let sender = fee_payer();
+    let receiver = sp_keyring::Sr25519Keyring::Eve.to_account_id();
+    let prefix = pallet_motra::AccrualCheckpoint::<Runtime>::hashed_key_for(&sender)[..32].to_vec();
+    ext.execute_with(|| System::set_block_number(100));
+    ext.commit_all().expect("commit fixture");
+    ext.execute_with(|| {
+        assert_ok!(Balances::transfer_allow_death(
+            RuntimeOrigin::signed(sender.clone()),
+            receiver.clone().into(),
+            FEE_PAYER_SEED - 1,
+        ));
+        assert!(!frame_system::Account::<Runtime>::contains_key(&sender));
+        assert_eq!(
+            pallet_motra::AccrualCheckpoint::<Runtime>::get(&sender),
+            Some((0, 0))
+        );
+    });
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        2
+    );
+    ext.commit_all().expect("commit transfer");
+    ext.execute_with(|| {
+        assert_ok!(Balances::reserve(&receiver, ExistentialDeposit::get()));
+    });
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        1
+    );
+    ext.commit_all().expect("commit reserve");
+    ext.execute_with(|| assert_eq!(Balances::unreserve(&receiver, ExistentialDeposit::get()), 0));
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        1
+    );
+    ext.commit_all().expect("commit unreserve");
+    ext.execute_with(|| {
+        assert_ok!(Balances::reserve(&receiver, 0));
+        assert_eq!(Balances::unreserve(&receiver, 0), 0);
+    });
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn checkpoint_batch_at_block_limit_cannot_finalize_overweight() {
+    use frame_support::{assert_ok, dispatch::GetDispatchInfo, traits::Hooks};
+    use parity_scale_codec::Encode;
+    use sp_runtime::{
+        traits::{Dispatchable, SignedExtension},
+        transaction_validity::InvalidTransaction,
+    };
+
+    new_test_ext().execute_with(|| {
+        System::initialize(&1, &Default::default(), &Default::default());
+        pallet_motra::MotraBalances::<Runtime>::insert(fee_payer(), 1_000_000_000_000_000_000);
+        let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+            dest: sp_keyring::Sr25519Keyring::Eve.to_account_id().into(),
+            value: ExistentialDeposit::get(),
+        });
+        let limits = RuntimeBlockWeights::get();
+        let normal = frame_support::dispatch::DispatchClass::Normal;
+        let operational = frame_support::dispatch::DispatchClass::Operational;
+        let count = (1..=10_000)
+            .take_while(|n| {
+                use pallet_utility::WeightInfo;
+                transfer
+                    .get_dispatch_info()
+                    .weight
+                    .saturating_mul(u64::from(*n))
+                    .saturating_add(<Runtime as pallet_utility::Config>::WeightInfo::batch(*n))
+                    .all_lte(
+                        limits
+                            .get(normal)
+                            .max_total
+                            .expect("normal cap")
+                            .saturating_sub(limits.get(normal).base_extrinsic),
+                    )
+            })
+            .last()
+            .expect("at least one transfer fits");
+        let batch = RuntimeCall::Utility(pallet_utility::Call::batch {
+            calls: vec![transfer.clone(); count as usize],
+        });
+        let info = batch.get_dispatch_info();
+        let len = batch.encoded_size();
+        // Previously admitted work leaves exactly this batch's declared budget.
+        let prior = limits.max_block.ref_time()
+            - info.weight.ref_time()
+            - limits.get(normal).base_extrinsic.ref_time();
+        System::register_extra_weight_unchecked(Weight::from_parts(prior, 0), operational);
+        assert_ok!(frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+            &info, len
+        ));
+        assert_ok!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new().pre_dispatch(
+                &fee_payer(),
+                &batch,
+                &info,
+                len
+            )
+        );
+        let post = batch
+            .dispatch(RuntimeOrigin::signed(fee_payer()))
+            .expect("batch dispatch");
+        assert_ok!(frame_system::CheckWeight::<Runtime>::post_dispatch(
+            Some(()),
+            &info,
+            &post,
+            len,
+            &Ok(())
+        ));
+        assert_eq!(
+            Balances::free_balance(sp_keyring::Sr25519Keyring::Eve.to_account_id()),
+            count as Balance * ExistentialDeposit::get(),
+            "every inner transfer ran"
+        );
+        assert_eq!(
+            frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+                &transfer.get_dispatch_info(),
+                transfer.encoded_size()
+            ),
+            Err(InvalidTransaction::ExhaustsResources.into())
+        );
+        Motra::on_finalize(1);
+        System::finalize();
+        let actual = System::block_weight().total();
+        assert!(
+            actual.all_lte(limits.max_block),
+            "finalized overweight: {actual:?} > {:?}",
+            limits.max_block
+        );
+        eprintln!(
+            "batch transfers={count}, finalized={actual:?}, maximum={:?}",
+            limits.max_block
+        );
+    });
+}
+
+#[test]
+fn checkpoint_currency_callers_and_fee_extension_have_declared_budgets() {
+    let checkpoint = pallet_motra::checkpoint_weight::<Runtime>();
+    macro_rules! covered {
+        ($pallet:ident, $method:ident($($arg:expr),*), $accounts:expr) => {{
+            use $pallet::WeightInfo;
+            let base = $pallet::weights::SubstrateWeight::<Runtime>::$method($($arg),*);
+            let actual = <Runtime as $pallet::Config>::WeightInfo::$method($($arg),*);
+            assert!(actual.all_gte(base.saturating_add(checkpoint.saturating_mul($accounts))),
+                "{}::{} omits checkpoint weight", stringify!($pallet), stringify!($method));
+        }};
+    }
+    covered!(pallet_vesting, vested_transfer(1, 1), 2);
+    covered!(pallet_vesting, force_vested_transfer(1, 1), 2);
+    covered!(pallet_multisig, as_multi_create(2, 0), 1);
+    covered!(pallet_multisig, as_multi_complete(2, 0), 1);
+    covered!(pallet_multisig, cancel_as_multi(2), 1);
+    covered!(pallet_recovery, create_recovery(2), 1);
+    covered!(pallet_recovery, initiate_recovery(), 1);
+    covered!(pallet_recovery, close_recovery(2), 2);
+    covered!(pallet_recovery, remove_recovery(2), 1);
+    covered!(pallet_treasury, payout(), 2);
+    covered!(pallet_treasury, on_initialize_proposals(100), 201);
+    covered!(pallet_intent_settlement, post_settlement_bond(), 1);
+    covered!(pallet_intent_settlement, slash_bad_settlement_evidence(), 4);
+    covered!(pallet_intent_settlement, release_settlement_bond(), 1);
+    use pallet_motra::weights::WeightInfo;
+    assert_eq!(RuntimeBlockWeights::get()
+        .get(frame_support::dispatch::DispatchClass::Normal)
+        .base_extrinsic,
+        ExtrinsicBaseWeight::get().saturating_add(
+            <Runtime as pallet_motra::Config>::WeightInfo::fee_path()));
+}
+
+#[test]
+fn checkpoint_receipt_rewards_return_hook_weight() {
+    use frame_support::traits::Hooks;
+    new_test_ext().execute_with(|| {
+        let who = sp_keyring::Sr25519Keyring::Eve.to_account_id();
+        System::set_block_number(14_400);
+        pallet_orinq_receipts::BlocksAuthored::<Runtime>::insert(&who, 1);
+        let before = System::block_weight();
+        let weight = OrinqReceipts::on_initialize(14_400);
+        assert!(Balances::free_balance(who) > 0, "era rewards were paid");
+        let checkpoint = pallet_motra::checkpoint_weight::<Runtime>();
+        assert!(
+            weight.all_gte(checkpoint.saturating_mul(2)),
+            "reward hook omitted balance checkpoints: {weight:?}"
+        );
+        assert_eq!(
+            System::block_weight(),
+            before,
+            "hook must return its weight"
+        );
+    });
+}
+
+#[test]
+fn checkpoint_settlement_bond_dispatches_use_the_configured_weights() {
+    use frame_support::dispatch::{DispatchClass, GetDispatchInfo, Pays};
+    use pallet_intent_settlement::{types::FraudProof, WeightInfo};
+    type Configured = <Runtime as pallet_intent_settlement::Config>::WeightInfo;
+    let calls = [
+        (
+            pallet_intent_settlement::Call::post_settlement_bond {
+                claim_id: H256::zero(),
+                amount: 1,
+            },
+            Configured::post_settlement_bond(),
+            Pays::Yes,
+        ),
+        (
+            pallet_intent_settlement::Call::slash_bad_settlement_evidence {
+                claim_id: H256::zero(),
+                fraud_proof: FraudProof::TxNotFound,
+                signatures: vec![],
+            },
+            Configured::slash_bad_settlement_evidence(),
+            Pays::No,
+        ),
+        (
+            pallet_intent_settlement::Call::release_settlement_bond {
+                claim_id: H256::zero(),
+            },
+            Configured::release_settlement_bond(),
+            Pays::Yes,
+        ),
+    ];
+    for (call, expected, pays_fee) in calls {
+        let info = RuntimeCall::IntentSettlement(call).get_dispatch_info();
+        assert_eq!(
+            info.weight, expected,
+            "bond dispatch bypassed configured checkpoint weight"
+        );
+        assert_eq!(info.class, DispatchClass::Operational);
+        assert_eq!(info.pays_fee, pays_fee);
+    }
 }

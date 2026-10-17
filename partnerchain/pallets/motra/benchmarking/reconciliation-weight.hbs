@@ -1,0 +1,30 @@
+//! Generated from FRAME Wasm samples; see docs/motra-checkpoint-weights.md.
+//! Execution: median sample, in picoseconds. DB: RocksDB floor.
+//! Proof: sum of independent StorageInfo bounds, checked by runtime tests.
+
+use frame_support::{traits::Get, weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight}};
+
+{{#each benchmarks as |benchmark|}}
+pub fn {{benchmark.name}}<T: frame_system::Config>() -> Weight {
+    let configured = T::DbWeight::get();
+    let minimum = RocksDbWeight::get();
+    let db = RuntimeDbWeight {
+        read: configured.read.max(minimum.read),
+        write: configured.write.max(minimum.write),
+    };
+    {{#if (eq benchmark.name "fee_path")}}
+    let proof = 30_847;
+    {{else}}
+    let proof = 29_346;
+    {{/if}}
+    Weight::from_parts({{underscore benchmark.base_weight}}, proof)
+        .saturating_add(db.reads({{benchmark.base_reads}}))
+        .saturating_add(db.writes({{benchmark.base_writes}}))
+        {{#if (eq benchmark.name "reconcile_legacy")}}
+        // The legacy read is already present in these samples.
+        {{else}}
+        // A missing holding checkpoint additionally reads the legacy baseline.
+        .saturating_add(db.reads(1))
+        {{/if}}
+}
+{{/each}}
