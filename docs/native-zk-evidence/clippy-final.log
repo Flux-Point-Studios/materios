@@ -1,0 +1,17 @@
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+warning: `core2` (lib) generated 2 warnings
+    Checking materios-zk-spec-driver v0.1.0 (/home/deci/work/wt-materios-zk-p0/tools/zk-spec/driver)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.31s

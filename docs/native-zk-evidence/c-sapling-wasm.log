@@ -1,0 +1,53 @@
+argv: ["nice", "-n", "10", "env", "CARGO_TARGET_DIR=.zk-spec-target", "/usr/bin/python3", "tools/zk-spec/check.py", "c-sapling-wasm"]
+exit: 1
+test_full_bundle_on_slowest_supported_validator (contracts.SaplingWasm.test_full_bundle_on_slowest_supported_validator) ... ERROR
+test_pinned_no_std_build_and_imports (contracts.SaplingWasm.test_pinned_no_std_build_and_imports) ... ERROR
+test_real_proofs_and_every_proof_bit_mutation (contracts.SaplingWasm.test_real_proofs_and_every_proof_bit_mutation) ... ERROR
+
+======================================================================
+ERROR: test_full_bundle_on_slowest_supported_validator (contracts.SaplingWasm.test_full_bundle_on_slowest_supported_validator)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 72, in test_full_bundle_on_slowest_supported_validator
+    result = self.query("sapling-benchmark", spends=1, outputs=2, samples=100)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_pinned_no_std_build_and_imports (contracts.SaplingWasm.test_pinned_no_std_build_and_imports)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 45, in test_pinned_no_std_build_and_imports
+    result = self.query("sapling-build")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_real_proofs_and_every_proof_bit_mutation (contracts.SaplingWasm.test_real_proofs_and_every_proof_bit_mutation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 56, in test_real_proofs_and_every_proof_bit_mutation
+    result = self.query("sapling-vectors", min_proofs=20, mutate="every-proof-bit")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.002s
+
+FAILED (errors=3)
+RED: selected=3 ran=3 skipped=0

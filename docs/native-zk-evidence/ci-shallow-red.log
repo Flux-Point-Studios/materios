@@ -1,0 +1,25 @@
+Reproduces hosted CI 101: https://ci.fluxpointstudios.com/repos/26/pipeline/101/4
+Initial clone: git clone --depth 1 --branch impl/native-zk-p0 https://github.com/Flux-Point-Studios/materios.git
+Command before the fix: nice -n 10 python3 tools/zk-spec/test_phases.py
+Exit: 1
+
+...fatal: invalid object name '5460448'.
+E.
+======================================================================
+ERROR: test_original_checks_and_acceptance_are_unchanged (__main__.PhaseTests.test_original_checks_and_acceptance_are_unchanged)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/.zk-spec-scratch/ci-shallow/repo/tools/zk-spec/test_phases.py", line 30, in test_original_checks_and_acceptance_are_unchanged
+    original = json.loads(subprocess.check_output(
+                          ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 466, in check_output
+    return run(*popenargs, stdout=PIPE, timeout=timeout, check=True,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['git', 'show', '5460448:.fluxpoint-spec.json']' returned non-zero exit status 128.
+
+----------------------------------------------------------------------
+Ran 5 tests in 0.008s
+
+FAILED (errors=1)

@@ -1,0 +1,38 @@
+argv: ["nice", "-n", "10", "env", "CARGO_TARGET_DIR=.zk-spec-target", "/usr/bin/python3", "tools/zk-spec/check.py", "c-bridge-datum"]
+exit: 1
+test_reserved_unknown_and_malformed_never_fall_back (contracts.BridgeDatum.test_reserved_unknown_and_malformed_never_fall_back) ... ERROR
+test_rust_aiken_cbor_roundtrip (contracts.BridgeDatum.test_rust_aiken_cbor_roundtrip) ... ERROR
+
+======================================================================
+ERROR: test_reserved_unknown_and_malformed_never_fall_back (contracts.BridgeDatum.test_reserved_unknown_and_malformed_never_fall_back)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 189, in test_reserved_unknown_and_malformed_never_fall_back
+    result = self.query("bridge-datum-invalid", case=case)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_rust_aiken_cbor_roundtrip (contracts.BridgeDatum.test_rust_aiken_cbor_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 179, in test_rust_aiken_cbor_roundtrip
+    result = self.query("bridge-datum", version=1, recipient=recipient)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.001s
+
+FAILED (errors=2)
+RED: selected=2 ran=2 skipped=0

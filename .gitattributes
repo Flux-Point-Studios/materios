@@ -1,0 +1,3 @@
+# Preserve upstream files and captured diagnostics verbatim.
+tools/zk-spec/vendor/** -whitespace
+docs/native-zk-evidence/*.log -whitespace

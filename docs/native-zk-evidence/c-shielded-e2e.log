@@ -1,0 +1,68 @@
+argv: ["nice", "-n", "10", "env", "CARGO_TARGET_DIR=.zk-spec-target", "/usr/bin/python3", "tools/zk-spec/check.py", "c-shielded-e2e"]
+exit: 1
+test_preprod_soak_has_positive_traffic (contracts.ShieldedE2E.test_preprod_soak_has_positive_traffic) ... ERROR
+test_recipient_decrypts_and_viewing_key_reconstructs_history (contracts.ShieldedE2E.test_recipient_decrypts_and_viewing_key_reconstructs_history) ... ERROR
+test_replays_roots_signatures_caps_and_pause (contracts.ShieldedE2E.test_replays_roots_signatures_caps_and_pause) ... ERROR
+test_unrelated_upgrade_preserves_spendable_notes (contracts.ShieldedE2E.test_unrelated_upgrade_preserves_spendable_notes) ... ERROR
+
+======================================================================
+ERROR: test_preprod_soak_has_positive_traffic (contracts.ShieldedE2E.test_preprod_soak_has_positive_traffic)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 299, in test_preprod_soak_has_positive_traffic
+    result = self.query("preprod-soak", min_days=7, min_bundles=500)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_recipient_decrypts_and_viewing_key_reconstructs_history (contracts.ShieldedE2E.test_recipient_decrypts_and_viewing_key_reconstructs_history)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 276, in test_recipient_decrypts_and_viewing_key_reconstructs_history
+    result = self.query("shielded-e2e", amount=100_000_000, sender="A", recipient="B", exit="C")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_replays_roots_signatures_caps_and_pause (contracts.ShieldedE2E.test_replays_roots_signatures_caps_and_pause)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 289, in test_replays_roots_signatures_caps_and_pause
+    self.rejected_without_value_effects(self.query("shielded-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_unrelated_upgrade_preserves_spendable_notes (contracts.ShieldedE2E.test_unrelated_upgrade_preserves_spendable_notes)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 292, in test_unrelated_upgrade_preserves_spendable_notes
+    result = self.query("shielded-upgrade", change="unrelated-pallet-append")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.002s
+
+FAILED (errors=4)
+RED: selected=4 ran=4 skipped=0

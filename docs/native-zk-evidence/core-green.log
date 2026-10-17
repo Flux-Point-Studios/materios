@@ -1,0 +1,38 @@
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+  --> vendor/core2/src/error.rs:14:18
+   |
+14 | use core::alloc::LayoutErr;
+   |                  ^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated type alias `core::alloc::LayoutErr`: Name does not follow std convention, use LayoutError
+   --> vendor/core2/src/error.rs:325:16
+    |
+325 | impl Error for LayoutErr {}
+    |                ^^^^^^^^^
+
+warning: `core2` (lib) generated 2 warnings
+   Compiling materios-zk-core v0.1.0 (/home/deci/work/wt-materios-zk-p0/tools/zk-spec/core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.37s
+     Running unittests src/lib.rs (.zk-spec-target/debug/deps/materios_zk_core-3242a67deba9b756)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/core.rs (.zk-spec-target/debug/deps/core-cdc3ba45f61ab13a)
+
+running 3 tests
+test mainnet_and_unknown_targets_refuse_enablement ... ok
+test canonical_bridge_roundtrips_and_reserved_tags_refuse ... ok
+test public_mainnet_proofs_and_complete_bundles ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.54s
+
+   Doc-tests materios_zk_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

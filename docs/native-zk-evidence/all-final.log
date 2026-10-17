@@ -1,0 +1,943 @@
+specification: validated 4328b0ee893357524ad91c5f2dfc0c962ba8dcfa92e239fb061b8c903161926d
+.............................................
+----------------------------------------------------------------------
+Ran 45 tests in 0.177s
+
+OK
+test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) ... 
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='node') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='runtime') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='genesis') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='metadata') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='imports') ... ERROR
+test_reviewed_post_aj_launch_artifacts_are_identical (contracts.MainnetIsolation.test_reviewed_post_aj_launch_artifacts_are_identical) ... ERROR
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='node')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation mainnet-isolation-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='runtime')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation mainnet-isolation-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='genesis')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation mainnet-isolation-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='metadata')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation mainnet-isolation-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='imports')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation mainnet-isolation-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_reviewed_post_aj_launch_artifacts_are_identical (contracts.MainnetIsolation.test_reviewed_post_aj_launch_artifacts_are_identical)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 26, in test_reviewed_post_aj_launch_artifacts_are_identical
+    result = self.query("mainnet-isolation", baseline="reviewed-launch-after-aj-66")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation mainnet-isolation has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.071s
+
+FAILED (errors=6)
+RED: selected=2 ran=2 skipped=0
+test_full_bundle_on_slowest_supported_validator (contracts.SaplingWasm.test_full_bundle_on_slowest_supported_validator) ... ERROR
+test_pinned_no_std_build_and_imports (contracts.SaplingWasm.test_pinned_no_std_build_and_imports) ... ERROR
+test_real_proofs_and_every_proof_bit_mutation (contracts.SaplingWasm.test_real_proofs_and_every_proof_bit_mutation) ... ERROR
+
+======================================================================
+ERROR: test_full_bundle_on_slowest_supported_validator (contracts.SaplingWasm.test_full_bundle_on_slowest_supported_validator)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 72, in test_full_bundle_on_slowest_supported_validator
+    result = self.query("sapling-benchmark", spends=1, outputs=2, samples=100)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation sapling-benchmark has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 3)
+
+
+======================================================================
+ERROR: test_pinned_no_std_build_and_imports (contracts.SaplingWasm.test_pinned_no_std_build_and_imports)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 45, in test_pinned_no_std_build_and_imports
+    result = self.query("sapling-build")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation sapling-build has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 0)
+
+
+======================================================================
+ERROR: test_real_proofs_and_every_proof_bit_mutation (contracts.SaplingWasm.test_real_proofs_and_every_proof_bit_mutation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 56, in test_real_proofs_and_every_proof_bit_mutation
+    result = self.query("sapling-vectors", min_proofs=20, mutate="every-proof-bit")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation sapling-vectors has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.069s
+
+FAILED (errors=3)
+RED: selected=3 ran=3 skipped=0
+test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) ... 
+  test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='u64-overflow') ... ERROR
+  test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='negative-value-balance') ... ERROR
+  test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='escrow-drain') ... ERROR
+  test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='reserved-balance-spend') ... ERROR
+  test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='dust-reaping') ... ERROR
+  test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='failure-after-debit') ... ERROR
+test_ten_thousand_mixed_runtime_transitions (contracts.SupplyInvariant.test_ten_thousand_mixed_runtime_transitions) ... ERROR
+
+======================================================================
+ERROR: test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='u64-overflow')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 128, in test_boundary_amounts_and_atomic_rejection
+    self.rejected_without_value_effects(self.query("hybrid-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hybrid-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='negative-value-balance')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 128, in test_boundary_amounts_and_atomic_rejection
+    self.rejected_without_value_effects(self.query("hybrid-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hybrid-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='escrow-drain')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 128, in test_boundary_amounts_and_atomic_rejection
+    self.rejected_without_value_effects(self.query("hybrid-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hybrid-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='reserved-balance-spend')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 128, in test_boundary_amounts_and_atomic_rejection
+    self.rejected_without_value_effects(self.query("hybrid-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hybrid-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='dust-reaping')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 128, in test_boundary_amounts_and_atomic_rejection
+    self.rejected_without_value_effects(self.query("hybrid-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hybrid-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_boundary_amounts_and_atomic_rejection (contracts.SupplyInvariant.test_boundary_amounts_and_atomic_rejection) (scenario='failure-after-debit')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 128, in test_boundary_amounts_and_atomic_rejection
+    self.rejected_without_value_effects(self.query("hybrid-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hybrid-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_ten_thousand_mixed_runtime_transitions (contracts.SupplyInvariant.test_ten_thousand_mixed_runtime_transitions)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 93, in test_ten_thousand_mixed_runtime_transitions
+    result = self.query("hybrid-sequence", operations=operations, initial=1_000_000,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hybrid-sequence has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 5)
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.102s
+
+FAILED (errors=7)
+RED: selected=2 ran=2 skipped=0
+test_core_runs_in_network_namespace_with_no_egress (contracts.MidnightBlackhole.test_core_runs_in_network_namespace_with_no_egress) ... ERROR
+
+======================================================================
+ERROR: test_core_runs_in_network_namespace_with_no_egress (contracts.MidnightBlackhole.test_core_runs_in_network_namespace_with_no_egress)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 133, in test_core_runs_in_network_namespace_with_no_egress
+    result = self.query("midnight-blackhole", profile="no-midnight", network="isolated-netns")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation midnight-blackhole has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+----------------------------------------------------------------------
+Ran 1 test in 0.065s
+
+FAILED (errors=1)
+RED: selected=1 ran=1 skipped=0
+test_actual_metadata_preserves_old_encoding (contracts.MetadataAppendOnly.test_actual_metadata_preserves_old_encoding) ... ERROR
+test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) ... 
+  test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='insert-error-in-middle') ... ERROR
+  test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='insert-event-in-middle') ... ERROR
+  test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='reuse-pallet-index') ... ERROR
+  test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='change-signed-extra') ... ERROR
+  test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='stale-manifest') ... ERROR
+  test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='shrink-bound-without-review') ... ERROR
+
+======================================================================
+ERROR: test_actual_metadata_preserves_old_encoding (contracts.MetadataAppendOnly.test_actual_metadata_preserves_old_encoding)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 149, in test_actual_metadata_preserves_old_encoding
+    result = self.query("metadata-diff", gate="494", baseline="captured-preprod-code")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation metadata-diff has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+======================================================================
+ERROR: test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='insert-error-in-middle')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 171, in test_shifted_errors_and_stale_manifest_fail_gate
+    self.assertNotEqual(self.query("metadata-mutant", mutation=mutation)["gate_exit"], 0)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation metadata-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='insert-event-in-middle')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 171, in test_shifted_errors_and_stale_manifest_fail_gate
+    self.assertNotEqual(self.query("metadata-mutant", mutation=mutation)["gate_exit"], 0)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation metadata-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='reuse-pallet-index')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 171, in test_shifted_errors_and_stale_manifest_fail_gate
+    self.assertNotEqual(self.query("metadata-mutant", mutation=mutation)["gate_exit"], 0)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation metadata-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='change-signed-extra')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 171, in test_shifted_errors_and_stale_manifest_fail_gate
+    self.assertNotEqual(self.query("metadata-mutant", mutation=mutation)["gate_exit"], 0)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation metadata-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='stale-manifest')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 171, in test_shifted_errors_and_stale_manifest_fail_gate
+    self.assertNotEqual(self.query("metadata-mutant", mutation=mutation)["gate_exit"], 0)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation metadata-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_shifted_errors_and_stale_manifest_fail_gate (contracts.MetadataAppendOnly.test_shifted_errors_and_stale_manifest_fail_gate) (mutation='shrink-bound-without-review')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 171, in test_shifted_errors_and_stale_manifest_fail_gate
+    self.assertNotEqual(self.query("metadata-mutant", mutation=mutation)["gate_exit"], 0)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation metadata-mutant has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.073s
+
+FAILED (errors=7)
+RED: selected=2 ran=2 skipped=0
+test_reserved_unknown_and_malformed_never_fall_back (contracts.BridgeDatum.test_reserved_unknown_and_malformed_never_fall_back) ... ERROR
+test_rust_aiken_cbor_roundtrip (contracts.BridgeDatum.test_rust_aiken_cbor_roundtrip) ... ERROR
+
+======================================================================
+ERROR: test_reserved_unknown_and_malformed_never_fall_back (contracts.BridgeDatum.test_reserved_unknown_and_malformed_never_fall_back)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 189, in test_reserved_unknown_and_malformed_never_fall_back
+    result = self.query("bridge-datum-invalid", case=case)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation bridge-datum-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_rust_aiken_cbor_roundtrip (contracts.BridgeDatum.test_rust_aiken_cbor_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 179, in test_rust_aiken_cbor_roundtrip
+    result = self.query("bridge-datum", version=1, recipient=recipient)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation bridge-datum has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.068s
+
+FAILED (errors=2)
+RED: selected=2 ran=2 skipped=0
+RED c-motra-66: AJ tests missing: accrual_account_creation_initializes_clock, accrual_cycling_ten_accounts_cannot_multiply_generation, accrual_fresh_account_starts_at_funding, accrual_projection_matches_safe_reconciliation, accrual_round_trip_cannot_restore_spent_interval, accrual_sovereign_accounts_never_generate, accrual_sovereign_cannot_generate_for_delegatee, accrual_top_up_does_not_backdate_holdings
+test_consumer_pins_backend_vk_version_domain_and_trust (contracts.HubOtherChains.test_consumer_pins_backend_vk_version_domain_and_trust) ... ERROR
+test_finality_and_inclusion_require_pinned_context (contracts.HubOtherChains.test_finality_and_inclusion_require_pinned_context) ... ERROR
+test_same_groth16_proof_on_both_preprod_chains (contracts.HubOtherChains.test_same_groth16_proof_on_both_preprod_chains) ... ERROR
+
+======================================================================
+ERROR: test_consumer_pins_backend_vk_version_domain_and_trust (contracts.HubOtherChains.test_consumer_pins_backend_vk_version_domain_and_trust)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 212, in test_consumer_pins_backend_vk_version_domain_and_trust
+    result = self.query("hub-consumer", mutation=mutation)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hub-consumer has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_finality_and_inclusion_require_pinned_context (contracts.HubOtherChains.test_finality_and_inclusion_require_pinned_context)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 196, in test_finality_and_inclusion_require_pinned_context
+    result = self.query("hub-finality", fixture="offline-grandpa-authority-transition")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation hub-finality has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_same_groth16_proof_on_both_preprod_chains (contracts.HubOtherChains.test_same_groth16_proof_on_both_preprod_chains)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 221, in test_same_groth16_proof_on_both_preprod_chains
+    result = self.query("dual-groth16", fixture="production-parameters")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation dual-groth16 has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.068s
+
+FAILED (errors=3)
+RED: selected=3 ran=3 skipped=0
+test_cap_and_cheap_admission_before_crypto (contracts.Fees.test_cap_and_cheap_admission_before_crypto) ... ERROR
+test_zero_congestion_still_prices_verification (contracts.Fees.test_zero_congestion_still_prices_verification) ... ERROR
+
+======================================================================
+ERROR: test_cap_and_cheap_admission_before_crypto (contracts.Fees.test_cap_and_cheap_admission_before_crypto)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 247, in test_cap_and_cheap_admission_before_crypto
+    result = self.query("admission-flood", attempts=10000)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation admission-flood has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_zero_congestion_still_prices_verification (contracts.Fees.test_zero_congestion_still_prices_verification)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 237, in test_zero_congestion_still_prices_verification
+    result = self.query("fees", congestion=0, same_encoded_length=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation fees has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.066s
+
+FAILED (errors=2)
+RED: selected=2 ran=2 skipped=0
+test_cardano_wallet_lock_and_full_lane_roundtrip (contracts.HybridUtxo.test_cardano_wallet_lock_and_full_lane_roundtrip) ... ERROR
+test_nonced_account_intents_and_outpoint_conflicts (contracts.HybridUtxo.test_nonced_account_intents_and_outpoint_conflicts) ... ERROR
+
+======================================================================
+ERROR: test_cardano_wallet_lock_and_full_lane_roundtrip (contracts.HybridUtxo.test_cardano_wallet_lock_and_full_lane_roundtrip)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 267, in test_cardano_wallet_lock_and_full_lane_roundtrip
+    result = self.query("wallet-hybrid-roundtrip", network="preprod", signer="cip30-test-wallet")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation wallet-hybrid-roundtrip has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+======================================================================
+ERROR: test_nonced_account_intents_and_outpoint_conflicts (contracts.HybridUtxo.test_nonced_account_intents_and_outpoint_conflicts)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 257, in test_nonced_account_intents_and_outpoint_conflicts
+    result = self.query("utxo-pool", processes=4, independent_spends=200)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation utxo-pool has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.067s
+
+FAILED (errors=2)
+RED: selected=2 ran=2 skipped=0
+test_preprod_soak_has_positive_traffic (contracts.ShieldedE2E.test_preprod_soak_has_positive_traffic) ... ERROR
+test_recipient_decrypts_and_viewing_key_reconstructs_history (contracts.ShieldedE2E.test_recipient_decrypts_and_viewing_key_reconstructs_history) ... ERROR
+test_replays_roots_signatures_caps_and_pause (contracts.ShieldedE2E.test_replays_roots_signatures_caps_and_pause) ... ERROR
+test_unrelated_upgrade_preserves_spendable_notes (contracts.ShieldedE2E.test_unrelated_upgrade_preserves_spendable_notes) ... ERROR
+
+======================================================================
+ERROR: test_preprod_soak_has_positive_traffic (contracts.ShieldedE2E.test_preprod_soak_has_positive_traffic)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 299, in test_preprod_soak_has_positive_traffic
+    result = self.query("preprod-soak", min_days=7, min_bundles=500)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation preprod-soak has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+======================================================================
+ERROR: test_recipient_decrypts_and_viewing_key_reconstructs_history (contracts.ShieldedE2E.test_recipient_decrypts_and_viewing_key_reconstructs_history)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 276, in test_recipient_decrypts_and_viewing_key_reconstructs_history
+    result = self.query("shielded-e2e", amount=100_000_000, sender="A", recipient="B", exit="C")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation shielded-e2e has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 4)
+
+
+======================================================================
+ERROR: test_replays_roots_signatures_caps_and_pause (contracts.ShieldedE2E.test_replays_roots_signatures_caps_and_pause)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 289, in test_replays_roots_signatures_caps_and_pause
+    self.rejected_without_value_effects(self.query("shielded-invalid", scenario=scenario))
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation shielded-invalid has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_unrelated_upgrade_preserves_spendable_notes (contracts.ShieldedE2E.test_unrelated_upgrade_preserves_spendable_notes)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 292, in test_unrelated_upgrade_preserves_spendable_notes
+    result = self.query("shielded-upgrade", change="unrelated-pallet-append")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation shielded-upgrade has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.070s
+
+FAILED (errors=4)
+RED: selected=4 ran=4 skipped=0
+test_differential_results_and_dark_rollout (contracts.HostCoverage.test_differential_results_and_dark_rollout) ... ERROR
+test_one_lagging_node_or_stale_attestation_blocks (contracts.HostCoverage.test_one_lagging_node_or_stale_attestation_blocks) ... ERROR
+
+======================================================================
+ERROR: test_differential_results_and_dark_rollout (contracts.HostCoverage.test_differential_results_and_dark_rollout)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 316, in test_differential_results_and_dark_rollout
+    result = self.query("host-differential", cases=10000, network="isolated-devnet")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation host-differential has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+======================================================================
+ERROR: test_one_lagging_node_or_stale_attestation_blocks (contracts.HostCoverage.test_one_lagging_node_or_stale_attestation_blocks)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 312, in test_one_lagging_node_or_stale_attestation_blocks
+    result = self.query("host-coverage", fault=fault)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation host-coverage has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.070s
+
+FAILED (errors=2)
+RED: selected=2 ran=2 skipped=0
+test_authority_and_evidence_absence_deny_activation (contracts.ActivationGates.test_authority_and_evidence_absence_deny_activation) ... ERROR
+test_every_activation_path_retains_all_authority_holds (contracts.ActivationGates.test_every_activation_path_retains_all_authority_holds) ... ERROR
+test_no_mainnet_chain_spec_can_enable_any_zk_pallet (contracts.ActivationGates.test_no_mainnet_chain_spec_can_enable_any_zk_pallet) ... ERROR
+
+======================================================================
+ERROR: test_authority_and_evidence_absence_deny_activation (contracts.ActivationGates.test_authority_and_evidence_absence_deny_activation)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 359, in test_authority_and_evidence_absence_deny_activation
+    result = self.query("activation-gate-simulation", absent=absent)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation activation-gate-simulation has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 1)
+
+
+======================================================================
+ERROR: test_every_activation_path_retains_all_authority_holds (contracts.ActivationGates.test_every_activation_path_retains_all_authority_holds)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 345, in test_every_activation_path_retains_all_authority_holds
+    result = self.query("activation-hold-coverage", packet_scope="preprod-only",
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation activation-hold-coverage has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+======================================================================
+ERROR: test_no_mainnet_chain_spec_can_enable_any_zk_pallet (contracts.ActivationGates.test_no_mainnet_chain_spec_can_enable_any_zk_pallet)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 329, in test_no_mainnet_chain_spec_can_enable_any_zk_pallet
+    result = self.query("mainnet-zk-enablement", packet_scope="preprod-only",
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 94, in query
+    output = run_argv([str(self.binary)], self.root, timeout=3600 if operation.startswith("p0-") else 300,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-p0/tools/zk-spec/check.py", line 50, in run_argv
+    raise CheckFailure(f"command exit {result.returncode}: {argv[0]}: {result.stderr[-1200:]}")
+check.CheckFailure: command exit 1: /home/deci/work/wt-materios-zk-p0/.zk-spec-target/debug/materios-zk-spec-driver: operation mainnet-zk-enablement has no implemented production path/artifact in P0; later-phase runtime evidence remains required (payload fields: 2)
+
+
+----------------------------------------------------------------------
+Ran 3 tests in 0.070s
+
+FAILED (errors=3)
+RED: selected=3 ran=3 skipped=0
+test_core_build_and_real_tests_without_network (p0_contracts.CoreNoEgress.test_core_build_and_real_tests_without_network) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 30.526s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_injected_dependency_fails_exclusion_gate (p0_contracts.MidnightNegativeControl.test_injected_dependency_fails_exclusion_gate) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.172s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_source_routes_refuse_mainnet_and_impersonation (p0_contracts.MainnetRefusal.test_source_routes_refuse_mainnet_and_impersonation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.528s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_actual_runtime_against_explicit_source_baseline_and_mutants (p0_contracts.MetadataCompat.test_actual_runtime_against_explicit_source_baseline_and_mutants) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 4.734s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_rust_and_aiken_evaluation (p0_contracts.BridgeCodec.test_rust_and_aiken_evaluation) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 0.141s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+test_mainnet_proofs_mutations_and_complete_wasm_bundles (p0_contracts.SaplingSpike.test_mainnet_proofs_mutations_and_complete_wasm_bundles) ... ok
+
+----------------------------------------------------------------------
+Ran 1 test in 150.521s
+
+OK
+GREEN: selected=1 ran=1 skipped=0
+
+Phase check report
+c-mainnet-isolation: RED
+c-sapling-wasm: RED
+c-supply-invariant: RED
+c-midnight-blackhole: RED
+c-metadata-append-only: RED
+c-bridge-datum: RED
+c-motra-66: RED
+c-hub-other-chains: RED
+c-fees: RED
+c-hybrid-utxo: RED
+c-shielded-e2e: RED
+c-host-coverage: RED
+c-activation-gates: RED
+c-p0-core-no-egress: GREEN
+c-p0-midnight-negative-control: GREEN
+c-p0-mainnet-refusal: GREEN
+c-p0-metadata-compat: GREEN
+c-p0-bridge-codec: GREEN
+c-p0-sapling-spike: GREEN
