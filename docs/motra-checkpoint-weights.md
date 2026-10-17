@@ -21,13 +21,43 @@ caller/recipient clocks and intervals of 100,000, 1,000,000 and u32::MAX blocks.
 An additional legacy baseline read covers the fallback branch even when the
 longer two-clock benchmark uses an existing checkpoint.
 
-The complete fee path (reconcile, burn, post-dispatch refund) is added once to
-`RuntimeBlockWeights.base_extrinsic`. Validation uses discarded storage and is
-outside block execution. The minimum and length fee remain paid; the dispatch
-weight fee is refunded at the pre-dispatch congestion rate. `TotalBurned` is
-net of the amount actually credited. `FeeRefunded` is appended to the event
-enum. Existing calls, storage encodings, SignedExtra and transaction version 5
-are unchanged.
+Paid transactions price the complete signed ref_time:
+`min_fee + R * (base_extrinsic + call_weight) / 1_000_000 + length_fee_per_byte * length`.
+The signed base contains ExtrinsicBaseWeight and the complete MOTRA fee path.
+The flat minimum is an additional floor; it does not replace congestion pricing
+of the signed base. Arithmetic uses the SDK's wide rational multiplication.
+Post-dispatch refunds retain the signed base, minimum and length charge at the
+pre-dispatch rate, including at saturation. Credit is bounded by max_balance;
+TotalBurned and FeeRefunded reflect only the amount actually credited.
+
+Paid pool priority is `min_fee + R * base_extrinsic / 1_000_000`, capped at
+u64::MAX-2. Length and refundable call declarations earn no extra priority.
+This deliberately gives equal priority to ordinary paid calls at a given R.
+The guardian remains at u64::MAX with its existing per-signer tag.
+
+Canonical committee attestation is a feeless validator duty at the fixed
+priority u64::MAX-1, independent of R and batch width. ChargeMotra calls the
+runtime's IsSubType classifier before reconciliation or payment, both in pool
+validation and pre_dispatch. A duty requires a current committee member, an
+existing uncertified receipt, the canonical hash and no prior attestation by
+that signer. Invalid duties never increment InsufficientMotraFailures.
+Pool tags contain signer and receipt; batches cannot repeat a receipt.
+Wrong hashes are rejected because bad-hash dispatch otherwise does not consume
+a signer slot and would permit unlimited free retries. The dispatch's late
+certification no-op remains a backstop for paid wrappers and privileged paths.
+
+Nonempty Utility.batch and Utility.batch_all containing only direct attests
+receive the same policy and one tag per receipt. Mixed, nested and other wrappers
+retain paid behavior; no arbitrary inner call inherits the exemption. A pure
+batch cannot certify or remove a member for a different inner receipt before
+its turn: receipt IDs are unique and every hash is canonical. Pre-dispatch
+rechecks reject pool entries invalidated by certification or committee changes.
+The fee extension releases only its unused fee_path base budget for a duty;
+signature, Utility and measured attestation work remain charged to block weight.
+The measurements include the complete ChargeMotra duty pre/dispatch/post path.
+
+Existing calls, storage encodings, SignedExtra and transaction version 5 are
+unchanged. This remains an unreleased spec241 candidate.
 
 ## Currency path audit
 
@@ -69,8 +99,9 @@ privileged certification, bond/unbond, slash, expiry and attestation return
 actual weight. Threshold attestation snapshots unique signer, treasury and
 escrow-payer balances and counts the accounts whose free balance changes. The
 96-signer maximum with reward and fee distribution changes 97 accounts, for
-both an existing treasury and the dead-treasury refund path. Non-threshold and
-late attestations return the measured base without checkpoints. Bad-hash
+both an existing treasury and the dead-treasury refund path. Non-threshold
+attestations return a measured function of the actual signer count; late calls
+retain the maximum non-threshold bound, without checkpoints. Bad-hash
 slashing has its own measured base and counts its changed accounts.
 
 Runtime regressions commit fixtures before dispatch and inspect real checkpoint
@@ -83,103 +114,97 @@ Receipt era rewards run every 14,400 blocks; their returned initialization
 weight includes every attempted balance mutation. The separate author-map
 traversal remains outside these checkpoint bounds.
 
-## Measurements and reproducibility
+## Measurements and capacity
 
-Gemtek: AMD Ryzen 7 7730U, 8 cores / 16 threads, 28 GiB RAM, Linux
-6.17.0-22-generic. Rust 1.85.0, SDK c455194a, frame-omni-bencher 0.7.0
-(benchmark CLI 43.0.0). All local heavy work uses the shared Cargo build lock,
-`nice -n 10`, four jobs and an isolated target directory.
-
-From `partnerchain/`, set `CARGO_TARGET_DIR` to the isolated target and
-`WASM_BUILD_WORKSPACE_HINT` to this checkout's `partnerchain/` directory:
+Gemtek Ryzen 7 7730U, Rust 1.85.0, SDK c455194a. Builds and benchmarks use the
+shared Cargo lock, nice10, four jobs and a target exclusive to this worktree.
+Measurement Wasm SHA-256: `d9d3f7a2f803b59add58daf84a883fe231ea8c6a71c248ac2a3c4d80d2b3d8d3`.
+Run the following from `partnerchain/` with the isolated CARGO_TARGET_DIR and
+WASM_BUILD_WORKSPACE_HINT set, inside the shared-lock/nice wrapper.
 
 ```sh
 cargo build -p materios-runtime --features runtime-benchmarks --locked
-frame-omni-bencher v1 benchmark pallet \
-  --runtime "$CARGO_TARGET_DIR/debug/wbuild/materios-runtime/materios_runtime.wasm" \
-  --pallet pallet_motra --extrinsic '*' \
+frame-omni-bencher v1 benchmark pallet --runtime <measurement.wasm> \
+  --pallet pallet_orinq_receipts \
+  --extrinsic 'attest_non_threshold,attest_repeated,attest_threshold,attest_dead_treasury,attest_bad_hash' \
   --steps 20 --repeat 20 --external-repeat 3 --output-analysis max \
   --map-size 1000000 --additional-trie-layers 2 \
   --genesis-builder runtime --genesis-builder-preset development \
-  --json-file motra-benchmarks.json
+  --json-file attestation-benchmarks.json
 ```
 
-The receipt command substitutes `--pallet pallet_orinq_receipts` and its own
-JSON output. Reconciliation and receipt attestation samples are retained in
-`pallets/motra/benchmarking/reconciliation-samples.json` and
-`pallets/orinq-receipts/benchmarking/attestation-samples.json`; templates beside
-them generate the weight functions using `--json-input`, `--template` and
-`--output`, followed by `rustfmt --edition 2021`. The prior checkpoint run used
-50 steps, 100 repeats and five external repeats; its raw JSON is retained as
-`checkpoint-samples.json`. Runtime tests pin the checkpoint, claim, delegation
-and fee ref_time and database counts to those samples, bound every measured
-reconciliation case, and derive proof bounds independently from StorageInfo.
+The fee-path run uses the same arguments with `--pallet pallet_motra
+--extrinsic fee_path`. Raw samples are committed beside the weight functions.
+Regenerate the coefficients and their formatting with
+`python3 pallets/motra/benchmarking/generate_fee_weights.py`. It starts from
+FRAME's `--output-analysis max` statistical fit and never lowers its base or
+slope. For non-threshold attests, it anchors the base at the larger of the FRAME
+base and zero-prior-signers median, then raises the slope to cover the median at
+every measured signer count. For the other paths it retains the FRAME slope
+and raises the intercept to cover those medians. This is a statistical fit,
+not a worst-observed-sample bound: non-threshold medians span about 80–88 µs,
+while isolated samples reach 144 µs. All raw samples remain committed.
 
-Measured Wasm SHA-256:
+Non-threshold measurements vary prior signers from 0 to 95; duplicate backstops
+vary from 1 to 96. Valid non-threshold, threshold and dead-treasury measurements
+execute ChargeMotra pre_dispatch, real runtime dispatch and ChargeMotra
+post_dispatch, including classifier/tag allocation and unused fee-base release.
+Returned weights also cover the duplicate-backstop fit. Runtime tests compare
+the per-count medians independently and derive proof bounds from StorageInfo.
+The complete paid fee-path bound uses its largest execution sample plus floored
+database costs and the legacy read. These policies distinguish execution
+estimates from hard storage/proof bounds; neither claims block-import latency.
 
-- MOTRA: `792e66e68c2c864389cd7e59c13b3a4581ec8d31f5aeefef31732a783845d279`
-- Receipts: `80f2ec8f84762507082bccb2953d3a2be414fa5139bd0e7361cd7f99d9a8be0b`
-- Prior checkpoint: `a91044ae7c4583cb877e236bf8729429dd7e3f653c44ca3a976123cc7a1e9657`
+| Capacity under the normal block budget | Count |
+|---|---:|
+| Separately signed transfers | 920 |
+| Separately signed non-threshold attests | 7873 |
+| Non-threshold attests in pure Utility batches | 16121 in 878 batches |
 
-| Measured MOTRA path | Execution ref_time | Unique reads/writes | Charged ref_time |
-| --- | ---: | ---: | ---: |
-| Claim | 197,014,000 | 9 / 6, plus legacy read | 1,047,014,000 |
-| Set delegatee | 198,657,000 | 9 / 7, plus legacy read | 1,148,657,000 |
-| Reconcile u32::MAX | 198,197,000 | 9 / 6, plus legacy read | 1,048,197,000 |
-| Reconcile 100,000 | 106,833,000 | 9 / 6, plus legacy read | bounded by reconcile above |
-| Reconcile 1,000,000 | 112,053,000 | 9 / 6, plus legacy read | bounded by reconcile above |
-| Legacy reconcile | 138,794,000 | 10 / 6 | bounded by reconcile above |
-| Fee pre + post | 189,660,000 | 10 / 7, plus legacy read | 1,164,660,000 |
+The attestation loops execute CheckWeight, ChargeMotra, real runtime dispatch
+and both post-dispatch paths; each recorded signer and receipt is checked.
+Admission reserves the threshold payout bound, then refunds unused call and
+fee work. The batched regression must meet round four's 15,138 count. These
+are protocol capacity measurements, not live TPS or daemon rollout claims.
+DbWeight=() is unchanged and #71 must recalculate capacity after its fix.
 
-Map proofs sum `max_size + 7*495` per independent key; values sum
-`max_size + 3*495`. Reconciliation covers System.Account, Params, two balances,
-two clocks, checkpoint, delegatee, TotalIssued and LegacyAccrualStart: 29,346
-bytes. The fee path adds TotalBurned: 30,847 bytes. This avoids taking only the
-largest prefix when multiple independent prefixes are accessed.
+The maximum dormant-claim batch remains a native TestExternalities execution
+regression backed by independent Wasm samples. Its native elapsed time excludes
+RocksDB and import/commit work and is not evidence of full block-import latency.
 
-Receipt measurements cover n=1..96 signers, normal and dead-treasury payout,
-non-threshold submission and bad-hash slashing. Non-threshold execution is
-48,973,000; threshold execution is the maximum of
-`129,230,520 + 55,051,141*n` and `157,357,000 + 49,530,379*n`.
-Their base proofs exclude the separately charged checkpoints: 20,083 bytes
-non-threshold, 43,329 + 7,122*n threshold, 29,185 bad-hash.
+## Fee and priority evidence
 
-## Capacity
+Fees below are MOTRA (15 decimals). Length is the SCALE-encoded signed
+extrinsic length with an sr25519 signature, immortal era and nonce zero.
+These calls have no fee refund beyond the duty exemption; fee equals escrow.
+Non-members are invalid before payment. At R=0, only minimum and length remain.
 
-The Normal block budget is 1,500,000,000,000 ref_time. The signed base is
-107,074,000 generic execution plus 1,164,660,000 fee work = **1,271,734,000**.
+| R | Call | Bytes | Fee / escrow (MOTRA) | Priority |
+|---:|---|---:|---:|---:|
+| 0 | transfer | 139 | 0.000001139 | 1000000000 |
+| 0 | remark | 106 | 0.000001106 | 1000000000 |
+| 0 | attest_member | 169 | 0 | 18446744073709551614 |
+| 0 | attest_non_member | 169 | Rejected | — |
+| 0 | claim | 105 | 0.000001105 | 1000000000 |
+| 0 | set_delegatee | 138 | 0.000001138 | 1000000000 |
+| 1,000,000,000 | transfer | 139 | 0.001630994 | 1294926000000 |
+| 1,000,000,000 | remark | 106 | 0.001296169744 | 1294926000000 |
+| 1,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
+| 1,000,000,000 | attest_non_member | 169 | Rejected | — |
+| 1,000,000,000 | claim | 105 | 0.002342045 | 1294926000000 |
+| 1,000,000,000 | set_delegatee | 138 | 0.002443721 | 1294926000000 |
+| 50,000,000,000 | transfer | 139 | 0.081493889 | 64697300000000 |
+| 50,000,000,000 | remark | 106 | 0.0647542932 | 64697300000000 |
+| 50,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
+| 50,000,000,000 | attest_non_member | 169 | Rejected | — |
+| 50,000,000,000 | claim | 105 | 0.117048105 | 64697300000000 |
+| 50,000,000,000 | set_delegatee | 138 | 0.122130288 | 64697300000000 |
 
-| Dispatch | Call ref_time | Including signed base |
-| --- | ---: | ---: |
-| transfer_keep_alive | 335,929,000 | 1,607,663,000 |
-| claim_motra | 1,047,014,000 | 2,318,748,000 |
-| set_delegatee | 1,148,657,000 | 2,420,391,000 |
-| Attest non-threshold actual | 48,973,000 | 1,320,707,000 |
-| Attest 96-signer threshold actual (97 checkpoints) | 19,855,985,056 | 21,127,719,056 |
-| Attest admission bound (98 checkpoints) | 20,004,870,056 | 21,276,604,056 |
-
-Transfers fit **933/block** by ref_time before other initialization, length or
-proof limits. A real CheckWeight/pre-dispatch/call/post-dispatch loop admits
-**1,120 non-threshold attests**, versus 70 with no actual-weight refunds under
-these new measured declarations and about 34 at the reviewed head. The ideal
-actual-only ceiling is 1,135; admission must leave room for a possible threshold
-call. Individually signed calls cannot restore pre-#68's 14,007 count while
-reserving the full fee path per extrinsic.
-
-Existing `Utility.batch` does meet the requested attestation count: a real
-CheckWeight/ChargeMotra/dispatch/post-dispatch loop admits **15,138
-non-threshold attestations in 520 signed batches**, using 1,479,835,961,258
-ref_time. Batch width shrinks with the remaining admission budget; every
-inner receipt is checked for its single recorded signer and uncertified state.
-Removing attestation actual-weight refunds makes this same regression fail at
-74 attestations. This is protocol batching capacity, not separate signed
-transaction capacity or a claim that cert-daemons already batch submissions.
-
-A real maximum Utility/as_derivative batch runs 1,411 dormant delegated claims
-at u32::MAX. Tests check every inner clock and compare the sum of worst Wasm
-claim samples (400,639,340,000 ref_time) against its declared total
-1,499,275,194,121. The isolated native run took 928,041,387,000 ref_time (0.928 seconds), within
-the declared bound. Concurrent test scheduling is not a runtime cost measurement.
+The 1,000-full-block empty-remark simulation reaches R=50,000,000,000 at a total
+cost of 37455.9095174112 MOTRA, with the same R-priced signed-weight formula as a
+transfer at every step. A zero-MOTRA member then certifies a receipt through
+the fee extension and runtime dispatch. Regressions also reproduce and close
+priority inflation from early-failing Utility batches and multisig max_weight.
 
 ## Conditional Currency refunds
 
@@ -246,7 +271,14 @@ MOTRA checkpoint, reconciliation and fee weights use the RocksDB floor and do
 not depend on zero DbWeight. The fee-router/perp-removal migrations already
 use a RocksDB floor for their base work and add the checkpoint increments.
 
-Settlement #51 must merge before #68. Both oracle and settlement currently
-resolve to ff0efeddad5dfa3a948f6b4e425b4546e39fbbe4; after #51 merges, both pins
-must move together to its merged main commit and validation must be repeated.
-No merge, deployment or enactment is authorized by this round.
+Settlement #51 is merged. Both pallet-intent-settlement and pallet-oracle pin
+`feb79e00510d0083de67bc3219e442f802cd1101`; its tree equals the reviewed ff0efed
+tree. The changed checkout path changes the Wasm artifact and is covered by
+the rebuilt candidate and live read-only metadata gate.
+
+Genesis-relevant fee-path layout work is tracked in
+[#75](https://github.com/Flux-Point-Studios/materios/issues/75); legacy sponsorship,
+hook accounting and the unused reconcile API in
+[#76](https://github.com/Flux-Point-Studios/materios/issues/76); settlement's weight
+examples and Pays::No documentation in
+[settlement #53](https://github.com/Flux-Point-Studios/materios-intent-settlement/issues/53).

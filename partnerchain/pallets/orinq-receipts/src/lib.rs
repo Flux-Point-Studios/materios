@@ -1048,6 +1048,34 @@ pub mod pallet {
             before.iter().filter(|(who, balance)| T::Currency::free_balance(who) != **balance).count() as u32
         }
 
+        /// A duty slot is consumed only by a new canonical attestation.
+        pub fn validate_attestation(
+            who: &T::AccountId,
+            receipt_id: H256,
+            claimed_hash: [u8; 32],
+        ) -> DispatchResult {
+            ensure!(
+                CommitteeMembers::<T>::get().contains(who),
+                Error::<T>::NotCommitteeMember
+            );
+            let record = Receipts::<T>::get(receipt_id).ok_or(Error::<T>::ReceiptNotFound)?;
+            ensure!(
+                record.availability_cert_hash == [0; 32],
+                Error::<T>::CertHashMismatch
+            );
+            if let Some((hash, signers)) = Attestations::<T>::get(receipt_id) {
+                ensure!(
+                    hash == H256::from(claimed_hash) && !signers.contains(who),
+                    Error::<T>::CertHashMismatch
+                );
+            }
+            ensure!(
+                Self::canonical_cert_hash(receipt_id) == Some(H256::from(claimed_hash)),
+                Error::<T>::CertHashMismatch
+            );
+            Ok(())
+        }
+
         /// Construct the canonical `Cert` for `receipt_id` and return its
         /// `sha2_256`. Returns `None` when the receipt does not exist. All
         /// inputs come from on-chain state and compile-time constants, so
@@ -1552,7 +1580,7 @@ pub mod pallet {
         /// `set_availability_cert`).
         #[pallet::call_index(3)]
         #[pallet::weight(<T as Config>::WeightInfo::attest_threshold(T::MaxCommitteeSize::get())
-            .max(<T as Config>::WeightInfo::attest_non_threshold())
+            .max(<T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get()))
             .max(<T as Config>::WeightInfo::attest_bad_hash())
             .saturating_add(<T as Config>::WeightInfo::balance_mutations(
                 T::MaxCommitteeSize::get().saturating_add(2))))]
@@ -1562,7 +1590,7 @@ pub mod pallet {
             claimed_hash: [u8; 32],
         ) -> DispatchResultWithPostInfo {
             let attester = ensure_signed(origin)?;
-            let mut base = <T as Config>::WeightInfo::attest_non_threshold();
+            let mut base = <T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get());
 
             let committee = CommitteeMembers::<T>::get();
             ensure!(committee.contains(&attester), Error::<T>::NotCommitteeMember);
@@ -1645,6 +1673,7 @@ pub mod pallet {
             })?;
 
             let threshold = AttestationThreshold::<T>::get().max(1);
+            base = <T as Config>::WeightInfo::attest_non_threshold(count);
 
             Self::deposit_event(Event::AttestationRecorded {
                 receipt_id,

@@ -46,7 +46,7 @@ pub(crate) fn accrue(balance: u128, per_block: u128, rate: Perbill, elapsed: u64
     let sum_upper = ((SCALE - lower) * BILLION).div_ceil(loss);
     let generated = mul_div(per_block, sum_lower, SCALE, Rounding::Down);
     // Each old nearest-integer step can lose 1/2 unit. The first generation step
-    // is exact; discount the remaining geometric sum so dormancy never wins.
+    // is exact; discount generation so zero-start holders do not gain from dormancy.
     let rounding_loss = sum_upper.saturating_sub(SCALE).div_ceil(2 * SCALE);
     (decayed, generated.saturating_sub(rounding_loss))
 }

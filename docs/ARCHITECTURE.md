@@ -129,7 +129,7 @@ MOTRA represents the right to use the network. Because it is non-transferable an
 Transaction fees are denominated in MOTRA, not MATRA:
 
 ```
-TxFee = MinFee + (CongestionRate × Weight / 1,000,000) + (LengthFeePerByte × TxLength)
+TxFee = MinFee + (CongestionRate × (SignedBaseWeight + CallWeight) / 1,000,000) + (LengthFeePerByte × TxLength)
 ```
 
 - **Fees paid in MOTRA (primary), not MATRA.** This avoids "gas token sell pressure" — MATRA holders are not forced to sell MATRA to pay fees.
@@ -139,13 +139,26 @@ TxFee = MinFee + (CongestionRate × Weight / 1,000,000) + (LengthFeePerByte × T
   - Bounded step size prevents oscillation
   - Smoothed via EMA (`congestion_smoothing`, default 10%) to prevent oscillation
 - **MinFee** establishes a floor cost even when the network is idle
-- **LengthFeePerByte** charges for encoded transaction size (default 1000 MOTRA-units per byte)
+- **LengthFeePerByte** charges for encoded transaction size (default 1,000,000 atomic units per byte)
+
+Paid priority uses only the non-refundable minimum and congestion-priced signed
+base, capped at u64::MAX-2. Refundable call declarations and transaction length
+cannot increase it. Guardian vetoes retain u64::MAX.
+
+Canonical committee attestations are feeless duties at fixed priority
+u64::MAX-1. Pool validation and pre-dispatch both require a current member, an
+existing pending receipt, a correct canonical hash and no previous signature
+from that member. Each signer/receipt pair has a unique pool tag. Nonempty pure
+Utility.batch and Utility.batch_all receive the same policy; mixed and nested
+wrappers remain paid. The duty's early checks are benchmarked with the call;
+unused fee-accounting base weight is released after dispatch. Receipt submitters
+pay for the receipts that bound this duty workload.
 
 ### Fee Destination: Permanent Burn
 
 **Fees are permanently destroyed.** They are not redistributed to validators, a treasury, or any other account.
 
-The burn path (`ChargeMotra` SignedExtension in `fee.rs`):
+The paid-call burn path (`ChargeMotra` SignedExtension in `fee.rs`):
 
 1. **Pre-dispatch** — Before an extrinsic executes, `burn_fee(who, amount)` is called
 2. **Account debit** — The fee amount is subtracted from the sender's MOTRA balance
@@ -155,9 +168,9 @@ The burn path (`ChargeMotra` SignedExtension in `fee.rs`):
 
 Key properties:
 
-- **Actual-weight refunds** — Minimum and length fees remain paid; unused dispatch weight is refunded at the pre-dispatch congestion rate.
+- **Actual-weight refunds** — Signed base, minimum and length fees remain paid; unused call weight is refunded at the pre-dispatch congestion rate. Credit stops at max_balance and counters reflect only the actual credit.
 - **Failed transactions still pay** — If the extrinsic dispatches but fails (e.g., a receipt submission hits a duplicate check), the fee is still burned. The sender pays for the chain's validation effort.
-- **Insufficient balance** — If an account's MOTRA balance is below the fee, the transaction is rejected at validation time (`InvalidTransaction::Payment`). The `InsufficientMotraFailures` counter is incremented for monitoring.
+- **Insufficient balance** — Paid calls whose MOTRA balance is below the fee are rejected at validation time (`InvalidTransaction::Payment`). The `InsufficientMotraFailures` counter is incremented for monitoring. Valid attestation duties bypass this path, including with zero MOTRA.
 
 **Why burn instead of redistribute?**
 
@@ -302,7 +315,7 @@ Both values are available via the `motra_getParams` RPC method and displayed on 
 | Delegation | Enables sponsorship without transferability |
 | Lazy accounting | Bounded work with conservative rounding; dormancy does not increase generation |
 | Fee separation | MATRA holders never forced to sell MATRA to use the network |
-| Actual-weight refunds | Unused dispatch weight restores MOTRA and reduces net burned fees |
+| Actual-weight refunds | Unused call weight restores MOTRA up to max_balance and reduces net burned fees; the signed base, minimum and length remain paid |
 
 ## Component Descriptions
 

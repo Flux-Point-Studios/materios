@@ -17,6 +17,7 @@ pallet-timestamp = { workspace = true }
 pallet-aura = { workspace = true }
 pallet-grandpa = { workspace = true }
 pallet-balances = { workspace = true }
+pallet-motra = { workspace = true, optional = true }
 sp-consensus-grandpa = { workspace = true, default-features = false }
 sp-core = { workspace = true }
 sp-io = { workspace = true }
@@ -43,6 +44,7 @@ std = [
     "pallet-aura/std",
     "pallet-grandpa/std",
     "pallet-balances/std",
+    "pallet-motra?/std",
     "sp-consensus-grandpa/std",
     "sp-core/std",
     "sp-io/std",
@@ -51,6 +53,7 @@ std = [
     "log/std",
 ]
 runtime-benchmarks = [
+    "dep:pallet-motra",
     "frame-benchmarking/runtime-benchmarks",
     "frame-support/runtime-benchmarks",
     "frame-system/runtime-benchmarks",

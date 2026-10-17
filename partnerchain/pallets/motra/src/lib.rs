@@ -38,6 +38,16 @@ pub mod pallet {
         /// The overarching runtime event type.
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
 
+        /// Runtime-recognized validator duties; None follows the paid path.
+        /// Duty checks must be included in the call weight. A valid duty skips
+        /// fee accounting and releases the fee_path budget from the signed base.
+        fn validate_attestation(
+            _who: &Self::AccountId,
+            _call: &<Self as frame_system::Config>::RuntimeCall,
+        ) -> Option<sp_runtime::transaction_validity::TransactionValidity> {
+            None
+        }
+
         /// Weight information for extrinsics in this pallet.
         type WeightInfo: WeightInfo;
 
@@ -478,18 +488,29 @@ pub mod pallet {
 
         /// Compute the fee for a transaction given its weight and encoded length.
         ///
-        /// TxFee = min_fee + congestion_rate * (ref_time / 1_000_000) + length_fee_per_byte * len
+        /// TxFee = min_fee + R * (call + signed base) / 1_000_000 + length_fee_per_byte * len
         pub fn compute_fee(weight: frame_support::weights::Weight, len: usize) -> u128 {
             let params = Params::<T>::get();
-            let weight_component = params
-                .congestion_rate
-                .saturating_mul(weight.ref_time() as u128)
-                / 1_000_000u128;
+            let base = T::BlockWeights::get()
+                .get(frame_support::dispatch::DispatchClass::Normal)
+                .base_extrinsic;
+            let weight_component =
+                Self::weight_fee(weight.saturating_add(base), params.congestion_rate);
             let length_fee = params.length_fee_per_byte.saturating_mul(len as u128);
             params
                 .min_fee
                 .saturating_add(weight_component)
                 .saturating_add(length_fee)
+        }
+
+        pub(crate) fn weight_fee(weight: Weight, rate: u128) -> u128 {
+            sp_arithmetic::helpers_128bit::multiply_by_rational_with_rounding(
+                rate,
+                u128::from(weight.ref_time()),
+                1_000_000,
+                sp_arithmetic::Rounding::Down,
+            )
+            .unwrap_or(u128::MAX)
         }
 
         /// Adjust congestion rate based on block fullness using EMA smoothing.

@@ -76,11 +76,20 @@ fn benchmark_reconciliation_and_fee_weights_match_samples_and_storage_bounds() {
         // Existing checkpoints and legacy fallback are mutually exclusive. The
         // extra read prices the fallback even on the longer two-clock path.
         let legacy = u64::from(name != "reconcile_legacy");
-        let expected = Weight::from_parts(
-            median_time(&sample),
-            reconciliation_proof(name == "fee_path"),
-        )
-        .saturating_add(RocksDbWeight::get().reads_writes(reads + legacy, writes));
+        let execution = if name == "fee_path" {
+            sample["time_results"]
+                .as_array()
+                .expect("fee timings")
+                .iter()
+                .map(|row| row["extrinsic_time"].as_u64().expect("time"))
+                .max()
+                .expect("fee sample")
+                * 1_000
+        } else {
+            median_time(&sample)
+        };
+        let expected = Weight::from_parts(execution, reconciliation_proof(name == "fee_path"))
+            .saturating_add(RocksDbWeight::get().reads_writes(reads + legacy, writes));
         let actual = match name {
             "fee_path" => fee,
             "claim_motra" => {
@@ -106,7 +115,7 @@ fn benchmark_reconciliation_and_fee_weights_match_samples_and_storage_bounds() {
                 "{name}: {actual:?} < {expected:?}"
             );
         }
-        eprintln!("{name}: execution={} ps, DB={reads}r/{writes}w (+{legacy} legacy read), declared={actual:?}", median_time(&sample));
+        eprintln!("{name}: execution={execution} ps, DB={reads}r/{writes}w (+{legacy} legacy read), declared={actual:?}");
     }
 }
 
@@ -151,7 +160,7 @@ fn benchmark_attestation_proof_bounds_sum_independent_storage() {
         + bound("BlockHash", 1)
         + bound("AttestationThreshold", 1);
     assert_eq!(
-        W::attest_non_threshold().proof_size(),
+        W::attest_non_threshold(96).proof_size(),
         common + bound("Attestations", 1)
     );
     assert_eq!(
@@ -177,6 +186,48 @@ fn benchmark_attestation_proof_bounds_sum_independent_storage() {
             + bound("ReceiptSubmittedAt", 1);
         assert_eq!(W::attest_threshold(n).proof_size(), proof);
     }
+}
+
+#[test]
+fn benchmark_attestation_weights_bound_each_signer_count_median() {
+    use pallet_orinq_receipts::weights::WeightInfo;
+    type W = <Runtime as pallet_orinq_receipts::Config>::WeightInfo;
+    let samples: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
+    ))
+    .expect("attestation samples");
+    for sample in samples {
+        let name = sample["benchmark"].as_str().expect("benchmark");
+        let mut groups = std::collections::BTreeMap::<u32, Vec<u64>>::new();
+        for row in sample["time_results"].as_array().expect("timings") {
+            let n = row["components"]
+                .as_array()
+                .expect("components")
+                .iter()
+                .find(|c| c[0] == "n")
+                .map(|c| c[1].as_u64().expect("signer count") as u32)
+                .unwrap_or(0);
+            groups
+                .entry(n)
+                .or_default()
+                .push(row["extrinsic_time"].as_u64().expect("time") * 1_000);
+        }
+        for (n, mut times) in groups {
+            times.sort_unstable();
+            let weight = match name {
+                "attest_non_threshold" => W::attest_non_threshold(n + 1),
+                "attest_repeated" => W::attest_non_threshold(n),
+                "attest_threshold" | "attest_dead_treasury" => W::attest_threshold(n),
+                "attest_bad_hash" => W::attest_bad_hash(),
+                _ => panic!("unexpected attestation benchmark {name}"),
+            };
+            assert!(
+                weight.ref_time() >= times[times.len() / 2],
+                "{name} median with {n} prior signers exceeds returned base {weight:?}"
+            );
+        }
+    }
+    assert!(W::attest_non_threshold(95).ref_time() > W::attest_non_threshold(1).ref_time());
 }
 
 #[test]

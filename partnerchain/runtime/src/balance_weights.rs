@@ -123,8 +123,8 @@ impl pallet_motra::weights::WeightInfo for WithMotra {
 }
 
 impl pallet_orinq_receipts::weights::WeightInfo for WithMotra {
-    fn attest_non_threshold() -> Weight {
-        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_non_threshold()
+    fn attest_non_threshold(n: u32) -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_non_threshold(n)
     }
 
     fn attest_threshold(n: u32) -> Weight {

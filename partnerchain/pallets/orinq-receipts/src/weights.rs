@@ -1,7 +1,7 @@
 use frame_support::{traits::Get, weights::Weight};
 
 pub trait WeightInfo {
-    fn attest_non_threshold() -> Weight;
+    fn attest_non_threshold(n: u32) -> Weight;
     fn attest_threshold(n: u32) -> Weight;
     fn attest_bad_hash() -> Weight;
     fn submit_receipt() -> Weight;
@@ -19,8 +19,9 @@ pub trait WeightInfo {
 /// Measured execution and independent storage bounds; see benchmarking samples.
 pub struct SubstrateWeight<T>(core::marker::PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
-    fn attest_non_threshold() -> Weight {
-        crate::attestation_weights::attest_non_threshold::<T>()
+    fn attest_non_threshold(n: u32) -> Weight {
+        crate::attestation_weights::attest_non_threshold::<T>(n)
+            .max(crate::attestation_weights::attest_repeated::<T>(n))
     }
     fn attest_threshold(n: u32) -> Weight {
         crate::attestation_weights::attest_threshold::<T>(n)

@@ -98,7 +98,7 @@ pub fn fee_path<T: frame_system::Config>() -> Weight {
         write: configured.write.max(minimum.write),
     };
     let proof = 30_847;
-    Weight::from_parts(189_660_000, proof)
+    Weight::from_parts(211_852_000, proof)
         .saturating_add(db.reads(10))
         .saturating_add(db.writes(7))
         // A missing holding checkpoint additionally reads the legacy baseline.

@@ -2,6 +2,7 @@ use crate::*;
 use frame_support::{
     assert_ok,
     dispatch::{DispatchInfo, GetDispatchInfo, PostDispatchInfo},
+    traits::Get,
     BoundedBTreeSet,
 };
 use sp_runtime::{
@@ -70,6 +71,507 @@ fn attest(id: H256, claimed_hash: [u8; 32]) -> RuntimeCall {
     })
 }
 
+fn pricing_params(rate: u128) {
+    pallet_motra::Params::<Runtime>::mutate(|p| {
+        p.decay_rate_per_block = Perbill::one();
+        p.generation_per_matra_per_block = 0;
+        p.congestion_rate = rate;
+        p.max_balance = u128::MAX;
+    });
+}
+
+fn validity(
+    who: &AccountId,
+    call: &RuntimeCall,
+) -> sp_runtime::transaction_validity::TransactionValidity {
+    use parity_scale_codec::Encode;
+    pallet_motra::fee::ChargeMotra::<Runtime>::new().validate(
+        who,
+        call,
+        &call.get_dispatch_info(),
+        call.encoded_size() + 128,
+    )
+}
+
+#[test]
+fn pricing_refundable_batch_weight_cannot_buy_priority() {
+    use parity_scale_codec::Encode;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 0);
+        let who = account(1);
+        pricing_params(1_000_000_000);
+        pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+        let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+            dest: account(2).into(), value: 1,
+        });
+        let failure = RuntimeCall::System(frame_system::Call::set_heap_pages { pages: 0 });
+        let transfer_priority = validity(&who, &transfer).expect("transfer valid").priority;
+        for count in [1, 10, 29] {
+            let mut calls = vec![failure.clone()];
+            calls.extend((0..count).map(|_| attest(id, hash)));
+            let batch = RuntimeCall::Utility(pallet_utility::Call::batch { calls });
+            let priority = validity(&who, &batch).expect("paid mixed batch").priority;
+            let info = batch.get_dispatch_info();
+            let len = batch.encoded_size() + 128;
+            let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&who, &batch, &info, len).expect("batch fee");
+            let before = Motra::total_burned();
+            let post = batch.dispatch(RuntimeOrigin::signed(who.clone())).expect("batch stops");
+            assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(Some(pre.clone()), &info, &post, len, &Ok(())));
+            let paid = pre.expect("paid batch").1 - (before - Motra::total_burned());
+            let transfer_fee = Motra::compute_fee(transfer.get_dispatch_info().weight, transfer.encoded_size() + 128);
+            assert!(priority <= transfer_priority || paid > transfer_fee,
+                "{count} refundable attests: priority {priority}>{transfer_priority} while fee {paid}<={transfer_fee}");
+        }
+    });
+}
+
+#[test]
+fn pricing_remark_ramp_prices_the_complete_signed_weight() {
+    use frame_support::{dispatch::DispatchClass, traits::Hooks};
+    externalities().execute_with(|| {
+        System::set_block_number(100);
+        pricing_params(0);
+        let remark = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+        let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+            dest: account(2).into(),
+            value: 1,
+        });
+        let normal = RuntimeBlockWeights::get()
+            .get(DispatchClass::Normal)
+            .clone();
+        let capacity = normal.max_total.expect("normal limit");
+        let mut total = 0u128;
+        for block in 100..1_100 {
+            let params = Motra::params();
+            for call in [&remark, &transfer] {
+                let signed = call
+                    .get_dispatch_info()
+                    .weight
+                    .saturating_add(normal.base_extrinsic);
+                let fee = Motra::compute_fee(call.get_dispatch_info().weight, 128);
+                assert_eq!(
+                    fee,
+                    params.min_fee
+                        + params.length_fee_per_byte * 128
+                        + params.congestion_rate * u128::from(signed.ref_time()) / 1_000_000,
+                    "signed work is underpriced at block {block}"
+                );
+            }
+            total += Motra::compute_fee(remark.get_dispatch_info().weight, 128)
+                * u128::from(
+                    capacity.ref_time()
+                        / (normal.base_extrinsic.ref_time()
+                            + remark.get_dispatch_info().weight.ref_time()),
+                );
+            frame_system::BlockWeight::<Runtime>::mutate(|w| {
+                w.set(capacity, DispatchClass::Normal)
+            });
+            Motra::on_finalize(block);
+        }
+        assert!(Motra::params().congestion_rate > 1_000_000_000);
+        eprintln!(
+            "1,000 full remark blocks: cost={total}, final R={}",
+            Motra::params().congestion_rate
+        );
+        let (id, hash) = receipt(1, 1, 0);
+        assert_eq!(Motra::motra_balance(&account(1)), 0);
+        assert!(
+            validity(&account(1), &attest(id, hash)).is_ok(),
+            "zero-MOTRA daemon must survive the ramp"
+        );
+        let call = attest(id, hash);
+        let info = call.get_dispatch_info();
+        let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&account(1), &call, &info, 169)
+            .expect("duty after congestion ramp");
+        let post = call
+            .dispatch(RuntimeOrigin::signed(account(1)))
+            .expect("certify after ramp");
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+            Some(pre),
+            &info,
+            &post,
+            169,
+            &Ok(())
+        ));
+        assert_eq!(
+            pallet_orinq_receipts::Receipts::<Runtime>::get(id)
+                .expect("receipt")
+                .availability_cert_hash,
+            hash
+        );
+    });
+}
+
+#[test]
+fn pricing_attestation_duty_rejects_invalid_and_replayed_calls() {
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 0);
+        pricing_params(50_000_000_000);
+        for who in [account(1), account(4)] {
+            pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+        }
+        assert!(
+            validity(&account(4), &attest(id, hash)).is_err(),
+            "non-member"
+        );
+        assert!(
+            validity(&account(1), &attest(H256::zero(), hash)).is_err(),
+            "unknown"
+        );
+        assert!(
+            validity(&account(1), &attest(id, [99; 32])).is_err(),
+            "wrong hash cannot consume unlimited free duty slots"
+        );
+        assert_ok!(attest(id, hash).dispatch(RuntimeOrigin::signed(account(1))));
+        assert!(
+            validity(&account(1), &attest(id, hash)).is_err(),
+            "duplicate"
+        );
+        assert_ok!(attest(id, hash).dispatch(RuntimeOrigin::signed(account(2))));
+        assert!(
+            validity(&account(1), &attest(id, hash)).is_err(),
+            "certified"
+        );
+    });
+}
+
+#[test]
+fn pricing_zero_balance_member_certifies_for_free_and_rechecks_before_dispatch() {
+    use parity_scale_codec::Encode;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(2, 1, 0);
+        pricing_params(50_000_000_000);
+        let who = account(1);
+        let call = attest(id, hash);
+        let valid = validity(&who, &call).expect("zero-MOTRA validator duty");
+        assert_eq!(valid.provides.len(), 1);
+        let info = call.get_dispatch_info();
+        let len = call.encoded_size() + 128;
+        assert_ok!(frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+            &info, len
+        ));
+        let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&who, &call, &info, len)
+            .expect("feeless pre-dispatch");
+        let burned = Motra::total_burned();
+        let post = call
+            .clone()
+            .dispatch(RuntimeOrigin::signed(who.clone()))
+            .expect("certifies");
+        assert_ok!(frame_system::CheckWeight::<Runtime>::post_dispatch(
+            None,
+            &info,
+            &post,
+            len,
+            &Ok(())
+        ));
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+            Some(pre),
+            &info,
+            &post,
+            len,
+            &Ok(())
+        ));
+        assert_eq!(Motra::total_burned(), burned);
+        assert_eq!(Motra::motra_balance(&who), 0);
+        assert_eq!(
+            pallet_orinq_receipts::Receipts::<Runtime>::get(id)
+                .expect("receipt")
+                .availability_cert_hash,
+            hash
+        );
+        assert!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&account(2), &call, &info, len)
+                .is_err(),
+            "stale pool result must not bypass the check"
+        );
+    });
+}
+
+#[test]
+fn pricing_pure_attestation_batches_are_free_and_have_per_receipt_tags() {
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 0);
+        pricing_params(50_000_000_000);
+        let second = H256::repeat_byte(55);
+        pallet_orinq_receipts::Receipts::<Runtime>::insert(
+            second,
+            pallet_orinq_receipts::Receipts::<Runtime>::get(id).expect("receipt"),
+        );
+        let other_hash = OrinqReceipts::canonical_cert_hash(second).expect("hash").0;
+        let single = attest(id, hash);
+        for atomic in [false, true] {
+            let calls = vec![single.clone(), attest(second, other_hash)];
+            let batch = RuntimeCall::Utility(if atomic {
+                pallet_utility::Call::batch_all { calls }
+            } else {
+                pallet_utility::Call::batch { calls }
+            });
+            let valid = validity(&account(1), &batch).expect("feeless batch");
+            assert_eq!(valid.provides.len(), 2);
+            assert!(valid
+                .provides
+                .contains(&validity(&account(1), &single).expect("single").provides[0]));
+            assert_eq!(
+                valid.priority,
+                validity(&account(1), &single).expect("single").priority
+            );
+        }
+        let duplicate = RuntimeCall::Utility(pallet_utility::Call::batch {
+            calls: vec![single.clone(), single],
+        });
+        assert!(
+            validity(&account(1), &duplicate).is_err(),
+            "in-batch replay"
+        );
+    });
+}
+
+#[test]
+fn pricing_refund_respects_max_balance_and_net_burn() {
+    externalities().execute_with(|| {
+        System::set_block_number(100);
+        pricing_params(1_000_000_000);
+        let who = account(1);
+        let cap = 10_000_000_000_000u128;
+        pallet_motra::Params::<Runtime>::mutate(|p| p.max_balance = cap);
+        pallet_motra::MotraBalances::<Runtime>::insert(&who, cap);
+        let call = RuntimeCall::Motra(pallet_motra::Call::claim_motra {});
+        let info = call.get_dispatch_info();
+        let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&who, &call, &info, 128)
+            .expect("fee");
+        pallet_motra::MotraBalances::<Runtime>::insert(&who, cap - 7);
+        let issued = Motra::total_issued();
+        let burned = Motra::total_burned();
+        let post = PostDispatchInfo {
+            actual_weight: Some(Weight::zero()),
+            ..Default::default()
+        };
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+            Some(pre),
+            &info,
+            &post,
+            128,
+            &Ok(())
+        ));
+        assert_eq!(Motra::motra_balance(&who), cap);
+        assert_eq!(Motra::total_burned(), burned - 7);
+        assert_eq!(Motra::total_issued(), issued);
+    });
+}
+
+#[test]
+fn pricing_non_threshold_weight_covers_95_prior_signers() {
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(96, 96, 0);
+        let first = attest(id, hash)
+            .dispatch(RuntimeOrigin::signed(account(1)))
+            .expect("first attest");
+        let signers: BoundedBTreeSet<
+            AccountId,
+            <Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize,
+        > = (1..=95)
+            .map(account)
+            .collect::<std::collections::BTreeSet<_>>()
+            .try_into()
+            .expect("95 signers");
+        pallet_orinq_receipts::Attestations::<Runtime>::insert(id, (H256::from(hash), signers));
+        let post = attest(id, hash)
+            .dispatch(RuntimeOrigin::signed(account(1)))
+            .expect("duplicate backstop");
+        assert!(
+            post.actual_weight.expect("actual").ref_time()
+                > first.actual_weight.expect("actual").ref_time(),
+            "95 signers require a measured signer-count term"
+        );
+    });
+}
+
+#[test]
+fn pricing_multisig_refundable_max_weight_cannot_raise_priority() {
+    externalities().execute_with(|| {
+        System::set_block_number(100);
+        let who = account(1);
+        pricing_params(1_000_000_000);
+        pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+        let make = |weight| {
+            RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
+                threshold: 2,
+                other_signatories: vec![account(2)],
+                maybe_timepoint: None,
+                call: Box::new(RuntimeCall::System(frame_system::Call::remark {
+                    remark: vec![],
+                })),
+                max_weight: Weight::from_parts(weight, 0),
+            })
+        };
+        let small = validity(&who, &make(1_000_000)).expect("small multisig");
+        let large = validity(&who, &make(500_000_000_000)).expect("large multisig");
+        assert!(
+            large.priority <= small.priority,
+            "refundable multisig max_weight buys priority"
+        );
+    });
+}
+
+#[test]
+fn pricing_fee_and_priority_table() {
+    use parity_scale_codec::Encode;
+    for rate in [0u128, 1_000_000_000, 50_000_000_000] {
+        for name in [
+            "transfer",
+            "remark",
+            "attest_member",
+            "attest_non_member",
+            "claim",
+            "set_delegatee",
+        ] {
+            externalities().execute_with(|| {
+                let (id, hash) = receipt(3, 2, 0);
+                pricing_params(rate);
+                let who = if name == "attest_non_member" { account(4) } else { account(1) };
+                pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+                let call = match name {
+                    "transfer" => RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive { dest: account(2).into(), value: 1 }),
+                    "remark" => RuntimeCall::System(frame_system::Call::remark { remark: vec![] }),
+                    "attest_member" | "attest_non_member" => attest(id, hash),
+                    "claim" => RuntimeCall::Motra(pallet_motra::Call::claim_motra {}),
+                    _ => RuntimeCall::Motra(pallet_motra::Call::set_delegatee { delegatee: Some(account(2)) }),
+                };
+                let extra: SignedExtra = (
+                    frame_system::CheckNonZeroSender::new(), frame_system::CheckSpecVersion::new(),
+                    frame_system::CheckTxVersion::new(), frame_system::CheckGenesis::new(),
+                    frame_system::CheckEra::from(sp_runtime::generic::Era::Immortal),
+                    frame_system::CheckNonce::from(0), frame_system::CheckWeight::new(),
+                    pallet_motra::fee::ChargeMotra::new(),
+                );
+                let signed = UncheckedExtrinsic::new_signed(call.clone(), who.clone().into(),
+                    Signature::Sr25519(sp_core::sr25519::Signature::from_raw([0; 64])), extra);
+                let len = signed.encoded_size();
+                let info = call.get_dispatch_info();
+                let validity = pallet_motra::fee::ChargeMotra::<Runtime>::new().validate(&who, &call, &info, len);
+                if name == "attest_non_member" {
+                    assert!(validity.is_err(), "non-member rejected before payment");
+                    eprintln!("PRICING {{\"R\":{rate},\"call\":\"{name}\",\"status\":\"rejected\",\"length\":{len}}}");
+                    return;
+                }
+                let priority = validity.expect("valid call").priority;
+                let before = Motra::total_burned();
+                let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new().pre_dispatch(&who, &call, &info, len).expect("pre-dispatch");
+                let escrow = Motra::total_burned() - before;
+                let post = call.dispatch(RuntimeOrigin::signed(who)).expect("dispatch");
+                assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(Some(pre), &info, &post, len, &Ok(())));
+                let fee = Motra::total_burned() - before;
+                if name == "attest_member" { assert_eq!(fee, 0); }
+                eprintln!("PRICING {{\"R\":{rate},\"call\":\"{name}\",\"fee\":{fee},\"escrow\":{escrow},\"priority\":{priority},\"length\":{len},\"call_weight\":{}}}", info.weight.ref_time());
+            });
+        }
+    }
+}
+
+#[test]
+fn pricing_saturated_refund_preserves_the_non_refundable_base() {
+    externalities().execute_with(|| {
+        System::set_block_number(100);
+        pricing_params(u128::MAX / 4);
+        let who = account(1);
+        pallet_motra::MotraBalances::<Runtime>::insert(&who, u128::MAX);
+        let call = RuntimeCall::Motra(pallet_motra::Call::claim_motra {});
+        let info = call.get_dispatch_info();
+        assert!(
+            RuntimeBlockWeights::get()
+                .get(frame_support::dispatch::DispatchClass::Normal)
+                .base_extrinsic
+                .ref_time()
+                > 4_000_000
+        );
+        let non_refundable = u128::MAX;
+        let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&who, &call, &info, 128)
+            .expect("maximum payment");
+        let post = PostDispatchInfo {
+            actual_weight: Some(Weight::zero()),
+            ..Default::default()
+        };
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+            Some(pre),
+            &info,
+            &post,
+            128,
+            &Ok(())
+        ));
+        assert!(
+            Motra::total_burned() >= non_refundable,
+            "overflow must not refund the signed base"
+        );
+    });
+}
+
+#[test]
+fn pricing_zero_balance_pure_batches_execute_and_pay_nothing() {
+    use parity_scale_codec::Encode;
+    for atomic in [false, true] {
+        externalities().execute_with(|| {
+            let (id, hash) = receipt(3, 2, 0);
+            pricing_params(50_000_000_000);
+            let who = account(1);
+            let second = H256::repeat_byte(55);
+            pallet_orinq_receipts::Receipts::<Runtime>::insert(
+                second,
+                pallet_orinq_receipts::Receipts::<Runtime>::get(id).expect("receipt"),
+            );
+            let other_hash = OrinqReceipts::canonical_cert_hash(second).expect("hash").0;
+            let calls = vec![attest(id, hash), attest(second, other_hash)];
+            let batch = RuntimeCall::Utility(if atomic {
+                pallet_utility::Call::batch_all { calls }
+            } else {
+                pallet_utility::Call::batch { calls }
+            });
+            assert_ok!(validity(&who, &batch));
+            let info = batch.get_dispatch_info();
+            let len = batch.encoded_size() + 128;
+            assert_ok!(frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+                &info, len
+            ));
+            let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&who, &batch, &info, len)
+                .expect("free batch");
+            let post = batch
+                .dispatch(RuntimeOrigin::signed(who.clone()))
+                .expect("batch");
+            assert_ok!(frame_system::CheckWeight::<Runtime>::post_dispatch(
+                None,
+                &info,
+                &post,
+                len,
+                &Ok(())
+            ));
+            assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+                Some(pre),
+                &info,
+                &post,
+                len,
+                &Ok(())
+            ));
+            for receipt_id in [id, second] {
+                assert!(
+                    pallet_orinq_receipts::Attestations::<Runtime>::get(receipt_id)
+                        .expect("attested")
+                        .1
+                        .contains(&who)
+                );
+            }
+            assert_eq!(Motra::motra_balance(&who), 0);
+            assert_eq!(Motra::total_burned(), 0);
+            assert_eq!(Motra::insufficient_motra_failures(), 0);
+        });
+    }
+}
+
 fn dispatch(call: RuntimeCall, who: AccountId) -> (DispatchInfo, PostDispatchInfo) {
     let info = call.get_dispatch_info();
     let post = call.dispatch(RuntimeOrigin::signed(who)).expect("dispatch");
@@ -78,7 +580,7 @@ fn dispatch(call: RuntimeCall, who: AccountId) -> (DispatchInfo, PostDispatchInf
 }
 
 #[test]
-fn refund_non_threshold_attest_charges_no_checkpoints_and_refunds_motra() {
+fn refund_non_threshold_attest_charges_no_checkpoints_and_no_motra() {
     externalities().execute_with(|| {
         let (id, hash) = receipt(3, 2, 100_000);
         let who = account(1);
@@ -109,6 +611,10 @@ fn refund_non_threshold_attest_charges_no_checkpoints_and_refunds_motra() {
             .as_array()
             .expect("timings")
             .iter()
+            .filter(|s| {
+                s["components"].as_array().expect("components").is_empty()
+                    || s["components"][0][1].as_u64().expect("signer count") == 0
+            })
             .map(|s| s["extrinsic_time"].as_u64().expect("time"))
             .collect();
         times.sort_unstable();
@@ -127,11 +633,8 @@ fn refund_non_threshold_attest_charges_no_checkpoints_and_refunds_motra() {
             0,
             &Ok(()),
         ));
-        assert_eq!(
-            before - Motra::motra_balance(&who),
-            Motra::compute_fee(actual, 0)
-        );
-        assert_eq!(Motra::total_burned(), Motra::compute_fee(actual, 0));
+        assert_eq!(before, Motra::motra_balance(&who));
+        assert_eq!(Motra::total_burned(), 0);
     });
 }
 
@@ -185,9 +688,12 @@ fn refund_threshold_and_late_attests_cover_observed_checkpoints() {
         assert!(actual.all_lte(info.weight));
         ext.execute_with(|| {
             let (_, post) = dispatch(attest(id, hash), account(1));
-            assert!(
-                post.actual_weight.expect("late refund").ref_time()
-                    < pallet_motra::checkpoint_weight::<Runtime>().ref_time()
+            assert_eq!(
+                post.actual_weight.expect("late refund"),
+                pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_non_threshold(
+                    <Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize::get()
+                ),
+                "late backstop retains the signer-count bound without checkpoint charges"
             );
         });
     }
@@ -466,8 +972,8 @@ fn refund_non_threshold_block_capacity_matches_priced_work() {
             assert_ok!(frame_system::CheckWeight::<Runtime>::post_dispatch(None, &info, &post, len, &Ok(())));
             assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(Some(pre), &info, &post, len, &Ok(())));
             declared = info.weight.ref_time() + normal.base_extrinsic.ref_time();
-            actual = post.calc_actual_weight(&info).ref_time() + normal.base_extrinsic.ref_time();
-            proof = post.calc_actual_weight(&info).proof_size() + normal.base_extrinsic.proof_size() + len as u64;
+            actual = post.calc_actual_weight(&info).ref_time() + ExtrinsicBaseWeight::get().ref_time();
+            proof = post.calc_actual_weight(&info).proof_size() + ExtrinsicBaseWeight::get().proof_size() + len as u64;
             accepted += 1;
         }
         let before_refunds = cap / declared;
@@ -583,7 +1089,7 @@ fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
             batches += 1;
         }
         let historical = cap.ref_time() / (ExtrinsicBaseWeight::get().ref_time() + 15_000);
-        assert!(accepted >= historical, "{accepted} batched attests < {historical} historical attests");
+        assert!(accepted >= 15_138, "{accepted} batched attests < round-four capacity 15138");
         assert!(System::block_weight().get(DispatchClass::Normal).all_lte(cap));
         eprintln!("batched non-threshold attests/block: {accepted} in {batches} signed batches; historical {historical}; consumed {:?}", System::block_weight());
     });

@@ -8,15 +8,50 @@ use sp_core::H256;
 #[benchmarks(
     where
         T::Moment: Into<u64>,
-        T: pallet_balances::Config<Balance = u128>,
+        T: pallet_balances::Config<Balance = u128> + pallet_motra::Config + Send + Sync,
         T::Currency: frame_support::traits::Currency<T::AccountId, Balance = u128>,
+        <T as frame_system::Config>::RuntimeCall: From<Call<T>>
+            + frame_support::dispatch::GetDispatchInfo
+            + sp_runtime::traits::Dispatchable<Info = frame_support::dispatch::DispatchInfo,
+                PostInfo = frame_support::dispatch::PostDispatchInfo>,
 )]
 mod benchmarks {
     use super::*;
+    use alloc::collections::BTreeSet;
     use frame_support::{
+        dispatch::{DispatchInfo, GetDispatchInfo, PostDispatchInfo},
         traits::{Currency, Get, ReservableCurrency, UnfilteredDispatchable},
         BoundedBTreeSet,
     };
+    use sp_runtime::traits::{Dispatchable, SignedExtension};
+
+    fn dispatch_duty<T>(caller: T::AccountId, id: H256, hash: [u8; 32])
+    where
+        T: Config + pallet_motra::Config + Send + Sync,
+        T::Moment: Into<u64>,
+        <T as frame_system::Config>::RuntimeCall: From<Call<T>>
+            + GetDispatchInfo
+            + Dispatchable<Info = DispatchInfo, PostInfo = PostDispatchInfo>,
+    {
+        let call: <T as frame_system::Config>::RuntimeCall = Call::<T>::attest_availability_cert {
+            receipt_id: id,
+            claimed_hash: hash,
+        }
+        .into();
+        let info = call.get_dispatch_info();
+        let pre = pallet_motra::fee::ChargeMotra::<T>::new()
+            .pre_dispatch(&caller, &call, &info, 169)
+            .expect("duty validation");
+        assert!(
+            pre.is_none(),
+            "benchmark must execute the feeless duty path"
+        );
+        let post = call
+            .dispatch(RawOrigin::Signed(caller).into())
+            .expect("attest");
+        pallet_motra::fee::ChargeMotra::<T>::post_dispatch(Some(pre), &info, &post, 169, &Ok(()))
+            .expect("release unused fee work");
+    }
 
     fn attestation<T>(n: u32, treasury_alive: bool) -> (T::AccountId, H256, [u8; 32])
     where
@@ -75,10 +110,13 @@ mod benchmarks {
     }
 
     #[benchmark]
-    fn attest_non_threshold() {
-        let (caller, id, hash) = attestation::<T>(0, true);
-        #[extrinsic_call]
-        attest_availability_cert(RawOrigin::Signed(caller), id, hash);
+    fn attest_non_threshold(n: Linear<0, { T::MaxCommitteeSize::get() - 1 }>) {
+        let (caller, id, hash) = attestation::<T>(n + 1, true);
+        AttestationThreshold::<T>::put(T::MaxCommitteeSize::get() + 1);
+        #[block]
+        {
+            dispatch_duty::<T>(caller, id, hash);
+        }
         assert_eq!(
             Receipts::<T>::get(id)
                 .expect("receipt")
@@ -88,10 +126,31 @@ mod benchmarks {
     }
 
     #[benchmark]
-    fn attest_threshold(n: Linear<1, { T::MaxCommitteeSize::get() }>) {
-        let (caller, id, hash) = attestation::<T>(n, true);
+    fn attest_repeated(n: Linear<1, { T::MaxCommitteeSize::get() }>) {
+        let (_, id, hash) = attestation::<T>(n, true);
+        let caller: T::AccountId = account("attester", 0, 0);
+        let signers: BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize> = (0..n)
+            .map(|i| account("attester", i, 0))
+            .collect::<BTreeSet<_>>()
+            .try_into()
+            .expect("signers");
+        Attestations::<T>::insert(id, (H256::from(hash), signers));
+        AttestationThreshold::<T>::put(T::MaxCommitteeSize::get() + 1);
         #[extrinsic_call]
         attest_availability_cert(RawOrigin::Signed(caller), id, hash);
+        assert_eq!(
+            Attestations::<T>::get(id).expect("attestations").1.len(),
+            n as usize
+        );
+    }
+
+    #[benchmark]
+    fn attest_threshold(n: Linear<1, { T::MaxCommitteeSize::get() }>) {
+        let (caller, id, hash) = attestation::<T>(n, true);
+        #[block]
+        {
+            dispatch_duty::<T>(caller, id, hash);
+        }
         assert_eq!(
             Receipts::<T>::get(id)
                 .expect("receipt")
@@ -103,8 +162,10 @@ mod benchmarks {
     #[benchmark]
     fn attest_dead_treasury(n: Linear<1, { T::MaxCommitteeSize::get() }>) {
         let (caller, id, hash) = attestation::<T>(n, false);
-        #[extrinsic_call]
-        attest_availability_cert(RawOrigin::Signed(caller), id, hash);
+        #[block]
+        {
+            dispatch_duty::<T>(caller, id, hash);
+        }
         assert_eq!(
             Receipts::<T>::get(id)
                 .expect("receipt")

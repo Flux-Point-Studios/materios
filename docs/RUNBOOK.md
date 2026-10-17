@@ -203,7 +203,11 @@ The returned balance reflects lazy reconciliation — it is computed as of the c
 
 ### Estimate Fee
 
-Estimate the MOTRA fee for a transaction with a given weight:
+Estimate the paid-call MOTRA fee from its call weight. The RPC adds the signed
+base automatically; do not add it to the input. It has no signer/call identity,
+so this generic quote does not describe a validated feeless committee duty.
+The quote uses zero encoded length; add the configured per-byte charge for the
+actual signed extrinsic.
 
 ```bash
 # Estimate fee for a transaction with 50M ref_time weight

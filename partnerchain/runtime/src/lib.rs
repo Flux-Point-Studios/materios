@@ -11,6 +11,7 @@ mod tests;
 mod seating_model_check;
 
 mod balance_weights;
+mod motra_duty;
 pub mod committee_liveness;
 pub mod genesis_committee;
 pub mod input_sanity;
@@ -737,6 +738,13 @@ impl pallet_motra::pallet::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type WeightInfo = balance_weights::WithMotra;
     type TakenFirst = root_gate::GuardianVeto;
+
+    fn validate_attestation(
+        who: &AccountId,
+        call: &RuntimeCall,
+    ) -> Option<sp_runtime::transaction_validity::TransactionValidity> {
+        motra_duty::validate(who, call)
+    }
 }
 
 // ---------------------------------------------------------------------------

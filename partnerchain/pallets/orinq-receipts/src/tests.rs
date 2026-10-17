@@ -37,6 +37,7 @@ construct_runtime! {
         Grandpa: pallet_grandpa,
         Balances: pallet_balances,
         OrinqReceipts: pallet_orinq_receipts,
+        Motra: pallet_motra,
     }
 }
 
@@ -92,6 +93,31 @@ impl pallet_balances::Config for Test {
     type MaxFreezes = ConstU32<0>;
     type RuntimeHoldReason = RuntimeHoldReason;
     type RuntimeFreezeReason = RuntimeFreezeReason;
+}
+
+impl pallet_motra::Config for Test {
+    type RuntimeEvent = RuntimeEvent;
+    type WeightInfo = pallet_motra::weights::SubstrateWeight<Test>;
+    type TakenFirst = frame_support::traits::Nothing;
+
+    fn validate_attestation(
+        who: &MockAccountId,
+        call: &RuntimeCall,
+    ) -> Option<sp_runtime::transaction_validity::TransactionValidity> {
+        if let RuntimeCall::OrinqReceipts(crate::Call::attest_availability_cert {
+            receipt_id,
+            claimed_hash,
+        }) = call
+        {
+            Some(
+                OrinqReceipts::validate_attestation(who, *receipt_id, *claimed_hash)
+                    .map(|()| sp_runtime::transaction_validity::ValidTransaction::default())
+                    .map_err(|_| sp_runtime::transaction_validity::InvalidTransaction::Call.into()),
+            )
+        } else {
+            None
+        }
+    }
 }
 
 parameter_types! {

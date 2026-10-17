@@ -394,8 +394,8 @@ fn compute_fee_scales_with_congestion() {
             frame_support::weights::Weight::from_parts(10_000_000, 0),
             0,
         );
-        // fee = 1_000 + 1_000 * 10_000_000 / 1_000_000 = 1_000 + 10_000 = 11_000
-        assert_eq!(fee, 11_000);
+        // The mock's signed base is 107_074_000 ref_time.
+        assert_eq!(fee, 118_074);
     });
 }
 
