@@ -1,0 +1,2273 @@
+{
+  "System.remark": {
+    "class": "Normal",
+    "ref_time": 1522821744,
+    "proof_size": 0,
+    "call_bytes": 3932006,
+    "signed_bytes": 3932111,
+    "fields": [
+      [
+        "remark",
+        "Vec<u8>"
+      ]
+    ]
+  },
+  "System.set_heap_pages": {
+    "class": "Operational",
+    "ref_time": 229109000,
+    "proof_size": 1485,
+    "call_bytes": 10,
+    "signed_bytes": 113,
+    "fields": [
+      [
+        "pages",
+        "u64"
+      ]
+    ]
+  },
+  "System.set_code": {
+    "class": "Operational",
+    "ref_time": 82130651000,
+    "proof_size": 67035,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "code",
+        "Vec<u8>"
+      ]
+    ]
+  },
+  "System.set_code_without_checks": {
+    "class": "Operational",
+    "ref_time": 82130651000,
+    "proof_size": 67035,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "code",
+        "Vec<u8>"
+      ]
+    ]
+  },
+  "System.set_storage": {
+    "class": "Operational",
+    "ref_time": 2192000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "items",
+        "Vec<KeyValue>"
+      ]
+    ]
+  },
+  "System.kill_storage": {
+    "class": "Operational",
+    "ref_time": 2159000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "keys",
+        "Vec<Key>"
+      ]
+    ]
+  },
+  "System.kill_prefix": {
+    "class": "Operational",
+    "ref_time": 130399281,
+    "proof_size": 204,
+    "call_bytes": 7,
+    "signed_bytes": 110,
+    "fields": [
+      [
+        "prefix",
+        "Key"
+      ],
+      [
+        "subkeys",
+        "u32"
+      ]
+    ]
+  },
+  "System.remark_with_event": {
+    "class": "Normal",
+    "ref_time": 5471974415,
+    "proof_size": 0,
+    "call_bytes": 3932006,
+    "signed_bytes": 3932111,
+    "fields": [
+      [
+        "remark",
+        "Vec<u8>"
+      ]
+    ]
+  },
+  "System.authorize_upgrade": {
+    "class": "Operational",
+    "ref_time": 109643000,
+    "proof_size": 0,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "code_hash",
+        "T::Hash"
+      ]
+    ]
+  },
+  "System.authorize_upgrade_without_checks": {
+    "class": "Operational",
+    "ref_time": 109643000,
+    "proof_size": 0,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "code_hash",
+        "T::Hash"
+      ]
+    ]
+  },
+  "System.apply_authorized_upgrade": {
+    "class": "Operational",
+    "ref_time": 88011595000,
+    "proof_size": 67035,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "code",
+        "Vec<u8>"
+      ]
+    ]
+  },
+  "Timestamp.set": {
+    "class": "Mandatory",
+    "ref_time": 158684000,
+    "proof_size": 1493,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "now",
+        "T::Moment"
+      ]
+    ]
+  },
+  "Grandpa.note_stalled": {
+    "class": "Normal",
+    "ref_time": 103000000,
+    "proof_size": 0,
+    "call_bytes": 10,
+    "signed_bytes": 113,
+    "fields": [
+      [
+        "delay",
+        "BlockNumberFor<T>"
+      ],
+      [
+        "best_finalized_block_number",
+        "BlockNumberFor<T>"
+      ]
+    ]
+  },
+  "Balances.transfer_allow_death": {
+    "class": "Normal",
+    "ref_time": 346133000,
+    "proof_size": 10659,
+    "call_bytes": 36,
+    "signed_bytes": 139,
+    "fields": [
+      [
+        "dest",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "value",
+        "T::Balance"
+      ]
+    ]
+  },
+  "Balances.force_transfer": {
+    "class": "Normal",
+    "ref_time": 347714000,
+    "proof_size": 13262,
+    "call_bytes": 69,
+    "signed_bytes": 172,
+    "fields": [
+      [
+        "source",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "dest",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "value",
+        "T::Balance"
+      ]
+    ]
+  },
+  "Balances.transfer_keep_alive": {
+    "class": "Normal",
+    "ref_time": 335929000,
+    "proof_size": 10659,
+    "call_bytes": 36,
+    "signed_bytes": 139,
+    "fields": [
+      [
+        "dest",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "value",
+        "T::Balance"
+      ]
+    ]
+  },
+  "Balances.transfer_all": {
+    "class": "Normal",
+    "ref_time": 345155000,
+    "proof_size": 10659,
+    "call_bytes": 36,
+    "signed_bytes": 139,
+    "fields": [
+      [
+        "dest",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "keep_alive",
+        "bool"
+      ]
+    ]
+  },
+  "Balances.force_unreserve": {
+    "class": "Normal",
+    "ref_time": 166118000,
+    "proof_size": 7126,
+    "call_bytes": 51,
+    "signed_bytes": 154,
+    "fields": [
+      [
+        "who",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "amount",
+        "T::Balance"
+      ]
+    ]
+  },
+  "Balances.upgrade_accounts": {
+    "class": "Normal",
+    "ref_time": 16588000,
+    "proof_size": 990,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "who",
+        "Vec<T::AccountId>"
+      ]
+    ]
+  },
+  "Balances.force_set_balance": {
+    "class": "Normal",
+    "ref_time": 168814000,
+    "proof_size": 7126,
+    "call_bytes": 36,
+    "signed_bytes": 139,
+    "fields": [
+      [
+        "who",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "new_free",
+        "T::Balance"
+      ]
+    ]
+  },
+  "Balances.force_adjust_total_issuance": {
+    "class": "Normal",
+    "ref_time": 6594000,
+    "proof_size": 0,
+    "call_bytes": 4,
+    "signed_bytes": 107,
+    "fields": [
+      [
+        "direction",
+        "AdjustmentDirection"
+      ],
+      [
+        "delta",
+        "T::Balance"
+      ]
+    ]
+  },
+  "Balances.burn": {
+    "class": "Normal",
+    "ref_time": 169596000,
+    "proof_size": 3533,
+    "call_bytes": 4,
+    "signed_bytes": 107,
+    "fields": [
+      [
+        "value",
+        "T::Balance"
+      ],
+      [
+        "keep_alive",
+        "bool"
+      ]
+    ]
+  },
+  "Sudo.sudo": {
+    "class": "Normal",
+    "ref_time": 11866744,
+    "proof_size": 1517,
+    "call_bytes": 5,
+    "signed_bytes": 108,
+    "fields": [
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Sudo.sudo_unchecked_weight": {
+    "class": "Normal",
+    "ref_time": 0,
+    "proof_size": 0,
+    "call_bytes": 7,
+    "signed_bytes": 110,
+    "fields": [
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ],
+      [
+        "weight",
+        "Weight"
+      ]
+    ]
+  },
+  "Sudo.set_key": {
+    "class": "Normal",
+    "ref_time": 9663000,
+    "proof_size": 1517,
+    "call_bytes": 35,
+    "signed_bytes": 138,
+    "fields": [
+      [
+        "new",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Sudo.sudo_as": {
+    "class": "Normal",
+    "ref_time": 12140744,
+    "proof_size": 1517,
+    "call_bytes": 38,
+    "signed_bytes": 141,
+    "fields": [
+      [
+        "who",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Sudo.remove_key": {
+    "class": "Normal",
+    "ref_time": 9127000,
+    "proof_size": 1517,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "Multisig.as_multi_threshold_1": {
+    "class": "Normal",
+    "ref_time": 22501848,
+    "proof_size": 3997,
+    "call_bytes": 294,
+    "signed_bytes": 397,
+    "fields": [
+      [
+        "other_signatories",
+        "Vec<T::AccountId>"
+      ],
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Multisig.as_multi": {
+    "class": "Normal",
+    "ref_time": 193959845,
+    "proof_size": 10344,
+    "call_bytes": 299,
+    "signed_bytes": 402,
+    "fields": [
+      [
+        "threshold",
+        "u16"
+      ],
+      [
+        "other_signatories",
+        "Vec<T::AccountId>"
+      ],
+      [
+        "maybe_timepoint",
+        "Option<Timepoint<BlockNumberFor<T>>>"
+      ],
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ],
+      [
+        "max_weight",
+        "Weight"
+      ]
+    ]
+  },
+  "Multisig.approve_as_multi": {
+    "class": "Normal",
+    "ref_time": 180190233,
+    "proof_size": 10344,
+    "call_bytes": 328,
+    "signed_bytes": 431,
+    "fields": [
+      [
+        "threshold",
+        "u16"
+      ],
+      [
+        "other_signatories",
+        "Vec<T::AccountId>"
+      ],
+      [
+        "maybe_timepoint",
+        "Option<Timepoint<BlockNumberFor<T>>>"
+      ],
+      [
+        "call_hash",
+        "[u8; 32]"
+      ],
+      [
+        "max_weight",
+        "Weight"
+      ]
+    ]
+  },
+  "Multisig.cancel_as_multi": {
+    "class": "Normal",
+    "ref_time": 181865524,
+    "proof_size": 10344,
+    "call_bytes": 333,
+    "signed_bytes": 436,
+    "fields": [
+      [
+        "threshold",
+        "u16"
+      ],
+      [
+        "other_signatories",
+        "Vec<T::AccountId>"
+      ],
+      [
+        "timepoint",
+        "Timepoint<BlockNumberFor<T>>"
+      ],
+      [
+        "call_hash",
+        "[u8; 32]"
+      ]
+    ]
+  },
+  "Utility.batch": {
+    "class": "Operational",
+    "ref_time": 2694370,
+    "proof_size": 3997,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "calls",
+        "Vec<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Utility.as_derivative": {
+    "class": "Normal",
+    "ref_time": 10776744,
+    "proof_size": 3997,
+    "call_bytes": 7,
+    "signed_bytes": 110,
+    "fields": [
+      [
+        "index",
+        "u16"
+      ],
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Utility.batch_all": {
+    "class": "Operational",
+    "ref_time": 12948874,
+    "proof_size": 3997,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "calls",
+        "Vec<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Utility.dispatch_as": {
+    "class": "Normal",
+    "ref_time": 8589744,
+    "proof_size": 0,
+    "call_bytes": 7,
+    "signed_bytes": 110,
+    "fields": [
+      [
+        "as_origin",
+        "Box<T::PalletsOrigin>"
+      ],
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Utility.force_batch": {
+    "class": "Operational",
+    "ref_time": 4879712,
+    "proof_size": 3997,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "calls",
+        "Vec<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Utility.with_weight": {
+    "class": "Normal",
+    "ref_time": 0,
+    "proof_size": 0,
+    "call_bytes": 7,
+    "signed_bytes": 110,
+    "fields": [
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ],
+      [
+        "weight",
+        "Weight"
+      ]
+    ]
+  },
+  "Treasury.spend_local": {
+    "class": "Normal",
+    "ref_time": 12681000,
+    "proof_size": 1887,
+    "call_bytes": 36,
+    "signed_bytes": 139,
+    "fields": [
+      [
+        "amount",
+        "BalanceOf<T, I>"
+      ],
+      [
+        "beneficiary",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Treasury.remove_approval": {
+    "class": "Operational",
+    "ref_time": 6567000,
+    "proof_size": 1887,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "proposal_id",
+        "ProposalIndex"
+      ]
+    ]
+  },
+  "Treasury.spend": {
+    "class": "Normal",
+    "ref_time": 14842000,
+    "proof_size": 3501,
+    "call_bytes": 36,
+    "signed_bytes": 139,
+    "fields": [
+      [
+        "asset_kind",
+        "Box<T::AssetKind>"
+      ],
+      [
+        "amount",
+        "AssetBalanceOf<T, I>"
+      ],
+      [
+        "beneficiary",
+        "Box<BeneficiaryLookupOf<T, I>>"
+      ],
+      [
+        "valid_from",
+        "Option<BlockNumberFor<T>>"
+      ]
+    ]
+  },
+  "Treasury.payout": {
+    "class": "Normal",
+    "ref_time": 359061000,
+    "proof_size": 13274,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "index",
+        "SpendIndex"
+      ]
+    ]
+  },
+  "Treasury.check_status": {
+    "class": "Normal",
+    "ref_time": 12480000,
+    "proof_size": 3538,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "index",
+        "SpendIndex"
+      ]
+    ]
+  },
+  "Treasury.void_spend": {
+    "class": "Normal",
+    "ref_time": 11427000,
+    "proof_size": 3538,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "index",
+        "SpendIndex"
+      ]
+    ]
+  },
+  "Vesting.vest": {
+    "class": "Normal",
+    "ref_time": 187673238,
+    "proof_size": 8297,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "Vesting.vest_other": {
+    "class": "Normal",
+    "ref_time": 189575721,
+    "proof_size": 8297,
+    "call_bytes": 35,
+    "signed_bytes": 138,
+    "fields": [
+      [
+        "target",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Vesting.vested_transfer": {
+    "class": "Normal",
+    "ref_time": 526274160,
+    "proof_size": 15363,
+    "call_bytes": 71,
+    "signed_bytes": 174,
+    "fields": [
+      [
+        "target",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "schedule",
+        "VestingInfo<BalanceOf<T>, BlockNumberFor<T>>"
+      ]
+    ]
+  },
+  "Vesting.force_vested_transfer": {
+    "class": "Normal",
+    "ref_time": 528526615,
+    "proof_size": 16795,
+    "call_bytes": 104,
+    "signed_bytes": 207,
+    "fields": [
+      [
+        "source",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "target",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "schedule",
+        "VestingInfo<BalanceOf<T>, BlockNumberFor<T>>"
+      ]
+    ]
+  },
+  "Vesting.merge_schedules": {
+    "class": "Normal",
+    "ref_time": 190693587,
+    "proof_size": 8297,
+    "call_bytes": 10,
+    "signed_bytes": 113,
+    "fields": [
+      [
+        "schedule1_index",
+        "u32"
+      ],
+      [
+        "schedule2_index",
+        "u32"
+      ]
+    ]
+  },
+  "Vesting.force_remove_vesting_schedule": {
+    "class": "Normal",
+    "ref_time": 192732245,
+    "proof_size": 8297,
+    "call_bytes": 39,
+    "signed_bytes": 142,
+    "fields": [
+      [
+        "target",
+        "<T::Lookup as StaticLookup>::Source"
+      ],
+      [
+        "schedule_index",
+        "u32"
+      ]
+    ]
+  },
+  "OrinqReceipts.submit_receipt": {
+    "class": "Normal",
+    "ref_time": 250759000,
+    "proof_size": 31771,
+    "call_bytes": 292,
+    "signed_bytes": 395,
+    "fields": [
+      [
+        "receipt_id",
+        "H256"
+      ],
+      [
+        "content_hash",
+        "H256"
+      ],
+      [
+        "base_root_sha256",
+        "[u8; 32]"
+      ],
+      [
+        "zk_root_poseidon",
+        "Option<[u8; 32]>"
+      ],
+      [
+        "poseidon_params_hash",
+        "Option<[u8; 32]>"
+      ],
+      [
+        "base_manifest_hash",
+        "[u8; 32]"
+      ],
+      [
+        "safety_manifest_hash",
+        "[u8; 32]"
+      ],
+      [
+        "monitor_config_hash",
+        "[u8; 32]"
+      ],
+      [
+        "attestation_evidence_hash",
+        "[u8; 32]"
+      ],
+      [
+        "storage_locator_hash",
+        "[u8; 32]"
+      ],
+      [
+        "schema_hash",
+        "[u8; 32]"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_availability_cert": {
+    "class": "Normal",
+    "ref_time": 216434000,
+    "proof_size": 18111,
+    "call_bytes": 66,
+    "signed_bytes": 169,
+    "fields": [
+      [
+        "receipt_id",
+        "H256"
+      ],
+      [
+        "cert_hash",
+        "[u8; 32]"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_committee": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 3080,
+    "signed_bytes": 3183,
+    "fields": [
+      [
+        "members",
+        "Vec<T::AccountId>"
+      ],
+      [
+        "threshold",
+        "u32"
+      ]
+    ]
+  },
+  "OrinqReceipts.attest_availability_cert": {
+    "class": "Normal",
+    "ref_time": 20004870056,
+    "proof_size": 1073275,
+    "call_bytes": 66,
+    "signed_bytes": 169,
+    "fields": [
+      [
+        "receipt_id",
+        "H256"
+      ],
+      [
+        "claimed_hash",
+        "[u8; 32]"
+      ]
+    ]
+  },
+  "OrinqReceipts.submit_anchor": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 130,
+    "signed_bytes": 233,
+    "fields": [
+      [
+        "anchor_id",
+        "H256"
+      ],
+      [
+        "content_hash",
+        "H256"
+      ],
+      [
+        "root_hash",
+        "H256"
+      ],
+      [
+        "manifest_hash",
+        "H256"
+      ]
+    ]
+  },
+  "OrinqReceipts.submit_receipt_v2": {
+    "class": "Normal",
+    "ref_time": 250759000,
+    "proof_size": 31771,
+    "call_bytes": 389,
+    "signed_bytes": 492,
+    "fields": [
+      [
+        "player_pubkey",
+        "[u8; 32]"
+      ],
+      [
+        "player_sig",
+        "[u8; 64]"
+      ],
+      [
+        "sig_type",
+        "u8"
+      ],
+      [
+        "receipt_id",
+        "H256"
+      ],
+      [
+        "content_hash",
+        "H256"
+      ],
+      [
+        "base_root_sha256",
+        "[u8; 32]"
+      ],
+      [
+        "zk_root_poseidon",
+        "Option<[u8; 32]>"
+      ],
+      [
+        "poseidon_params_hash",
+        "Option<[u8; 32]>"
+      ],
+      [
+        "base_manifest_hash",
+        "[u8; 32]"
+      ],
+      [
+        "safety_manifest_hash",
+        "[u8; 32]"
+      ],
+      [
+        "monitor_config_hash",
+        "[u8; 32]"
+      ],
+      [
+        "attestation_evidence_hash",
+        "[u8; 32]"
+      ],
+      [
+        "storage_locator_hash",
+        "[u8; 32]"
+      ],
+      [
+        "schema_hash",
+        "[u8; 32]"
+      ]
+    ]
+  },
+  "OrinqReceipts.join_committee": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "member",
+        "T::AccountId"
+      ]
+    ]
+  },
+  "OrinqReceipts.leave_committee": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "member",
+        "T::AccountId"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_attestation_reward_per_signer": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "value",
+        "u128"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_era_cap_base": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "value",
+        "u128"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_era_cap_baseline_attestor_count": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "value",
+        "u32"
+      ]
+    ]
+  },
+  "OrinqReceipts.bond": {
+    "class": "Normal",
+    "ref_time": 202527000,
+    "proof_size": 10655,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "amount",
+        "u128"
+      ]
+    ]
+  },
+  "OrinqReceipts.unbond": {
+    "class": "Normal",
+    "ref_time": 230310000,
+    "proof_size": 15214,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "OrinqReceipts.slash_attestor": {
+    "class": "Normal",
+    "ref_time": 408521000,
+    "proof_size": 25330,
+    "call_bytes": 51,
+    "signed_bytes": 154,
+    "fields": [
+      [
+        "attestor",
+        "T::AccountId"
+      ],
+      [
+        "amount",
+        "u128"
+      ],
+      [
+        "reason",
+        "SlashReason"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_bond_requirement": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "value",
+        "u128"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_receipt_submission_fee": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "value",
+        "u128"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_receipt_submission_fee_floor": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "value",
+        "u128"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_receipt_expiry_blocks": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "value",
+        "u32"
+      ]
+    ]
+  },
+  "OrinqReceipts.expire_receipt_fee": {
+    "class": "Normal",
+    "ref_time": 219519000,
+    "proof_size": 19600,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "receipt_id",
+        "H256"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_bad_attest_slash_threshold": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "value",
+        "u32"
+      ]
+    ]
+  },
+  "OrinqReceipts.reset_candidate_liveness": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "who",
+        "T::AccountId"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_core_eviction_enabled": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "enabled",
+        "bool"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_contribution_window_enabled": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "enabled",
+        "bool"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_break_glass_floor_enabled": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "enabled",
+        "bool"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_slack_invariant_enabled": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "enabled",
+        "bool"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_break_glass_aura_keys": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 3076,
+    "signed_bytes": 3179,
+    "fields": [
+      [
+        "keys",
+        "Vec<[u8; 32]>"
+      ]
+    ]
+  },
+  "OrinqReceipts.set_pinned_committee": {
+    "class": "Normal",
+    "ref_time": 20000,
+    "proof_size": 0,
+    "call_bytes": 3115,
+    "signed_bytes": 3218,
+    "fields": [
+      [
+        "members",
+        "Vec<PinnedMember>"
+      ],
+      [
+        "until_epoch",
+        "u64"
+      ]
+    ]
+  },
+  "OrinqReceipts.clear_pinned_committee": {
+    "class": "Normal",
+    "ref_time": 10000,
+    "proof_size": 0,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "Motra.set_delegatee": {
+    "class": "Normal",
+    "ref_time": 1148657000,
+    "proof_size": 29346,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "delegatee",
+        "Option<T::AccountId>"
+      ]
+    ]
+  },
+  "Motra.set_params": {
+    "class": "Normal",
+    "ref_time": 15000000,
+    "proof_size": 0,
+    "call_bytes": 110,
+    "signed_bytes": 213,
+    "fields": [
+      [
+        "params",
+        "MotraParams"
+      ]
+    ]
+  },
+  "Motra.claim_motra": {
+    "class": "Normal",
+    "ref_time": 1047014000,
+    "proof_size": 29346,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "SessionCommitteeManagement.set": {
+    "class": "Mandatory",
+    "ref_time": 232064398,
+    "proof_size": 4538,
+    "call_bytes": 3147,
+    "signed_bytes": 3250,
+    "fields": [
+      [
+        "validators",
+        "BoundedVec<(T::AuthorityId, T::AuthorityKeys), T::MaxValidators>"
+      ],
+      [
+        "for_epoch_number",
+        "T::ScEpochNumber"
+      ],
+      [
+        "selection_inputs_hash",
+        "SizedByteString<32>"
+      ]
+    ]
+  },
+  "SessionCommitteeManagement.set_main_chain_scripts": {
+    "class": "Normal",
+    "ref_time": 181914365,
+    "proof_size": 4538,
+    "call_bytes": 59,
+    "signed_bytes": 162,
+    "fields": [
+      [
+        "committee_candidate_address",
+        "MainchainAddress"
+      ],
+      [
+        "d_parameter_policy_id",
+        "PolicyId"
+      ],
+      [
+        "permissioned_candidates_policy_id",
+        "PolicyId"
+      ]
+    ]
+  },
+  "BlockRewards.set_current_block_beneficiary": {
+    "class": "Mandatory",
+    "ref_time": 0,
+    "proof_size": 0,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "beneficiary",
+        "T::BeneficiaryId"
+      ]
+    ]
+  },
+  "PalletSession.set_keys": {
+    "class": "Normal",
+    "ref_time": 959558000,
+    "proof_size": 17759,
+    "call_bytes": 67,
+    "signed_bytes": 170,
+    "fields": [
+      [
+        "keys",
+        "T::Keys"
+      ],
+      [
+        "proof",
+        "Vec<u8>"
+      ]
+    ]
+  },
+  "PalletSession.purge_keys": {
+    "class": "Normal",
+    "ref_time": 792476000,
+    "proof_size": 5282,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "NativeTokenManagement.transfer_tokens": {
+    "class": "Mandatory",
+    "ref_time": 0,
+    "proof_size": 0,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "token_amount",
+        "NativeTokenAmount"
+      ]
+    ]
+  },
+  "NativeTokenManagement.set_main_chain_scripts": {
+    "class": "Normal",
+    "ref_time": 1,
+    "proof_size": 0,
+    "call_bytes": 32,
+    "signed_bytes": 135,
+    "fields": [
+      [
+        "native_token_policy_id",
+        "PolicyId"
+      ],
+      [
+        "native_token_asset_name",
+        "AssetName"
+      ],
+      [
+        "illiquid_supply_validator_address",
+        "MainchainAddress"
+      ]
+    ]
+  },
+  "IntentSettlement.submit_intent": {
+    "class": "Normal",
+    "ref_time": 500000000,
+    "proof_size": 0,
+    "call_bytes": 11,
+    "signed_bytes": 114,
+    "fields": [
+      [
+        "kind",
+        "IntentKind"
+      ]
+    ]
+  },
+  "IntentSettlement.attest_intent": {
+    "class": "Operational",
+    "ref_time": 50000000,
+    "proof_size": 0,
+    "call_bytes": 130,
+    "signed_bytes": 233,
+    "fields": [
+      [
+        "intent_id",
+        "IntentId"
+      ],
+      [
+        "pubkey",
+        "CommitteePubkey"
+      ],
+      [
+        "sig",
+        "CommitteeSig"
+      ]
+    ]
+  },
+  "IntentSettlement.request_voucher": {
+    "class": "Operational",
+    "ref_time": 100000000,
+    "proof_size": 0,
+    "call_bytes": 9425,
+    "signed_bytes": 9528,
+    "fields": [
+      [
+        "claim_id",
+        "ClaimId"
+      ],
+      [
+        "intent_id",
+        "IntentId"
+      ],
+      [
+        "voucher",
+        "Voucher"
+      ],
+      [
+        "fairness_proof",
+        "BatchFairnessProof"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.request_credit_refund": {
+    "class": "Normal",
+    "ref_time": 500000000,
+    "proof_size": 0,
+    "call_bytes": 10,
+    "signed_bytes": 113,
+    "fields": [
+      [
+        "amount_ada",
+        "AdaLovelace"
+      ]
+    ]
+  },
+  "IntentSettlement.settle_claim": {
+    "class": "Operational",
+    "ref_time": 50000000,
+    "proof_size": 0,
+    "call_bytes": 9285,
+    "signed_bytes": 9388,
+    "fields": [
+      [
+        "claim_id",
+        "ClaimId"
+      ],
+      [
+        "cardano_tx_hash",
+        "[u8; 32]"
+      ],
+      [
+        "settled_direct",
+        "bool"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.expire_policy_mirror": {
+    "class": "Operational",
+    "ref_time": 30000000,
+    "proof_size": 0,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "intent_id",
+        "IntentId"
+      ]
+    ]
+  },
+  "IntentSettlement.credit_deposit": {
+    "class": "Operational",
+    "ref_time": 30000000,
+    "proof_size": 0,
+    "call_bytes": 9292,
+    "signed_bytes": 9395,
+    "fields": [
+      [
+        "target",
+        "T::AccountId"
+      ],
+      [
+        "amount_ada",
+        "AdaLovelace"
+      ],
+      [
+        "cardano_tx_hash",
+        "[u8; 32]"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.set_pool_utilization": {
+    "class": "Operational",
+    "ref_time": 10000000,
+    "proof_size": 0,
+    "call_bytes": 26,
+    "signed_bytes": 129,
+    "fields": [
+      [
+        "params",
+        "PoolUtilizationParams"
+      ]
+    ]
+  },
+  "IntentSettlement.set_min_signer_threshold": {
+    "class": "Operational",
+    "ref_time": 10000000,
+    "proof_size": 0,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "new_threshold",
+        "u32"
+      ]
+    ]
+  },
+  "IntentSettlement.settle_batch_atomic": {
+    "class": "Operational",
+    "ref_time": 4311966280,
+    "proof_size": 1119951,
+    "call_bytes": 25862,
+    "signed_bytes": 25967,
+    "fields": [
+      [
+        "entries",
+        "BoundedVec<SettleBatchEntry,<T as Config>::MaxSettleBatch>"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.attest_batch_intents": {
+    "class": "Operational",
+    "ref_time": 818000000,
+    "proof_size": 0,
+    "call_bytes": 17414,
+    "signed_bytes": 17519,
+    "fields": [
+      [
+        "intent_ids",
+        "BoundedVec<IntentId,<T as Config>::MaxAttestBatch>"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.request_batch_vouchers": {
+    "class": "Operational",
+    "ref_time": 2610000000,
+    "proof_size": 0,
+    "call_bytes": 61702,
+    "signed_bytes": 61807,
+    "fields": [
+      [
+        "entries",
+        "BoundedVec<RequestVoucherEntry,<T as Config>::MaxVoucherBatch>"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.submit_batch_intents": {
+    "class": "Normal",
+    "ref_time": 1330000000,
+    "proof_size": 1327104,
+    "call_bytes": 2308,
+    "signed_bytes": 2411,
+    "fields": [
+      [
+        "entries",
+        "BoundedVec<SubmitIntentEntry,<T as Config>::MaxSubmitBatch>"
+      ]
+    ]
+  },
+  "IntentSettlement.request_settle": {
+    "class": "Operational",
+    "ref_time": 40000000,
+    "proof_size": 0,
+    "call_bytes": 179,
+    "signed_bytes": 282,
+    "fields": [
+      [
+        "claim_id",
+        "ClaimId"
+      ],
+      [
+        "cardano_tx_hash",
+        "[u8; 32]"
+      ],
+      [
+        "settled_direct",
+        "bool"
+      ],
+      [
+        "attestation_evidence",
+        "SettlementEvidence"
+      ]
+    ]
+  },
+  "IntentSettlement.attest_settle": {
+    "class": "Operational",
+    "ref_time": 60000000,
+    "proof_size": 0,
+    "call_bytes": 9252,
+    "signed_bytes": 9355,
+    "fields": [
+      [
+        "claim_id",
+        "ClaimId"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.request_batch_settle": {
+    "class": "Operational",
+    "ref_time": 2088000000,
+    "proof_size": 0,
+    "call_bytes": 37124,
+    "signed_bytes": 37229,
+    "fields": [
+      [
+        "entries",
+        "BoundedVec<SettleAttestedBatchEntry,<T as Config>::MaxSettleBatch>"
+      ]
+    ]
+  },
+  "IntentSettlement.attest_batch_settle": {
+    "class": "Operational",
+    "ref_time": 3900000000,
+    "proof_size": 0,
+    "call_bytes": 17414,
+    "signed_bytes": 17519,
+    "fields": [
+      [
+        "claim_ids",
+        "BoundedVec<ClaimId,<T as Config>::MaxSettleBatch>"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.request_expire_policy": {
+    "class": "Operational",
+    "ref_time": 35000000,
+    "proof_size": 0,
+    "call_bytes": 174,
+    "signed_bytes": 277,
+    "fields": [
+      [
+        "intent_id",
+        "IntentId"
+      ],
+      [
+        "cardano_tx_hash",
+        "[u8; 32]"
+      ],
+      [
+        "attestation_evidence",
+        "ExpiryEvidence"
+      ]
+    ]
+  },
+  "IntentSettlement.attest_expire_policy": {
+    "class": "Operational",
+    "ref_time": 55000000,
+    "proof_size": 0,
+    "call_bytes": 9252,
+    "signed_bytes": 9355,
+    "fields": [
+      [
+        "intent_id",
+        "IntentId"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.post_settlement_bond": {
+    "class": "Operational",
+    "ref_time": 648885000,
+    "proof_size": 3533,
+    "call_bytes": 50,
+    "signed_bytes": 153,
+    "fields": [
+      [
+        "claim_id",
+        "ClaimId"
+      ],
+      [
+        "amount",
+        "u128"
+      ]
+    ]
+  },
+  "IntentSettlement.slash_bad_settlement_evidence": {
+    "class": "Operational",
+    "ref_time": 1095540000,
+    "proof_size": 14132,
+    "call_bytes": 9253,
+    "signed_bytes": 9356,
+    "fields": [
+      [
+        "claim_id",
+        "ClaimId"
+      ],
+      [
+        "fraud_proof",
+        "FraudProof"
+      ],
+      [
+        "signatures",
+        "Vec<(CommitteePubkey, CommitteeSig)>"
+      ]
+    ]
+  },
+  "IntentSettlement.release_settlement_bond": {
+    "class": "Operational",
+    "ref_time": 648885000,
+    "proof_size": 3533,
+    "call_bytes": 34,
+    "signed_bytes": 137,
+    "fields": [
+      [
+        "claim_id",
+        "ClaimId"
+      ]
+    ]
+  },
+  "TeeAttestation.submit_evidence": {
+    "class": "Normal",
+    "ref_time": 1000000000,
+    "proof_size": 32768,
+    "call_bytes": 16455,
+    "signed_bytes": 16560,
+    "fields": [
+      [
+        "receipt_id",
+        "ReceiptId"
+      ],
+      [
+        "content_hash",
+        "[u8; 32]"
+      ],
+      [
+        "entry",
+        "EvidenceEntry"
+      ]
+    ]
+  },
+  "TeeAttestation.set_disabled": {
+    "class": "Normal",
+    "ref_time": 1000000000,
+    "proof_size": 32768,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "disabled",
+        "bool"
+      ]
+    ]
+  },
+  "Billing.topup_self": {
+    "class": "Normal",
+    "ref_time": 204672000,
+    "proof_size": 12156,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "amount",
+        "u128"
+      ]
+    ]
+  },
+  "Billing.topup_for": {
+    "class": "Normal",
+    "ref_time": 197738000,
+    "proof_size": 12156,
+    "call_bytes": 50,
+    "signed_bytes": 153,
+    "fields": [
+      [
+        "target",
+        "T::AccountId"
+      ],
+      [
+        "amount",
+        "u128"
+      ]
+    ]
+  },
+  "Billing.pay_request": {
+    "class": "Normal",
+    "ref_time": 60000000,
+    "proof_size": 8192,
+    "call_bytes": 59,
+    "signed_bytes": 162,
+    "fields": [
+      [
+        "endpoint_class",
+        "Vec<u8>"
+      ],
+      [
+        "request_bytes",
+        "u64"
+      ],
+      [
+        "max_charge",
+        "u128"
+      ],
+      [
+        "request_id",
+        "H256"
+      ]
+    ]
+  },
+  "Billing.governance_set_endpoint_price": {
+    "class": "Normal",
+    "ref_time": 20000000,
+    "proof_size": 4096,
+    "call_bytes": 20,
+    "signed_bytes": 123,
+    "fields": [
+      [
+        "endpoint_class",
+        "Vec<u8>"
+      ],
+      [
+        "model",
+        "PricingModel"
+      ]
+    ]
+  },
+  "Billing.request_withdrawal": {
+    "class": "Normal",
+    "ref_time": 35000000,
+    "proof_size": 4096,
+    "call_bytes": 18,
+    "signed_bytes": 121,
+    "fields": [
+      [
+        "amount",
+        "u128"
+      ]
+    ]
+  },
+  "Billing.execute_withdrawal": {
+    "class": "Normal",
+    "ref_time": 373654000,
+    "proof_size": 15693,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "Billing.cancel_withdrawal": {
+    "class": "Normal",
+    "ref_time": 25000000,
+    "proof_size": 4096,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "Billing.prune_paid_requests": {
+    "class": "Normal",
+    "ref_time": 1290000000,
+    "proof_size": 66560,
+    "call_bytes": 16388,
+    "signed_bytes": 16493,
+    "fields": [
+      [
+        "ids",
+        "Vec<(T::AccountId, H256)>"
+      ]
+    ]
+  },
+  "Billing.governance_set_debits_enabled": {
+    "class": "Normal",
+    "ref_time": 20000000,
+    "proof_size": 4096,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "enabled",
+        "bool"
+      ]
+    ]
+  },
+  "Oracle.submit_price": {
+    "class": "Normal",
+    "ref_time": 500000000,
+    "proof_size": 50000,
+    "call_bytes": 147,
+    "signed_bytes": 250,
+    "fields": [
+      [
+        "pair_id",
+        "PairId"
+      ],
+      [
+        "price",
+        "u64"
+      ],
+      [
+        "decimals",
+        "u8"
+      ],
+      [
+        "slot_observed",
+        "SlotNumber"
+      ],
+      [
+        "pubkey",
+        "AttestorPubkey"
+      ],
+      [
+        "sig",
+        "AttestorSig"
+      ]
+    ]
+  },
+  "Oracle.register_attestor": {
+    "class": "Normal",
+    "ref_time": 100000000,
+    "proof_size": 10000,
+    "call_bytes": 66,
+    "signed_bytes": 169,
+    "fields": [
+      [
+        "pair_id",
+        "PairId"
+      ],
+      [
+        "pubkey",
+        "AttestorPubkey"
+      ]
+    ]
+  },
+  "Recovery.as_recovered": {
+    "class": "Normal",
+    "ref_time": 16904744,
+    "proof_size": 3997,
+    "call_bytes": 38,
+    "signed_bytes": 141,
+    "fields": [
+      [
+        "account",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "Recovery.set_recovered": {
+    "class": "Normal",
+    "ref_time": 7578000,
+    "proof_size": 0,
+    "call_bytes": 68,
+    "signed_bytes": 171,
+    "fields": [
+      [
+        "lost",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "rescuer",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Recovery.create_recovery": {
+    "class": "Normal",
+    "ref_time": 173732900,
+    "proof_size": 7349,
+    "call_bytes": 297,
+    "signed_bytes": 400,
+    "fields": [
+      [
+        "friends",
+        "Vec<T::AccountId>"
+      ],
+      [
+        "threshold",
+        "u16"
+      ],
+      [
+        "delay_period",
+        "BlockNumberFor<T>"
+      ]
+    ]
+  },
+  "Recovery.initiate_recovery": {
+    "class": "Normal",
+    "ref_time": 176926000,
+    "proof_size": 7387,
+    "call_bytes": 35,
+    "signed_bytes": 138,
+    "fields": [
+      [
+        "account",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Recovery.vouch_recovery": {
+    "class": "Normal",
+    "ref_time": 20289654,
+    "proof_size": 3854,
+    "call_bytes": 68,
+    "signed_bytes": 171,
+    "fields": [
+      [
+        "lost",
+        "AccountIdLookupOf<T>"
+      ],
+      [
+        "rescuer",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Recovery.claim_recovery": {
+    "class": "Normal",
+    "ref_time": 24735080,
+    "proof_size": 3854,
+    "call_bytes": 35,
+    "signed_bytes": 138,
+    "fields": [
+      [
+        "account",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Recovery.close_recovery": {
+    "class": "Normal",
+    "ref_time": 332030649,
+    "proof_size": 10920,
+    "call_bytes": 35,
+    "signed_bytes": 138,
+    "fields": [
+      [
+        "rescuer",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "Recovery.remove_recovery": {
+    "class": "Normal",
+    "ref_time": 179664547,
+    "proof_size": 7387,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "Recovery.cancel_recovered": {
+    "class": "Normal",
+    "ref_time": 12275000,
+    "proof_size": 3545,
+    "call_bytes": 35,
+    "signed_bytes": 138,
+    "fields": [
+      [
+        "account",
+        "AccountIdLookupOf<T>"
+      ]
+    ]
+  },
+  "RootTimelock.schedule": {
+    "class": "Normal",
+    "ref_time": 50006000,
+    "proof_size": 0,
+    "call_bytes": 5,
+    "signed_bytes": 108,
+    "fields": [
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "RootTimelock.cancel": {
+    "class": "Operational",
+    "ref_time": 20000000,
+    "proof_size": 0,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "id",
+        "TaskId"
+      ]
+    ]
+  },
+  "RootTimelock.fast_track": {
+    "class": "Operational",
+    "ref_time": 20000000,
+    "proof_size": 0,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "id",
+        "TaskId"
+      ]
+    ]
+  },
+  "RootTimelock.enact": {
+    "class": "Normal",
+    "ref_time": 51143744,
+    "proof_size": 0,
+    "call_bytes": 9,
+    "signed_bytes": 112,
+    "fields": [
+      [
+        "id",
+        "TaskId"
+      ],
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  },
+  "RootTimelock.set_delay": {
+    "class": "Normal",
+    "ref_time": 20000000,
+    "proof_size": 0,
+    "call_bytes": 7,
+    "signed_bytes": 110,
+    "fields": [
+      [
+        "class",
+        "CallClass"
+      ],
+      [
+        "blocks",
+        "BlockNumberFor<T>"
+      ]
+    ]
+  },
+  "RootTimelock.set_guardian": {
+    "class": "Normal",
+    "ref_time": 20000000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "guardian",
+        "Option<T::AccountId>"
+      ]
+    ]
+  },
+  "RootTimelock.cancel_all": {
+    "class": "Operational",
+    "ref_time": 1320000000,
+    "proof_size": 0,
+    "call_bytes": 2,
+    "signed_bytes": 105,
+    "fields": []
+  },
+  "RootTimelock.prune": {
+    "class": "Normal",
+    "ref_time": 20000000,
+    "proof_size": 0,
+    "call_bytes": 6,
+    "signed_bytes": 109,
+    "fields": [
+      [
+        "id",
+        "TaskId"
+      ]
+    ]
+  },
+  "RootTimelock.approve": {
+    "class": "Operational",
+    "ref_time": 20000000,
+    "proof_size": 0,
+    "call_bytes": 3,
+    "signed_bytes": 106,
+    "fields": [
+      [
+        "call_hash",
+        "Option<T::Hash>"
+      ]
+    ]
+  },
+  "RootTimelock.enact_approved": {
+    "class": "Normal",
+    "ref_time": 51143744,
+    "proof_size": 0,
+    "call_bytes": 5,
+    "signed_bytes": 108,
+    "fields": [
+      [
+        "call",
+        "Box<<T as Config>::RuntimeCall>"
+      ]
+    ]
+  }
+}

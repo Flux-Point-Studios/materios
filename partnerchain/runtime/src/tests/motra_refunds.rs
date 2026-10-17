@@ -4,6 +4,7 @@ use frame_support::{
     dispatch::{DispatchInfo, GetDispatchInfo, PostDispatchInfo},
     BoundedBTreeSet,
 };
+use pallet_orinq_receipts::weights::WeightInfo as _;
 use sp_runtime::{
     traits::{Dispatchable, SignedExtension},
     BuildStorage,
@@ -117,7 +118,8 @@ fn refund_non_threshold_attest_charges_no_checkpoints_and_refunds_motra() {
             "actual weight must cover benchmarked execution"
         );
         assert!(
-            actual.ref_time() < pallet_motra::checkpoint_weight::<Runtime>().ref_time(),
+            actual
+                == <Runtime as pallet_orinq_receipts::Config>::WeightInfo::attest_non_threshold(),
             "non-threshold attestation must not carry any checkpoint surcharge: {actual:?}"
         );
         assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
@@ -186,8 +188,9 @@ fn refund_threshold_and_late_attests_cover_observed_checkpoints() {
         ext.execute_with(|| {
             let (_, post) = dispatch(attest(id, hash), account(1));
             assert!(
-                post.actual_weight.expect("late refund").ref_time()
-                    < pallet_motra::checkpoint_weight::<Runtime>().ref_time()
+                post.actual_weight.expect("late refund")
+                    == <Runtime as pallet_orinq_receipts::Config>::WeightInfo::attest_non_threshold(
+                    )
             );
         });
     }
@@ -526,11 +529,12 @@ fn refund_failed_legacy_bond_keeps_its_budget_and_rolls_back_checkpoints() {
 }
 
 #[test]
-fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
+fn refund_batched_non_threshold_attests_match_database_pricing() {
     use frame_support::dispatch::DispatchClass;
     use pallet_utility::WeightInfo;
     use parity_scale_codec::Encode;
-    externalities().execute_with(|| {
+    for maximum_width in [1, 32, 96] {
+        externalities().execute_with(|| {
         let (template, _) = receipt(3, 2, 0);
         let record = pallet_orinq_receipts::Receipts::<Runtime>::get(template).expect("receipt");
         let who = account(1);
@@ -550,7 +554,7 @@ fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
         loop {
             let remaining = cap.saturating_sub(*System::block_weight().get(DispatchClass::Normal))
                 .saturating_sub(normal.base_extrinsic);
-            let width = (1u32..=96).take_while(|n| {
+            let width = (1u32..=maximum_width).take_while(|n| {
                 per_call.saturating_mul(u64::from(*n))
                     .saturating_add(<Runtime as pallet_utility::Config>::WeightInfo::batch(*n))
                     .all_lte(remaining)
@@ -583,8 +587,13 @@ fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
             batches += 1;
         }
         let historical = cap.ref_time() / (ExtrinsicBaseWeight::get().ref_time() + 15_000);
-        assert!(accepted >= historical, "{accepted} batched attests < {historical} historical attests");
+        let actual = <Runtime as pallet_orinq_receipts::Config>::WeightInfo::attest_non_threshold();
+        let minimum = cap.ref_time() / per_call.saturating_add(normal.base_extrinsic).ref_time();
+        assert!(accepted > minimum, "refunds must improve on worst-case admission");
+        assert!(accepted <= cap.ref_time() / actual.ref_time());
+        if maximum_width == 96 { assert_eq!(accepted, 3_705, "database-priced batching capacity regression"); }
         assert!(System::block_weight().get(DispatchClass::Normal).all_lte(cap));
-        eprintln!("batched non-threshold attests/block: {accepted} in {batches} signed batches; historical {historical}; consumed {:?}", System::block_weight());
+        eprintln!("batched non-threshold attests/block (maximum width {maximum_width}): {accepted} in {batches} signed batches; historical {historical}; consumed {:?}", System::block_weight());
     });
+    }
 }

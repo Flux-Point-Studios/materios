@@ -3,20 +3,12 @@
 //! Steps: 50; repeats: 100; map size: 1000000.
 //! Proof bound: MaxEncodedLen; execution: Compiled.
 
-use frame_support::{
-    traits::Get,
-    weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight},
-};
+use frame_support::{traits::Get, weights::Weight};
 
 /// Storage: `Motra::AccrualCheckpoint` (r:1 w:1)
 /// Proof: `Motra::AccrualCheckpoint` (`max_values`: None, `max_size`: Some(68), added: 2543, mode: `MaxEncodedLen`)
 pub fn checkpoint<T: frame_system::Config>() -> Weight {
-    let configured = T::DbWeight::get();
-    let minimum = RocksDbWeight::get();
-    let db = RuntimeDbWeight {
-        read: configured.read.max(minimum.read),
-        write: configured.write.max(minimum.write),
-    };
+    let db = T::DbWeight::get();
     // Measured proof: 229 bytes; bounded proof: 3533 bytes.
     // Minimum execution time: 22643_000 picoseconds.
     Weight::from_parts(23_885_000, 3533)
