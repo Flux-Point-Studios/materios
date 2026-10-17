@@ -7,7 +7,7 @@ mod account_store;
 pub mod fee;
 pub mod types;
 pub mod weights;
-pub use account_store::MatraAccountStore;
+pub use account_store::{checkpoint_weight, MatraAccountStore};
 
 #[cfg(test)]
 mod tests;
@@ -364,7 +364,6 @@ pub mod pallet {
             {
                 return Ok(old_balance);
             }
-            crate::account_store::charge_checkpoint_weight::<T>();
             let (decayed_balance, generated) = Self::accrual(who, &params);
             let decay_amount = old_balance.saturating_sub(decayed_balance);
 
@@ -435,8 +434,9 @@ pub mod pallet {
         /// Get MATRA (native token) free balance for an account.
         fn get_matra_balance(who: &T::AccountId) -> u128 {
             use frame_support::traits::fungible::Inspect;
+            use sp_runtime::traits::SaturatedConversion;
             let bal = pallet_balances::Pallet::<T>::balance(who);
-            bal.try_into().unwrap_or(0u128)
+            bal.saturated_into()
         }
 
         /// Burn MOTRA from an account (used by fee payment).

@@ -199,6 +199,12 @@ under-credits holdings that changed during an interval instead of charging every
 MATRA mutation for MOTRA's decay loop. Reconcile before moving MATRA to realize
 the completed interval. The read-only RPC uses the same accounting function.
 
+Checkpoint work is included in dispatch weights, including batched transfers,
+and in initialization budgets for rewards and migrations. Fee reconciliation's
+checkpoint cost is reserved in the extrinsic base weight. The
+[checkpoint weight audit](motra-checkpoint-weights.md) lists every MATRA mutation
+path and its bound.
+
 The system account-creation hook initializes `LastTouched`, the separate decay
 clock. Re-funding an account does not reset decay of existing MOTRA. Accounts
 whose SCALE encoding starts with `modl` (PalletId sovereign accounts and their

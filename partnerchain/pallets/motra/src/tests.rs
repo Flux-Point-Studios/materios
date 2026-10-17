@@ -839,17 +839,15 @@ fn accrual_failed_balance_mutation_preserves_checkpoint() {
 }
 
 #[test]
-fn accrual_hooks_account_for_database_work_even_with_default_db_weights() {
+fn accrual_hooks_do_not_register_unchecked_weight() {
     new_test_ext().execute_with(|| {
+        let before = System::block_weight();
         assert_ok!(Balances::transfer_keep_alive(
             RuntimeOrigin::signed(1),
             10,
             1_000_000
         ));
-        let weight = System::block_weight();
-        let normal = weight.get(frame_support::dispatch::DispatchClass::Normal);
-        assert!(normal.ref_time() >= 375_000_000);
-        assert!(normal.proof_size() >= 10_500);
+        assert_eq!(System::block_weight(), before);
     });
 }
 
@@ -882,14 +880,34 @@ fn accrual_first_funding_preserves_decay_of_prior_sponsorship() {
 }
 
 #[test]
-fn accrual_reconcile_accounts_for_checkpoint_storage_work() {
+fn accrual_reconcile_does_not_register_unchecked_weight() {
     new_test_ext().execute_with(|| {
         let before = *System::block_weight().get(frame_support::dispatch::DispatchClass::Normal);
         assert_ok!(Motra::reconcile(&1));
         let after = *System::block_weight().get(frame_support::dispatch::DispatchClass::Normal);
-        let charged = after.saturating_sub(before);
-        assert!(charged.ref_time() >= 150_000_000);
-        assert!(charged.proof_size() >= 7_000);
+        assert_eq!(after, before);
+    });
+}
+
+#[test]
+fn accrual_u128_max_balance_is_preserved_without_unchecked_weight() {
+    use frame_support::traits::StoredMap;
+    new_test_ext().execute_with(|| {
+        System::inc_providers(&99);
+        let before = System::block_weight();
+        assert_ok!(crate::MatraAccountStore::<Test>::try_mutate_exists(
+            &99,
+            |account| {
+                *account = Some(pallet_balances::AccountData {
+                    free: u128::MAX,
+                    ..Default::default()
+                });
+                Ok::<_, sp_runtime::DispatchError>(())
+            }
+        ));
+        assert_eq!(pallet::AccrualCheckpoint::<Test>::get(99), Some((u128::MAX, 1)));
+        assert_eq!(Balances::free_balance(99), u128::MAX);
+        assert_eq!(System::block_weight(), before);
     });
 }
 

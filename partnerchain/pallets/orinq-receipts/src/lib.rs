@@ -888,6 +888,9 @@ pub mod pallet {
                                     account,
                                     balance,
                                 );
+                                weight = weight.saturating_add(
+                                    <T as Config>::WeightInfo::balance_mutations(1),
+                                );
 
                                 // Track lifetime rewards
                                 ValidatorRewards::<T>::mutate(account, |total| {
@@ -914,6 +917,9 @@ pub mod pallet {
                             let _ = pallet_balances::Pallet::<T>::deposit_creating(
                                 &Self::treasury_account(),
                                 balance,
+                            );
+                            weight = weight.saturating_add(
+                                <T as Config>::WeightInfo::balance_mutations(1),
                             );
                         }
 
@@ -1394,7 +1400,8 @@ pub mod pallet {
     {
         /// Submit a new receipt on-chain.
         #[pallet::call_index(0)]
-        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt())]
+        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn submit_receipt(
             origin: OriginFor<T>,
             receipt_id: H256,
@@ -1454,7 +1461,8 @@ pub mod pallet {
         /// drains `ReceiptFeeEscrow`. Mirrors the expire-refund event for
         /// auditability.
         #[pallet::call_index(1)]
-        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::set_availability_cert())]
+        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::set_availability_cert()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn set_availability_cert(
             origin: OriginFor<T>,
             receipt_id: H256,
@@ -1533,7 +1541,9 @@ pub mod pallet {
         #[pallet::call_index(3)]
         #[pallet::weight(Weight::from_parts(15_000, 0)
             .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(2)))]
+            .saturating_add(T::DbWeight::get().writes(2))
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(
+                T::MaxCommitteeSize::get().saturating_mul(3).saturating_add(3))))]
         pub fn attest_availability_cert(
             origin: OriginFor<T>,
             receipt_id: H256,
@@ -1753,7 +1763,8 @@ pub mod pallet {
         /// `sig_type` — 0 = ed25519, 1 = sr25519.
         /// Remaining params are identical to `submit_receipt`.
         #[pallet::call_index(6)]
-        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt())]
+        #[pallet::weight(<T as crate::pallet::Config>::WeightInfo::submit_receipt()
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn submit_receipt_v2(
             origin: OriginFor<T>,
             player_pubkey: [u8; 32],
@@ -1937,7 +1948,8 @@ pub mod pallet {
         #[pallet::call_index(12)]
         #[pallet::weight(Weight::from_parts(20_000, 0)
             .saturating_add(T::DbWeight::get().reads(1))
-            .saturating_add(T::DbWeight::get().writes(2)))]
+            .saturating_add(T::DbWeight::get().writes(2))
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn bond(origin: OriginFor<T>, amount: u128) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -1969,7 +1981,8 @@ pub mod pallet {
         #[pallet::call_index(13)]
         #[pallet::weight(Weight::from_parts(20_000, 0)
             .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(2)))]
+            .saturating_add(T::DbWeight::get().writes(2))
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn unbond(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
 
@@ -2003,7 +2016,8 @@ pub mod pallet {
         #[pallet::call_index(14)]
         #[pallet::weight(Weight::from_parts(30_000, 0)
             .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3)))]
+            .saturating_add(T::DbWeight::get().writes(3))
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(2)))]
         pub fn slash_attestor(
             origin: OriginFor<T>,
             attestor: T::AccountId,
@@ -2171,7 +2185,8 @@ pub mod pallet {
         #[pallet::call_index(19)]
         #[pallet::weight(Weight::from_parts(25_000, 0)
             .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(2)))]
+            .saturating_add(T::DbWeight::get().writes(2))
+            .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn expire_receipt_fee(
             origin: OriginFor<T>,
             receipt_id: H256,

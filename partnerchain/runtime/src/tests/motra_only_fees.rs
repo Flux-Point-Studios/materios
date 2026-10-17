@@ -240,3 +240,175 @@ fn legacy_holder_without_stored_motra_can_pay_after_the_upgrade() {
         assert_eq!(Motra::total_burned(), 20_000);
     });
 }
+
+#[test]
+fn checkpoint_transfer_dispatch_weight_covers_both_accounts_and_creation() {
+    use frame_support::dispatch::GetDispatchInfo;
+    use pallet_balances::WeightInfo;
+
+    let call = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+        dest: sp_keyring::Sr25519Keyring::Eve.to_account_id().into(),
+        value: ExistentialDeposit::get(),
+    });
+    let upstream = pallet_balances::weights::SubstrateWeight::<Runtime>::transfer_keep_alive();
+    // Each account budgets mutation, legacy repair and account creation.
+    let checkpoints = frame_support::weights::constants::RocksDbWeight::get()
+        .reads_writes(24, 6)
+        .saturating_add(Weight::from_parts(0, 84_000));
+    let actual = call.get_dispatch_info().weight;
+    assert_eq!(actual, upstream.saturating_add(checkpoints));
+    eprintln!("transfer_keep_alive weight: {upstream:?} -> {actual:?}");
+}
+
+#[test]
+fn checkpoint_batch_at_block_limit_cannot_finalize_overweight() {
+    use frame_support::{assert_ok, dispatch::GetDispatchInfo, traits::Hooks};
+    use parity_scale_codec::Encode;
+    use sp_runtime::{
+        traits::{Dispatchable, SignedExtension},
+        transaction_validity::InvalidTransaction,
+    };
+
+    new_test_ext().execute_with(|| {
+        System::initialize(&1, &Default::default(), &Default::default());
+        let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
+            dest: sp_keyring::Sr25519Keyring::Eve.to_account_id().into(),
+            value: ExistentialDeposit::get(),
+        });
+        let limits = RuntimeBlockWeights::get();
+        let normal = frame_support::dispatch::DispatchClass::Normal;
+        let operational = frame_support::dispatch::DispatchClass::Operational;
+        let count = (1..=10_000)
+            .take_while(|n| {
+                use pallet_utility::WeightInfo;
+                transfer
+                    .get_dispatch_info()
+                    .weight
+                    .saturating_mul(u64::from(*n))
+                    .saturating_add(<Runtime as pallet_utility::Config>::WeightInfo::batch(*n))
+                    .all_lte(
+                        limits
+                            .get(normal)
+                            .max_total
+                            .expect("normal cap")
+                            .saturating_sub(limits.get(normal).base_extrinsic),
+                    )
+            })
+            .last()
+            .expect("at least one transfer fits");
+        let batch = RuntimeCall::Utility(pallet_utility::Call::batch {
+            calls: vec![transfer.clone(); count as usize],
+        });
+        let info = batch.get_dispatch_info();
+        let len = batch.encoded_size();
+        // Previously admitted work leaves exactly this batch's declared budget.
+        let prior = limits.max_block.ref_time()
+            - info.weight.ref_time()
+            - limits.get(normal).base_extrinsic.ref_time();
+        System::register_extra_weight_unchecked(Weight::from_parts(prior, 0), operational);
+        assert_ok!(frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+            &info, len
+        ));
+        assert_ok!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new().pre_dispatch(
+                &fee_payer(),
+                &batch,
+                &info,
+                len
+            )
+        );
+        let post = batch
+            .dispatch(RuntimeOrigin::signed(fee_payer()))
+            .expect("batch dispatch");
+        assert_ok!(frame_system::CheckWeight::<Runtime>::post_dispatch(
+            Some(()),
+            &info,
+            &post,
+            len,
+            &Ok(())
+        ));
+        assert_eq!(
+            Balances::free_balance(sp_keyring::Sr25519Keyring::Eve.to_account_id()),
+            count as Balance * ExistentialDeposit::get(),
+            "every inner transfer ran"
+        );
+        assert_eq!(
+            frame_system::CheckWeight::<Runtime>::do_pre_dispatch(
+                &transfer.get_dispatch_info(),
+                transfer.encoded_size()
+            ),
+            Err(InvalidTransaction::ExhaustsResources.into())
+        );
+        Motra::on_finalize(1);
+        System::finalize();
+        let actual = System::block_weight().total();
+        assert!(
+            actual.all_lte(limits.max_block),
+            "finalized overweight: {actual:?} > {:?}",
+            limits.max_block
+        );
+        eprintln!(
+            "batch transfers={count}, finalized={actual:?}, maximum={:?}",
+            limits.max_block
+        );
+    });
+}
+
+#[test]
+fn checkpoint_currency_callers_and_fee_extension_have_declared_budgets() {
+    let checkpoint = frame_support::weights::constants::RocksDbWeight::get()
+        .reads_writes(4, 1)
+        .saturating_add(Weight::from_parts(0, 14_000));
+    macro_rules! covered {
+        ($pallet:ident, $method:ident($($arg:expr),*), $accounts:expr) => {{
+            use $pallet::WeightInfo;
+            let base = $pallet::weights::SubstrateWeight::<Runtime>::$method($($arg),*);
+            let actual = <Runtime as $pallet::Config>::WeightInfo::$method($($arg),*);
+            assert!(actual.all_gte(base.saturating_add(checkpoint.saturating_mul($accounts))),
+                "{}::{} omits checkpoint weight", stringify!($pallet), stringify!($method));
+        }};
+    }
+    covered!(pallet_vesting, vested_transfer(1, 1), 2);
+    covered!(pallet_vesting, force_vested_transfer(1, 1), 2);
+    covered!(pallet_multisig, as_multi_create(2, 0), 1);
+    covered!(pallet_multisig, as_multi_complete(2, 0), 1);
+    covered!(pallet_multisig, cancel_as_multi(2), 1);
+    covered!(pallet_recovery, create_recovery(2), 1);
+    covered!(pallet_recovery, initiate_recovery(), 1);
+    covered!(pallet_recovery, close_recovery(2), 2);
+    covered!(pallet_recovery, remove_recovery(2), 1);
+    covered!(pallet_treasury, payout(), 2);
+    covered!(pallet_treasury, on_initialize_proposals(100), 201);
+    covered!(pallet_intent_settlement, post_settlement_bond(), 1);
+    covered!(pallet_intent_settlement, slash_bad_settlement_evidence(), 4);
+    covered!(pallet_intent_settlement, release_settlement_bond(), 1);
+    assert!(RuntimeBlockWeights::get()
+        .get(frame_support::dispatch::DispatchClass::Normal)
+        .base_extrinsic
+        .all_gte(ExtrinsicBaseWeight::get().saturating_add(checkpoint)));
+}
+
+#[test]
+fn checkpoint_receipt_rewards_return_hook_weight() {
+    use frame_support::traits::Hooks;
+    new_test_ext().execute_with(|| {
+        let who = sp_keyring::Sr25519Keyring::Eve.to_account_id();
+        System::set_block_number(14_400);
+        pallet_orinq_receipts::BlocksAuthored::<Runtime>::insert(&who, 1);
+        let before = System::block_weight();
+        let weight = OrinqReceipts::on_initialize(14_400);
+        assert!(Balances::free_balance(who) > 0, "era rewards were paid");
+        let checkpoint = frame_support::weights::constants::RocksDbWeight::get()
+            .reads_writes(4, 1)
+            .saturating_add(Weight::from_parts(0, 14_000));
+        assert!(
+            weight.all_gte(checkpoint.saturating_mul(4)),
+            "reward hook omitted balance checkpoints: {weight:?}"
+        );
+        assert_eq!(
+            System::block_weight(),
+            before,
+            "hook must return its weight"
+        );
+    });
+}

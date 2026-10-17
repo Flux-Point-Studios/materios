@@ -1,6 +1,5 @@
 use crate::{AccrualCheckpoint, Config, LastTouched, MotraBalances, Pallet};
 use frame_support::{
-    dispatch::DispatchClass,
     traits::{Get, OnNewAccount, StoredMap},
     weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight},
 };
@@ -20,11 +19,10 @@ impl<T: Config> OnNewAccount<T::AccountId> for Pallet<T> {
             };
             LastTouched::<T>::insert(who, last);
         }
-        charge_checkpoint_weight::<T>();
     }
 }
 
-pub(crate) fn checkpoint_weight<T: Config>() -> Weight {
+pub fn checkpoint_weight<T: Config>() -> Weight {
     let configured = T::DbWeight::get();
     let minimum = RocksDbWeight::get();
     // Some runtimes inherit FRAME's zero DbWeight default.
@@ -36,23 +34,12 @@ pub(crate) fn checkpoint_weight<T: Config>() -> Weight {
     .saturating_add(Weight::from_parts(0, 14_000))
 }
 
-pub(crate) fn charge_checkpoint_weight<T: Config>() {
-    // Account hooks also run at genesis; block accounting must not enter genesis storage.
-    if frame_system::Pallet::<T>::block_number() != BlockNumberFor::<T>::zero() {
-        frame_system::Pallet::<T>::register_extra_weight_unchecked(
-            checkpoint_weight::<T>(),
-            DispatchClass::Normal,
-        );
-    }
-}
-
 /// Balances' system-account store, with a conservative MATRA holding checkpoint.
 pub struct MatraAccountStore<T>(core::marker::PhantomData<T>);
 
 impl<T> StoredMap<T::AccountId, AccountData<T::Balance>> for MatraAccountStore<T>
 where
-    T: Config
-        + frame_system::Config<AccountData = AccountData<<T as pallet_balances::Config>::Balance>>,
+    T: Config<Balance = u128> + frame_system::Config<AccountData = AccountData<u128>>,
 {
     fn get(who: &T::AccountId) -> AccountData<T::Balance> {
         frame_system::Pallet::<T>::get(who)
@@ -64,15 +51,9 @@ where
     ) -> Result<R, E> {
         let mut balances = (0u128, 0u128);
         let result = frame_system::Pallet::<T>::try_mutate_exists(who, |account| {
-            balances.0 = account
-                .as_ref()
-                .map(|a| a.free.try_into().unwrap_or(0))
-                .unwrap_or(0);
+            balances.0 = account.as_ref().map(|a| a.free).unwrap_or(0);
             let result = f(account)?;
-            balances.1 = account
-                .as_ref()
-                .map(|a| a.free.try_into().unwrap_or(0))
-                .unwrap_or(0);
+            balances.1 = account.as_ref().map(|a| a.free).unwrap_or(0);
             Ok::<R, E>(result)
         })?;
         if balances.0 != balances.1 {
@@ -85,7 +66,6 @@ where
                     None => (balances.0.min(balances.1), now),
                 });
             });
-            charge_checkpoint_weight::<T>();
         }
         Ok(result)
     }

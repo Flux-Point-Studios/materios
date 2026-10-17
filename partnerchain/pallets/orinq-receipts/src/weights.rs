@@ -3,6 +3,10 @@ use frame_support::weights::Weight;
 pub trait WeightInfo {
     fn submit_receipt() -> Weight;
     fn set_availability_cert() -> Weight;
+    /// Additional account-store work for each potential balance mutation.
+    fn balance_mutations(_accounts: u32) -> Weight {
+        Weight::zero()
+    }
 }
 
 /// Substrate reference weights -- replace with benchmarked values.
