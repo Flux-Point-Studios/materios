@@ -18,6 +18,9 @@ The pinned SDK is `polkadot-sdk` revision `c455194a`. Its
 invoke `ensure_upgraded` before changing account data. Its
 [Utility weight calculation and refunds](https://github.com/paritytech/polkadot-sdk/blob/c455194a2ae2f613c1c671e00dbf397b83ed8171/substrate/frame/utility/src/lib.rs)
 both use the inner calls' dispatch information.
+The settlement dependency routes its three bond calls through `WeightInfo`;
+dispatch-information regressions in both repositories enforce that wiring,
+including the existing operational class and fee policy.
 No call indices, origins, SignedExtra fields or transaction-version changes are
 needed.
 

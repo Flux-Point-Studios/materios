@@ -412,3 +412,45 @@ fn checkpoint_receipt_rewards_return_hook_weight() {
         );
     });
 }
+
+#[test]
+fn checkpoint_settlement_bond_dispatches_use_the_configured_weights() {
+    use frame_support::dispatch::{DispatchClass, GetDispatchInfo, Pays};
+    use pallet_intent_settlement::{types::FraudProof, WeightInfo};
+    type Configured = <Runtime as pallet_intent_settlement::Config>::WeightInfo;
+    let calls = [
+        (
+            pallet_intent_settlement::Call::post_settlement_bond {
+                claim_id: H256::zero(),
+                amount: 1,
+            },
+            Configured::post_settlement_bond(),
+            Pays::Yes,
+        ),
+        (
+            pallet_intent_settlement::Call::slash_bad_settlement_evidence {
+                claim_id: H256::zero(),
+                fraud_proof: FraudProof::TxNotFound,
+                signatures: vec![],
+            },
+            Configured::slash_bad_settlement_evidence(),
+            Pays::No,
+        ),
+        (
+            pallet_intent_settlement::Call::release_settlement_bond {
+                claim_id: H256::zero(),
+            },
+            Configured::release_settlement_bond(),
+            Pays::Yes,
+        ),
+    ];
+    for (call, expected, pays_fee) in calls {
+        let info = RuntimeCall::IntentSettlement(call).get_dispatch_info();
+        assert_eq!(
+            info.weight, expected,
+            "bond dispatch bypassed configured checkpoint weight"
+        );
+        assert_eq!(info.class, DispatchClass::Operational);
+        assert_eq!(info.pays_fee, pays_fee);
+    }
+}
