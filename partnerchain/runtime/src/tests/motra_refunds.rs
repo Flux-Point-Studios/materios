@@ -219,7 +219,7 @@ fn refund_optional_receipt_and_billing_mutations_return_actual_weight() {
         use pallet_billing::weights::WeightInfo as _;
         assert_eq!(
             post.actual_weight,
-            Some(pallet_billing::weights::SubstrateWeight::topup_self())
+            Some(pallet_billing::weights::SubstrateWeight::<Runtime>::topup_self())
         );
 
         pallet_billing::PendingWithdrawals::<Runtime>::insert(account(200), (100_000u128, 100));
@@ -228,7 +228,7 @@ fn refund_optional_receipt_and_billing_mutations_return_actual_weight() {
         assert_eq!(
             post.actual_weight,
             Some(
-                pallet_billing::weights::SubstrateWeight::execute_withdrawal()
+                pallet_billing::weights::SubstrateWeight::<Runtime>::execute_withdrawal()
                     .saturating_add(pallet_motra::checkpoint_weight::<Runtime>())
             )
         );
@@ -243,7 +243,7 @@ fn refund_bond_slash_and_expiry_charge_only_changed_accounts() {
             RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::bond { amount: 0 }),
             account(1),
         );
-        assert_eq!(post.actual_weight, Some(Weight::from_parts(20_000, 0)));
+        assert_eq!(post.actual_weight, Some(<pallet_orinq_receipts::weights::SubstrateWeight<Runtime> as pallet_orinq_receipts::weights::WeightInfo>::bond()));
         let call = RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::slash_attestor {
             attestor: account(1),
             amount: 100,
@@ -252,7 +252,7 @@ fn refund_bond_slash_and_expiry_charge_only_changed_accounts() {
         let post = call
             .dispatch(RuntimeOrigin::root())
             .expect("empty bond slash");
-        assert_eq!(post.actual_weight, Some(Weight::from_parts(30_000, 0)));
+        assert_eq!(post.actual_weight, Some(<pallet_orinq_receipts::weights::SubstrateWeight<Runtime> as pallet_orinq_receipts::weights::WeightInfo>::slash_attestor()));
         pallet_orinq_receipts::ReceiptExpiryBlocks::<Runtime>::put(10);
         System::set_block_number(111);
         let (_, post) = dispatch(
@@ -261,7 +261,7 @@ fn refund_bond_slash_and_expiry_charge_only_changed_accounts() {
             }),
             account(1),
         );
-        assert_eq!(post.actual_weight, Some(Weight::from_parts(25_000, 0)));
+        assert_eq!(post.actual_weight, Some(<pallet_orinq_receipts::weights::SubstrateWeight<Runtime> as pallet_orinq_receipts::weights::WeightInfo>::expire_receipt_fee()));
     });
 }
 
@@ -523,4 +523,68 @@ fn refund_failed_legacy_bond_keeps_its_budget_and_rolls_back_checkpoints() {
         touched, 0,
         "the rejected reserve must unwind the preceding repair"
     );
+}
+
+#[test]
+fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
+    use frame_support::dispatch::DispatchClass;
+    use pallet_utility::WeightInfo;
+    use parity_scale_codec::Encode;
+    externalities().execute_with(|| {
+        let (template, _) = receipt(3, 2, 0);
+        let record = pallet_orinq_receipts::Receipts::<Runtime>::get(template).expect("receipt");
+        let who = account(1);
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.decay_rate_per_block = Perbill::one();
+            p.generation_per_matra_per_block = 0;
+            p.congestion_rate = 1_000_000;
+            p.length_fee_per_byte = 0;
+        });
+        pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+        let limits = RuntimeBlockWeights::get();
+        let normal = limits.get(DispatchClass::Normal);
+        let cap = normal.max_total.expect("normal cap");
+        let per_call = attest(template, [0; 32]).get_dispatch_info().weight;
+        let mut accepted = 0u64;
+        let mut batches = 0u64;
+        loop {
+            let remaining = cap.saturating_sub(*System::block_weight().get(DispatchClass::Normal))
+                .saturating_sub(normal.base_extrinsic);
+            let width = (1u32..=96).take_while(|n| {
+                per_call.saturating_mul(u64::from(*n))
+                    .saturating_add(<Runtime as pallet_utility::Config>::WeightInfo::batch(*n))
+                    .all_lte(remaining)
+            }).last().unwrap_or(0);
+            if width == 0 { break; }
+            let mut ids = Vec::new();
+            let calls = (0..width).map(|i| {
+                let id = H256::from_low_u64_be(accepted + u64::from(i) + 1_000);
+                pallet_orinq_receipts::Receipts::<Runtime>::insert(id, record.clone());
+                let hash = OrinqReceipts::canonical_cert_hash(id).expect("cert").0;
+                ids.push(id);
+                attest(id, hash)
+            }).collect();
+            let call = RuntimeCall::Utility(pallet_utility::Call::batch { calls });
+            let info = call.get_dispatch_info();
+            let len = call.encoded_size() + 128;
+            assert_ok!(frame_system::CheckWeight::<Runtime>::do_pre_dispatch(&info, len));
+            let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&who, &call, &info, len).expect("batch fee");
+            let post = call.dispatch(RuntimeOrigin::signed(who.clone())).expect("batch");
+            for id in ids {
+                let (_, signers) = pallet_orinq_receipts::Attestations::<Runtime>::get(id).expect("attested");
+                assert_eq!(signers.len(), 1);
+                assert!(signers.contains(&who));
+                assert_eq!(pallet_orinq_receipts::Receipts::<Runtime>::get(id).expect("receipt").availability_cert_hash, [0; 32]);
+            }
+            assert_ok!(frame_system::CheckWeight::<Runtime>::post_dispatch(None, &info, &post, len, &Ok(())));
+            assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(Some(pre), &info, &post, len, &Ok(())));
+            accepted += u64::from(width);
+            batches += 1;
+        }
+        let historical = cap.ref_time() / (ExtrinsicBaseWeight::get().ref_time() + 15_000);
+        assert!(accepted >= historical, "{accepted} batched attests < {historical} historical attests");
+        assert!(System::block_weight().get(DispatchClass::Normal).all_lte(cap));
+        eprintln!("batched non-threshold attests/block: {accepted} in {batches} signed batches; historical {historical}; consumed {:?}", System::block_weight());
+    });
 }

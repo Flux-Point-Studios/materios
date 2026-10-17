@@ -83,7 +83,7 @@ weights!(pallet_intent_settlement, pallet_intent_settlement::weights::SubstrateW
     release_settlement_bond() => 1;
 });
 
-weights!(pallet_billing, pallet_billing::weights::SubstrateWeight, {
+weights!(pallet_billing, pallet_billing::weights::SubstrateWeight<Runtime>, {
     balance_mutations(accounts: u32) => u64::from(accounts);
     topup_self() => 0;
     topup_for() => 0;
@@ -141,6 +141,22 @@ impl pallet_orinq_receipts::weights::WeightInfo for WithMotra {
 
     fn set_availability_cert() -> Weight {
         pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::set_availability_cert()
+    }
+
+    fn bond() -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::bond()
+    }
+
+    fn unbond() -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::unbond()
+    }
+
+    fn slash_attestor() -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::slash_attestor()
+    }
+
+    fn expire_receipt_fee() -> Weight {
+        pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::expire_receipt_fee()
     }
 
     fn balance_mutations(accounts: u32) -> Weight {

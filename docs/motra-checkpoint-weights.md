@@ -163,17 +163,60 @@ proof limits. A real CheckWeight/pre-dispatch/call/post-dispatch loop admits
 **1,120 non-threshold attests**, versus 70 with no actual-weight refunds under
 these new measured declarations and about 34 at the reviewed head. The ideal
 actual-only ceiling is 1,135; admission must leave room for a possible threshold
-call. This does **not** equal pre-#68's 14,007: that figure used an unpriced fee
-extension and a 15,000-ref_time attestation base. Restoring that number while
-reserving full worst-case fee work per separate extrinsic is incompatible with
-the present block budget. This remains an explicit acceptance decision, not a
-reason to understate execution cost.
+call. Individually signed calls cannot restore pre-#68's 14,007 count while
+reserving the full fee path per extrinsic.
+
+Existing `Utility.batch` does meet the requested attestation count: a real
+CheckWeight/ChargeMotra/dispatch/post-dispatch loop admits **15,138
+non-threshold attestations in 520 signed batches**, using 1,479,835,961,258
+ref_time. Batch width shrinks with the remaining admission budget; every
+inner receipt is checked for its single recorded signer and uncertified state.
+Removing attestation actual-weight refunds makes this same regression fail at
+74 attestations. This is protocol batching capacity, not separate signed
+transaction capacity or a claim that cert-daemons already batch submissions.
 
 A real maximum Utility/as_derivative batch runs 1,411 dormant delegated claims
 at u32::MAX. Tests check every inner clock and compare the sum of worst Wasm
 claim samples (400,639,340,000 ref_time) against its declared total
-1,499,275,194,121. The isolated native run took 983,750,068,000 ref_time (0.984 seconds), within
+1,499,275,194,121. The isolated native run took 928,041,387,000 ref_time (0.928 seconds), within
 the declared bound. Concurrent test scheduling is not a runtime cost measurement.
+
+## Conditional Currency refunds
+
+All receipt and Billing calls that refund checkpoint surcharges retain a
+measured execution base. The raw `benchmarking/currency-samples.json` files
+cover zero and positive Currency operations, a full 96-member committee,
+maximal content-index input, both receipt versions and creation of a Billing
+withdrawal recipient. The base takes the largest observed execution sample
+across these branches, retaining the measured positive-branch CPU cost even
+when a zero branch refunds every checkpoint. This prevents utility batches
+from recycling checkpoint refunds against the former 20,000–30,000-ref_time
+receipt bases.
+
+| Retained base | ref_time | Proof bytes | Base reads/writes |
+|---|---:|---:|---:|
+| Submit receipt v1/v2 | 101,874,000 | 28,238 | 6/7 |
+| Privileged certification | 67,549,000 | 14,578 | 3/4 |
+| Bond | 53,642,000 | 7,122 | 2/2 |
+| Unbond | 81,425,000 | 11,681 | 3/2 |
+| Slash attestor | 110,751,000 | 18,264 | 6/5 |
+| Expire escrow | 70,634,000 | 16,067 | 5/3 |
+| Billing topup self | 55,787,000 | 8,623 | 3/3 |
+| Billing topup for | 48,853,000 | 8,623 | 3/3 |
+| Billing withdrawal | 75,884,000 | 8,627 | 3/3 |
+
+These measurements use the same FRAME command above with `--steps 20
+--repeat 20 --external-repeat 3`, once for `pallet_orinq_receipts` and once
+for `pallet_billing`. Measurement Wasm SHA256:
+`586c62ba2c0902aeef64a9397f6422523c3d067956079253e95fc3a3c4923353`.
+Each retained base is the maximum `extrinsic_time * 1000` in its samples;
+v1/v2 share the component-wise maximum. Proof bounds sum the independent
+StorageInfo bounds listed in `proof_storage`, with seven trie layers per map
+and three per value. The runtime test recomputes the CPU/proof bounds from
+the samples and runtime StorageInfo, then checks the dispatch base and DB counts under a nonzero test schedule.
+The recorded checkpoint key is removed from base DB counts and charged by
+the separate checkpoint surcharge. Billing additionally accounts for
+`Balances.TotalIssuance`, which the standard benchmark whitelist excludes.
 
 ## Remaining database-weight dependency
 
@@ -188,12 +231,11 @@ owns the runtime-wide fix. Within this PR:
   storage remains zero-priced. Threshold DB samples include checkpoint keys
   that are also covered by the separate checkpoint surcharge, so a future
   nonzero DbWeight must reconcile that conservative duplication.
-- Receipt bond, unbond, slash and expiry annotations and their actual weights
-  retain zero `T::DbWeight` terms (including the free-balance snapshots used for
-  refunds). The checkpoint addition does not price their base storage work.
-- Billing topups/withdrawal and receipt submission v1/v2 and privileged
-  certification use hand-authored flat base weights with no database terms;
-  the added checkpoint budget does not repair them.
+- All refunded receipt Currency bases (submission v1/v2, privileged
+  certification, bond, unbond, slash and expiry) and Billing topups/withdrawal
+  use measured execution but configured `T::DbWeight` for base storage.
+  Those DB terms remain zero; separate checkpoint work retains the RocksDB
+  floor. Billing's unrelated dispatches retain their prior flat weights.
 - Reward-hook base work retains configured database terms; author-map work is
   not covered by the checkpoint increment.
 - Capacity and exact-weight regression numbers use today's zero base database

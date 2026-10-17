@@ -1,6 +1,6 @@
-//! Hand-tuned weights for `pallet-billing`.
+//! Currency paths use Wasm execution maxima and independent storage bounds.
 
-use frame_support::weights::Weight;
+use frame_support::{traits::Get, weights::Weight};
 
 pub trait WeightInfo {
     fn balance_mutations(_accounts: u32) -> Weight {
@@ -19,15 +19,15 @@ pub trait WeightInfo {
     fn prune_paid_requests(n: u32) -> Weight;
 }
 
-pub struct SubstrateWeight;
+pub struct SubstrateWeight<T>(core::marker::PhantomData<T>);
 
-impl WeightInfo for SubstrateWeight {
+impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn topup_self() -> Weight {
-        Weight::from_parts(40_000_000, 4_096)
+        Weight::from_parts(55_787_000, 8_623).saturating_add(T::DbWeight::get().reads_writes(3, 3))
     }
 
     fn topup_for() -> Weight {
-        Weight::from_parts(45_000_000, 4_096)
+        Weight::from_parts(48_853_000, 8_623).saturating_add(T::DbWeight::get().reads_writes(3, 3))
     }
 
     fn pay_request() -> Weight {
@@ -47,7 +47,7 @@ impl WeightInfo for SubstrateWeight {
     }
 
     fn execute_withdrawal() -> Weight {
-        Weight::from_parts(50_000_000, 4_096)
+        Weight::from_parts(75_884_000, 8_627).saturating_add(T::DbWeight::get().reads_writes(3, 3))
     }
 
     fn cancel_withdrawal() -> Weight {

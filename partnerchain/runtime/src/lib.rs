@@ -1843,6 +1843,7 @@ frame_benchmarking::define_benchmarks!(
     [frame_system, SystemBench::<Runtime>]
     [pallet_balances, Balances]
     [pallet_motra, Motra]
+    [pallet_billing, Billing]
     [pallet_orinq_receipts, OrinqReceipts]
     [pallet_timestamp, Timestamp]
     [pallet_intent_settlement, IntentSettlement]

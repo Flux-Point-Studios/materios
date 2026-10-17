@@ -1978,9 +1978,7 @@ pub mod pallet {
         /// It can be withdrawn via `unbond` when the attestor is not in the
         /// committee.
         #[pallet::call_index(12)]
-        #[pallet::weight(Weight::from_parts(20_000, 0)
-            .saturating_add(T::DbWeight::get().reads(1))
-            .saturating_add(T::DbWeight::get().writes(2))
+        #[pallet::weight(<T as Config>::WeightInfo::bond()
             .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn bond(origin: OriginFor<T>, amount: u128) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
@@ -2007,17 +2005,14 @@ pub mod pallet {
                 amount,
                 new_total,
             });
-            Ok(Some(Weight::from_parts(20_000, 0)
-                .saturating_add(T::DbWeight::get().reads_writes(1, 2))
+            Ok(Some(<T as Config>::WeightInfo::bond()
                 .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
         /// Withdraw the entire bond. Fails if the caller is still a
         /// committee member — call `leave_committee` first.
         #[pallet::call_index(13)]
-        #[pallet::weight(Weight::from_parts(20_000, 0)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(2))
+        #[pallet::weight(<T as Config>::WeightInfo::unbond()
             .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn unbond(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
@@ -2040,8 +2035,7 @@ pub mod pallet {
             AttestorBonds::<T>::remove(&who);
 
             Self::deposit_event(Event::Unbonded { who, amount: bonded });
-            Ok(Some(Weight::from_parts(20_000, 0)
-                .saturating_add(T::DbWeight::get().reads_writes(2, 2))
+            Ok(Some(<T as Config>::WeightInfo::unbond()
                 .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
@@ -2054,9 +2048,7 @@ pub mod pallet {
         /// want MATRA to accumulate in `mat/attr` for future reward
         /// payouts, not to shrink total issuance.
         #[pallet::call_index(14)]
-        #[pallet::weight(Weight::from_parts(30_000, 0)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(3))
+        #[pallet::weight(<T as Config>::WeightInfo::slash_attestor()
             .saturating_add(<T as Config>::WeightInfo::balance_mutations(2)))]
         pub fn slash_attestor(
             origin: OriginFor<T>,
@@ -2132,8 +2124,7 @@ pub mod pallet {
             }
 
             let changed = Self::changed_accounts(&balances_before);
-            Ok(Some(Weight::from_parts(30_000, 0)
-                .saturating_add(T::DbWeight::get().reads_writes(3, 3))
+            Ok(Some(<T as Config>::WeightInfo::slash_attestor()
                 .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 
@@ -2231,9 +2222,7 @@ pub mod pallet {
         /// * `ReceiptNotExpired` — `ReceiptExpiryBlocks` have not yet
         ///   elapsed since submission.
         #[pallet::call_index(19)]
-        #[pallet::weight(Weight::from_parts(25_000, 0)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(2))
+        #[pallet::weight(<T as Config>::WeightInfo::expire_receipt_fee()
             .saturating_add(<T as Config>::WeightInfo::balance_mutations(1)))]
         pub fn expire_receipt_fee(
             origin: OriginFor<T>,
@@ -2285,8 +2274,7 @@ pub mod pallet {
                 submitter,
                 amount: reserved_fee,
             });
-            Ok(Some(Weight::from_parts(25_000, 0)
-                .saturating_add(T::DbWeight::get().reads_writes(3, 2))
+            Ok(Some(<T as Config>::WeightInfo::expire_receipt_fee()
                 .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
         }
 

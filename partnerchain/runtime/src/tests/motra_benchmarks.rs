@@ -274,3 +274,149 @@ fn benchmark_signed_transfer_covers_fee_path_and_reports_capacity() {
         .all_lte(normal.max_total.expect("cap")));
     eprintln!("transfer_keep_alive: call={:?}; signed total={total:?}; transfers/block={count}; worst measured fee path={measured} ps", info.weight);
 }
+
+mod currency_db {
+    use frame_support::{derive_impl, parameter_types, weights::RuntimeDbWeight};
+    frame_support::construct_runtime!(pub enum Test { System: frame_system });
+    parameter_types! {
+        pub const Db: RuntimeDbWeight = RuntimeDbWeight { read: 1, write: 10_000 };
+    }
+    #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+    impl frame_system::Config for Test {
+        type Block = frame_system::mocking::MockBlock<Test>;
+        type DbWeight = Db;
+    }
+}
+
+fn currency_base<T: frame_system::Config>(name: &str) -> Weight {
+    use pallet_billing::weights::WeightInfo as _;
+    use pallet_orinq_receipts::weights::WeightInfo as _;
+    match name {
+        "submit_receipt" | "submit_receipt_v2" => {
+            pallet_orinq_receipts::weights::SubstrateWeight::<T>::submit_receipt()
+        }
+        "set_availability_cert" => {
+            pallet_orinq_receipts::weights::SubstrateWeight::<T>::set_availability_cert()
+        }
+        "bond" => pallet_orinq_receipts::weights::SubstrateWeight::<T>::bond(),
+        "unbond" => pallet_orinq_receipts::weights::SubstrateWeight::<T>::unbond(),
+        "slash_attestor" => pallet_orinq_receipts::weights::SubstrateWeight::<T>::slash_attestor(),
+        "expire_receipt_fee" => {
+            pallet_orinq_receipts::weights::SubstrateWeight::<T>::expire_receipt_fee()
+        }
+        "topup_self" => pallet_billing::weights::SubstrateWeight::<T>::topup_self(),
+        "topup_for" => pallet_billing::weights::SubstrateWeight::<T>::topup_for(),
+        "execute_withdrawal" => pallet_billing::weights::SubstrateWeight::<T>::execute_withdrawal(),
+        _ => panic!("unpriced currency benchmark {name}"),
+    }
+}
+
+#[test]
+fn benchmark_currency_refunds_retain_measured_execution_and_proofs() {
+    let entries = [
+        System::storage_info(),
+        Balances::storage_info(),
+        Timestamp::storage_info(),
+        OrinqReceipts::storage_info(),
+        Billing::storage_info(),
+    ]
+    .concat();
+    let receipts: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../pallets/orinq-receipts/benchmarking/currency-samples.json"
+    ))
+    .expect("receipt currency samples");
+    let billing: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../pallets/billing/benchmarking/currency-samples.json"
+    ))
+    .expect("billing currency samples");
+    let mut failures = Vec::new();
+    for sample in receipts.iter().chain(&billing) {
+        let name = sample["benchmark"].as_str().expect("benchmark name");
+        let group: Vec<_> = if name.starts_with("submit_receipt") {
+            receipts
+                .iter()
+                .filter(|s| {
+                    s["benchmark"]
+                        .as_str()
+                        .expect("name")
+                        .starts_with("submit_receipt")
+                })
+                .collect()
+        } else {
+            vec![sample]
+        };
+        let execution = group
+            .iter()
+            .flat_map(|s| s["time_results"].as_array().expect("times"))
+            .map(|r| r["extrinsic_time"].as_u64().expect("execution"))
+            .max()
+            .expect("sample")
+            * 1_000;
+        let proof = group
+            .iter()
+            .map(|s| {
+                s["proof_storage"]
+                    .as_array()
+                    .expect("storage bounds")
+                    .iter()
+                    .map(|bound| {
+                        let info = entries
+                            .iter()
+                            .find(|info| {
+                                info.pallet_name
+                                    == bound["pallet"].as_str().expect("pallet").as_bytes()
+                                    && info.storage_name
+                                        == bound["storage"].as_str().expect("storage").as_bytes()
+                            })
+                            .expect("runtime storage info");
+                        bound["count"].as_u64().expect("key count")
+                            * (u64::from(info.max_size.expect("bounded storage"))
+                                + if info.max_values == Some(1) {
+                                    3 * 495
+                                } else {
+                                    7 * 495
+                                })
+                    })
+                    .sum::<u64>()
+            })
+            .max()
+            .expect("proof bound");
+        let actual = currency_base::<Runtime>(name);
+        let expected = Weight::from_parts(execution, proof);
+        let db_count = |field: &str| {
+            group
+                .iter()
+                .map(|s| {
+                    s["db_results"]
+                        .as_array()
+                        .expect("DB samples")
+                        .iter()
+                        .map(|row| row[field].as_u64().expect("DB count"))
+                        .max()
+                        .expect("DB sample")
+                        - s["checkpoint_keys"]
+                            .as_u64()
+                            .expect("separately charged checkpoint")
+                        + u64::from(s["whitelisted_issuance"].as_bool().unwrap_or(false))
+                })
+                .max()
+                .expect("DB bound")
+        };
+        assert_eq!(
+            currency_base::<currency_db::Test>(name),
+            expected.saturating_add(
+                currency_db::Db::get().reads_writes(db_count("reads"), db_count("writes"))
+            ),
+            "{name} must retain the measured base DB counts"
+        );
+        eprintln!("currency {name}: declared={actual:?}, measured/proof bound={expected:?}");
+        if actual != expected {
+            failures.push(format!("{name}: {actual:?} != {expected:?}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "refund bases must cover measured branches: {}",
+        failures.join("; ")
+    );
+}

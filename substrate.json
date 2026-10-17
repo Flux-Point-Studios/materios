@@ -4,7 +4,7 @@
     {
       "id": "orinq-receipts-pallet",
       "name": "Orinq receipts pallet",
-      "desc": "Receipt registry with M-of-N committee attestation, availability certification, anchor records, attestor bonds and slashing, and fee escrow \u2014 the on-chain truth every other primitive commits to. Benchmarked threshold and non-threshold attestation paths return actual weights; conditional Currency calls refund unused MOTRA checkpoint budgets.",
+      "desc": "Receipt registry with M-of-N committee attestation, availability certification, anchor records, attestor bonds and slashing, and fee escrow \u2014 the on-chain truth every other primitive commits to. Benchmarked threshold and non-threshold attestation paths return actual weights; conditional Currency calls refund unused MOTRA checkpoint budgets. Every refunded Currency base is pinned to maximum Wasm samples and independent storage proofs, including zero-balance branches. Existing Utility batches admit 15,138 non-threshold attestations under the measured signed fee and refund budgets.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/orinq-receipts"
@@ -27,7 +27,7 @@
     {
       "id": "billing-pallet",
       "name": "Billing pallet",
-      "desc": "Application-layer MATRA billing (pay_request) for API calls, metering and attestation evidence \u2014 the user-facing spend surface, distinct from MOTRA tx fees.",
+      "desc": "Application-layer MATRA billing (pay_request) for API calls, metering and attestation evidence \u2014 the user-facing spend surface, distinct from MOTRA tx fees. Topups and withdrawals use measured Wasm execution and storage-proof bounds while refunding unused MOTRA checkpoint surcharges.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/billing"
