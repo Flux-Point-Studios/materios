@@ -18,6 +18,14 @@ pub enum OrinqCmd {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Subcommand {
+    /// Print, as JSON, the genesis hash a chain spec builds and the chain ids
+    /// its runtime reports once block one has initialised on it. Offline.
+    ChainId {
+        /// A chain spec file, or the name of a chain built into the node.
+        #[arg(long)]
+        chain: String,
+    },
+
     /// Build a chain specification.
     BuildSpec(sc_cli::BuildSpecCmd),
 

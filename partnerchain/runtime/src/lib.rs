@@ -628,15 +628,11 @@ parameter_types! {
     pub const IntentSettlementMaxAttestBatch: u32 = 256;
     pub const IntentSettlementMaxVoucherBatch: u32 = 256;
     pub const IntentSettlementMaxSubmitBatch: u32 = 256;
-    /// 32-byte Materios chain identity (preprod v6 genesis hash). Pinned
-    /// into committee-signed bundles to domain-separate across networks/
-    /// resets.
-    pub IntentSettlementMateriosChainId: sp_core::H256 = sp_core::H256([
-        0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc,
-        0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
-        0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07,
-        0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
-    ]);
+    /// This chain's genesis hash, which committee-signed bundles bind so a
+    /// signature from another network or reset never verifies here. Genesis
+    /// stores a placeholder, but it carries no extrinsics and block one
+    /// writes the real hash before its first call; System never prunes it.
+    pub IntentSettlementMateriosChainId: H256 = frame_system::BlockHash::<Runtime>::get(0);
     /// Cardano preprod network magic. Mainnet flip: 764824073.
     pub const IntentSettlementNetworkMagic: u32 = 1;
     /// 28-byte blake2b224 of the deployed `aegis_policy_v1` script.
@@ -1299,17 +1295,8 @@ impl pallet_billing::Config for Runtime {
 // ---------------------------------------------------------------------------
 
 parameter_types! {
-    /// 32-byte materios chain identity (preprod v6 genesis hash). Pinned
-    /// into every PRIC preimage so a price signed on one chain is
-    /// structurally invalid on another. Same bytes as
-    /// `IntentSettlementMateriosChainId` but typed as a raw `[u8; 32]` to
-    /// match the oracle pallet's `Get<[u8; 32]>` Config bound.
-    pub const OracleMateriosChainId: [u8; 32] = [
-        0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc,
-        0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
-        0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07,
-        0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
-    ];
+    /// The settlement chain identity, bound into every PRIC preimage.
+    pub OracleMateriosChainId: [u8; 32] = IntentSettlementMateriosChainId::get().0;
     /// Per-pair attestor roster cap.
     pub const OracleMaxAttestors: u32 = 16;
     /// M-of-N aggregation gate. `submit_price` accumulates observations

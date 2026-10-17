@@ -127,7 +127,8 @@ fn seed_perp_engine_state() -> usize {
 #[test]
 fn metadata_carries_no_perp_engine() {
     for version in [14u32, 15] {
-        let metadata = Runtime::metadata_at_version(version)
+        let metadata = TestExternalities::default()
+            .execute_with(|| Runtime::metadata_at_version(version))
             .unwrap_or_else(|| panic!("metadata v{version} is served"));
         for needle in [&b"PerpEngine"[..], &b"perp_engine"[..]] {
             assert!(
@@ -141,7 +142,8 @@ fn metadata_carries_no_perp_engine() {
 
 #[test]
 fn pallet_indices_are_pinned_and_23_stays_vacant() {
-    let indices: Vec<(&str, u8)> = Runtime::metadata_ir()
+    let indices: Vec<(&str, u8)> = TestExternalities::default()
+        .execute_with(Runtime::metadata_ir)
         .pallets
         .iter()
         .map(|p| (p.name, p.index))

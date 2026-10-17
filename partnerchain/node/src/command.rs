@@ -49,6 +49,13 @@ pub fn run() -> sc_cli::Result<()> {
     let cli = Cli::from_args();
 
     match &cli.subcommand {
+        Some(Subcommand::ChainId { chain }) => {
+            let spec = cli.load_spec(chain).map_err(sc_cli::Error::Input)?;
+            let identity =
+                crate::chain_identity::inspect(spec.as_ref()).map_err(sc_cli::Error::Input)?;
+            println!("{identity}");
+            Ok(())
+        }
         Some(Subcommand::BuildSpec(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.sync_run(|config| cmd.run(config.chain_spec, config.network))

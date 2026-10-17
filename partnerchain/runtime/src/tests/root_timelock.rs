@@ -1542,7 +1542,8 @@ fn mainnet_defaults() {
 /// runtime metadata, which is all it has of the runtime.
 #[test]
 fn metadata_declares_the_mainnet_delays_and_their_ceiling() {
-    let pallet = Runtime::metadata_ir()
+    let pallet = bare_ext()
+        .execute_with(Runtime::metadata_ir)
         .pallets
         .into_iter()
         .find(|pallet| pallet.name == "RootTimelock")

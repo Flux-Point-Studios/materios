@@ -53,7 +53,9 @@ Rules, each of which refuses on its own:
                  not the checked spec; it runs another binary than the one the
                  manifest pins; its running node names another chain, chain
                  type or properties than the checked spec, or its --chain path
-                 changed less than a second before its node process started
+                 changed less than a second before its node process started;
+                 the spec's runtime, as its node binary runs it at block one,
+                 holds a chain id other than the genesis hash
   9 committee    the genesis committee, which the runtime seats at every
                  rotation whose Cardano draw fails, not exactly the declared
                  authorities, each once, or past the runtime's MaxValidators,
@@ -2952,6 +2954,48 @@ def node_genesis(exe: Path, options: list[str], cwd: Path, scratch: Path, where:
     return exported_genesis(out.read_bytes(), where), said
 
 
+def check_runtime_chain_ids(exe: Path, spec: Path, genesis: bytes, where: str) -> list[Finding]:
+    """What `materios-node chain-id` reports of the spec's own runtime, run offline on the genesis state with block
+    one initialised: the genesis it builds, which must be the one the preflight computes, and every metadata
+    constant whose name holds ChainId or GenesisHash. Each must be the genesis that run stored as BlockHash(0), as
+    every chain id a signed payload binds must be, but Cardano's Shelley genesis hash, which names the external chain
+    settlement evidence comes from."""
+    try:
+        done = subprocess.run([str(exe), "chain-id", "--chain", str(spec)], cwd=spec.parent, env={},
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=NODE_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise InputError(f"{where}: its node binary's chain-id did not run: {e}") from e
+    if done.returncode:
+        raise InputError(f"{where}: its node binary's chain-id failed: {stop_reason(done.stdout + done.stderr)}")
+    try:
+        report = json.loads(done.stdout, object_pairs_hook=unique_keys)
+        built = hex_bytes(report["genesis_hash"], f"{where}: its node's chain-id genesis_hash")
+        if len(built) != 32:
+            raise ValueError("a genesis hash of other than 32 bytes")
+        if not isinstance(report["constants"], list):
+            raise ValueError("constants that are not a list")
+        ids = {}
+        for pallet, name, value in report["constants"]:
+            if not (isinstance(pallet, str) and isinstance(name, str) and isinstance(value, list)
+                    and all(type(byte) is int and 0 <= byte <= 255 for byte in value)):
+                raise ValueError("a constant that is not a pallet, a name and bytes")
+            if (pallet, name) in ids:
+                raise ValueError(f"{pallet}.{name} twice")
+            ids[pallet, name] = bytes(value)
+    except (ValueError, TypeError, KeyError) as e:
+        raise InputError(f"{where}: its node's chain-id report is unreadable: {e}") from e
+    findings = []
+    if built != genesis:
+        findings.append(Finding(NODE, f"{where}: its node's chain-id builds genesis 0x{built.hex()} from the checked "
+                                      f"chain spec, and the preflight computes 0x{genesis.hex()}"))
+    for (pallet, name), value in ids.items():
+        if (pallet, name) != ("IntentSettlement", "MainchainGenesisHash") and value != built:
+            findings.append(Finding(NODE, f"{where}: the spec's runtime holds {pallet}.{name} 0x{value.hex()} at "
+                                          f"block one, not the genesis hash 0x{built.hex()}: a payload signed for "
+                                          "this chain does not verify on it"))
+    return findings
+
+
 def stop_reason(output: str) -> str:
     """The line of a node's output that says why it stopped: its last error or panic line, else its last line."""
     lines = [line.strip() for line in output.splitlines() if line.strip()]
@@ -3112,7 +3156,7 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
         raise InputError("the chain spec names telemetryEndpoints, which the node connects to while it builds "
                          "genesis; the attestation runs offline, so give none (a node can take --telemetry-url)")
     genesis, spec_sha = spec_genesis_hash(spec), hashlib.sha256(spec.source).hexdigest()
-    findings, runs = [], {}
+    findings, runs, inspected = [], {}, set()
     with tempfile.TemporaryDirectory(prefix="launch-preflight-node-") as tmp:
         scratch = Path(tmp)
         checked = scratch / "chain-spec.json"
@@ -3188,6 +3232,9 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
             if attested is None:
                 raise InputError(f"{where}: its node builds no genesis from the checked chain spec: "
                                  f"{stop_reason(said)}")
+            if sha not in inspected:
+                findings += check_runtime_chain_ids(exe, checked, genesis, where)
+                inspected.add(sha)
             wrong = next((h for h in (attested, launched) if h not in (None, genesis)), None)
             if wrong is not None:
                 findings.append(Finding(NODE, f"{where}: its node builds genesis 0x{wrong.hex()} from the checked "
