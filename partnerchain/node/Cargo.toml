@@ -54,6 +54,7 @@ substrate-frame-rpc-system = { workspace = true }
 # 202 (HIGH #1 follow-up to PR #9, 2026-04-21). See runtime/Cargo.toml and
 # node/src/rpc.rs for the rationale.
 frame-system = { workspace = true, features = ["std"] }
+frame-metadata = "16.0.0"
 
 # IOG Partner Chains toolkit
 sidechain-domain = { workspace = true, features = ["std"] }

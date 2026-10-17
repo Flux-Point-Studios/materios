@@ -219,6 +219,8 @@ def test_a_preflight_that_reads_the_spec_apart_from_the_node_is_refused(tmp_path
     computed = lp.spec_genesis_hash(lp.load_spec(str(preprod))).hex()
     assert computed != genesis
     assert findings(preprod, attested(tmp_path, node, pin, preprod, ["--chain", "/srv/materios/mainnet-raw.json"])) == [
+        f"[8 node] authority val0: its node's chain-id builds genesis 0x{genesis} from the checked chain spec, and the "
+        f"preflight computes 0x{computed}",
         f"[8 node] authority val0: its node builds genesis 0x{genesis} from the checked chain spec, and the preflight "
         f"computes 0x{computed}: the signed genesis hash and the lock's datum bind the preflight's, not the chain this "
         "authority starts"]
@@ -558,3 +560,42 @@ def test_a_directory_renamed_into_the_chain_spec_path_after_the_node_started_is_
                                                           "next/raw.json": checked.read_bytes()}, after=swap)
     assert impl == IMPL
     assert len(found) == 1 and found[0].startswith(changed_after_start("spec")), found
+
+
+def chain_ids(node: Path, spec: Path) -> tuple[str, dict]:
+    """The genesis and the chain ids `materios-node chain-id` reports for `spec`."""
+    done = subprocess.run([str(node), "chain-id", "--chain", str(spec)], env={}, stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, timeout=lp.NODE_TIMEOUT, check=True)
+    report = json.loads(done.stdout)
+    return report["genesis_hash"], {f"{pallet}.{name}": "0x" + bytes(value).hex()
+                                    for pallet, name, value in report["constants"]}
+
+
+def test_the_runtime_this_tree_builds_binds_the_genesis_it_runs_on(node, preprod, tmp_path):
+    reset = with_alice_as_root(preprod, tmp_path / "reset.json")
+    assert lp.load_spec(str(reset)).code == lp.load_spec(str(preprod)).code
+    for path in (preprod, reset):
+        genesis = "0x" + lp.spec_genesis_hash(lp.load_spec(str(path))).hex()
+        assert genesis != "0x" + base.PREPROD_GENESIS
+        built, ids = chain_ids(node, path)
+        ids.pop("IntentSettlement.MainchainGenesisHash")
+        assert (built, ids) == (genesis, {"IntentSettlement.MateriosChainId": genesis,
+                                          "Oracle.MateriosChainId": genesis})
+        assert lp.check_runtime_chain_ids(node, path, bytes.fromhex(genesis[2:]), "authority val0") == []
+
+
+def test_chain_id_reads_the_specs_own_runtime_not_the_nodes(node, preprod_path):
+    """The preprod v6 runtime predates settlement's and the oracle's chain ids; the node's own runtime has both."""
+    genesis = "0x" + lp.spec_genesis_hash(lp.load_spec(str(preprod_path))).hex()
+    assert chain_ids(node, preprod_path) == (genesis, {})
+
+
+def test_genesis_runs_no_calls_and_stores_the_system_placeholder(node, preprod, tmp_path):
+    """Block 0 is built from storage with an empty body, so no call runs while System.BlockHash(0) holds the
+    placeholder genesis stores; block one replaces it with the genesis hash before its first call."""
+    spec = lp.load_spec(str(preprod))
+    assert spec.storage[lp.storage_key("System", "BlockHash") + lp.twox_64(bytes(4)) + bytes(4)] == bytes([69]) * 32
+    (tmp_path / "registrations.json").write_text("[]")
+    genesis, said = lp.node_genesis(node, ["--chain", str(preprod)], tmp_path, tmp_path, "authority val0")
+    assert genesis == lp.spec_genesis_hash(spec), said
+    assert next(tmp_path.glob("*/block-0")).read_bytes()[8 + lp.GENESIS_HEADER:] == b"\0\0"
