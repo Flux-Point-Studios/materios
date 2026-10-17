@@ -130,6 +130,26 @@
       ],
       "consumes": [],
       "status": "experimental"
+    },
+    {
+      "id": "native-zk-specification",
+      "name": "Native ZK and hybrid MATRA specification",
+      "desc": "Decision packet and executable RED acceptance scaffolds for native verification of other chains and single-asset account/UTXO/shielded MATRA. Adapter rejects missing dependencies and vacuous execution; feature implementation and runtime evidence remain absent. No mainnet or spending authority is granted.",
+      "kind": "toolkit",
+      "paths": [
+        ".fluxpoint-spec.json",
+        "tools/zk-spec",
+        "scripts/harness.sh"
+      ],
+      "consumes": [
+        "orinq-receipts-pallet",
+        "tee-attestation-pallet",
+        "motra-fee-resource",
+        "launch-preflight",
+        "runtime-build",
+        "root-timelock"
+      ],
+      "status": "experimental"
     }
   ]
 }

@@ -1,0 +1,27 @@
+argv: ["nice", "-n", "10", "/usr/bin/python3", "tools/zk-spec/test_adapter.py", "-v"]
+exit: 0
+test_absent_aj_tests_fail_before_compiling (__main__.AdapterTests.test_absent_aj_tests_fail_before_compiling) ... ok
+test_absent_driver_fails_before_compiling (__main__.AdapterTests.test_absent_driver_fails_before_compiling) ... ok
+test_argv_is_literal_and_target_is_worktree_local (__main__.AdapterTests.test_argv_is_literal_and_target_is_worktree_local) ... ok
+test_assertion_failure_is_red (__main__.AdapterTests.test_assertion_failure_is_red) ... ok
+test_boolean_protocol_version_is_not_integer_version (__main__.AdapterTests.test_boolean_protocol_version_is_not_integer_version) ... ok
+test_cargo_ignored_test_fails (__main__.AdapterTests.test_cargo_ignored_test_fails) ... ok
+test_cargo_missing_summary_fails (__main__.AdapterTests.test_cargo_missing_summary_fails) ... ok
+test_cargo_single_real_test_passes (__main__.AdapterTests.test_cargo_single_real_test_passes) ... ok
+test_cargo_zero_tests_fails (__main__.AdapterTests.test_cargo_zero_tests_fails) ... ok
+test_driver_empty_response_fails (__main__.AdapterTests.test_driver_empty_response_fails) ... ok
+test_driver_unknown_response_fails (__main__.AdapterTests.test_driver_unknown_response_fails) ... ok
+test_duplicate_response_keys_fail (__main__.AdapterTests.test_duplicate_response_keys_fail) ... ok
+test_empty_suite_fails (__main__.AdapterTests.test_empty_suite_fails) ... ok
+test_expected_failure_is_not_green (__main__.AdapterTests.test_expected_failure_is_not_green) ... ok
+test_missing_command_fails (__main__.AdapterTests.test_missing_command_fails) ... ok
+test_nonzero_exit_fails (__main__.AdapterTests.test_nonzero_exit_fails) ... ok
+test_real_assertion_passes (__main__.AdapterTests.test_real_assertion_passes) ... ok
+test_skipped_suite_fails (__main__.AdapterTests.test_skipped_suite_fails) ... ok
+test_timeout_fails (__main__.AdapterTests.test_timeout_fails) ... ok
+test_unknown_driver_status_fails (__main__.AdapterTests.test_unknown_driver_status_fails) ... ok
+
+----------------------------------------------------------------------
+Ran 20 tests in 0.008s
+
+OK

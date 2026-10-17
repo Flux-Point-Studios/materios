@@ -68,3 +68,8 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+
+# Native ZK specification build and evidence inputs
+.zk-spec-target/
+.zk-spec-scratch/
+tools/zk-spec/artifacts/

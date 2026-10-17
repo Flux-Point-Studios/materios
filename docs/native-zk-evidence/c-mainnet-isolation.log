@@ -1,0 +1,99 @@
+argv: ["nice", "-n", "10", "env", "CARGO_TARGET_DIR=.zk-spec-target", "/usr/bin/python3", "tools/zk-spec/check.py", "c-mainnet-isolation"]
+exit: 1
+test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) ...
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='node') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='runtime') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='genesis') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='metadata') ... ERROR
+  test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='imports') ... ERROR
+test_reviewed_post_aj_launch_artifacts_are_identical (contracts.MainnetIsolation.test_reviewed_post_aj_launch_artifacts_are_identical) ... ERROR
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='node')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='runtime')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='genesis')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='metadata')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_gate_rejects_each_contaminated_launch_artifact (contracts.MainnetIsolation.test_gate_rejects_each_contaminated_launch_artifact) (name='imports')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 38, in test_gate_rejects_each_contaminated_launch_artifact
+    result = self.query("mainnet-isolation-mutant", artifact=name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+======================================================================
+ERROR: test_reviewed_post_aj_launch_artifacts_are_identical (contracts.MainnetIsolation.test_reviewed_post_aj_launch_artifacts_are_identical)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 26, in test_reviewed_post_aj_launch_artifacts_are_identical
+    result = self.query("mainnet-isolation", baseline="reviewed-launch-after-aj-66")
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/contracts.py", line 13, in query
+    result = DRIVER.query(operation, payload)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/deci/work/wt-materios-zk-spec/tools/zk-spec/check.py", line 90, in query
+    raise CheckFailure("runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked")
+check.CheckFailure: runtime driver missing: tools/zk-spec/driver/Cargo.toml; no implementation checked
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.002s
+
+FAILED (errors=6)
+RED: selected=2 ran=2 skipped=0
