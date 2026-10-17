@@ -1,7 +1,20 @@
 when:
   - event: push
     branch: main
+    path: &zk_paths
+      include:
+        - tools/zk-spec/**
+        - .fluxpoint-spec.json
+        - .fluxpoint-spec-lock.json
+        - WORK.md
+        - scripts/harness.sh
+        - .woodpecker/zk-p0.yaml
+        - partnerchain/runtime/**
+        - partnerchain/pallets/**
+        - chain-spec/**
+      on_empty: false
   - event: pull_request
+    path: *zk_paths
 
 labels:
   arm64-emu: "true"
@@ -11,10 +24,29 @@ steps:
     image: rust:1.85.0-bookworm
     commands:
       - apt-get update -qq
-      - apt-get install -y --no-install-recommends python3 nodejs
+      - apt-get install -y --no-install-recommends python3 python3-yaml
       - mkdir -p .zk-spec-scratch/aiken
       - curl -fsSL https://github.com/aiken-lang/aiken/releases/download/v1.1.22/aiken-x86_64-unknown-linux-musl.tar.gz -o .zk-spec-scratch/aiken.tar.gz
       - echo 'd443f9deab109fd75ae19e22f7dfce4cdd2f70b3f68c152a6a23db6bc1ea76e1  .zk-spec-scratch/aiken.tar.gz' | sha256sum -c -
       - tar xzf .zk-spec-scratch/aiken.tar.gz -C .zk-spec-scratch/aiken
       - install .zk-spec-scratch/aiken/aiken-x86_64-unknown-linux-musl/aiken /usr/local/bin/aiken
+      - curl -fsSL https://github.com/woodpecker-ci/woodpecker/releases/download/v3.16.0/woodpecker-cli_linux_amd64.tar.gz -o .zk-spec-scratch/woodpecker-cli.tar.gz
+      - echo 'a87df7024f2cf4949a94fb27a49808b984350cf97d4aa511049d58f88dd21e7e  .zk-spec-scratch/woodpecker-cli.tar.gz' | sha256sum -c -
+      - tar xzf .zk-spec-scratch/woodpecker-cli.tar.gz -C .zk-spec-scratch
+      - WOODPECKER_CLI=./.zk-spec-scratch/woodpecker-cli nice -n 10 python3 tools/zk-spec/ci_paths_test.py
       - tools/zk-spec/ci.sh
+
+  - name: c-p0-sapling-spike
+    image: rust:1.85.0-bookworm
+    when:
+      - event: [push, pull_request]
+        path:
+          include:
+            - tools/zk-spec/**
+            - .fluxpoint-spec.json
+            - .fluxpoint-spec-lock.json
+          on_empty: false
+    commands:
+      - apt-get update -qq
+      - apt-get install -y --no-install-recommends python3 nodejs
+      - tools/zk-spec/ci-sapling.sh
