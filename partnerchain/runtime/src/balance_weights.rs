@@ -4,8 +4,7 @@ use frame_support::weights::Weight;
 pub struct WithMotra;
 
 pub fn mutations(accounts: u64) -> Weight {
-    // A legacy account can be repaired before mutation, and created by inc_providers.
-    pallet_motra::checkpoint_weight::<Runtime>().saturating_mul(accounts.saturating_mul(3))
+    pallet_motra::checkpoint_weight::<Runtime>().saturating_mul(accounts)
 }
 
 macro_rules! weights {
@@ -97,18 +96,26 @@ weights!(pallet_billing, pallet_billing::weights::SubstrateWeight, {
 });
 
 impl pallet_motra::weights::WeightInfo for WithMotra {
+    fn checkpoint() -> Weight {
+        pallet_motra::weights::SubstrateWeight::<Runtime>::checkpoint()
+    }
+
+    fn initialize_delegatee_clock() -> Weight {
+        pallet_motra::weights::SubstrateWeight::<Runtime>::initialize_delegatee_clock()
+    }
+
     fn set_delegatee() -> Weight {
-        pallet_motra::weights::SubstrateWeight::set_delegatee()
-            .saturating_add(pallet_motra::checkpoint_weight::<Runtime>())
+        pallet_motra::weights::SubstrateWeight::<Runtime>::set_delegatee()
+            .saturating_add(pallet_motra::reconciliation_weight::<Runtime>())
     }
 
     fn set_params() -> Weight {
-        pallet_motra::weights::SubstrateWeight::set_params()
+        pallet_motra::weights::SubstrateWeight::<Runtime>::set_params()
     }
 
     fn claim_motra() -> Weight {
-        pallet_motra::weights::SubstrateWeight::claim_motra()
-            .saturating_add(pallet_motra::checkpoint_weight::<Runtime>())
+        pallet_motra::weights::SubstrateWeight::<Runtime>::claim_motra()
+            .saturating_add(pallet_motra::reconciliation_weight::<Runtime>())
     }
 }
 

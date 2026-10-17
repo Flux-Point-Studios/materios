@@ -27,7 +27,7 @@ impl frame_system::Config for Test {
     type AccountId = u64;
     type Lookup = IdentityLookup<Self::AccountId>;
     type AccountData = pallet_balances::AccountData<u128>;
-    type OnNewAccount = Motra;
+    type OnNewAccount = ();
 }
 
 parameter_types! {
@@ -60,7 +60,7 @@ impl pallet_balances::Config for Test {
 
 impl pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = crate::weights::SubstrateWeight;
+    type WeightInfo = crate::weights::SubstrateWeight<Test>;
     type TakenFirst = frame_support::traits::Nothing;
 }
 
@@ -681,11 +681,13 @@ fn accrual_projection_matches_safe_reconciliation() {
 }
 
 #[test]
-fn accrual_account_creation_initializes_clock() {
+fn accrual_system_account_creation_does_not_write_motra_state() {
     new_test_ext().execute_with(|| {
         System::set_block_number(100);
         System::inc_sufficients(&10);
-        assert_eq!(Motra::last_touched(&10), 100);
+        assert!(!pallet::LastTouched::<Test>::contains_key(10));
+        assert!(!pallet::AccrualCheckpoint::<Test>::contains_key(10));
+        assert_eq!(Motra::projected_balance(&10), 0);
     });
 }
 
@@ -785,6 +787,7 @@ fn accrual_refunding_preserves_decay_and_starts_at_new_funding() {
             10,
             1_000_000
         ));
+        assert_ok!(Motra::reconcile(&10));
         pallet::MotraBalances::<Test>::insert(10, 1_000_000);
         assert_ok!(Balances::transfer_allow_death(
             RuntimeOrigin::signed(10),
@@ -852,11 +855,56 @@ fn accrual_hooks_do_not_register_unchecked_weight() {
 }
 
 #[test]
+fn accrual_funding_only_writes_the_holding_checkpoint() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert_eq!(
+            pallet::AccrualCheckpoint::<Test>::get(10),
+            Some((1_000_000, 100))
+        );
+        assert!(!pallet::LastTouched::<Test>::contains_key(10));
+        assert_eq!(Motra::projected_balance(&10), 0);
+        System::set_block_number(110);
+        assert_eq!(Motra::projected_balance(&10), 10_000);
+        assert_ok!(Motra::reconcile(&10), 10_000);
+        assert_eq!(Motra::last_touched(&10), 110);
+    });
+}
+
+#[test]
 fn accrual_projection_matches_reconcile_after_same_block_cap_change() {
     new_test_ext().execute_with(|| {
         assert_ok!(Motra::reconcile(&1));
         pallet::Params::<Test>::mutate(|p| p.max_balance = 1);
         assert_eq!(Motra::reconcile(&1), Ok(Motra::projected_balance(&1)));
+    });
+}
+
+#[test]
+fn accrual_first_credit_uses_the_funded_accounts_clock() {
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert!(!pallet::LastTouched::<Test>::contains_key(10));
+        assert_ok!(Motra::set_delegatee(RuntimeOrigin::signed(1), Some(10)));
+        System::set_block_number(110);
+        assert_ok!(Motra::reconcile(&1));
+        assert_eq!(Motra::last_touched(&10), 100);
+        let credited = Motra::motra_balance(&10);
+        assert!(credited > 0);
+        let decayed = (0..10).fold(credited, |balance, _| {
+            Perbill::from_parts(999_000_000) * balance
+        });
+        assert_eq!(Motra::projected_balance(&10), decayed + 10_000);
     });
 }
 

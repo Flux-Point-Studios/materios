@@ -4,10 +4,12 @@ extern crate alloc;
 
 pub use pallet::*;
 mod account_store;
+mod checkpoint_weights;
+mod delegatee_clock_weights;
 pub mod fee;
 pub mod types;
 pub mod weights;
-pub use account_store::{checkpoint_weight, MatraAccountStore};
+pub use account_store::{checkpoint_weight, reconciliation_weight, MatraAccountStore};
 
 #[cfg(test)]
 mod tests;
@@ -383,6 +385,7 @@ pub mod pallet {
 
             if &generation_target != who && generated > 0 {
                 let delegatee_balance = MotraBalances::<T>::get(&generation_target);
+                Self::initialize_delegatee_clock(&generation_target, delegatee_balance);
                 let new_delegatee_balance = delegatee_balance
                     .saturating_add(generated)
                     .min(params.max_balance);
@@ -402,6 +405,16 @@ pub mod pallet {
             });
 
             Ok(new_self_balance)
+        }
+
+        pub(crate) fn initialize_delegatee_clock(who: &T::AccountId, balance: u128) {
+            if balance == 0 && !LastTouched::<T>::contains_key(who) {
+                // Keep unclaimed MATRA generation and any pre-funding sponsorship clock.
+                let since = AccrualCheckpoint::<T>::get(who)
+                    .map(|(_, since)| since)
+                    .unwrap_or_default();
+                LastTouched::<T>::insert(who, since);
+            }
         }
 
         /// Apply multiplicative decay: balance * (rate ^ elapsed).

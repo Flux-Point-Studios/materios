@@ -147,7 +147,10 @@ fn fresh_funding_rpc_and_sponsored_first_fee() {
                 .expect("runtime API dispatch");
             u128::decode(&mut &encoded[..]).expect("MOTRA response")
         };
-        assert_eq!(Motra::last_touched(&recipient), 100);
+        assert_eq!(
+            pallet_motra::AccrualCheckpoint::<Runtime>::get(&recipient),
+            Some((1_000_000, 100))
+        );
         assert_eq!(rpc(), 0);
         let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
         let info = frame_support::dispatch::GetDispatchInfo::get_dispatch_info(&call);
@@ -242,6 +245,33 @@ fn legacy_holder_without_stored_motra_can_pay_after_the_upgrade() {
 }
 
 #[test]
+fn checkpoint_proof_uses_the_storage_info_bound() {
+    use frame_support::traits::StorageInfoTrait;
+    use pallet_motra::weights::WeightInfo;
+    let storage = Motra::storage_info()
+        .into_iter()
+        .find(|entry| entry.storage_name == b"AccrualCheckpoint")
+        .expect("checkpoint storage info");
+    // CLI map-size 1,000,000: five trie layers, plus two top-level layers.
+    let bound = u64::from(storage.max_size.expect("bounded checkpoint encoding")) + 7 * 495;
+    assert_eq!(
+        pallet_motra::checkpoint_weight::<Runtime>().proof_size(),
+        bound
+    );
+    let clock_bound: u64 = Motra::storage_info()
+        .into_iter()
+        .filter(|entry| {
+            entry.storage_name == b"AccrualCheckpoint" || entry.storage_name == b"LastTouched"
+        })
+        .map(|entry| u64::from(entry.max_size.expect("bounded clock storage")) + 7 * 495)
+        .sum();
+    assert_eq!(
+        <Runtime as pallet_motra::Config>::WeightInfo::initialize_delegatee_clock().proof_size(),
+        clock_bound
+    );
+}
+
+#[test]
 fn checkpoint_transfer_dispatch_weight_covers_both_accounts_and_creation() {
     use frame_support::dispatch::GetDispatchInfo;
     use pallet_balances::WeightInfo;
@@ -251,13 +281,91 @@ fn checkpoint_transfer_dispatch_weight_covers_both_accounts_and_creation() {
         value: ExistentialDeposit::get(),
     });
     let upstream = pallet_balances::weights::SubstrateWeight::<Runtime>::transfer_keep_alive();
-    // Each account budgets mutation, legacy repair and account creation.
-    let checkpoints = frame_support::weights::constants::RocksDbWeight::get()
-        .reads_writes(24, 6)
-        .saturating_add(Weight::from_parts(0, 84_000));
+    let checkpoints = pallet_motra::checkpoint_weight::<Runtime>().saturating_mul(2);
     let actual = call.get_dispatch_info().weight;
     assert_eq!(actual, upstream.saturating_add(checkpoints));
     eprintln!("transfer_keep_alive weight: {upstream:?} -> {actual:?}");
+    for (name, base, actual) in [
+        (
+            "transfer_allow_death",
+            pallet_balances::weights::SubstrateWeight::<Runtime>::transfer_allow_death(),
+            <Runtime as pallet_balances::Config>::WeightInfo::transfer_allow_death(),
+        ),
+        (
+            "force_transfer",
+            pallet_balances::weights::SubstrateWeight::<Runtime>::force_transfer(),
+            <Runtime as pallet_balances::Config>::WeightInfo::force_transfer(),
+        ),
+    ] {
+        assert_eq!(actual, base.saturating_add(checkpoints));
+        eprintln!("{name} weight: {base:?} -> {actual:?}");
+    }
+    eprintln!(
+        "reserve/unreserve checkpoint surcharge: {:?}",
+        pallet_motra::checkpoint_weight::<Runtime>()
+    );
+}
+
+#[test]
+fn checkpoint_reaping_transfer_and_reserves_touch_only_changed_accounts() {
+    use frame_support::{assert_ok, traits::ReservableCurrency};
+    let mut ext = new_test_ext();
+    let sender = fee_payer();
+    let receiver = sp_keyring::Sr25519Keyring::Eve.to_account_id();
+    let prefix = pallet_motra::AccrualCheckpoint::<Runtime>::hashed_key_for(&sender)[..32].to_vec();
+    ext.execute_with(|| System::set_block_number(100));
+    ext.commit_all().expect("commit fixture");
+    ext.execute_with(|| {
+        assert_ok!(Balances::transfer_allow_death(
+            RuntimeOrigin::signed(sender.clone()),
+            receiver.clone().into(),
+            FEE_PAYER_SEED - 1,
+        ));
+        assert!(!frame_system::Account::<Runtime>::contains_key(&sender));
+        assert_eq!(
+            pallet_motra::AccrualCheckpoint::<Runtime>::get(&sender),
+            Some((0, 0))
+        );
+    });
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        2
+    );
+    ext.commit_all().expect("commit transfer");
+    ext.execute_with(|| {
+        assert_ok!(Balances::reserve(&receiver, ExistentialDeposit::get()));
+    });
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        1
+    );
+    ext.commit_all().expect("commit reserve");
+    ext.execute_with(|| assert_eq!(Balances::unreserve(&receiver, ExistentialDeposit::get()), 0));
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        1
+    );
+    ext.commit_all().expect("commit unreserve");
+    ext.execute_with(|| {
+        assert_ok!(Balances::reserve(&receiver, 0));
+        assert_eq!(Balances::unreserve(&receiver, 0), 0);
+    });
+    assert_eq!(
+        ext.overlayed_changes()
+            .changes()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .count(),
+        0
+    );
 }
 
 #[test]
@@ -271,6 +379,7 @@ fn checkpoint_batch_at_block_limit_cannot_finalize_overweight() {
 
     new_test_ext().execute_with(|| {
         System::initialize(&1, &Default::default(), &Default::default());
+        pallet_motra::MotraBalances::<Runtime>::insert(fee_payer(), 1_000_000_000_000_000_000);
         let transfer = RuntimeCall::Balances(pallet_balances::Call::transfer_keep_alive {
             dest: sp_keyring::Sr25519Keyring::Eve.to_account_id().into(),
             value: ExistentialDeposit::get(),
@@ -356,9 +465,7 @@ fn checkpoint_batch_at_block_limit_cannot_finalize_overweight() {
 
 #[test]
 fn checkpoint_currency_callers_and_fee_extension_have_declared_budgets() {
-    let checkpoint = frame_support::weights::constants::RocksDbWeight::get()
-        .reads_writes(4, 1)
-        .saturating_add(Weight::from_parts(0, 14_000));
+    let checkpoint = pallet_motra::checkpoint_weight::<Runtime>();
     macro_rules! covered {
         ($pallet:ident, $method:ident($($arg:expr),*), $accounts:expr) => {{
             use $pallet::WeightInfo;
@@ -386,6 +493,20 @@ fn checkpoint_currency_callers_and_fee_extension_have_declared_budgets() {
         .get(frame_support::dispatch::DispatchClass::Normal)
         .base_extrinsic
         .all_gte(ExtrinsicBaseWeight::get().saturating_add(checkpoint)));
+    let clock = frame_support::weights::constants::RocksDbWeight::get()
+        .reads_writes(2, 1)
+        .saturating_add(Weight::from_parts(0, 7_050));
+    assert!(
+        RuntimeBlockWeights::get()
+            .get(frame_support::dispatch::DispatchClass::Normal)
+            .base_extrinsic
+            .all_gte(
+                ExtrinsicBaseWeight::get()
+                    .saturating_add(checkpoint)
+                    .saturating_add(clock)
+            ),
+        "fee reconciliation omits first delegated-credit clock work"
+    );
 }
 
 #[test]
@@ -398,11 +519,9 @@ fn checkpoint_receipt_rewards_return_hook_weight() {
         let before = System::block_weight();
         let weight = OrinqReceipts::on_initialize(14_400);
         assert!(Balances::free_balance(who) > 0, "era rewards were paid");
-        let checkpoint = frame_support::weights::constants::RocksDbWeight::get()
-            .reads_writes(4, 1)
-            .saturating_add(Weight::from_parts(0, 14_000));
+        let checkpoint = pallet_motra::checkpoint_weight::<Runtime>();
         assert!(
-            weight.all_gte(checkpoint.saturating_mul(4)),
+            weight.all_gte(checkpoint.saturating_mul(2)),
             "reward hook omitted balance checkpoints: {weight:?}"
         );
         assert_eq!(

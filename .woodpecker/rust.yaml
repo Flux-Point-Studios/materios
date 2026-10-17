@@ -41,6 +41,7 @@ steps:
       # feature compiles in.
       - cargo test -p pallet-root-timelock --features try-runtime --lib --locked
       - cargo test -p pallet-motra --features try-runtime --lib --locked
+      - cargo test -p pallet-motra --features runtime-benchmarks --lib --locked
       # The node the launch preflight's genesis attestation runs, built
       # before the runtime tests below, which build the runtime without its
       # blob.

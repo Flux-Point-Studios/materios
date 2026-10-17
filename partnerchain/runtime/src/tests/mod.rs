@@ -7,6 +7,7 @@ mod spo_integration_tests;
 mod treasury_integration;
 mod vesting_schedule;
 mod motra_only_fees;
+mod checkpoint_weights;
 mod treasury_drip_migration;
 mod tee_attestation_integration;
 mod pinned_committee;

@@ -1,37 +1,16 @@
-use crate::{AccrualCheckpoint, Config, LastTouched, MotraBalances, Pallet};
-use frame_support::{
-    traits::{Get, OnNewAccount, StoredMap},
-    weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight},
-};
-use frame_system::pallet_prelude::BlockNumberFor;
+use crate::{AccrualCheckpoint, Config};
+use frame_support::{traits::StoredMap, weights::Weight};
 use pallet_balances::AccountData;
-use sp_runtime::{traits::Zero, DispatchError};
-
-impl<T: Config> OnNewAccount<T::AccountId> for Pallet<T> {
-    fn on_new_account(who: &T::AccountId) {
-        // Reaping MATRA must not restart decay of an existing MOTRA balance.
-        if !LastTouched::<T>::contains_key(who) {
-            // Delegated MOTRA can predate System.Account and use the default zero clock.
-            let last = if MotraBalances::<T>::get(who) == 0 {
-                frame_system::Pallet::<T>::block_number()
-            } else {
-                BlockNumberFor::<T>::zero()
-            };
-            LastTouched::<T>::insert(who, last);
-        }
-    }
-}
+use sp_runtime::DispatchError;
 
 pub fn checkpoint_weight<T: Config>() -> Weight {
-    let configured = T::DbWeight::get();
-    let minimum = RocksDbWeight::get();
-    // Some runtimes inherit FRAME's zero DbWeight default.
-    RuntimeDbWeight {
-        read: configured.read.max(minimum.read),
-        write: configured.write.max(minimum.write),
-    }
-    .reads_writes(4, 1)
-    .saturating_add(Weight::from_parts(0, 14_000))
+    <<T as Config>::WeightInfo as crate::weights::WeightInfo>::checkpoint()
+}
+
+pub fn reconciliation_weight<T: Config>() -> Weight {
+    checkpoint_weight::<T>().saturating_add(
+        <<T as Config>::WeightInfo as crate::weights::WeightInfo>::initialize_delegatee_clock(),
+    )
 }
 
 /// Balances' system-account store, with a conservative MATRA holding checkpoint.

@@ -45,7 +45,7 @@ impl frame_system::Config for Test {
     type AccountId = MockAccountId;
     type Lookup = IdentityLookup<Self::AccountId>;
     type AccountData = pallet_balances::AccountData<u128>;
-    type OnNewAccount = Motra;
+    type OnNewAccount = ();
 }
 
 parameter_types! {
@@ -96,7 +96,7 @@ impl pallet_balances::Config for Test {
 
 impl pallet_motra::pallet::Config for Test {
     type RuntimeEvent = RuntimeEvent;
-    type WeightInfo = pallet_motra::weights::SubstrateWeight;
+    type WeightInfo = pallet_motra::weights::SubstrateWeight<Test>;
     type TakenFirst = frame_support::traits::Nothing;
 }
 

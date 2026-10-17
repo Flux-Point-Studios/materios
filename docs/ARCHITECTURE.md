@@ -205,11 +205,15 @@ checkpoint cost is reserved in the extrinsic base weight. The
 [checkpoint weight audit](motra-checkpoint-weights.md) lists every MATRA mutation
 path and its bound.
 
-The system account-creation hook initializes `LastTouched`, the separate decay
-clock. Re-funding an account does not reset decay of existing MOTRA. Accounts
+Reconciliation sets `LastTouched`, the separate decay clock. System account
+creation does not write MOTRA state, and re-funding does not reset decay of existing MOTRA. Accounts
 whose SCALE encoding starts with `modl` (PalletId sovereign accounts and their
 subaccounts) never generate MOTRA from MATRA. Delegation continues to route only
 new generation; it does not transfer existing MOTRA.
+The first delegated credit to a zero MOTRA balance initializes an absent clock
+from the holding checkpoint, or zero before first funding, without discarding
+the recipient's unclaimed MATRA generation. Its separately benchmarked cost is
+reserved by reconciliation.
 
 Runtime spec 241 adds this map and a `LegacyAccrualStart` block without changing
 existing storage encodings, call/event/error indices, `SignedExtra`, or

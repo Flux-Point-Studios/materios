@@ -234,7 +234,7 @@ parameter_types! {
         .base_block(BlockExecutionWeight::get())
         .for_class(frame_support::dispatch::DispatchClass::all(), |weights| {
             weights.base_extrinsic = ExtrinsicBaseWeight::get()
-                .saturating_add(pallet_motra::checkpoint_weight::<Runtime>());
+                .saturating_add(pallet_motra::reconciliation_weight::<Runtime>());
         })
         .for_class(frame_support::dispatch::DispatchClass::Normal, |weights| {
             weights.max_total = Some(NORMAL_DISPATCH_RATIO * Weight::from_parts(
@@ -265,7 +265,7 @@ impl frame_system::Config for Runtime {
     type Hash = Hash;
     type AccountId = AccountId;
     type AccountData = pallet_balances::AccountData<Balance>;
-    type OnNewAccount = Motra;
+    type OnNewAccount = ();
     type Version = Version;
     type BaseCallFilter = root_gate::SudoRootGate;
 }
@@ -1842,6 +1842,7 @@ impl frame_system_benchmarking::Config for Runtime {}
 frame_benchmarking::define_benchmarks!(
     [frame_system, SystemBench::<Runtime>]
     [pallet_balances, Balances]
+    [pallet_motra, Motra]
     [pallet_timestamp, Timestamp]
     [pallet_intent_settlement, IntentSettlement]
     [pallet_oracle, Oracle]
