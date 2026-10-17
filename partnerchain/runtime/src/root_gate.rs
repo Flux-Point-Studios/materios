@@ -16,7 +16,7 @@ use core::slice;
 use frame_support::{
     dispatch::GetDispatchInfo,
     traits::{Contains, ContainsPair},
-    weights::{constants::RocksDbWeight, Weight},
+    weights::Weight,
 };
 use pallet_root_timelock::{CallClass, ClassifyCall, Guardian};
 use sp_keyring::Sr25519Keyring;
@@ -336,11 +336,9 @@ impl ClassifyCall<RuntimeCall> for TimelockClassifier {
         })
     }
 
-    /// Per call visited: at most one storage read, priced from `RocksDbWeight`
-    /// whatever `frame_system::Config::DbWeight` says, and the step itself,
-    /// priced as `pallet_utility` benchmarks one call of a batch.
+    /// Per visited call: one storage read and the Utility per-call execution cost.
     fn weight(call: &RuntimeCall) -> Weight {
-        RocksDbWeight::get()
+        <Runtime as frame_system::Config>::DbWeight::get()
             .reads(1)
             .saturating_add(Weight::from_parts(5_000_000, 0))
             .saturating_mul(calls_in(call))

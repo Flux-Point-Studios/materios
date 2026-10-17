@@ -1607,7 +1607,7 @@ fn stored_delays_are_never_overwritten() {
     });
 }
 
-/// `frame_system::Config::DbWeight` is `()` here and prices storage at zero.
+/// Migration weights use the runtime database schedule.
 #[test]
 fn storing_the_delays_is_charged_at_rocksdb_cost() {
     bare_ext().execute_with(|| {

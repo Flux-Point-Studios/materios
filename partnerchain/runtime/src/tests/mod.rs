@@ -29,3 +29,4 @@ fn authority(seed: &str) -> Authority {
     let grandpa = ed25519::Pair::from_string(&uri, None).unwrap().public();
     (cross_chain.into(), (aura, grandpa).into())
 }
+mod db_weights;

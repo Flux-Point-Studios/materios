@@ -27,7 +27,7 @@ use frame_support::{
     construct_runtime, derive_impl, parameter_types,
     traits::{ConstBool, ConstU32, ConstU64, WithdrawReasons},
     weights::{
-        constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
+        constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         Weight,
     },
     genesis_builder_helper::get_preset,
@@ -222,6 +222,8 @@ pub fn native_version() -> NativeVersion {
 // Parameter types / constants
 // ---------------------------------------------------------------------------
 
+type RuntimeDbWeight = <Runtime as frame_system::Config>::DbWeight;
+
 const NORMAL_DISPATCH_RATIO: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(75);
 
 // Maximum block weight: 2 seconds of compute with 75% normal dispatch.
@@ -248,6 +250,7 @@ parameter_types! {
                 u64::MAX,
             ));
         })
+        .avg_block_initialization(Perbill::zero())
         .build_or_panic();
 }
 
@@ -258,6 +261,7 @@ parameter_types! {
 #[derive_impl(frame_system::config_preludes::SolochainDefaultConfig)]
 impl frame_system::Config for Runtime {
     type Block = Block;
+    type DbWeight = RocksDbWeight;
     type BlockWeights = RuntimeBlockWeights;
     type BlockLength = RuntimeBlockLength;
     type BlockHashCount = BlockHashCount;

@@ -288,6 +288,101 @@ mod currency_db {
     }
 }
 
+#[test]
+fn attestation_database_counts_exclude_separate_checkpoints() {
+    use pallet_orinq_receipts::weights::{SubstrateWeight, WeightInfo};
+    let samples: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
+    ))
+    .expect("attestation samples");
+    for sample in samples.iter().filter(|sample| {
+        matches!(
+            sample["benchmark"].as_str(),
+            Some("attest_threshold" | "attest_dead_treasury")
+        )
+    }) {
+        for row in sample["db_results"].as_array().expect("database samples") {
+            let n = row["components"][0][1].as_u64().expect("committee size");
+            let checkpoints = n + 1;
+            let reads = row["reads"].as_u64().expect("reads") - checkpoints;
+            let writes = row["writes"].as_u64().expect("writes") - checkpoints;
+            let actual = SubstrateWeight::<currency_db::Test>::attest_threshold(n as u32)
+                .saturating_sub(SubstrateWeight::<zero_db::Test>::attest_threshold(n as u32));
+            assert_eq!(
+                actual,
+                currency_db::Db::get().reads_writes(reads, writes),
+                "n={n}: checkpoints must be charged once"
+            );
+        }
+    }
+}
+
+mod zero_db {
+    use frame_support::derive_impl;
+    frame_support::construct_runtime!(pub enum Test { System: frame_system });
+    #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+    impl frame_system::Config for Test {
+        type Block = frame_system::mocking::MockBlock<Test>;
+    }
+}
+
+#[test]
+fn motra_weights_use_configured_database_schedule() {
+    use pallet_motra::weights::{SubstrateWeight, WeightInfo};
+    let db = currency_db::Db::get();
+    for (actual, execution, reads, writes) in [
+        (
+            SubstrateWeight::<currency_db::Test>::checkpoint(),
+            23_885_000,
+            1,
+            1,
+        ),
+        (
+            SubstrateWeight::<currency_db::Test>::reconcile(),
+            198_197_000,
+            10,
+            6,
+        ),
+        (
+            SubstrateWeight::<currency_db::Test>::fee_path(),
+            189_660_000,
+            11,
+            7,
+        ),
+        (
+            SubstrateWeight::<currency_db::Test>::claim_motra(),
+            197_014_000,
+            10,
+            6,
+        ),
+        (
+            SubstrateWeight::<currency_db::Test>::set_delegatee(),
+            198_657_000,
+            10,
+            7,
+        ),
+    ] {
+        assert_eq!(
+            actual.ref_time(),
+            execution + db.reads_writes(reads, writes).ref_time()
+        );
+    }
+}
+
+#[test]
+fn runtime_motra_weights_preserve_rocksdb_floor_prices() {
+    use pallet_motra::weights::WeightInfo;
+    type W = <Runtime as pallet_motra::Config>::WeightInfo;
+    assert_eq!(W::checkpoint(), Weight::from_parts(148_885_000, 3_533));
+    assert_eq!(W::reconcile(), Weight::from_parts(1_048_197_000, 29_346));
+    assert_eq!(W::fee_path(), Weight::from_parts(1_164_660_000, 30_847));
+    assert_eq!(W::claim_motra(), Weight::from_parts(1_047_014_000, 29_346));
+    assert_eq!(
+        W::set_delegatee(),
+        Weight::from_parts(1_148_657_000, 29_346)
+    );
+}
+
 fn currency_base<T: frame_system::Config>(name: &str) -> Weight {
     use pallet_billing::weights::WeightInfo as _;
     use pallet_orinq_receipts::weights::WeightInfo as _;
@@ -382,7 +477,7 @@ fn benchmark_currency_refunds_retain_measured_execution_and_proofs() {
             .max()
             .expect("proof bound");
         let actual = currency_base::<Runtime>(name);
-        let expected = Weight::from_parts(execution, proof);
+        let execution_and_proof = Weight::from_parts(execution, proof);
         let db_count = |field: &str| {
             group
                 .iter()
@@ -404,10 +499,13 @@ fn benchmark_currency_refunds_retain_measured_execution_and_proofs() {
         };
         assert_eq!(
             currency_base::<currency_db::Test>(name),
-            expected.saturating_add(
+            execution_and_proof.saturating_add(
                 currency_db::Db::get().reads_writes(db_count("reads"), db_count("writes"))
             ),
             "{name} must retain the measured base DB counts"
+        );
+        let expected = execution_and_proof.saturating_add(
+            RuntimeDbWeight::get().reads_writes(db_count("reads"), db_count("writes")),
         );
         eprintln!("currency {name}: declared={actual:?}, measured/proof bound={expected:?}");
         if actual != expected {

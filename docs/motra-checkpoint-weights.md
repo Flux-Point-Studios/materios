@@ -10,7 +10,8 @@ written once in the database; repeated overlay accesses remain in execution
 time. System.Account belongs to the base Currency weight and is whitelisted;
 the MOTRA checkpoint is not. Its cost is **148,885,000 ref_time / 3,533 proof
 bytes**: 23,885,000 execution plus one RocksDB read and write. The database terms
-use `max(T::DbWeight, RocksDbWeight)` separately for reads and writes.
+use `T::DbWeight`; the runtime selects RocksDbWeight. The prior local floor
+has been removed without changing these checkpoint prices.
 
 Reconciliation uses directed fixed-point exponentiation, bounded by 64 rounds,
 and decays generation within the holding interval. It settles a delegatee's
@@ -144,42 +145,32 @@ non-threshold submission and bad-hash slashing. Non-threshold execution is
 Their base proofs exclude the separately charged checkpoints: 20,083 bytes
 non-threshold, 43,329 + 7,122*n threshold, 29,185 bad-hash.
 
-## Capacity
+## Capacity with runtime database pricing
 
 The Normal block budget is 1,500,000,000,000 ref_time. The signed base is
-107,074,000 generic execution plus 1,164,660,000 fee work = **1,271,734,000**.
+107,074,000 generic execution plus 1,164,660,000 fee work = 1,271,734,000.
 
 | Dispatch | Call ref_time | Including signed base |
 | --- | ---: | ---: |
-| transfer_keep_alive | 335,929,000 | 1,607,663,000 |
-| claim_motra | 1,047,014,000 | 2,318,748,000 |
-| set_delegatee | 1,148,657,000 | 2,420,391,000 |
-| Attest non-threshold actual | 48,973,000 | 1,320,707,000 |
-| Attest 96-signer threshold actual (97 checkpoints) | 19,855,985,056 | 21,127,719,056 |
-| Attest admission bound (98 checkpoints) | 20,004,870,056 | 21,276,604,056 |
+| transfer_keep_alive |460,929,000|1,732,663,000|
+| claim_motra |1,047,014,000|2,318,748,000|
+| set_delegatee |1,148,657,000|2,420,391,000|
+| Attest non-threshold actual |273,973,000|1,545,707,000|
+| Attest 96-signer threshold actual (97 checkpoints) |45,105,985,056|46,377,719,056|
+| Attest admission bound (98 checkpoints) |45,254,870,056|46,526,604,056|
 
-Transfers fit **933/block** by ref_time before other initialization, length or
-proof limits. A real CheckWeight/pre-dispatch/call/post-dispatch loop admits
-**1,120 non-threshold attests**, versus 70 with no actual-weight refunds under
-these new measured declarations and about 34 at the reviewed head. The ideal
-actual-only ceiling is 1,135; admission must leave room for a possible threshold
-call. Individually signed calls cannot restore pre-#68's 14,007 count while
-reserving the full fee path per extrinsic.
+Transfers fit 865/block by ref_time before initialization, length or proof
+limits. A real CheckWeight/pre-dispatch/call/post-dispatch loop admits 941
+non-threshold attests. Existing Utility.batch admits 3,705 such attestations
+in 318 signed batches with a shrinking final width, versus 15,138 before global
+storage pricing. Every inner receipt and signer is checked. The installed
+daemon submits individually; this is protocol capacity, not live TPS.
 
-Existing `Utility.batch` does meet the requested attestation count: a real
-CheckWeight/ChargeMotra/dispatch/post-dispatch loop admits **15,138
-non-threshold attestations in 520 signed batches**, using 1,479,835,961,258
-ref_time. Batch width shrinks with the remaining admission budget; every
-inner receipt is checked for its single recorded signer and uncertified state.
-Removing attestation actual-weight refunds makes this same regression fail at
-74 attestations. This is protocol batching capacity, not separate signed
-transaction capacity or a claim that cert-daemons already batch submissions.
-
-A real maximum Utility/as_derivative batch runs 1,411 dormant delegated claims
-at u32::MAX. Tests check every inner clock and compare the sum of worst Wasm
-claim samples (400,639,340,000 ref_time) against its declared total
-1,499,275,194,121. The isolated native run took 928,041,387,000 ref_time (0.928 seconds), within
-the declared bound. Concurrent test scheduling is not a runtime cost measurement.
+The maximum dormant-claim batch runs 1,211 claims, down from 1,411: the
+Utility wrapper now prices its database work. The MOTRA claim weight itself
+is unchanged. The aggregate hook/migration safety audit has unresolved blockers.
+See [runtime database weights](runtime-db-weights.md) for the complete
+before/after call and fee tables, exact capacity assumptions and counterexamples.
 
 ## Conditional Currency refunds
 
@@ -218,35 +209,23 @@ The recorded checkpoint key is removed from base DB counts and charged by
 the separate checkpoint surcharge. Billing additionally accounts for
 `Balances.TotalIssuance`, which the standard benchmark whitelist excludes.
 
-## Remaining database-weight dependency
+## Runtime database schedule
 
-`System.DbWeight = ()` is unchanged; [#71](https://github.com/Flux-Point-Studios/materios/issues/71)
-owns the runtime-wide fix. Within this PR:
+The runtime selects RocksDbWeight. Balances, Vesting, Multisig, Recovery,
+Treasury, IntentSettlement and receipt/Billing generated base DB terms now
+carry that schedule. MOTRA and runtime migration/classifier work no longer
+have independent RocksDB floors.
 
-- `runtime/src/balance_weights.rs` preserves SDK base weights for Balances,
-  Vesting, Multisig, Recovery, Treasury and IntentSettlement. Their underlying
-  `T::DbWeight` reads/writes remain zero; only MOTRA checkpoint additions have
-  the RocksDB floor.
-- Receipt attestation base functions use `T::DbWeight`; their non-MOTRA
-  storage remains zero-priced. Threshold DB samples include checkpoint keys
-  that are also covered by the separate checkpoint surcharge, so a future
-  nonzero DbWeight must reconcile that conservative duplication.
-- All refunded receipt Currency bases (submission v1/v2, privileged
-  certification, bond, unbond, slash and expiry) and Billing topups/withdrawal
-  use measured execution but configured `T::DbWeight` for base storage.
-  Those DB terms remain zero; separate checkpoint work retains the RocksDB
-  floor. Billing's unrelated dispatches retain their prior flat weights.
-- Reward-hook base work retains configured database terms; author-map work is
-  not covered by the checkpoint increment.
-- Capacity and exact-weight regression numbers use today's zero base database
-  terms. The checkpoint property test proves the added MOTRA delta, not full
-  Currency cost. These expected numbers must move with #71.
+Threshold attestation DB counts exclude the separately charged n+1 checkpoint
+keys: 14+2n reads and 9+2n writes. Every original benchmark DB sample is checked
+under an independent nonzero test schedule. Proof and execution measurements
+are unchanged. Existing flat-weight calls and unbounded/underpriced hooks are
+not repaired by setting DbWeight; [the runtime audit](runtime-db-weights.md)
+records the outstanding merge/genesis blockers.
 
-MOTRA checkpoint, reconciliation and fee weights use the RocksDB floor and do
-not depend on zero DbWeight. The fee-router/perp-removal migrations already
-use a RocksDB floor for their base work and add the checkpoint increments.
-
-Settlement #51 must merge before #68. Both oracle and settlement currently
-resolve to ff0efeddad5dfa3a948f6b4e425b4546e39fbbe4; after #51 merges, both pins
-must move together to its merged main commit and validation must be repeated.
-No merge, deployment or enactment is authorized by this round.
+Settlement #51 merged as `feb79e00510d0083de67bc3219e442f802cd1101` on
+2026-10-17. The #68 base still pins oracle and settlement together to its
+reviewed head `ff0efeddad5dfa3a948f6b4e425b4546e39fbbe4`; updating those pins
+belongs to that base branch's review flow. This stacked draft must absorb
+any later base update by signed merge and repeat validation. No merge,
+deployment or enactment is authorized by this audit.
