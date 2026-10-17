@@ -205,3 +205,38 @@ fn sovereign_pots_and_subaccounts_do_not_generate_motra() {
         }
     });
 }
+
+#[test]
+fn legacy_holder_without_stored_motra_can_pay_after_the_upgrade() {
+    use frame_support::{
+        assert_ok,
+        traits::{Hooks, StorageVersion},
+    };
+    use sp_runtime::traits::SignedExtension;
+
+    new_test_ext().execute_with(|| {
+        let who = fee_payer();
+        pallet_motra::AccrualCheckpoint::<Runtime>::remove(&who);
+        pallet_motra::LastTouched::<Runtime>::remove(&who);
+        pallet_motra::MotraBalances::<Runtime>::remove(&who);
+        pallet_motra::Params::<Runtime>::mutate(|p| {
+            p.min_fee = 20_000;
+            p.length_fee_per_byte = 0;
+            p.congestion_rate = 0;
+            p.generation_per_matra_per_block = 1_000;
+            p.decay_rate_per_block = sp_runtime::Perbill::one();
+            p.max_balance = u128::MAX;
+        });
+        StorageVersion::new(0).put::<Motra>();
+        System::set_block_number(1_000_000);
+        Motra::on_runtime_upgrade();
+        assert_eq!(Motra::projected_balance(&who), 0);
+        System::set_block_number(1_000_010);
+        let call = RuntimeCall::System(frame_system::Call::remark { remark: vec![] });
+        let info = frame_support::dispatch::GetDispatchInfo::get_dispatch_info(&call);
+        assert_ok!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new().pre_dispatch(&who, &call, &info, 0)
+        );
+        assert_eq!(Motra::total_burned(), 20_000);
+    });
+}

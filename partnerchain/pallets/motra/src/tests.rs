@@ -892,3 +892,38 @@ fn accrual_reconcile_accounts_for_checkpoint_storage_work() {
         assert!(charged.proof_size() >= 7_000);
     });
 }
+
+#[test]
+fn accrual_legacy_baseline_starts_at_upgrade_and_cannot_survive_a_balance_cycle() {
+    use frame_support::traits::StorageVersion;
+    new_test_ext().execute_with(|| {
+        System::set_block_number(100);
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        pallet::AccrualCheckpoint::<Test>::remove(10);
+        pallet::LastTouched::<Test>::remove(10);
+        StorageVersion::new(0).put::<Motra>();
+        System::set_block_number(1_000_000);
+        Motra::on_runtime_upgrade();
+        assert_eq!(Motra::projected_balance(&10), 0);
+        System::set_block_number(1_000_010);
+        assert_eq!(Motra::projected_balance(&10), 10_000);
+        assert_ok!(Balances::transfer_allow_death(
+            RuntimeOrigin::signed(10),
+            1,
+            1_000_000
+        ));
+        assert_ok!(Balances::transfer_keep_alive(
+            RuntimeOrigin::signed(1),
+            10,
+            1_000_000
+        ));
+        assert_eq!(Motra::projected_balance(&10), 0);
+        System::set_block_number(1_000_020);
+        assert_eq!(Motra::projected_balance(&10), 10_000);
+        assert_ok!(Motra::reconcile(&10), 10_000);
+    });
+}

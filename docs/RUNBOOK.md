@@ -234,7 +234,7 @@ curl -s -H "Content-Type: application/json" \
   Alternatively, wait until the account's own post-funding accrual covers its fee.
 - Nonzero MATRA top-ups enter the earning base at reconciliation. Claim before
   moving MATRA to realize the completed holding interval. On the spec-241 upgrade,
-  legacy accounts begin earning from their first checkpoint; unproven historical
+  unchanged legacy balances begin earning from the upgrade block; unproven historical
   generation is discarded, while stored MOTRA and delegation remain.
 - On a dev chain with block time ~6s and default generation rate, accounts accumulate MOTRA quickly.
 - Use `motra_getParams` to see the current congestion rate — it should be 0 (or near-zero) on an empty dev chain since block fullness is well below the 50% target.

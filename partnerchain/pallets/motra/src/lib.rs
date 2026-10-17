@@ -86,10 +86,14 @@ pub mod pallet {
     #[pallet::getter(fn insufficient_motra_failures)]
     pub type InsufficientMotraFailures<T: Config> = StorageValue<_, u64, ValueQuery>;
 
-    /// Lowest free MATRA held since the checkpoint block. Missing means no proven history.
+    /// Lowest free MATRA held since the checkpoint block. Missing uses the legacy upgrade baseline.
     #[pallet::storage]
     pub type AccrualCheckpoint<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, (u128, BlockNumberFor<T>), OptionQuery>;
+
+    /// Earliest proven holding block for legacy accounts without a balance mutation.
+    #[pallet::storage]
+    pub type LegacyAccrualStart<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
 
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
@@ -134,11 +138,11 @@ pub mod pallet {
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn on_runtime_upgrade() -> Weight {
             if StorageVersion::get::<Self>() == StorageVersion::new(0) {
-                // Legacy accounts have no checkpoint and earn nothing until their first touch.
-                // This makes migration constant-cost regardless of the account count.
+                // Balance hooks prove unchanged legacy holdings from this block onward.
+                LegacyAccrualStart::<T>::put(frame_system::Pallet::<T>::block_number());
                 StorageVersion::new(1).put::<Self>();
             }
-            crate::account_store::checkpoint_weight::<T>()
+            crate::account_store::checkpoint_weight::<T>().saturating_mul(2)
         }
 
         #[cfg(feature = "try-runtime")]
@@ -147,18 +151,39 @@ pub mod pallet {
                 StorageVersion::get::<Self>() <= STORAGE_VERSION,
                 "unexpected MOTRA version"
             );
-            Ok(Self::accounting_state())
+            Ok((
+                StorageVersion::get::<Self>() == StorageVersion::new(0),
+                frame_system::Pallet::<T>::block_number(),
+                LegacyAccrualStart::<T>::get(),
+                Self::accounting_state(),
+            )
+                .encode())
         }
 
         #[cfg(feature = "try-runtime")]
         fn post_upgrade(state: alloc::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+            let (migrating, block, previous_start, accounting): (
+                bool,
+                BlockNumberFor<T>,
+                Option<BlockNumberFor<T>>,
+                alloc::vec::Vec<u8>,
+            ) = Decode::decode(&mut &state[..]).map_err(|_| "invalid MOTRA migration state")?;
             ensure!(
                 StorageVersion::get::<Self>() == StorageVersion::new(1),
                 "MOTRA version not migrated"
             );
             ensure!(
-                Self::accounting_state() == state,
+                Self::accounting_state() == accounting,
                 "migration changed existing MOTRA state"
+            );
+            ensure!(
+                LegacyAccrualStart::<T>::get()
+                    == if migrating {
+                        Some(block)
+                    } else {
+                        previous_start
+                    },
+                "incorrect legacy accrual start"
             );
             Ok(())
         }
@@ -289,17 +314,22 @@ pub mod pallet {
             // PalletId accounts and subaccounts carry the SCALE type prefix `modl`.
             let generated = if who.encode().starts_with(b"modl") {
                 0
-            } else if let Some((held, since)) = AccrualCheckpoint::<T>::get(who) {
-                let blocks: u64 = now
-                    .saturating_sub(since.max(last))
-                    .try_into()
-                    .unwrap_or(u64::MAX);
-                held.min(Self::get_matra_balance(who))
-                    .saturating_mul(params.generation_per_matra_per_block)
-                    .saturating_mul(blocks as u128)
-                    / 1_000_000
             } else {
-                0
+                let matra = Self::get_matra_balance(who);
+                let checkpoint = AccrualCheckpoint::<T>::get(who)
+                    .or_else(|| LegacyAccrualStart::<T>::get().map(|since| (matra, since)));
+                if let Some((held, since)) = checkpoint {
+                    let blocks: u64 = now
+                        .saturating_sub(since.max(last))
+                        .try_into()
+                        .unwrap_or(u64::MAX);
+                    held.min(matra)
+                        .saturating_mul(params.generation_per_matra_per_block)
+                        .saturating_mul(blocks as u128)
+                        / 1_000_000
+                } else {
+                    0
+                }
             };
             (decayed, generated)
         }

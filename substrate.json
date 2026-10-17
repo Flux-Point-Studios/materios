@@ -15,7 +15,7 @@
     {
       "id": "motra-fee-resource",
       "name": "MOTRA fee resource",
-      "desc": "Non-transferable transaction-fee resource generated from the lowest free MATRA held throughout each checkpoint interval (NIGHT/DUST model), with balance-change checkpoints preventing backdated funding and cycling, PalletId sovereign generation excluded, and a constant-cost lazy legacy migration. Charged by a signed extension, with sponsor delegation for fresh accounts' first fees; the extension also gives a runtime-named (signer, call) set the top transaction-pool priority, one slot per signer, so the guardian's veto cannot be outbid for a place in a block.",
+      "desc": "Non-transferable transaction-fee resource generated from the lowest free MATRA held throughout each checkpoint interval (NIGHT/DUST model), with balance-change checkpoints preventing backdated funding and cycling, PalletId sovereign generation excluded, and a constant-cost legacy migration with an upgrade-block earning baseline. Charged by a signed extension, with sponsor delegation for fresh accounts' first fees; the extension also gives a runtime-named (signer, call) set the top transaction-pool priority, one slot per signer, so the guardian's veto cannot be outbid for a place in a block.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/motra"

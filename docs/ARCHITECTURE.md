@@ -205,14 +205,20 @@ whose SCALE encoding starts with `modl` (PalletId sovereign accounts and their
 subaccounts) never generate MOTRA from MATRA. Delegation continues to route only
 new generation; it does not transfer existing MOTRA.
 
-Runtime spec 241 adds this map without changing existing storage encodings,
-call/event/error indices, `SignedExtra`, or transaction version 5. The pallet's
-storage-version 0→1 migration is constant-cost and lazy: legacy accounts have no
-checkpoint, so projection and their first reconciliation generate zero. That
-first reconciliation records their current balance and block, including accounts
-whose `LastTouched` is absent or zero. Subsequent intervals earn normally.
+Runtime spec 241 adds this map and a `LegacyAccrualStart` block without changing
+existing storage encodings, call/event/error indices, `SignedExtra`, or
+transaction version 5. The pallet's
+storage-version 0→1 migration records the upgrade's starting-state block in
+constant time. FRAME runs this hook before initializing the next block. Legacy
+accounts without a checkpoint earn only from that block: the balance hooks prove
+that their free MATRA has remained unchanged since the upgrade. Any balance
+mutation creates a checkpoint, so moving funds cannot restore that baseline.
+This lets a legacy holder with no stored MOTRA earn its first post-upgrade fee
+without needing a successful transaction to initialize its earning clock.
+The first reconciliation records the current balance and block, including
+accounts whose `LastTouched` is absent or zero.
 Previously stored MOTRA remains subject to its existing decay clock, and
-delegations remain intact. Unreconciled pre-upgrade generation is discarded
+delegations remain intact. Unreconciled generation before this boundary is discarded
 because its holding history cannot be proven. `try-runtime` verifies preservation
 of existing accounting state. The launch preflight permits only canonical
 genesis checkpoints at block zero, bounded by the account's actual free MATRA.

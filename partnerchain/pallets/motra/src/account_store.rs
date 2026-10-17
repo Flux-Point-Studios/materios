@@ -32,8 +32,8 @@ pub(crate) fn checkpoint_weight<T: Config>() -> Weight {
         read: configured.read.max(minimum.read),
         write: configured.write.max(minimum.write),
     }
-    .reads_writes(2, 1)
-    .saturating_add(Weight::from_parts(0, 7_000))
+    .reads_writes(4, 1)
+    .saturating_add(Weight::from_parts(0, 14_000))
 }
 
 pub(crate) fn charge_checkpoint_weight<T: Config>() {
