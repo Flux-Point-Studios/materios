@@ -390,8 +390,8 @@ fn attacker_vectors() -> Vec<RuntimeCall> {
         .ref_time()
     };
     let items = ((room - per_item(0)) / (per_item(1) - per_item(0))) as usize;
-    let mut vectors: Vec<RuntimeCall> = zeroed_operational().into_values().collect();
-    vectors.extend([
+    // Block-filling vectors first, so any one admitted leaves no room.
+    let mut vectors = vec![
         fill.clone(),
         RuntimeCall::System(frame_system::Call::set_storage {
             items: vec![(vec![], vec![]); items],
@@ -434,7 +434,8 @@ fn attacker_vectors() -> Vec<RuntimeCall> {
         RuntimeCall::RootTimelock(pallet_root_timelock::Call::enact_approved {
             call: Box::new(fill),
         }),
-    ]);
+    ];
+    vectors.extend(zeroed_operational().into_values());
     vectors
 }
 
