@@ -383,7 +383,12 @@ fn checkpoint_batch_at_block_limit_cannot_finalize_overweight() {
                     .weight
                     .saturating_mul(u64::from(*n))
                     .saturating_add(<Runtime as pallet_utility::Config>::WeightInfo::batch(*n))
-                    .all_lte(limits.get(normal).max_extrinsic.expect("normal per-call cap"))
+                    .all_lte(
+                        limits
+                            .get(normal)
+                            .max_extrinsic
+                            .expect("normal per-call cap"),
+                    )
             })
             .last()
             .expect("at least one transfer fits");

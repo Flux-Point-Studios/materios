@@ -396,7 +396,10 @@ fn reconciliation_db_counts(name: &str) -> (u64, u64) {
             .max()
             .expect("DB sample")
     };
-    (max("reads") + u64::from(name != "reconcile_legacy"), max("writes"))
+    (
+        max("reads") + u64::from(name != "reconcile_legacy"),
+        max("writes"),
+    )
 }
 
 #[test]
@@ -406,7 +409,12 @@ fn benchmark_motra_weights_price_storage_at_the_configured_schedule() {
     type Unpriced = SubstrateWeight<zero_db::Test>;
     let db = currency_db::Db::get();
     for (name, priced, unpriced, (reads, writes)) in [
-        ("checkpoint", Priced::checkpoint(), Unpriced::checkpoint(), (1, 1)),
+        (
+            "checkpoint",
+            Priced::checkpoint(),
+            Unpriced::checkpoint(),
+            (1, 1),
+        ),
         (
             "fee_path",
             Priced::fee_path(),

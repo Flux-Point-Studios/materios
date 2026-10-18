@@ -529,7 +529,9 @@ fn pricing_submission_escrow_grows_with_the_threshold() {
             let escrow = Motra::total_burned() - before;
             assert!(escrow > previous, "threshold {threshold}");
             previous = escrow;
-            eprintln!("SUBMISSION {{\"threshold\":{threshold},\"escrow\":{escrow},\"length\":{len}}}");
+            eprintln!(
+                "SUBMISSION {{\"threshold\":{threshold},\"escrow\":{escrow},\"length\":{len}}}"
+            );
         });
     }
 }

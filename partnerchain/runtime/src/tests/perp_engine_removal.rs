@@ -228,7 +228,10 @@ fn removal_releases_bonds_sweeps_the_pot_and_clears_every_key() {
             sp_io::storage::get(&sentinel_key()).as_deref(),
             Some(&b"untouched"[..])
         );
-        assert!(weight.all_gte(<Runtime as frame_system::Config>::DbWeight::get().reads_writes(seeded as u64, seeded as u64)));
+        assert!(weight.all_gte(
+            <Runtime as frame_system::Config>::DbWeight::get()
+                .reads_writes(seeded as u64, seeded as u64)
+        ));
     });
 }
 
@@ -290,7 +293,10 @@ fn removal_is_idempotent() {
         let weight = RemovePerpEngine::on_runtime_upgrade();
 
         assert_eq!(sp_io::storage::root(StateVersion::V1), root);
-        assert_eq!(weight, <Runtime as frame_system::Config>::DbWeight::get().reads(1));
+        assert_eq!(
+            weight,
+            <Runtime as frame_system::Config>::DbWeight::get().reads(1)
+        );
         assert_eq!(
             Balances::reserved_balance(&acct(Charlie)),
             UNRELATED_RESERVE
@@ -407,9 +413,11 @@ fn a_run_at_the_bound_fits_in_one_block() {
             weight.all_lte(max_block),
             "{weight:?} exceeds a block's {max_block:?}"
         );
-        assert!(weight.all_gte(<Runtime as frame_system::Config>::DbWeight::get().reads_writes(
-            2 * u64::from(PERP_ENGINE_KEYS_PER_UPGRADE),
-            2 * u64::from(PERP_ENGINE_KEYS_PER_UPGRADE),
-        )));
+        assert!(weight.all_gte(
+            <Runtime as frame_system::Config>::DbWeight::get().reads_writes(
+                2 * u64::from(PERP_ENGINE_KEYS_PER_UPGRADE),
+                2 * u64::from(PERP_ENGINE_KEYS_PER_UPGRADE),
+            )
+        ));
     });
 }

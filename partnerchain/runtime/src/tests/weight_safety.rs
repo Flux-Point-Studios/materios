@@ -41,7 +41,11 @@ fn motra_and_runtime_storage_prices_are_unchanged() {
     for (name, weight, expected) in [
         ("fee_path", Motra::fee_path(), (1_186_852_000, 30_847)),
         ("claim_motra", Motra::claim_motra(), (1_047_014_000, 29_346)),
-        ("set_delegatee", Motra::set_delegatee(), (1_148_657_000, 29_346)),
+        (
+            "set_delegatee",
+            Motra::set_delegatee(),
+            (1_148_657_000, 29_346),
+        ),
         ("reconcile", Motra::reconcile(), (1_048_197_000, 29_346)),
     ] {
         assert_eq!(ref_time(weight), expected, "{name}");
@@ -130,9 +134,8 @@ fn list_length(path: &str) -> u32 {
         "OrinqReceipts.set_committee.members" | "OrinqReceipts.set_break_glass_aura_keys.keys" => {
             <Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize::get()
         }
-        "OrinqReceipts.set_pinned_committee.members" | "SessionCommitteeManagement.set.validators" => {
-            MaxValidators::get()
-        }
+        "OrinqReceipts.set_pinned_committee.members"
+        | "SessionCommitteeManagement.set.validators" => MaxValidators::get(),
         "Recovery.create_recovery.friends" => {
             <Runtime as pallet_recovery::Config>::MaxFriends::get()
         }
@@ -262,7 +265,11 @@ fn audited_calls() -> Vec<Audited> {
             } else {
                 Envelope::Bounded
             };
-            audited.push(Audited { name, call, envelope });
+            audited.push(Audited {
+                name,
+                call,
+                envelope,
+            });
         }
     }
     audited
@@ -301,7 +308,12 @@ fn call_limit(class: DispatchClass) -> Weight {
 fn every_call_fits_its_class_limit() {
     genesis().execute_with(|| {
         let (mut worst, mut refused) = ((0f64, String::new()), Vec::new());
-        for Audited { name, call, envelope } in audited_calls() {
+        for Audited {
+            name,
+            call,
+            envelope,
+        } in audited_calls()
+        {
             let info = call.get_dispatch_info();
             let length = signed_length(&call);
             let limit = call_limit(info.class);
@@ -323,14 +335,20 @@ fn every_call_fits_its_class_limit() {
                 || (info.class != DispatchClass::Mandatory
                     && frame_system::CheckWeight::<Runtime>::do_validate(&info, length).is_err())
             {
-                refused.push(format!("{name}: {:?} {:?}, {length} bytes", info.class, info.weight));
+                refused.push(format!(
+                    "{name}: {:?} {:?}, {length} bytes",
+                    info.class, info.weight
+                ));
             }
             if share > worst.0 {
                 worst = (share, name);
             }
         }
         eprintln!("WORST {:.6}% {}", worst.0 * 100.0, worst.1);
-        assert!(refused.is_empty(), "un-includable at their worst case: {refused:#?}");
+        assert!(
+            refused.is_empty(),
+            "un-includable at their worst case: {refused:#?}"
+        );
     });
 }
 
@@ -353,8 +371,10 @@ fn every_caller_sized_call_is_refused_above_its_class_limit() {
                 };
                 assert_eq!(
                     frame_system::CheckWeight::<Runtime>::do_validate(&info, 128),
-                    Err(sp_runtime::transaction_validity::InvalidTransaction::ExhaustsResources
-                        .into())
+                    Err(
+                        sp_runtime::transaction_validity::InvalidTransaction::ExhaustsResources
+                            .into()
+                    )
                 );
             }
         }
@@ -381,8 +401,8 @@ fn full_committee_blocks(slots: u64) -> Vec<(u64, frame_system::ConsumedWeight)>
         let mut parent = genesis_header();
         (epoch_start(1_000)..epoch_start(1_000) + slots)
             .map(|slot| {
-                let (header, inherents) = propose(&parent, slot, &inherent_data(slot, Some(&listed)))
-                    .deconstruct();
+                let (header, inherents) =
+                    propose(&parent, slot, &inherent_data(slot, Some(&listed))).deconstruct();
                 <Runtime as Core<Block>>::initialize_block(&header);
                 for inherent in inherents {
                     <Runtime as BlockBuilder<Block>>::apply_extrinsic(inherent)
@@ -441,7 +461,10 @@ fn every_block_of_a_full_committee_initializes_within_its_reservation() {
         );
         worst = worst.max(initialization);
     }
-    assert_eq!(rotations, 2, "a rotation opens each epoch after the first block's");
+    assert_eq!(
+        rotations, 2,
+        "a rotation opens each epoch after the first block's"
+    );
     eprintln!(
         "INITIALIZATION worst {worst:?} = {:.4}% of the block, reservation {reserved:?}",
         worst.ref_time() as f64 * 100.0 / max_block.ref_time() as f64
@@ -507,12 +530,11 @@ fn every_paid_operational_call_is_bounded_and_fits_its_class() {
 #[test]
 fn the_widest_duty_batch_fits_and_a_wider_one_is_refused() {
     genesis().execute_with(|| {
-        let attest = RuntimeCall::OrinqReceipts(
-            pallet_orinq_receipts::Call::attest_availability_cert {
+        let attest =
+            RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::attest_availability_cert {
                 receipt_id: sp_core::H256::zero(),
                 claimed_hash: [0; 32],
-            },
-        );
+            });
         let batch = |width: usize| {
             RuntimeCall::Utility(pallet_utility::Call::batch {
                 calls: vec![attest.clone(); width],
@@ -633,8 +655,7 @@ fn the_reward_era_prices_its_storage_and_fits_a_block_at_its_author_bound() {
         // the reserve's total, the treasury's account and total issuance.
         let reads = 3 * u64::from(authors) + 5;
         assert!(
-            declared.ref_time()
-                >= 10_000_000 + db.reads_writes(reads, written as u64).ref_time(),
+            declared.ref_time() >= 10_000_000 + db.reads_writes(reads, written as u64).ref_time(),
             "{authors} authors: {declared:?} for {written} keys written"
         );
         declared

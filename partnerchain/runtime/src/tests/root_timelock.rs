@@ -1156,7 +1156,9 @@ fn call_trees() -> [(RuntimeCall, u64); 2] {
 #[test]
 fn the_timelock_charges_for_every_call_its_classifier_visits() {
     new_test_ext().execute_with(|| {
-        let read = <Runtime as frame_system::Config>::DbWeight::get().reads(1).ref_time();
+        let read = <Runtime as frame_system::Config>::DbWeight::get()
+            .reads(1)
+            .ref_time();
         for (call, visited) in call_trees() {
             let floor = visited * read;
             let scheduling = sudo(schedule_call(call.clone()));
