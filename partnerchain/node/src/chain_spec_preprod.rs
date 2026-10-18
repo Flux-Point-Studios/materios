@@ -2,7 +2,8 @@
 
 use crate::chain_spec::Authority;
 use materios_runtime::{
-    opaque::SessionKeys, CrossChainPublic, Multisig, TESTNET_TIMELOCK_DELAYS, WASM_BINARY,
+    opaque::SessionKeys, CrossChainPublic, Multisig, MATRA_DECIMALS, TESTNET_TIMELOCK_DELAYS,
+    WASM_BINARY,
 };
 use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
@@ -215,10 +216,10 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
     .with_chain_type(ChainType::Live)
     .with_protocol_id("materios-preprod-v6")
     .with_properties({
-        // MATRA = 6 decimals (matches cMATRA on Cardano); MOTRA = 15
-        // decimals (Midnight DUST parity, separate pallet storage).
+        // MATRA's decimals; MOTRA has 15 (Midnight DUST parity, separate
+        // pallet storage).
         let mut props = serde_json::Map::new();
-        props.insert("tokenDecimals".to_string(), serde_json::json!(6));
+        props.insert("tokenDecimals".to_string(), serde_json::json!(MATRA_DECIMALS));
         props.insert("tokenSymbol".to_string(), serde_json::json!("MATRA"));
         props.insert("ss58Format".to_string(), serde_json::json!(42));
         props

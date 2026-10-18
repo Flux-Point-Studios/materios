@@ -510,8 +510,14 @@ fn checkpoint_receipt_rewards_return_hook_weight() {
 #[test]
 fn checkpoint_settlement_bond_dispatches_use_the_configured_weights() {
     use frame_support::dispatch::{DispatchClass, GetDispatchInfo, Pays};
-    use pallet_intent_settlement::{types::FraudProof, WeightInfo};
+    use pallet_intent_settlement::{
+        types::{FraudProof, SettleAttestedBatchEntry, SettlementEvidence},
+        WeightInfo,
+    };
+    use parity_scale_codec::Decode;
     type Configured = <Runtime as pallet_intent_settlement::Config>::WeightInfo;
+    let evidence = SettlementEvidence::decode(&mut &[0u8; 256][..]).expect("zeroed evidence");
+    let entry = SettleAttestedBatchEntry::decode(&mut &[0u8; 256][..]).expect("zeroed entry");
     let calls = [
         (
             pallet_intent_settlement::Call::post_settlement_bond {
@@ -537,6 +543,35 @@ fn checkpoint_settlement_bond_dispatches_use_the_configured_weights() {
             Configured::release_settlement_bond(),
             Pays::Yes,
         ),
+        (
+            pallet_intent_settlement::Call::request_settle {
+                claim_id: H256::zero(),
+                cardano_tx_hash: [0; 32],
+                settled_direct: false,
+                attestation_evidence: evidence,
+                bond_amount: 1,
+            },
+            Configured::request_settle(),
+            Pays::Yes,
+        ),
+        (
+            pallet_intent_settlement::Call::request_batch_settle {
+                entries: vec![entry; 3].try_into().expect("within MaxSettleBatch"),
+                bond_amount: 1,
+            },
+            Configured::request_batch_settle(3),
+            Pays::Yes,
+        ),
+        (
+            pallet_intent_settlement::Call::supersede_settlement_request {
+                claim_id: H256::zero(),
+                settled_direct: false,
+                evidence,
+                signatures: vec![],
+            },
+            Configured::supersede_settlement_request() + Configured::threshold_signatures(0),
+            Pays::No,
+        ),
     ];
     for (call, expected, pays_fee) in calls {
         let info = RuntimeCall::IntentSettlement(call).get_dispatch_info();
@@ -546,5 +581,121 @@ fn checkpoint_settlement_bond_dispatches_use_the_configured_weights() {
         );
         assert_eq!(info.class, DispatchClass::Operational);
         assert_eq!(info.pays_fee, pays_fee);
+    }
+}
+
+/// Each settlement slot was generated on this runtime, including the MOTRA
+/// checkpoints of any balance it moves, so the adapter adds none. Bond,
+/// slash and release keep the checkpoint budget they carried before theirs
+/// were generated.
+#[test]
+fn checkpoint_settlement_weights_add_checkpoints_to_bond_slash_and_release_only() {
+    use pallet_intent_settlement::WeightInfo;
+    type Base = pallet_intent_settlement::weights::SubstrateWeight<Runtime>;
+    type Configured = <Runtime as pallet_intent_settlement::Config>::WeightInfo;
+    let checkpoints =
+        |accounts: u64| pallet_motra::checkpoint_weight::<Runtime>().saturating_mul(accounts);
+    assert_eq!(
+        Configured::post_settlement_bond(),
+        Base::post_settlement_bond() + checkpoints(1)
+    );
+    assert_eq!(
+        Configured::slash_bad_settlement_evidence(),
+        Base::slash_bad_settlement_evidence() + checkpoints(4)
+    );
+    assert_eq!(
+        Configured::release_settlement_bond(),
+        Base::release_settlement_bond() + checkpoints(1)
+    );
+    for (name, configured, base) in [
+        (
+            "request_settle",
+            Configured::request_settle(),
+            Base::request_settle(),
+        ),
+        (
+            "supersede_settlement_request",
+            Configured::supersede_settlement_request(),
+            Base::supersede_settlement_request(),
+        ),
+        (
+            "submit_intent",
+            Configured::submit_intent(),
+            Base::submit_intent(),
+        ),
+        (
+            "request_credit_refund",
+            Configured::request_credit_refund(),
+            Base::request_credit_refund(),
+        ),
+        (
+            "attest_intent",
+            Configured::attest_intent(),
+            Base::attest_intent(),
+        ),
+        (
+            "request_voucher",
+            Configured::request_voucher(),
+            Base::request_voucher(),
+        ),
+        (
+            "attest_settle",
+            Configured::attest_settle(),
+            Base::attest_settle(),
+        ),
+        (
+            "attest_expire_policy",
+            Configured::attest_expire_policy(),
+            Base::attest_expire_policy(),
+        ),
+    ] {
+        assert_eq!(configured, base, "{name}");
+    }
+    let max = <Runtime as pallet_intent_settlement::Config>::MaxSettleBatch::get();
+    for n in [0, 1, max] {
+        for (name, configured, base) in [
+            (
+                "settle_batch_atomic",
+                Configured::settle_batch_atomic(n),
+                Base::settle_batch_atomic(n),
+            ),
+            (
+                "request_batch_settle",
+                Configured::request_batch_settle(n),
+                Base::request_batch_settle(n),
+            ),
+            (
+                "submit_batch_intents",
+                Configured::submit_batch_intents(n),
+                Base::submit_batch_intents(n),
+            ),
+            (
+                "attest_batch_intents",
+                Configured::attest_batch_intents(n),
+                Base::attest_batch_intents(n),
+            ),
+            (
+                "request_batch_vouchers",
+                Configured::request_batch_vouchers(n),
+                Base::request_batch_vouchers(n),
+            ),
+            (
+                "attest_batch_settle",
+                Configured::attest_batch_settle(n),
+                Base::attest_batch_settle(n),
+            ),
+            (
+                "expire_intents",
+                Configured::expire_intents(n),
+                Base::expire_intents(n),
+            ),
+            (
+                "threshold_signatures",
+                Configured::threshold_signatures(n),
+                Base::threshold_signatures(n),
+            ),
+        ] {
+            assert_eq!(configured, base, "{name}({n})");
+        }
     }
 }

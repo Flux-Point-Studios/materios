@@ -204,10 +204,10 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 241,
+    spec_version: 242,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
-    transaction_version: 5,
+    transaction_version: 6,
     state_version: 1,
 };
 
@@ -328,6 +328,13 @@ impl pallet_grandpa::Config for Runtime {
 // Balances
 // ---------------------------------------------------------------------------
 
+/// MATRA's decimal places, the same as cMATRA's on Cardano: the genesis lock
+/// backs MATRA base unit for base unit. Chain specs advertise them as
+/// `tokenDecimals`.
+pub const MATRA_DECIMALS: u32 = 6;
+/// One MATRA in base units.
+pub const MATRA: Balance = 10u128.pow(MATRA_DECIMALS);
+
 parameter_types! {
     pub const ExistentialDeposit: Balance = 500;
 }
@@ -361,7 +368,7 @@ parameter_types! {
     /// Upper bound on the treasury spends Root approves in one extrinsic:
     /// 15,000 MATRA. Larger moves take several timelock tasks, each public
     /// for the whole delay and each vetoable on its own.
-    pub const MaxSpend: Balance = 15_000 * 1_000_000;
+    pub const MaxSpend: Balance = 15_000 * MATRA;
     pub const PayoutPeriod: BlockNumber = 30 * DAYS;
 }
 
@@ -426,8 +433,7 @@ pub fn attestor_reserve_account() -> AccountId {
 // ---------------------------------------------------------------------------
 
 parameter_types! {
-    /// 1 MATRA (6 dec) == 1_000_000.
-    pub const MinVestedTransfer: Balance = 1_000_000;
+    pub const MinVestedTransfer: Balance = MATRA;
     /// Vested accounts may still pay tx fees and reserve funds; only TRANSFER
     /// and RESERVE are blocked by the vesting lock.
     pub UnvestedFundsAllowedWithdrawReasons: WithdrawReasons =
@@ -676,9 +682,9 @@ parameter_types! {
     /// `release_settlement_bond`. Set to 2 × MinFinalityDepth so Cardano
     /// has had two finality windows to surface any reorg.
     pub const IntentSettlementBondReleaseDelayBlocks: u32 = 30;
-    /// Minimum bond a requester must reserve via `post_settlement_bond`.
-    /// Defaults to zero (opt-in); production bumps via governance.
-    pub const IntentSettlementMinSettlementBond: u128 = 0;
+    /// Minimum bond each settlement request reserves, which proven fraud
+    /// slashes: 1,000 MATRA, the attestor bond.
+    pub const IntentSettlementMinSettlementBond: u128 = 1_000 * MATRA;
 }
 
 impl pallet_intent_settlement::Config for Runtime {

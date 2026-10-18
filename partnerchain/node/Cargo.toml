@@ -98,6 +98,7 @@ motra-rpc = { workspace = true }
 motra-primitives = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+pallet-intent-settlement = { workspace = true, features = ["std"] }
 pallet-orinq-receipts = { workspace = true, features = ["std"] }
 
 [build-dependencies]

@@ -76,11 +76,28 @@ weights!(pallet_treasury, pallet_treasury::weights::SubstrateWeight<Runtime>, {
     void_spend() => 0;
 });
 
+// Each slot was generated on this runtime, including the MOTRA checkpoints of
+// any balance it moves. Bond, slash and release keep the checkpoint budget
+// they carried before theirs were generated.
 weights!(pallet_intent_settlement, pallet_intent_settlement::weights::SubstrateWeight<Runtime>, {
     settle_batch_atomic(n: u32) => 0;
     post_settlement_bond() => 1;
     slash_bad_settlement_evidence() => 4;
     release_settlement_bond() => 1;
+    request_settle() => 0;
+    request_batch_settle(n: u32) => 0;
+    supersede_settlement_request() => 0;
+    submit_intent() => 0;
+    request_credit_refund() => 0;
+    submit_batch_intents(n: u32) => 0;
+    attest_intent() => 0;
+    attest_batch_intents(n: u32) => 0;
+    request_voucher() => 0;
+    request_batch_vouchers(n: u32) => 0;
+    attest_settle() => 0;
+    attest_batch_settle(n: u32) => 0;
+    attest_expire_policy() => 0;
+    expire_intents(n: u32) => 0;
 });
 
 weights!(pallet_billing, pallet_billing::weights::SubstrateWeight<Runtime>, {

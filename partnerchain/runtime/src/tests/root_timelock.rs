@@ -1887,8 +1887,8 @@ fn stuffer() -> RuntimeCall {
 }
 
 /// A permissionless settlement keeper call of `entries` entries: paid
-/// Operational traffic any funded account may send, declaring 40M plus 8M per
-/// entry, and failing here for want of claims.
+/// Operational traffic any funded account may send, declaring its measured
+/// weight, and failing here for want of claims.
 fn keeper_call(entries: usize) -> RuntimeCall {
     use parity_scale_codec::Decode;
     let entry = pallet_intent_settlement::SettleAttestedBatchEntry::decode(&mut &[0u8; 256][..])
@@ -1897,6 +1897,7 @@ fn keeper_call(entries: usize) -> RuntimeCall {
         entries: vec![entry; entries]
             .try_into()
             .expect("within MaxSettleBatch"),
+        bond_amount: IntentSettlementMinSettlementBond::get(),
     })
 }
 

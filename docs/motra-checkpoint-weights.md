@@ -65,7 +65,7 @@ so a new Operational call or wrapper fails CI until its path is decided.
 | `Sudo.sudo` | The sudo key, for calls `SudoRootGate` lets run at once |
 | `RootTimelock.enact` (inner Operational) | Anyone, for a ready, unexpired task with the matching hash |
 | `System.apply_authorized_upgrade` | Anyone, while that code is authorized; the unsigned path is unchanged |
-| `IntentSettlement` committee calls: `attest_intent`, `request_voucher`, `settle_claim`, `expire_policy_mirror`, `credit_deposit`, `settle_batch_atomic`, `attest_batch_intents`, `request_batch_vouchers`, `attest_settle`, `attest_batch_settle`, `attest_expire_policy` | An attestation committee member |
+| `IntentSettlement` committee calls: `attest_intent`, `request_voucher`, `settle_claim`, `expire_policy_mirror`, `credit_deposit`, `settle_batch_atomic`, `attest_batch_intents`, `request_batch_vouchers`, `attest_settle`, `attest_batch_settle`, `attest_expire_policy`, `supersede_settlement_request` | An attestation committee member |
 | `IntentSettlement` keeper and watcher calls: `request_settle`, `request_batch_settle`, `request_expire_policy`, `post_settlement_bond`, `release_settlement_bond`, `slash_bad_settlement_evidence` | Anyone; bounded declared weight, metered by R |
 | `Utility.batch`, `batch_all`, `force_batch` | The signer, when non-empty and every inner call is admitted |
 | `Utility.as_derivative`, `Multisig.as_multi_threshold_1`, `Recovery.as_recovered` | As the derived, multisig or recovered account; a rescuer must be that account's proxy |
@@ -75,7 +75,7 @@ Settlement committee duties stay paid at the flat paid priority. Each carries
 the full M-of-N signature bundle, so it is one transaction per settled item. A
 failed settlement attest leaves its item pending, so a feeless path would need
 the complete bundle verified in pool validation to stop free replays, and the
-pinned pallet's checks are internal and changing in settlement #55.
+pallet's signature checks are internal.
 
 Receipt submissions price the certification they trigger. For each
 `submit_receipt` or `submit_receipt_v2` a call carries, at any wrapper depth,
@@ -109,7 +109,7 @@ signature, Utility and measured attestation work remain charged to block weight.
 The measurements include the complete ChargeMotra duty pre/dispatch/post path.
 
 Existing calls, storage encodings, SignedExtra and transaction version 5 are
-unchanged. This remains an unreleased spec241 candidate.
+unchanged by this work.
 
 ## Currency path audit
 
@@ -131,6 +131,7 @@ unchanged. This remains an unreleased spec241 candidate.
 | Other Treasury calls | 0; approvals/asset-spend records only |
 | IntentSettlement bond/release | 1 reserve/unreserve |
 | IntentSettlement slash | 4 across two repatriations |
+| IntentSettlement request, batch request, supersede | 0; measured on this runtime with the reserve and any displaced bond's refund, checkpoints included |
 | Other IntentSettlement calls/hooks | 0; settlement records and vouchers do not mutate MATRA |
 | Billing topups | 1 withdrawal |
 | Billing execute withdrawal | 2; deposit and possible overflow rollback withdrawal |
@@ -285,8 +286,8 @@ order:
 | Stuffer | Bytes | Weight share | Length share | Final R | Cost (MOTRA) |
 |---|---:|---:|---:|---:|---:|
 | Remark ramp (weight) | 108 | 74.98% | 2.39% | 49,978,920,005 | 38,631.10 |
-| `request_batch_settle`, 0 entries | 108 | 99.98% | 3.09% | 50,000,000,000 | 51,482.92 |
-| `request_batch_settle`, 256 entries | 37,229 | 23.67% | 99.41% | 50,000,000,000 | 61,486.53 |
+| `request_batch_settle`, 0 entries | 124 | 99.96% | 3.33% | 50,000,000,000 | 51,598.46 |
+| `request_batch_settle`, 256 entries | 37,245 | 99.54% | 54.70% | 50,000,000,000 | 77,047.77 |
 | Normal-length-filling remark | 3,932,160 | 0.14% | 75% (all of Normal's) | 50,000,000,000 | 37,536.71 |
 | `transfer_keep_alive` | 141 | 74.93% | 2.30% | 49,909,744,445 | 38,507.24 |
 | One block-filling `upgrade_accounts` | 164,461 | 73.99% | 3.14% | 48,650,172,222 | 37,483.83 |
@@ -347,10 +348,13 @@ per read and 100,000,000 per write. The
 fee before and after storage was priced, block capacity, and the safety audit
 of every call and hook.
 
-Settlement #51 is merged. Both pallet-intent-settlement and pallet-oracle pin
-`feb79e00510d0083de67bc3219e442f802cd1101`; its tree equals the reviewed ff0efed
-tree. The changed checkout path changes the Wasm artifact and is covered by
-the rebuilt candidate and live read-only metadata gate.
+Both pallet-intent-settlement and pallet-oracle pin settlement #55's merge
+commit `0757de35efa52d983c9203a683307827d76ae338`. Its settlement weights were
+generated on this runtime, MOTRA checkpoints included, so the adapter adds no
+checkpoint to the fourteen slots #55 introduced. Their storage terms, checkpoint
+keys among them, are priced through `T::DbWeight`, which stays zero until #71.
+Bond, release and slash keep their earlier 1/4/1 checkpoint budgets on top of
+their now-measured bases.
 
 Genesis-relevant fee-path layout work is tracked in
 [#75](https://github.com/Flux-Point-Studios/materios/issues/75); legacy sponsorship,

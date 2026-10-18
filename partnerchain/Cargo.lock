@@ -4632,6 +4632,7 @@ dependencies = [
  "orinq-receipts-primitives",
  "orinq-receipts-rpc",
  "pallet-block-rewards",
+ "pallet-intent-settlement",
  "pallet-orinq-receipts",
  "pallet-partner-chains-session",
  "pallet-session-validator-management",
@@ -5702,7 +5703,7 @@ dependencies = [
 [[package]]
 name = "pallet-intent-settlement"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=feb79e00510d0083de67bc3219e442f802cd1101#feb79e00510d0083de67bc3219e442f802cd1101"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=0757de35efa52d983c9203a683307827d76ae338#0757de35efa52d983c9203a683307827d76ae338"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5770,7 +5771,7 @@ dependencies = [
 [[package]]
 name = "pallet-oracle"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=feb79e00510d0083de67bc3219e442f802cd1101#feb79e00510d0083de67bc3219e442f802cd1101"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=0757de35efa52d983c9203a683307827d76ae338#0757de35efa52d983c9203a683307827d76ae338"
 dependencies = [
  "frame-benchmarking",
  "frame-support",

@@ -86,6 +86,11 @@ pub(super) const OPERATIONAL: &[(&str, &str, Payer)] = &[
         Payer::Anyone,
     ),
     ("IntentSettlement", "release_settlement_bond", Payer::Anyone),
+    (
+        "IntentSettlement",
+        "supersede_settlement_request",
+        Payer::Member,
+    ),
     ("RootTimelock", "cancel", Payer::Guardian),
     ("RootTimelock", "fast_track", Payer::Guardian),
     ("RootTimelock", "cancel_all", Payer::Guardian),
@@ -363,6 +368,7 @@ fn request_batch_settle(entries: u32) -> RuntimeCall {
         entries: vec![entry; entries as usize]
             .try_into()
             .expect("within MaxSettleBatch"),
+        bond_amount: IntentSettlementMinSettlementBond::get(),
     })
 }
 
