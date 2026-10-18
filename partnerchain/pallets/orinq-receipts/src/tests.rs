@@ -3255,6 +3255,378 @@ fn six_attests_pay_the_certification_exactly_once() {
 }
 
 // ---------------------------------------------------------------------------
+// Signers who leave the committee before certification
+// ---------------------------------------------------------------------------
+//
+// Only current members count toward the threshold and share the payout. A
+// member's attestation stops counting once it leaves the committee, whether
+// Root removes it or a slash ejects it.
+
+const REWARD: u128 = 10_000_000;
+
+fn attest_canonical(seed: u8, rid: H256) -> frame_support::dispatch::PostDispatchInfo {
+    OrinqReceipts::attest_availability_cert(
+        RuntimeOrigin::signed(acc(seed)),
+        rid,
+        canonical_for(rid),
+    )
+    .expect("canonical attest")
+}
+
+fn is_certified(rid: H256) -> bool {
+    pallet::Receipts::<Test>::get(rid)
+        .expect("receipt")
+        .availability_cert_hash
+        != [0; 32]
+}
+
+fn free_balances(seeds: &[u8]) -> Vec<u128> {
+    seeds
+        .iter()
+        .map(|&s| Balances::free_balance(&acc(s)))
+        .collect()
+}
+
+fn gains(seeds: &[u8], before: &[u128]) -> Vec<u128> {
+    free_balances(seeds)
+        .iter()
+        .zip(before)
+        .map(|(after, before)| after - before)
+        .collect()
+}
+
+fn reserve_account() -> MockAccountId {
+    AttestorReservePotId::get().into_account_truncating()
+}
+
+fn last_recorded_count() -> u32 {
+    frame_system::Pallet::<Test>::events()
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event {
+            RuntimeEvent::OrinqReceipts(crate::Event::AttestationRecorded { count, .. }) => {
+                Some(*count)
+            }
+            _ => None,
+        })
+        .expect("an attestation was recorded")
+}
+
+/// Committee {1..5} at threshold 3. Signers 1 and 2 leave; `leave_committee`
+/// keeps the threshold at 3, so 3, 4 and 5 must all attest, and only they
+/// are paid.
+#[test]
+fn signers_who_leave_neither_count_nor_earn() {
+    new_test_ext().execute_with(|| {
+        let committee: Vec<u8> = (1..=5).collect();
+        seed_submitter_and_committee(10, &committee);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee.iter().map(|&s| acc(s)).collect(),
+            3
+        ));
+        let rid = H256::from([0xD1; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xD2; 32])));
+        attest_canonical(1, rid);
+        attest_canonical(2, rid);
+        for s in [1, 2] {
+            assert_ok!(OrinqReceipts::leave_committee(
+                RuntimeOrigin::root(),
+                acc(s)
+            ));
+        }
+        assert_eq!(pallet::AttestationThreshold::<Test>::get(), 3);
+        let before = free_balances(&committee);
+        let treasury_before = Balances::free_balance(&treasury_account());
+
+        attest_canonical(3, rid);
+        assert!(
+            !is_certified(rid),
+            "departed signers 1 and 2 must not complete the threshold"
+        );
+        assert_eq!(last_recorded_count(), 1);
+        attest_canonical(4, rid);
+        assert!(!is_certified(rid));
+        assert_eq!(last_recorded_count(), 2);
+        attest_canonical(5, rid);
+        assert!(is_certified(rid));
+
+        let share = 800_000 / 3;
+        assert_eq!(
+            gains(&committee, &before),
+            vec![0, 0, REWARD + share, REWARD + share, REWARD + share]
+        );
+        assert_eq!(
+            Balances::free_balance(&treasury_account()) - treasury_before,
+            DEFAULT_FEE - 3 * share
+        );
+        for s in [1, 2] {
+            assert_eq!(OrinqReceipts::attestation_rewards(acc(s)), 0);
+        }
+    });
+}
+
+/// A committee reset that drops 1 and 2 and lowers the threshold to 2:
+/// signer 3 alone does not certify, 3 and 4 do, and only they are paid.
+#[test]
+fn a_committee_reset_discounts_the_signers_it_drops() {
+    new_test_ext().execute_with(|| {
+        let committee: Vec<u8> = (1..=5).collect();
+        seed_submitter_and_committee(10, &committee);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee.iter().map(|&s| acc(s)).collect(),
+            3
+        ));
+        let rid = H256::from([0xD3; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xD4; 32])));
+        attest_canonical(1, rid);
+        attest_canonical(2, rid);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(3), acc(4), acc(5)],
+            2
+        ));
+        let before = free_balances(&committee);
+
+        attest_canonical(3, rid);
+        assert!(
+            !is_certified(rid),
+            "dropped signers 1 and 2 must not complete the threshold"
+        );
+        attest_canonical(4, rid);
+        assert!(is_certified(rid));
+
+        assert_eq!(
+            gains(&committee, &before),
+            vec![0, 0, REWARD + 400_000, REWARD + 400_000, 0]
+        );
+    });
+}
+
+/// An ejected signer's attestation stops counting and earns nothing, whether
+/// the bad-hash auto-slash or Root's `slash_attestor` ejects it.
+#[test]
+fn ejected_signers_neither_count_nor_earn() {
+    let ejections: [fn(H256); 2] = [
+        |rid| {
+            pallet::BadAttestSlashThreshold::<Test>::put(1);
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(1)),
+                rid,
+                [0xDE; 32]
+            ));
+        },
+        |_| {
+            assert_ok!(OrinqReceipts::slash_attestor(
+                RuntimeOrigin::root(),
+                acc(1),
+                1_000_000_000,
+                SlashReason::InvalidSignature
+            ));
+        },
+    ];
+    for eject in ejections {
+        new_test_ext().execute_with(|| {
+            let committee = [1u8, 2, 3];
+            seed_submitter_and_committee(10, &committee);
+            Balances::make_free_balance_be(&reserve_account(), 1);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                committee.iter().map(|&s| acc(s)).collect(),
+                2
+            ));
+            let rid = H256::from([0xD5; 32]);
+            assert_ok!(submit_c4(10, rid, H256::from([0xD6; 32])));
+            attest_canonical(1, rid);
+            eject(rid);
+            assert!(!OrinqReceipts::committee_members().contains(&acc(1)));
+            assert_eq!(pallet::AttestationThreshold::<Test>::get(), 2);
+            let before = free_balances(&committee);
+
+            attest_canonical(2, rid);
+            assert!(
+                !is_certified(rid),
+                "the ejected signer must not complete the threshold"
+            );
+            attest_canonical(3, rid);
+            assert!(is_certified(rid));
+
+            assert_eq!(
+                gains(&committee, &before),
+                vec![0, REWARD + 400_000, REWARD + 400_000]
+            );
+            assert_eq!(OrinqReceipts::attestation_rewards(acc(1)), 0);
+        });
+    }
+}
+
+/// `leave_committee` does not clamp the threshold. With fewer members than
+/// the threshold no receipt certifies, including one a departed member
+/// signed, until governance seats another member.
+#[test]
+fn a_threshold_above_the_committee_waits_for_a_new_member() {
+    new_test_ext().execute_with(|| {
+        seed_submitter_and_committee(10, &[1, 2, 3]);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1), acc(2), acc(3)],
+            3
+        ));
+        let rid = H256::from([0xD7; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xD8; 32])));
+        attest_canonical(3, rid);
+        assert_ok!(OrinqReceipts::leave_committee(
+            RuntimeOrigin::root(),
+            acc(3)
+        ));
+        assert_eq!(pallet::AttestationThreshold::<Test>::get(), 3);
+        assert_eq!(OrinqReceipts::committee_members().len(), 2);
+
+        for s in [1, 2, 1] {
+            attest_canonical(s, rid);
+            assert!(
+                !is_certified(rid),
+                "two members cannot meet a threshold of three"
+            );
+        }
+
+        Balances::make_free_balance_be(&acc(4), 10_000_000_000);
+        assert_ok!(OrinqReceipts::bond(
+            RuntimeOrigin::signed(acc(4)),
+            1_000_000_000
+        ));
+        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(4)));
+        let seeds = [1u8, 2, 3, 4];
+        let before = free_balances(&seeds);
+        attest_canonical(4, rid);
+        assert!(is_certified(rid));
+        let share = 800_000 / 3;
+        assert_eq!(
+            gains(&seeds, &before),
+            vec![REWARD + share, REWARD + share, 0, REWARD + share]
+        );
+    });
+}
+
+/// A full committee replaces half its members while a receipt is pending at
+/// a threshold of the whole committee. The departed half never fills the
+/// bounded signer set: the receipt certifies when every current member has
+/// attested, and pays exactly them.
+#[test]
+fn departed_signers_never_crowd_out_current_members() {
+    use frame_support::traits::Get;
+    new_test_ext().execute_with(|| {
+        let max: u32 = <Test as pallet::Config>::MaxCommitteeSize::get();
+        let max = max as u8;
+        let departed: Vec<u8> = (1..=max / 2).collect();
+        let current: Vec<u8> = (max / 2 + 1..=max + max / 2).collect();
+        for s in 1..=max + max / 2 {
+            Balances::make_free_balance_be(&acc(s), 1_000_000);
+        }
+        Balances::make_free_balance_be(&treasury_account(), 1);
+        let committee_of = |seeds: Vec<u8>| -> frame_support::BoundedBTreeSet<
+            MockAccountId,
+            <Test as pallet::Config>::MaxCommitteeSize,
+        > {
+            seeds
+                .into_iter()
+                .map(acc)
+                .collect::<std::collections::BTreeSet<_>>()
+                .try_into()
+                .expect("committee bound")
+        };
+        pallet::CommitteeMembers::<Test>::put(committee_of((1..=max).collect()));
+        pallet::AttestationThreshold::<Test>::put(u32::from(max));
+        let rid = H256::from([0xD9; 32]);
+        assert_ok!(submit_c4(200, rid, H256::from([0xDA; 32])));
+        for &s in &departed {
+            attest_canonical(s, rid);
+        }
+        pallet::CommitteeMembers::<Test>::put(committee_of(current.clone()));
+        let departed_before = free_balances(&departed);
+        let current_before = free_balances(&current);
+
+        for &s in &current[..current.len() - 1] {
+            attest_canonical(s, rid);
+            assert!(
+                !is_certified(rid),
+                "certified before member {s}'s peers attested"
+            );
+        }
+        attest_canonical(*current.last().expect("members"), rid);
+        assert!(is_certified(rid));
+
+        assert!(gains(&departed, &departed_before)
+            .iter()
+            .all(|gain| *gain == 0));
+        let share = 800_000 / u128::from(max);
+        assert!(gains(&current, &current_before)
+            .iter()
+            .all(|gain| *gain == REWARD + share));
+    });
+}
+
+/// The attest that drops departed signers still decodes them, so it is
+/// weighed at the stored count. Committee {1..5} at threshold 4: 1, 2 and 3
+/// attest, a reset drops 1 and 2 and lowers the threshold to 2, and 4's
+/// attest certifies over three stored signers, paying 3 and 4.
+#[test]
+fn an_attest_is_weighed_at_the_signers_it_decodes() {
+    use crate::weights::WeightInfo;
+    type W = crate::weights::SubstrateWeight<Test>;
+    new_test_ext().execute_with(|| {
+        let committee: Vec<u8> = (1..=5).collect();
+        seed_submitter_and_committee(10, &committee);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee.iter().map(|&s| acc(s)).collect(),
+            4
+        ));
+        let rid = H256::from([0xDB; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xDC; 32])));
+        for s in [1, 2, 3] {
+            attest_canonical(s, rid);
+        }
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(3), acc(4), acc(5)],
+            2
+        ));
+        let before = free_balances(&committee);
+
+        let post = attest_canonical(4, rid);
+        assert!(is_certified(rid));
+        assert_eq!(post.actual_weight, Some(W::attest_threshold(3)));
+        assert_eq!(
+            gains(&committee, &before),
+            vec![0, 0, REWARD + 400_000, REWARD + 400_000, 0]
+        );
+
+        let rid = H256::from([0xDD; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xDE; 32])));
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            committee.iter().map(|&s| acc(s)).collect(),
+            4
+        ));
+        for s in [1, 2] {
+            attest_canonical(s, rid);
+        }
+        for s in [1, 2] {
+            assert_ok!(OrinqReceipts::leave_committee(
+                RuntimeOrigin::root(),
+                acc(s)
+            ));
+        }
+        let post = attest_canonical(3, rid);
+        assert_eq!(post.actual_weight, Some(W::attest_non_threshold(2)));
+        let (_, signers) = pallet::Attestations::<Test>::get(rid).expect("pending");
+        assert_eq!(signers.into_iter().collect::<Vec<_>>(), vec![acc(3)]);
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Genesis: attestor reward and subsidy parameters have no default
 // ---------------------------------------------------------------------------
 //

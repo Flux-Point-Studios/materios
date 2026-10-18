@@ -152,9 +152,18 @@ actual weight. Threshold attestation snapshots unique signer, treasury and
 escrow-payer balances and counts the accounts whose free balance changes. The
 96-signer maximum with reward and fee distribution changes 97 accounts, for
 both an existing treasury and the dead-treasury refund path. Non-threshold
-attestations return a measured function of the actual signer count; late calls
+attestations return a measured function of the signers they decode; late calls
 retain the maximum non-threshold bound, without checkpoints. Bad-hash
 slashing has its own measured base and counts its changed accounts.
+
+Only current committee members count toward the threshold and share the
+reward and fee. Each attest narrows the receipt's stored signers to the
+committee before adding its own, so members who left, by Root's removal or a
+slash, neither complete a certificate nor fill the bounded signer set. The
+narrowing still decodes the departed signers, so an attest returns the weight
+of the larger of the stored and current counts; `attest_departed` measures it
+with 1 to 96 departed signers. Its storage access equals a non-threshold
+attest's: the committee it checks the caller against is already read.
 
 Runtime regressions commit fixtures before dispatch and inspect real checkpoint
 writes across fifteen Billing/receipt paths, plus maximum committee payouts.
@@ -170,7 +179,9 @@ author's entry, account and lifetime reward.
 
 Gemtek Ryzen 7 7730U, Rust 1.85.0, SDK c455194a. Builds and benchmarks use the
 shared Cargo lock, nice10, four jobs and a target exclusive to this worktree.
-Measurement Wasm SHA-256: `d9d3f7a2f803b59add58daf84a883fe231ea8c6a71c248ac2a3c4d80d2b3d8d3`.
+Measurement Wasm SHA-256: attestation
+`544b8d31fc777d1958eb8010c86b8510f126bdf0993ebf8a4a50e666f4c5c2af`, fee path
+`d9d3f7a2f803b59add58daf84a883fe231ea8c6a71c248ac2a3c4d80d2b3d8d3`.
 Run the following from `partnerchain/` with the isolated CARGO_TARGET_DIR and
 WASM_BUILD_WORKSPACE_HINT set, inside the shared-lock/nice wrapper.
 
@@ -178,7 +189,7 @@ WASM_BUILD_WORKSPACE_HINT set, inside the shared-lock/nice wrapper.
 cargo build -p materios-runtime --features runtime-benchmarks --locked
 frame-omni-bencher v1 benchmark pallet --runtime <measurement.wasm> \
   --pallet pallet_orinq_receipts \
-  --extrinsic 'attest_non_threshold,attest_repeated,attest_threshold,attest_dead_treasury,attest_bad_hash' \
+  --extrinsic 'attest_non_threshold,attest_repeated,attest_threshold,attest_dead_treasury,attest_bad_hash,attest_departed' \
   --steps 20 --repeat 20 --external-repeat 3 --output-analysis max \
   --map-size 1000000 --additional-trie-layers 2 \
   --genesis-builder runtime --genesis-builder-preset development \
@@ -186,7 +197,11 @@ frame-omni-bencher v1 benchmark pallet --runtime <measurement.wasm> \
 ```
 
 The fee-path run uses the same arguments with `--pallet pallet_motra
---extrinsic fee_path`. Raw samples are committed beside the weight functions.
+--extrinsic fee_path`. The committed attestation samples concatenate three
+runs of the attestation command, each started at the CPU's idle temperature
+(65 °C). A run heats it to 83 °C and slows the clock from 4.4 to about
+3.4 GHz, so a longer run measured its last benchmark, the unchanged bad-hash
+path, a fifth slower. Raw samples are committed beside the weight functions.
 Regenerate the coefficients and their formatting with
 `python3 pallets/motra/benchmarking/generate_fee_weights.py`. It starts from
 FRAME's `--output-analysis max` statistical fit and never lowers its base or
@@ -194,15 +209,16 @@ slope. For non-threshold attests, it anchors the base at the larger of the FRAME
 base and zero-prior-signers median, then raises the slope to cover the median at
 every measured signer count. For the other paths it retains the FRAME slope
 and raises the intercept to cover those medians. This is a statistical fit,
-not a worst-observed-sample bound: non-threshold medians span about 80–88 µs,
-while isolated samples reach 144 µs. All raw samples remain committed.
+not a worst-observed-sample bound: non-threshold medians span about 69–97 µs,
+while isolated samples reach 304 µs. All raw samples remain committed.
 
 Non-threshold measurements vary prior signers from 0 to 95; duplicate backstops
-vary from 1 to 96. Valid non-threshold, threshold and dead-treasury measurements
-execute ChargeMotra pre_dispatch, real runtime dispatch and ChargeMotra
-post_dispatch, including classifier/tag allocation and unused fee-base release.
-Returned weights also cover the duplicate-backstop fit. Runtime tests compare
-the per-count medians independently and derive proof bounds from StorageInfo.
+and departed signers vary from 1 to 96. Valid non-threshold, departed-signer,
+threshold and dead-treasury measurements execute ChargeMotra pre_dispatch, real
+runtime dispatch and ChargeMotra post_dispatch, including classifier/tag
+allocation and unused fee-base release. Returned weights also cover the
+duplicate-backstop and departed-signer fits. Runtime tests compare the
+per-count medians independently and derive proof bounds from StorageInfo.
 The complete paid fee-path bound uses its largest execution sample plus its
 database costs and the legacy read. These policies distinguish execution
 estimates from hard storage/proof bounds; neither claims block-import latency.
@@ -210,8 +226,8 @@ estimates from hard storage/proof bounds; neither claims block-import latency.
 | Capacity under the normal block budget | Count |
 |---|---:|
 | Separately signed transfers | 854 |
-| Separately signed non-threshold attests | 3521 |
-| Non-threshold attests in pure Utility batches | 4419 in 503 batches |
+| Separately signed non-threshold attests | 3544 |
+| Non-threshold attests in pure Utility batches | 4454 in 511 batches |
 
 The attestation loops execute CheckWeight, ChargeMotra, real runtime dispatch
 and both post-dispatch paths; each recorded signer and receipt is checked.
@@ -252,7 +268,7 @@ and write.
 | 1,000,000,000 | remark | 106 | 0.001336605458 | 1294926000000 |
 | 1,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 1,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 1,000,000,000 | submit_receipt | 395 | 0.006148116122 / 0.006297001122 | 1294926000000 |
+| 1,000,000,000 | submit_receipt | 395 | 0.006341608539 / 0.006490493539 | 1294926000000 |
 | 1,000,000,000 | claim | 105 | 0.002382099245 | 1294926000000 |
 | 1,000,000,000 | set_delegatee | 138 | 0.002496363722 | 1294926000000 |
 | 1,000,000,000 | Operational stuffer | 114 | Rejected | — |
@@ -260,7 +276,7 @@ and write.
 | 50,000,000,000 | remark | 106 | 0.0667760789 | 64697300000000 |
 | 50,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 50,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 50,000,000,000 | submit_receipt | 395 | 0.3073374511 / 0.3147817011 | 64697300000000 |
+| 50,000,000,000 | submit_receipt | 395 | 0.31701207195 / 0.32445632195 | 64697300000000 |
 | 50,000,000,000 | claim | 105 | 0.11905081725 | 64697300000000 |
 | 50,000,000,000 | set_delegatee | 138 | 0.1247624241 | 64697300000000 |
 | 50,000,000,000 | Operational stuffer | 114 | Rejected | — |

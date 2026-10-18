@@ -148,9 +148,9 @@ Normal-class ceilings, 1.5e12 ref_time, and Operational, 2e12; not live TPS.
 |---|---:|---:|
 | Separately signed `transfer_keep_alive` | 920 | 854 |
 | `submit_receipt` / `submit_receipt_v2`, declared | 955 | 619 |
-| Separately signed non-threshold attestations, refunded (the cert-daemon's form) | 7,873 | 3,521 |
-| Non-threshold attestations in pure Utility batches, refunded | 16,121 in 878 batches | 4,419 in 503 batches |
-| Attestations admitted at their declared weight | 69 | 32 |
+| Separately signed non-threshold attestations, refunded (the cert-daemon's form) | 7,873 | 3,544 |
+| Non-threshold attestations in pure Utility batches, refunded | 16,121 in 878 batches | 4,454 in 511 batches |
+| Attestations admitted at their declared weight | 69 | 31 |
 | `IntentSettlement.post_settlement_bond` | 1,325 | 1,136 |
 | `IntentSettlement.release_settlement_bond` | 1,319 | 955 |
 | `IntentSettlement.request_settle` | 1,413 | 819 |
@@ -164,9 +164,13 @@ Normal-class ceilings, 1.5e12 ref_time, and Operational, 2e12; not live TPS.
 Settlement's figures start from main's weights, settlement #55's generated
 slots with the 1/4/1 checkpoint units on the bond paths.
 
-An attestation's actual weight is now 412,808,600 with its signed base
-(187,808,600 before): five reads and one write add 225,000,000. A block
-certifies about 3,521 / t receipts at threshold t from separate extrinsics.
+An attestation's actual weight is now 409,979,500 with its signed base
+(187,808,600 before), of which its five reads and one write take 225,000,000.
+A block certifies about 3,544 / t receipts at threshold t from separate
+extrinsics. The attestation figures were re-measured when certification came
+to count only current committee members
+([#89](https://github.com/Flux-Point-Studios/materios/issues/89)); see
+[MOTRA accounting and dispatch weights](motra-checkpoint-weights.md).
 
 ## Fees
 
@@ -183,12 +187,12 @@ second figure is the escrow taken before dispatch, where they differ):
 |---:|---|---:|---:|---:|---:|
 | 1,000,000,000 | transfer_keep_alive | 139 | 0.001684018 | 0.001809018 | 1.07 |
 | 1,000,000,000 | remark | 106 | 0.001336605 | 0.001336605 | 1.00 |
-| 1,000,000,000 | submit_receipt, threshold 2 of 3 | 395 | 0.003323116 / 0.003472001 | 0.006148116 / 0.006297001 | 1.85 |
+| 1,000,000,000 | submit_receipt, threshold 2 of 3 | 395 | 0.003323116 / 0.003472001 | 0.006341609 / 0.006490494 | 1.91 |
 | 1,000,000,000 | claim_motra | 105 | 0.002382099 | 0.002382099 | 1.00 |
 | 1,000,000,000 | set_delegatee | 138 | 0.002496364 | 0.002496364 | 1.00 |
 | 50,000,000,000 | transfer_keep_alive | 139 | 0.084145099 | 0.090395099 | 1.07 |
 | 50,000,000,000 | remark | 106 | 0.066776079 | 0.066776079 | 1.00 |
-| 50,000,000,000 | submit_receipt, threshold 2 of 3 | 395 | 0.166087451 / 0.173531701 | 0.307337451 / 0.314781701 | 1.85 |
+| 50,000,000,000 | submit_receipt, threshold 2 of 3 | 395 | 0.166087451 / 0.173531701 | 0.317012072 / 0.324456322 | 1.91 |
 | 50,000,000,000 | claim_motra | 105 | 0.119050817 | 0.119050817 | 1.00 |
 | 50,000,000,000 | set_delegatee | 138 | 0.124762424 | 0.124762424 | 1.00 |
 
@@ -200,17 +204,17 @@ R = 1e9):
 
 | Threshold | Before | After | × |
 |---:|---:|---:|---:|
-| 1 | 0.003085976 | 0.005435976 | 1.76 |
-| 2 | 0.003472766 | 0.006297766 | 1.81 |
-| 16 | 0.009041880 | 0.018516880 | **2.05** |
-| 64 | 0.030351199 | 0.062626199 | **2.06** |
-| 96 | 0.046448156 | 0.093923156 | **2.02** |
+| 1 | 0.003085976 | 0.005628789 | 1.82 |
+| 2 | 0.003472766 | 0.006491258 | 1.87 |
+| 16 | 0.009041880 | 0.018609404 | **2.06** |
+| 64 | 0.030351199 | 0.061054491 | **2.01** |
+| 96 | 0.046448156 | 0.090245134 | 1.94 |
 
 **More than 2×** (R = 1e9, at each call's worst case):
 
-- `submit_receipt` and `submit_receipt_v2` at thresholds of 16 and above,
+- `submit_receipt` and `submit_receipt_v2` at thresholds from 16 to 64,
   through the attestation storage their certification prepays;
-- `OrinqReceipts.attest_availability_cert` on a paid path (a wrapper), 2.17×;
+- `OrinqReceipts.attest_availability_cert` on a paid path (a wrapper), 2.19×;
   direct duties stay feeless;
 - `IntentSettlement.request_batch_settle` at 256 entries, 5.95×: a
   permissionless keeper call, 0.040 → 0.239 MOTRA;
@@ -328,7 +332,7 @@ fee is unchanged.
 | OrinqReceipts.submit_receipt | Normal | bounded | 275,759,000 | 1,125,759,000 | 4.08 | 395 | 0.000001395 | 0.00172176 → 0.00257176 | 0.086019658 → 0.128519658 |  |
 | OrinqReceipts.set_availability_cert | Normal | bounded | 216,434,000 | 691,434,000 | 3.19 | 169 | 0.000001169 | 0.001575997 → 0.002050997 | 0.078742582 → 0.102492582 |  |
 | OrinqReceipts.set_committee | Normal | bounded | 10,000 | 200,010,000 | 20001.00 | 3,183 | 0.000004183 | 0.002512335 → 0.002712335 | 0.125411774 → 0.135411774 |  |
-| OrinqReceipts.attest_availability_cert | Normal | bounded | 20,225,691,650 | 45,475,691,650 | 2.25 | 169 | 0.000001169 | 0.021585255 → 0.046835255 | 1.079205465 → 2.341705465 | ! |
+| OrinqReceipts.attest_availability_cert | Normal | bounded | 20,225,691,650 | 45,935,723,240 | 2.27 | 169 | 0.000001169 | 0.021585255 → 0.047295287 | 1.079205465 → 2.364707044 | ! |
 | OrinqReceipts.submit_anchor | Normal | bounded | 10,000 | 125,010,000 | 12501.00 | 233 | 0.000001233 | 0.001384051 → 0.001509051 | 0.069142147 → 0.075392147 |  |
 | OrinqReceipts.submit_receipt_v2 | Normal | bounded | 275,759,000 | 1,125,759,000 | 4.08 | 492 | 0.000001492 | 0.00175886 → 0.00260886 | 0.087869879 → 0.130369879 |  |
 | OrinqReceipts.join_committee | Normal | bounded | 10,000 | 150,010,000 | 15001.00 | 137 | 0.000001137 | 0.001347334 → 0.001497334 | 0.067311 → 0.074811 |  |

@@ -1530,3 +1530,73 @@ fn pricing_new_signer_after_95_prior_signers_reports_their_count() {
         assert!(actual.ref_time() >= times[times.len() / 2]);
     });
 }
+
+/// A member's attest drops 96 departed signers, a full set, which it still
+/// decodes: the receipt stays pending at one current signer, and the attest
+/// is weighed at the 96 it decoded and covers their measured median.
+#[test]
+fn pricing_new_signer_after_96_departed_signers_reports_their_count() {
+    use pallet_orinq_receipts::weights::WeightInfo;
+    use parity_scale_codec::Encode;
+    type W = <Runtime as pallet_orinq_receipts::Config>::WeightInfo;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(96, 2, 0);
+        let departed: BoundedBTreeSet<
+            AccountId,
+            <Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize,
+        > = (101..=196)
+            .map(account)
+            .collect::<std::collections::BTreeSet<_>>()
+            .try_into()
+            .expect("96 departed signers");
+        pallet_orinq_receipts::Attestations::<Runtime>::insert(id, (H256::from(hash), departed));
+        let who = account(1);
+        let call = attest(id, hash);
+        let info = call.get_dispatch_info();
+        let len = call.encoded_size() + 128;
+        let pre = pallet_motra::fee::ChargeMotra::<Runtime>::new()
+            .pre_dispatch(&who, &call, &info, len)
+            .expect("duty");
+        let post = call
+            .dispatch(RuntimeOrigin::signed(who.clone()))
+            .expect("current signer");
+        assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
+            Some(pre),
+            &info,
+            &post,
+            len,
+            &Ok(())
+        ));
+        assert_eq!(
+            OrinqReceipts::receipts(id)
+                .expect("receipt")
+                .availability_cert_hash,
+            [0; 32]
+        );
+        let (_, signers) =
+            pallet_orinq_receipts::Attestations::<Runtime>::get(id).expect("pending");
+        assert_eq!(signers.into_iter().collect::<Vec<_>>(), vec![who]);
+        let actual = post.actual_weight.expect("actual");
+        assert_eq!(
+            actual,
+            W::attest_non_threshold(96).saturating_add(W::balance_mutations(0))
+        );
+        assert!(post.calc_actual_weight(&info).all_lte(info.weight));
+        let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
+            "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
+        ))
+        .expect("attestation samples");
+        let mut times: Vec<u64> = samples
+            .iter()
+            .find(|s| s["benchmark"] == "attest_departed")
+            .expect("departed samples")["time_results"]
+            .as_array()
+            .expect("timings")
+            .iter()
+            .filter(|s| s["components"][0][1].as_u64() == Some(96))
+            .map(|s| s["extrinsic_time"].as_u64().expect("time") * 1_000)
+            .collect();
+        times.sort_unstable();
+        assert!(actual.ref_time() >= times[times.len() / 2]);
+    });
+}

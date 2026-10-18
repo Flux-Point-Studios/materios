@@ -186,6 +186,30 @@ mod benchmarks {
         assert!(!CommitteeMembers::<T>::get().contains(&caller));
     }
 
+    #[benchmark]
+    fn attest_departed(n: Linear<1, { T::MaxCommitteeSize::get() }>) {
+        let (caller, id, hash) = attestation::<T>(1, true);
+        let departed: BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize> = (0..n)
+            .map(|i| account("departed", i, 0))
+            .collect::<BTreeSet<_>>()
+            .try_into()
+            .expect("departed");
+        Attestations::<T>::insert(id, (H256::from(hash), departed));
+        AttestationThreshold::<T>::put(T::MaxCommitteeSize::get() + 1);
+        #[block]
+        {
+            dispatch_duty::<T>(caller.clone(), id, hash);
+        }
+        assert_eq!(
+            Attestations::<T>::get(id)
+                .expect("attestations")
+                .1
+                .into_iter()
+                .collect::<alloc::vec::Vec<_>>(),
+            alloc::vec![caller]
+        );
+    }
+
     fn submission<T>(m: u32, v2: bool) -> (T::AccountId, H256, Call<T>)
     where
         T: Config + pallet_balances::Config<Balance = u128>,

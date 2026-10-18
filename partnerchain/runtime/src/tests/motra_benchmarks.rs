@@ -216,7 +216,7 @@ fn benchmark_attestation_weights_bound_each_signer_count_median() {
             times.sort_unstable();
             let weight = match name {
                 "attest_non_threshold" => W::attest_non_threshold(n + 1),
-                "attest_repeated" => W::attest_non_threshold(n),
+                "attest_repeated" | "attest_departed" => W::attest_non_threshold(n),
                 "attest_threshold" | "attest_dead_treasury" => W::attest_threshold(n),
                 "attest_bad_hash" => W::attest_bad_hash(),
                 _ => panic!("unexpected attestation benchmark {name}"),
