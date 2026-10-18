@@ -22,7 +22,7 @@ use frame_support::{
         tokens::{Fortitude, Preservation},
         Currency, ExistenceRequirement, OnRuntimeUpgrade, ReservableCurrency,
     },
-    weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight},
+    weights::Weight,
     Blake2_128Concat, PalletId,
 };
 use pallet_root_timelock::DelayTable;
@@ -41,12 +41,6 @@ use crate::{
     AccountId, AttestorReservePalletId, Balance, Balances, BlockNumber, RootTimelockDefaultDelays,
     Runtime, TreasuryPalletId, TESTNET_TIMELOCK_DELAYS,
 };
-
-/// `frame_system::Config::DbWeight` is `()` in this runtime, which prices
-/// storage access at zero; migrations charge RocksDB costs instead.
-pub(crate) fn db_weight() -> RuntimeDbWeight {
-    RocksDbWeight::get()
-}
 
 /// Moves everything `pot` can transfer to the treasury and returns the amount
 /// moved. That excludes frozen funds: any account can lock part of a pot's
@@ -118,8 +112,9 @@ impl SweepFeeRouterPotsIntoTreasury {
 
 impl OnRuntimeUpgrade for SweepFeeRouterPotsIntoTreasury {
     fn on_runtime_upgrade() -> Weight {
+        let db = <Runtime as frame_system::Config>::DbWeight::get();
         if Self::stored_version() >= SWEEP_MIGRATION_VERSION {
-            return db_weight().reads(1);
+            return db.reads(1);
         }
 
         let author = sweep_into_treasury(&AUTHOR_POT_ID.into_account_truncating(), "author");
@@ -139,7 +134,7 @@ impl OnRuntimeUpgrade for SweepFeeRouterPotsIntoTreasury {
             attestor,
         );
 
-        db_weight().reads_writes(1 + 2 * SWEEP_READS, 2 * SWEEP_WRITES + 1)
+        db.reads_writes(1 + 2 * SWEEP_READS, 2 * SWEEP_WRITES + 1)
             .saturating_add(crate::balance_weights::mutations(4))
     }
 }
@@ -198,9 +193,10 @@ pub struct RemovePerpEngine;
 
 impl OnRuntimeUpgrade for RemovePerpEngine {
     fn on_runtime_upgrade() -> Weight {
+        let db = <Runtime as frame_system::Config>::DbWeight::get();
         let prefix = perp_engine_prefix();
         if !unhashed::contains_prefixed_key(&prefix) {
-            return db_weight().reads(1);
+            return db.reads(1);
         }
 
         let mut released: Balance = 0;
@@ -251,7 +247,7 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
         // account write and the Unreserved event. Three further reads: the
         // prefix check, the drain's final lookup and the leftover check.
         let bonds = u64::from(bonds);
-        db_weight().reads_writes(
+        db.reads_writes(
             3 + 3 * bonds + SWEEP_READS + u64::from(scanned),
             3 * bonds + SWEEP_WRITES + u64::from(deleted),
         )
@@ -362,7 +358,7 @@ impl InitRootTimelock {
 
 impl OnRuntimeUpgrade for InitRootTimelock {
     fn on_runtime_upgrade() -> Weight {
-        let db = db_weight();
+        let db = <Runtime as frame_system::Config>::DbWeight::get();
         if pallet_root_timelock::Delays::<Runtime>::exists() {
             return db.reads(1);
         }

@@ -29,7 +29,7 @@ use frame_support::{
     construct_runtime, derive_impl, parameter_types,
     traits::{ConstBool, ConstU32, ConstU64, WithdrawReasons},
     weights::{
-        constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight as RuntimeDbWeight, WEIGHT_REF_TIME_PER_SECOND},
+        constants::{BlockExecutionWeight, ExtrinsicBaseWeight, RocksDbWeight, WEIGHT_REF_TIME_PER_SECOND},
         Weight,
     },
     genesis_builder_helper::get_preset,
@@ -225,6 +225,11 @@ pub fn native_version() -> NativeVersion {
 // ---------------------------------------------------------------------------
 
 const NORMAL_DISPATCH_RATIO: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(75);
+/// The share of a block its hooks and inherents may take before any
+/// transaction. One transaction may declare its class's budget less this
+/// share and its signed base, so it fits any block whose initialization
+/// stays within the share.
+const AVERAGE_ON_INITIALIZE_RATIO: sp_runtime::Perbill = sp_runtime::Perbill::from_percent(1);
 
 // Maximum block weight: 2 seconds of compute with 75% normal dispatch.
 parameter_types! {
@@ -250,6 +255,7 @@ parameter_types! {
                 u64::MAX,
             ));
         })
+        .avg_block_initialization(AVERAGE_ON_INITIALIZE_RATIO)
         .build_or_panic();
 }
 
@@ -260,6 +266,7 @@ parameter_types! {
 #[derive_impl(frame_system::config_preludes::SolochainDefaultConfig)]
 impl frame_system::Config for Runtime {
     type Block = Block;
+    type DbWeight = RocksDbWeight;
     type BlockWeights = RuntimeBlockWeights;
     type BlockLength = RuntimeBlockLength;
     type BlockHashCount = BlockHashCount;
@@ -768,7 +775,7 @@ impl sp_sidechain::OnNewEpoch for LogBeneficiaries {
     fn on_new_epoch(old_epoch: ScEpochNumber, _new_epoch: ScEpochNumber) -> sp_weights::Weight {
         let rewards = BlockRewards::get_rewards_and_clear();
         log::info!("Rewards accrued in epoch {old_epoch}: {rewards:?}");
-        RuntimeDbWeight::get().reads_writes(1, 1)
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(1, 1)
     }
 }
 

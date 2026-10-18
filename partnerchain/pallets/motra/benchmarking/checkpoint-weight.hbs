@@ -3,19 +3,14 @@
 //! Steps: {{cmd.steps}}; repeats: {{cmd.repeat}}; map size: {{cmd.worst_case_map_values}}.
 //! Proof bound: MaxEncodedLen; execution: {{cmd.wasm_execution}}.
 
-use frame_support::{traits::Get, weights::{constants::RocksDbWeight, RuntimeDbWeight, Weight}};
+use frame_support::{traits::Get, weights::Weight};
 
 {{#each benchmarks as |benchmark|}}
 {{#each benchmark.comments as |comment|}}
 /// {{comment}}
 {{/each}}
 pub fn {{benchmark.name}}<T: frame_system::Config>() -> Weight {
-    let configured = T::DbWeight::get();
-    let minimum = RocksDbWeight::get();
-    let db = RuntimeDbWeight {
-        read: configured.read.max(minimum.read),
-        write: configured.write.max(minimum.write),
-    };
+    let db = T::DbWeight::get();
     // Measured proof: {{benchmark.base_recorded_proof_size}} bytes; CLI prefix maximum: {{benchmark.base_calculated_proof_size}} bytes.
     // Minimum execution time: {{benchmark.min_execution_time}}_000 picoseconds.
     Weight::from_parts({{underscore benchmark.base_weight}}, {{benchmark.base_calculated_proof_size}})

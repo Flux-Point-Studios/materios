@@ -19,6 +19,7 @@ mod perp_engine_removal;
 mod root_timelock;
 mod committee_inherent;
 mod chain_identity;
+mod weight_safety;
 
 /// A committee member: its cross-chain key and its session keys.
 type Authority = (CrossChainPublic, SessionKeys);

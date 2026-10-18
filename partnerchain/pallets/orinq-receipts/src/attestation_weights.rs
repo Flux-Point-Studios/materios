@@ -28,6 +28,9 @@ pub fn attest_threshold<T: frame_system::Config>(n: u32) -> Weight {
         .saturating_add(T::DbWeight::get().reads(3_u64.saturating_mul(n.into())))
         .saturating_add(T::DbWeight::get().writes(10))
         .saturating_add(T::DbWeight::get().writes(3_u64.saturating_mul(n.into())))
+        // The samples hold the checkpoint of each signer and of the treasury
+        // or refunded submitter, which `balance_mutations` charges.
+        .saturating_sub(T::DbWeight::get().reads_writes(1 + u64::from(n), 1 + u64::from(n)))
 }
 pub fn attest_dead_treasury<T: frame_system::Config>(n: u32) -> Weight {
     let proof = 43_329_u64.saturating_add(7_122_u64.saturating_mul(n.into()));
@@ -38,6 +41,9 @@ pub fn attest_dead_treasury<T: frame_system::Config>(n: u32) -> Weight {
         .saturating_add(T::DbWeight::get().reads(3_u64.saturating_mul(n.into())))
         .saturating_add(T::DbWeight::get().writes(10))
         .saturating_add(T::DbWeight::get().writes(3_u64.saturating_mul(n.into())))
+        // The samples hold the checkpoint of each signer and of the treasury
+        // or refunded submitter, which `balance_mutations` charges.
+        .saturating_sub(T::DbWeight::get().reads_writes(1 + u64::from(n), 1 + u64::from(n)))
 }
 pub fn attest_bad_hash<T: frame_system::Config>() -> Weight {
     let proof = 29_185;

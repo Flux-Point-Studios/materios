@@ -24,14 +24,14 @@ use sp_runtime::{
     BuildStorage, Digest, DigestItem,
 };
 
-const SLOTS_PER_EPOCH: u64 = 10;
+pub(super) const SLOTS_PER_EPOCH: u64 = 10;
 
 fn authorities(seeds: &[&str]) -> Vec<Authority> {
     seeds.iter().copied().map(authority).collect()
 }
 
 /// `authorities` in the order Ariadne seats them.
-fn in_seating_order(mut authorities: Vec<Authority>) -> Vec<Authority> {
+pub(super) fn in_seating_order(mut authorities: Vec<Authority>) -> Vec<Authority> {
     authorities.sort_by(|a, b| a.0.cmp(&b.0));
     authorities
 }
@@ -46,7 +46,7 @@ fn outsiders() -> Vec<Authority> {
 }
 
 /// A chain whose genesis seats `committee`.
-fn chain(committee: &[Authority]) -> sp_io::TestExternalities {
+pub(super) fn chain(committee: &[Authority]) -> sp_io::TestExternalities {
     RuntimeGenesisConfig {
         sidechain: pallet_sidechain::GenesisConfig {
             genesis_utxo: Default::default(),
@@ -66,7 +66,7 @@ fn chain(committee: &[Authority]) -> sp_io::TestExternalities {
 
 /// Cardano's committee selection inputs: `candidates` as the permissioned
 /// candidates, one seat each, and no registered seats.
-fn cardano(candidates: &[Authority]) -> AuthoritySelectionInputs {
+pub(super) fn cardano(candidates: &[Authority]) -> AuthoritySelectionInputs {
     AuthoritySelectionInputs {
         d_parameter: DParameter {
             num_permissioned_candidates: candidates.len() as u16,
@@ -87,7 +87,7 @@ fn cardano(candidates: &[Authority]) -> AuthoritySelectionInputs {
 
 /// A node's inherent data for the block at `slot`, with `ariadne` as what its
 /// Ariadne inherent data provider gave it.
-fn inherent_data(slot: u64, ariadne: Option<&AuthoritySelectionInputs>) -> InherentData {
+pub(super) fn inherent_data(slot: u64, ariadne: Option<&AuthoritySelectionInputs>) -> InherentData {
     let mut data = InherentData::new();
     data.put_data(
         <pallet_timestamp::Pallet<Runtime> as ProvideInherent>::INHERENT_IDENTIFIER,
@@ -106,7 +106,7 @@ fn inherent_data(slot: u64, ariadne: Option<&AuthoritySelectionInputs>) -> Inher
     data
 }
 
-fn genesis_header() -> Header {
+pub(super) fn genesis_header() -> Header {
     Header::new(
         0,
         Default::default(),
@@ -171,7 +171,7 @@ fn propose_edited(
     })
 }
 
-fn propose(parent: &Header, slot: u64, data: &InherentData) -> Block {
+pub(super) fn propose(parent: &Header, slot: u64, data: &InherentData) -> Block {
     propose_edited(parent, slot, data, |_| ())
 }
 
@@ -272,7 +272,7 @@ fn aura_authorities() -> Vec<AuraId> {
     pallet_aura::Authorities::<Runtime>::get().to_vec()
 }
 
-fn epoch_start(epoch: u64) -> u64 {
+pub(super) fn epoch_start(epoch: u64) -> u64 {
     epoch * SLOTS_PER_EPOCH
 }
 
