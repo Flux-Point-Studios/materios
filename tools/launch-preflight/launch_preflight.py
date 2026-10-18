@@ -154,6 +154,11 @@ GENESIS_STORAGE = frozenset({
     "NativeTokenManagement.MainChainScriptsConfiguration", "Vesting.StorageVersion",
     "IntentSettlement.IntentTTL", "IntentSettlement.ClaimTTL", "IntentSettlement.MinSignerThreshold",
     "IntentSettlement.PoolUtilization",
+    # Settlement's own storage version and its legacy cutover blocks hold no
+    # MATRA. Genesis writes the current version with both cutovers at zero,
+    # which closes the legacy settle and expire calls.
+    "IntentSettlement.SettlementStorageVersion", "IntentSettlement.StcaCutoverBlock",
+    "IntentSettlement.PolicyExpireCutoverBlock",
     # The Root timelock's delay per call class and its guardian hold no MATRA;
     # rule 7 checks what they hold. Its queue (Tasks, CounterForTasks,
     # NextTaskId, PendingGuardianChange, Approval) stays out: a new chain has
