@@ -218,7 +218,9 @@ Checkpoint work is included in dispatch weights, including batched transfers,
 and in initialization budgets for rewards and migrations. The complete fee extension's
 reconciliation, burn and refund cost is reserved in the extrinsic base weight. The
 [checkpoint weight audit](motra-checkpoint-weights.md) lists every MATRA mutation
-path and its bound.
+path and its bound. Storage access is priced at RocksDB cost runtime-wide, and
+the [runtime database weights](runtime-db-weights.md) bound every call and block
+hook.
 
 Reconciliation sets `LastTouched`, the separate decay clock. System's account-creation
 callback does not write a decay clock, and re-funding does not reset decay of existing MOTRA. Accounts
