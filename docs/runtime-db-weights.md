@@ -336,7 +336,7 @@ fee is unchanged.
 | OrinqReceipts.submit_anchor | Normal | bounded | 10,000 | 125,010,000 | 12501.00 | 233 | 0.000001233 | 0.001384051 → 0.001509051 | 0.069142147 → 0.075392147 |  |
 | OrinqReceipts.submit_receipt_v2 | Normal | bounded | 275,759,000 | 1,125,759,000 | 4.08 | 492 | 0.000001492 | 0.00175886 → 0.00260886 | 0.087869879 → 0.130369879 |  |
 | OrinqReceipts.join_committee | Normal | bounded | 10,000 | 150,010,000 | 15001.00 | 137 | 0.000001137 | 0.001347334 → 0.001497334 | 0.067311 → 0.074811 |  |
-| OrinqReceipts.leave_committee | Normal | bounded | 10,000 | 125,010,000 | 12501.00 | 137 | 0.000001137 | 0.001347334 → 0.001472334 | 0.067311 → 0.073561 |  |
+| OrinqReceipts.leave_committee | Normal | bounded | 10,000 | 250,010,000 | 25001.00 | 137 | 0.000001137 | 0.001347334 → 0.001597334 | 0.067311 → 0.079811 |  |
 | OrinqReceipts.set_attestation_reward_per_signer | Normal | bounded | 10,000 | 100,010,000 | 10001.00 | 121 | 0.000001121 | 0.001341215 → 0.001441215 | 0.067005808 → 0.072005808 |  |
 | OrinqReceipts.set_era_cap_base | Normal | bounded | 10,000 | 100,010,000 | 10001.00 | 121 | 0.000001121 | 0.001341215 → 0.001441215 | 0.067005808 → 0.072005808 |  |
 | OrinqReceipts.set_era_cap_baseline_attestor_count | Normal | bounded | 10,000 | 100,010,000 | 10001.00 | 109 | 0.000001109 | 0.001336625 → 0.001436625 | 0.066776915 → 0.071776915 |  |

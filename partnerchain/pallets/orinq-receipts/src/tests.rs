@@ -3312,9 +3312,9 @@ fn last_recorded_count() -> u32 {
         .expect("an attestation was recorded")
 }
 
-/// Committee {1..5} at threshold 3. Signers 1 and 2 leave; `leave_committee`
-/// keeps the threshold at 3, so 3, 4 and 5 must all attest, and only they
-/// are paid.
+/// Committee {1..5} at threshold 3. Signers 1 and 2 leave; the three members
+/// left still meet the threshold of 3, so 3, 4 and 5 must all attest, and
+/// only they are paid.
 #[test]
 fn signers_who_leave_neither_count_nor_earn() {
     new_test_ext().execute_with(|| {
@@ -3461,13 +3461,47 @@ fn ejected_signers_neither_count_nor_earn() {
     }
 }
 
-/// `leave_committee` does not clamp the threshold. With fewer members than
-/// the threshold no receipt certifies, including one a departed member
-/// signed, until governance seats another member.
+fn threshold_clamps() -> Vec<(u32, u32)> {
+    frame_system::Pallet::<Test>::events()
+        .iter()
+        .filter_map(|record| match &record.event {
+            RuntimeEvent::OrinqReceipts(crate::Event::AttestationThresholdClamped {
+                previous,
+                threshold,
+            }) => Some((*previous, *threshold)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Committee {1, 2, 3} at threshold 3: removing 3 lowers the threshold to the
+/// two members left and reports it.
 #[test]
-fn a_threshold_above_the_committee_waits_for_a_new_member() {
+fn leave_committee_below_the_threshold_clamps_it_and_reports_it() {
     new_test_ext().execute_with(|| {
         seed_submitter_and_committee(10, &[1, 2, 3]);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1), acc(2), acc(3)],
+            3
+        ));
+        assert_ok!(OrinqReceipts::leave_committee(
+            RuntimeOrigin::root(),
+            acc(3)
+        ));
+        assert_eq!(pallet::AttestationThreshold::<Test>::get(), 2);
+        assert_eq!(threshold_clamps(), vec![(3, 2)]);
+    });
+}
+
+/// A receipt that departed member 3 signed at threshold 3 certifies once the
+/// clamp lowers the threshold to 2, with the two remaining members, and pays
+/// only them.
+#[test]
+fn a_receipt_a_departed_member_signed_certifies_with_the_remaining_members() {
+    new_test_ext().execute_with(|| {
+        let seeds = [1u8, 2, 3];
+        seed_submitter_and_committee(10, &seeds);
         assert_ok!(OrinqReceipts::set_committee(
             RuntimeOrigin::root(),
             vec![acc(1), acc(2), acc(3)],
@@ -3480,32 +3514,94 @@ fn a_threshold_above_the_committee_waits_for_a_new_member() {
             RuntimeOrigin::root(),
             acc(3)
         ));
-        assert_eq!(pallet::AttestationThreshold::<Test>::get(), 3);
-        assert_eq!(OrinqReceipts::committee_members().len(), 2);
-
-        for s in [1, 2, 1] {
-            attest_canonical(s, rid);
-            assert!(
-                !is_certified(rid),
-                "two members cannot meet a threshold of three"
-            );
-        }
-
-        Balances::make_free_balance_be(&acc(4), 10_000_000_000);
-        assert_ok!(OrinqReceipts::bond(
-            RuntimeOrigin::signed(acc(4)),
-            1_000_000_000
-        ));
-        assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(4)));
-        let seeds = [1u8, 2, 3, 4];
         let before = free_balances(&seeds);
-        attest_canonical(4, rid);
+
+        attest_canonical(1, rid);
+        assert!(!is_certified(rid), "departed member 3 must not count");
+        attest_canonical(2, rid);
         assert!(is_certified(rid));
-        let share = 800_000 / 3;
         assert_eq!(
             gains(&seeds, &before),
-            vec![REWARD + share, REWARD + share, 0, REWARD + share]
+            vec![REWARD + 400_000, REWARD + 400_000, 0]
         );
+    });
+}
+
+/// While the committee keeps at least as many members as the threshold, a
+/// removal changes neither the threshold nor the events.
+#[test]
+fn leave_committee_at_or_above_the_threshold_neither_clamps_nor_reports() {
+    new_test_ext().execute_with(|| {
+        seed_submitter_and_committee(10, &[1, 2, 3, 4, 5]);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            (1..=5).map(acc).collect(),
+            3
+        ));
+        for s in [5, 4] {
+            assert_ok!(OrinqReceipts::leave_committee(
+                RuntimeOrigin::root(),
+                acc(s)
+            ));
+            assert_eq!(pallet::AttestationThreshold::<Test>::get(), 3);
+        }
+        assert_eq!(OrinqReceipts::committee_members().len(), 3);
+        assert!(threshold_clamps().is_empty());
+    });
+}
+
+/// Every path that clamps the threshold reports a lowering: both ejections
+/// with `AttestationThresholdClamped`, and `set_committee` with the threshold
+/// `CommitteeUpdated` carries.
+#[test]
+fn every_clamp_that_lowers_the_threshold_is_reported() {
+    let ejections: [fn(); 2] = [
+        || {
+            pallet::BadAttestSlashThreshold::<Test>::put(1);
+            let rid = H256::from([0xDF; 32]);
+            assert_ok!(submit_c4(10, rid, H256::from([0xE0; 32])));
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(1)),
+                rid,
+                [0xDE; 32]
+            ));
+        },
+        || {
+            assert_ok!(OrinqReceipts::slash_attestor(
+                RuntimeOrigin::root(),
+                acc(1),
+                1_000_000_000,
+                SlashReason::InvalidSignature
+            ));
+        },
+    ];
+    for eject in ejections {
+        new_test_ext().execute_with(|| {
+            seed_submitter_and_committee(10, &[1, 2, 3]);
+            Balances::make_free_balance_be(&reserve_account(), 1);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                vec![acc(1), acc(2), acc(3)],
+                3
+            ));
+            eject();
+            assert!(!OrinqReceipts::committee_members().contains(&acc(1)));
+            assert_eq!(pallet::AttestationThreshold::<Test>::get(), 2);
+            assert_eq!(threshold_clamps(), vec![(3, 2)]);
+        });
+    }
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1), acc(2)],
+            5
+        ));
+        System::assert_last_event(RuntimeEvent::OrinqReceipts(
+            crate::Event::CommitteeUpdated {
+                members: vec![acc(1), acc(2)],
+                threshold: 2,
+            },
+        ));
     });
 }
 

@@ -590,6 +590,12 @@ pub mod pallet {
         /// The emergency pinned committee was cleared; selection returns to the
         /// L1-driven Ariadne draw immediately.
         PinnedCommitteeCleared,
+        /// `AttestationThreshold` was lowered to the committee's new size after
+        /// a member left or was ejected, so certification stays satisfiable.
+        AttestationThresholdClamped {
+            previous: u32,
+            threshold: u32,
+        },
     }
 
     // Error doc comments ship in on-chain metadata. Keep them actionable.
@@ -1157,15 +1163,24 @@ pub mod pallet {
                     who: attester.clone(),
                     remaining_bond: 0,
                 });
-                // Clamp the threshold to the new committee size so the
-                // certification path never becomes unsatisfiable. Lower bound
-                // of 1 avoids divide-by-zero downstream.
-                let new_size = CommitteeMembers::<T>::get().len() as u32;
-                AttestationThreshold::<T>::mutate(|t| {
-                    *t = (*t).min(new_size).max(1);
-                });
+                Self::clamp_threshold(CommitteeMembers::<T>::get().len() as u32);
             }
             Ok(())
+        }
+
+        /// Clamp `AttestationThreshold` to `committee_size` after a removal so
+        /// the certification path never becomes unsatisfiable, and report a
+        /// lowering. The lower bound of 1 avoids divide-by-zero downstream.
+        fn clamp_threshold(committee_size: u32) {
+            let previous = AttestationThreshold::<T>::get();
+            let threshold = previous.min(committee_size).max(1);
+            AttestationThreshold::<T>::put(threshold);
+            if threshold < previous {
+                Self::deposit_event(Event::AttestationThresholdClamped {
+                    previous,
+                    threshold,
+                });
+            }
         }
 
         /// The derived attestor reserve pot account (`mat/attr`). Slashed
@@ -1938,28 +1953,29 @@ pub mod pallet {
         /// Root-only: governance removes `member` from the attestation
         /// committee. The member stops receiving attestation rewards, can no
         /// longer attest, and its attestations on receipts not yet certified
-        /// stop counting. The threshold is not clamped to the smaller
-        /// committee. Permissionless self-leave was removed in spec-228 so a
+        /// stop counting. A threshold above the smaller committee is clamped to
+        /// its size. Permissionless self-leave was removed in spec-228 so a
         /// misbehaving member cannot dodge eviction/slash by leaving voluntarily;
         /// removal (and slashing) is governance-driven (see `slash_attestor`,
         /// which also auto-ejects when bond drops below requirement).
         #[pallet::call_index(8)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
-            .saturating_add(T::DbWeight::get().reads(1))
-            .saturating_add(T::DbWeight::get().writes(1)))]
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(2)))]
         pub fn leave_committee(origin: OriginFor<T>, member: T::AccountId) -> DispatchResult {
             ensure_root(origin)?;
 
-            CommitteeMembers::<T>::try_mutate(|set| {
+            let size = CommitteeMembers::<T>::try_mutate(|set| {
                 ensure!(set.contains(&member), Error::<T>::NotCommitteeMemberCantLeave);
                 set.remove(&member);
-                let size = set.len() as u32;
-                Self::deposit_event(Event::CommitteeMemberLeft {
-                    who: member,
-                    committee_size: size,
-                });
-                Ok(())
-            })
+                Ok::<u32, DispatchError>(set.len() as u32)
+            })?;
+            Self::deposit_event(Event::CommitteeMemberLeft {
+                who: member,
+                committee_size: size,
+            });
+            Self::clamp_threshold(size);
+            Ok(())
         }
 
         // ── Component 5: governance setters for dynamic reward config ────
@@ -2159,12 +2175,7 @@ pub mod pallet {
                         who: attestor,
                         remaining_bond,
                     });
-                    // Clamp threshold to the new committee size; mirrors the
-                    // clamp in `auto_slash_for_bad_attest`.
-                    let new_size = CommitteeMembers::<T>::get().len() as u32;
-                    AttestationThreshold::<T>::mutate(|t| {
-                        *t = (*t).min(new_size).max(1);
-                    });
+                    Self::clamp_threshold(CommitteeMembers::<T>::get().len() as u32);
                 }
             }
 

@@ -164,6 +164,11 @@ narrowing still decodes the departed signers, so an attest returns the weight
 of the larger of the stored and current counts; `attest_departed` measures it
 with 1 to 96 departed signers. Its storage access equals a non-threshold
 attest's: the committee it checks the caller against is already read.
+`leave_committee`, `slash_attestor`'s ejection and the bad-hash auto-slash
+clamp `AttestationThreshold` to the smaller committee and report a lowering
+with `AttestationThresholdClamped`; `set_committee` clamps its threshold and
+reports it in `CommitteeUpdated`. `leave_committee` reads and writes the
+threshold, two reads and two writes in all.
 
 Runtime regressions commit fixtures before dispatch and inspect real checkpoint
 writes across fifteen Billing/receipt paths, plus maximum committee payouts.
@@ -201,7 +206,13 @@ The fee-path run uses the same arguments with `--pallet pallet_motra
 runs of the attestation command, each started at the CPU's idle temperature
 (65 °C). A run heats it to 83 °C and slows the clock from 4.4 to about
 3.4 GHz, so a longer run measured its last benchmark, the unchanged bad-hash
-path, a fifth slower. Raw samples are committed beside the weight functions.
+path, a fifth slower. The clamp event was added after this measurement. An
+order-balanced A/B of six runs per side against the measured Wasm puts its
+cost at 0.6 µs on the bad-hash path (median 130.96 → 131.56 µs over 360
+samples, under its 132.03 µs bound) and 0.7 µs on `slash_attestor` (median
+59.08 → 59.80 µs over 7,200 samples, under its 110.75 µs retained base),
+below run-to-run variation, so both bounds stand. Raw samples are committed
+beside the weight functions.
 Regenerate the coefficients and their formatting with
 `python3 pallets/motra/benchmarking/generate_fee_weights.py`. It starts from
 FRAME's `--output-analysis max` statistical fit and never lowers its base or
