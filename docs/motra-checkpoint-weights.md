@@ -285,15 +285,16 @@ order:
 | Stuffer | Bytes | Weight share | Length share | Final R | Cost (MOTRA) |
 |---|---:|---:|---:|---:|---:|
 | Remark ramp (weight) | 108 | 74.98% | 2.39% | 49,978,920,005 | 38,631.10 |
-| `request_batch_settle`, 0 entries | 124 | 99.96% | 3.33% | 50,000,000,000 | 51,598.46 |
-| `request_batch_settle`, 256 entries | 37,245 | 99.54% | 54.70% | 50,000,000,000 | 77,047.77 |
+| `request_batch_settle`, 0 entries | 124 | 99.97% | 2.83% | 50,000,000,000 | 51,351.52 |
+| `request_batch_settle`, 256 entries | 37,245 | 89.80% | 5.68% | 50,000,000,000 | 47,695.23 |
 | Normal-length-filling remark | 3,932,160 | 0.14% | 75% (all of Normal's) | 50,000,000,000 | 37,536.71 |
 | `transfer_keep_alive` | 141 | 74.93% | 2.30% | 49,909,744,445 | 38,507.24 |
 | One block-filling `upgrade_accounts` | 164,461 | 73.99% | 3.14% | 48,650,172,222 | 37,483.83 |
 
 The last two fill the block in coarser steps and stop short of the remark
 ramp's fullness by up to one call; their R stays within 5% of the remark
-ramp's.
+ramp's. The 256-entry `request_batch_settle` is storage-priced too: eight
+copies fill 89.80% of the block's weight.
 
 Shares are of the whole block. Before round six, the first keeper stuffer
 cost 1.66 MOTRA over the same 1,000 blocks with R at zero. The 256-entry

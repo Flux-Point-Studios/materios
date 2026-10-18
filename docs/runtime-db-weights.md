@@ -10,7 +10,9 @@ the runtime migrations, the Root timelock classifier and the certification
 threshold read. Those paths now read the runtime's `DbWeight`, and their
 weights are unchanged (`motra_and_runtime_storage_prices_are_unchanged`).
 
-Baseline: main at `5198f89`, spec 241 / transaction version 5, unreleased.
+Baseline: main at `67ec3d9`, spec 242 / transaction version 6, unreleased.
+No call, storage or extrinsic encoding changes, so the spec and transaction
+versions stay.
 Nothing here is deployed or enacted.
 
 ## What changes
@@ -51,6 +53,13 @@ Nothing here is deployed or enacted.
   more than a block. The seeding of missing parameters remains
   (`on_runtime_upgrade_keeps_attestations_in_flight`,
   `a_runtime_upgrade_fits_a_block_whatever_the_attestations_in_flight`).
+- **Settlement's bond slots carry no extra checkpoint budget.**
+  `post_settlement_bond`, `slash_bad_settlement_evidence` and
+  `release_settlement_bond` were generated on this runtime with the MOTRA
+  checkpoints of the balances they move (one, two and one keys). The adapter's
+  extra 1/4/1 checkpoint units charged them twice once storage was priced; they
+  are zero now, and the slots must cover their checkpoint keys
+  (`checkpoint_settlement_weights_add_no_checkpoints`, #85).
 
 ## Safety
 
@@ -58,11 +67,11 @@ Nothing here is deployed or enacted.
 
 `every_call_fits_its_class_limit` walks `RuntimeCall`'s scale-info registry,
 encodes every variant at its worst case, decodes it and asks the runtime for
-its `DispatchInfo`. All 141 constructible variants fit; the two GRANDPA
+its `DispatchInfo`. All 142 constructible variants fit; the two GRANDPA
 equivocation reports take an uninhabited key-owner proof and cannot be
 encoded.
 
-- **Bounded (117).** Every list a call's weight depends on is encoded at its
+- **Bounded (118).** Every list a call's weight depends on is encoded at its
   pallet's bound: 96 receipt committee members, 32 session validators, 256
   settlement batch entries and claim or intent ids, 96 settlement signatures,
   9 Multisig co-signatories, 9 Recovery friends, 256 Billing prune ids, a
@@ -79,8 +88,8 @@ encoded.
 
 | Worst case | Call | ref_time | Share of its limit |
 |---|---|---:|---:|
-| Operational | System.apply_authorized_upgrade | 88,011,595,000 | 4.448% |
-| Normal | OrinqReceipts.attest_availability_cert | 45,475,691,650 | 3.075% |
+| Operational | IntentSettlement.attest_batch_settle, 256 claims and 96 signatures | 525,621,460,684 | 26.564% (18.598% before) |
+| Normal | IntentSettlement.submit_batch_intents, 256 entries | 383,996,419,345 | 25.968% (23.450% before) |
 | Mandatory | SessionCommitteeManagement.set | 382,064,398 | 0.019% |
 
 No call became un-includable. Every Operational call a signer may pay for is
@@ -96,11 +105,11 @@ is one.
 
 | Block | Declared | Share of the block | Test |
 |---|---:|---:|---|
-| Initialization of a 32-seat committee's blocks, inherents included, over three epochs | at most 9,615,037,398 | 0.48% (reservation 1%) | `every_block_of_a_full_committee_initializes_within_its_reservation` |
+| Initialization of a 32-seat committee's blocks, inherents included, over three epochs | at most 12,941,850,327 | 0.65% (reservation 1%) | `every_block_of_a_full_committee_initializes_within_its_reservation` |
 | Session rotation | the whole block, plus the above | Mandatory only | same |
 | Receipt reward era, 800 authors | 419,991,885,000 | 21.00%; fits twice over up to 1,907 authors | `the_reward_era_prices_its_storage_and_fits_a_block_at_its_author_bound` |
 | Treasury spend period, 100 approvals | 71,283,411,920 | 3.56% | `the_treasury_spend_period_fits_a_block` |
-| Runtime upgrade, every migration | 5,768,360,000 | 0.29%, whatever the attestations in flight | `a_runtime_upgrade_fits_a_block_whatever_the_attestations_in_flight` |
+| Runtime upgrade, every migration | 5,818,360,000 | 0.29%, whatever the attestations in flight | `a_runtime_upgrade_fits_a_block_whatever_the_attestations_in_flight` |
 | `on_idle` | 0 | none | `no_pallet_takes_idle_time` |
 
 Partner-chains' session pallet declares the whole block for a rotation, as
@@ -121,17 +130,14 @@ These remain and are not changed by pricing storage:
 
 - MOTRA's `on_finalize` congestion update reserves no weight
   ([#76](https://github.com/Flux-Point-Studios/materios/issues/76)).
-- Hand weights that never call `T::DbWeight`, so no schedule reaches them:
-  18 `IntentSettlement` calls and 2 `Oracle` calls (materios-intent-settlement
-  `feb79e0`), 6 `Billing` calls, both `TeeAttestation` calls, and
+- Hand weights that never call `T::DbWeight`, so no schedule reaches them
+  ([#88](https://github.com/Flux-Point-Studios/materios/issues/88)):
+  `IntentSettlement`'s `settle_claim`, `expire_policy_mirror`,
+  `credit_deposit`, `set_pool_utilization`, `set_min_signer_threshold` and
+  `request_expire_policy`, both `Oracle` calls (materios-intent-settlement
+  `0757de3`), 6 `Billing` calls, both `TeeAttestation` calls, and
   partner-chains' `BlockRewards`, `NativeTokenManagement` and session-key
   calls. Their storage stays unpriced until each is benchmarked.
-- The settlement expiry hook charges a flat 10,000 per expiring intent (at
-  most 64 a block) while each touches its intent, credits and the
-  `PendingBatches` vector of up to 10,000 ids.
-- Settlement's chained migrations run on the first upgrade of a chain whose
-  `SettlementStorageVersion` is 0, as a fresh genesis leaves it. Their caps
-  count migrated rows; nothing caps the rows they scan.
 - The treasury's per-block inactive-funds update returns no weight (SDK).
 
 ## Capacity
@@ -145,11 +151,18 @@ Normal-class ceilings, 1.5e12 ref_time, and Operational, 2e12; not live TPS.
 | Separately signed non-threshold attestations, refunded (the cert-daemon's form) | 7,873 | 3,521 |
 | Non-threshold attestations in pure Utility batches, refunded | 16,121 in 878 batches | 4,419 in 503 batches |
 | Attestations admitted at their declared weight | 69 | 32 |
-| `IntentSettlement.post_settlement_bond` | 1,029 | 901 |
-| `IntentSettlement.release_settlement_bond` | 1,029 | 862 |
-| `IntentSettlement.attest_intent` | 1,488 | 1,488 |
-| `IntentSettlement.attest_batch_intents`, 256 ids | 947 | 947 |
-| `IntentSettlement.settle_batch_atomic`, 256 entries | 356 | 28 |
+| `IntentSettlement.post_settlement_bond` | 1,325 | 1,136 |
+| `IntentSettlement.release_settlement_bond` | 1,319 | 955 |
+| `IntentSettlement.request_settle` | 1,413 | 819 |
+| `IntentSettlement.request_batch_settle`, 256 entries | 77 | 8 |
+| `IntentSettlement.attest_intent` | 1,276 | 1,016 |
+| `IntentSettlement.attest_settle` | 176 | 163 |
+| `IntentSettlement.attest_batch_intents`, 256 ids | 142 | 20 |
+| `IntentSettlement.attest_batch_settle`, 256 claims | 5 | 3 |
+| `IntentSettlement.settle_batch_atomic`, 256 entries | 140 | 25 |
+
+Settlement's figures start from main's weights, settlement #55's generated
+slots with the 1/4/1 checkpoint units on the bond paths.
 
 An attestation's actual weight is now 412,808,600 with its signed base
 (187,808,600 before): five reads and one write add 225,000,000. A block
@@ -193,13 +206,19 @@ R = 1e9):
 | 64 | 0.030351199 | 0.062626199 | **2.06** |
 | 96 | 0.046448156 | 0.093923156 | **2.02** |
 
-**More than 2×:** `submit_receipt` and `submit_receipt_v2` at thresholds of 16
-and above, through the attestation storage their certification prepays;
-`OrinqReceipts.attest_availability_cert` on a paid path (a wrapper), 2.17× at
-R = 1e9; `IntentSettlement.settle_batch_atomic` at 256 entries, 5.14×, paid by
-a committee member; `RootTimelock.cancel_all`, 4.12×, the guardian's veto,
-which is taken first whatever its fee. Settlement's other calls carry flat
-hand weights and do not move.
+**More than 2×** (R = 1e9, at each call's worst case):
+
+- `submit_receipt` and `submit_receipt_v2` at thresholds of 16 and above,
+  through the attestation storage their certification prepays;
+- `OrinqReceipts.attest_availability_cert` on a paid path (a wrapper), 2.17×;
+  direct duties stay feeless;
+- `IntentSettlement.request_batch_settle` at 256 entries, 5.95×: a
+  permissionless keeper call, 0.040 → 0.239 MOTRA;
+- `IntentSettlement.attest_batch_intents` at 256 ids, 5.01×, and
+  `settle_batch_atomic` at 256 entries, 3.66×, both paid by a committee
+  member;
+- `RootTimelock.cancel_all`, 4.12×, the guardian's veto, which is taken first
+  whatever its fee.
 
 The per-call table below prices each call at its audited worst case before
 refunds, with the signed length of that encoding.
@@ -207,8 +226,9 @@ refunds, with the signed length of that encoding.
 ## Stuffing
 
 `stuffers_of_weight_or_length_ramp_r_like_the_remark_ramp` fills 1,000 blocks
-from R = 0 with each stuffer, admitted as the author admits it. The remark
-ramp and the existing stuffers do not move. The two storage-priced stuffers
+from R = 0 with each stuffer, admitted as the author admits it. Every stuffer
+raises R at least as fast as the remark ramp at every block. The two
+storage-priced Normal stuffers
 fill the block in coarser steps and stop short of the remark ramp's fullness
 by up to one call; the test requires their final R within 5% of the remark
 ramp's and their cost within its 0.9×–10× band.
@@ -216,18 +236,25 @@ ramp's and their cost within its 0.9×–10× band.
 | Stuffer | Weight share before → after | Final R before → after | Cost (MOTRA) before → after |
 |---|---:|---:|---:|
 | Remark ramp | 74.98% | 49,978,920,005 | 38,631.10 |
-| `request_batch_settle`, 0 entries | 99.98% | 50,000,000,000 | 51,482.92 |
-| `request_batch_settle`, 256 entries | 23.67% | 50,000,000,000 | 61,486.53 |
+| `request_batch_settle`, 0 entries | 99.96% → 99.97% | 50,000,000,000 | 51,598.46 → 51,351.52 |
+| `request_batch_settle`, 256 entries | 99.54% → 89.80% (length 54.70% → 5.68%) | 50,000,000,000 | 77,047.77 → 47,695.23 |
 | Normal-length remark | 0.14% | 50,000,000,000 | 37,536.71 |
 | `transfer_keep_alive` | 74.97% → 74.93% | 49,964,440,000 → 49,909,744,445 | 38,658.58 → 38,507.24 |
 | One block-filling `upgrade_accounts` | 75.00% → 73.99% | 49,995,726,001 → 48,650,172,222 | 40,264.20 → 37,483.83 |
 
 No stuffer got cheaper per share of the block it holds than the remark ramp
-by more than the step of its own call: `transfer_keep_alive` pays 0.3% less
-per share (0.1% more before). The single `upgrade_accounts` now declares at most the
-Normal per-call limit, so it holds 1% less of the block (the initialization
-reservation) and R ramps 2.7% slower; it pays 1.7% less per share than the
-remark ramp, against 4.2% more before.
+(515 MOTRA per percent) by more than the step of its own call:
+
+- `request_batch_settle` at 256 entries declares 223,211,611,664 ref_time, so
+  8 copies fit where 77 did. They hold 89.80% of the weight and 5.68% of the
+  length, where 77 held 99.54% and 54.70%, and pay 531 MOTRA per percent of
+  weight held, 3% above the remark ramp. Its total cost fell 38% because it
+  no longer buys half the block's length.
+- `transfer_keep_alive` pays 0.3% less per share (0.1% more before).
+- The single `upgrade_accounts` now declares at most the Normal per-call
+  limit, so it holds 1% less of the block (the initialization reservation)
+  and R ramps 2.7% slower; it pays 1.7% less per share than the remark ramp,
+  against 4.2% more before.
 
 ## Reproducing
 
@@ -240,7 +267,7 @@ SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked -- --nocapture -
 
 `AUDIT` lines carry each call's class, envelope, weight and signed length;
 `PRICING`, `SUBMISSION`, the capacity and stuffer lines carry the rest. The
-before figures come from the same tests on `5198f89`.
+before figures come from the same tests on `67ec3d9`.
 
 ## Per-call weights and fees
 
@@ -336,28 +363,29 @@ fee is unchanged.
 | PalletSession.purge_keys | Normal | bounded | 792,476,000 | 792,476,000 | 1.00 | 105 | 0.000001105 | 0.002127561 → 0.002127561 | 0.106323917 → 0.106323917 |  |
 | NativeTokenManagement.transfer_tokens | Mandatory | bounded | 0 | 0 | inf | 121 | — | — | — |  |
 | NativeTokenManagement.set_main_chain_scripts | Normal | bounded | 1 | 1 | 1.00 | 135 | 0.000001135 | 0.001346559 → 0.001346559 | 0.067272351 → 0.067272351 |  |
-| IntentSettlement.submit_intent | Normal | bounded | 500,000,000 | 500,000,000 | 1.00 | 114 | 0.000001114 | 0.001838527 → 0.001838527 | 0.091871787 → 0.091871787 |  |
-| IntentSettlement.attest_intent | Operational | bounded | 50,000,000 | 50,000,000 | 1.00 | 233 | 0.000001233 | 0.001434041 → 0.001434041 | 0.071641647 → 0.071641647 |  |
-| IntentSettlement.request_voucher | Operational | bounded | 100,000,000 | 100,000,000 | 1.00 | 9,528 | 0.000010528 | 0.005039091 → 0.005039091 | 0.25143866 → 0.25143866 |  |
-| IntentSettlement.request_credit_refund | Normal | bounded | 500,000,000 | 500,000,000 | 1.00 | 113 | 0.000001113 | 0.001838145 → 0.001838145 | 0.091852713 → 0.091852713 |  |
-| IntentSettlement.settle_claim | Operational | bounded | 50,000,000 | 50,000,000 | 1.00 | 9,388 | 0.000010388 | 0.004935545 → 0.004935545 | 0.246268237 → 0.246268237 |  |
+| IntentSettlement.submit_intent | Normal | bounded | 1,365,428,000 | 2,040,428,000 | 1.49 | 114 | 0.000001114 | 0.002703955 → 0.003378955 | 0.135143187 → 0.168893187 |  |
+| IntentSettlement.attest_intent | Operational | bounded | 273,095,676 | 673,095,676 | 2.46 | 233 | 0.000001233 | 0.001657137 → 0.002057137 | 0.082796431 → 0.102796431 |  |
+| IntentSettlement.request_voucher | Operational | bounded | 10,084,316,676 | 10,734,316,676 | 1.06 | 9,528 | 0.000010528 | 0.015023407 → 0.015673407 | 0.750654493 → 0.783154493 |  |
+| IntentSettlement.request_credit_refund | Normal | bounded | 1,357,664,000 | 2,007,664,000 | 1.48 | 113 | 0.000001113 | 0.002695809 → 0.003345809 | 0.134735913 → 0.167235913 |  |
+| IntentSettlement.settle_claim | Operational | bounded | 8,707,481,676 | 8,707,481,676 | 1.00 | 9,388 | 0.000010388 | 0.013593027 → 0.013593027 | 0.67914232 → 0.67914232 |  |
 | IntentSettlement.expire_policy_mirror | Operational | bounded | 30,000,000 | 30,000,000 | 1.00 | 137 | 0.000001137 | 0.001377324 → 0.001377324 | 0.0688105 → 0.0688105 |  |
-| IntentSettlement.credit_deposit | Operational | bounded | 30,000,000 | 30,000,000 | 1.00 | 9,395 | 0.000010395 | 0.004918222 → 0.004918222 | 0.245401758 → 0.245401758 |  |
+| IntentSettlement.credit_deposit | Operational | bounded | 8,687,481,676 | 8,687,481,676 | 1.00 | 9,395 | 0.000010395 | 0.013575704 → 0.013575704 | 0.678275842 → 0.678275842 |  |
 | IntentSettlement.set_pool_utilization | Operational | bounded | 10,000,000 | 10,000,000 | 1.00 | 129 | 0.000001129 | 0.001354265 → 0.001354265 | 0.067657904 → 0.067657904 |  |
 | IntentSettlement.set_min_signer_threshold | Operational | bounded | 10,000,000 | 10,000,000 | 1.00 | 109 | 0.000001109 | 0.001346615 → 0.001346615 | 0.067276415 → 0.067276415 |  |
-| IntentSettlement.settle_batch_atomic | Operational | bounded | 4,311,966,280 | 68,611,966,280 | 15.91 | 25,967 | 0.000026967 | 0.015538465 → 0.079838465 | 0.775601857 → 3.990601857 | ! |
-| IntentSettlement.attest_batch_intents | Operational | bounded | 818,000,000 | 818,000,000 | 1.00 | 17,519 | 0.000018519 | 0.0088134 → 0.0088134 | 0.43976259 → 0.43976259 |  |
-| IntentSettlement.request_batch_vouchers | Operational | bounded | 2,610,000,000 | 2,610,000,000 | 1.00 | 61,807 | 0.000062807 | 0.027544187 → 0.027544187 | 1.374131831 → 1.374131831 |  |
-| IntentSettlement.submit_batch_intents | Normal | bounded | 1,330,000,000 | 1,330,000,000 | 1.00 | 2,411 | 0.000003411 | 0.003547059 → 0.003547059 | 0.177185799 → 0.177185799 |  |
-| IntentSettlement.request_settle | Operational | bounded | 40,000,000 | 40,000,000 | 1.00 | 282 | 0.000001282 | 0.001442782 → 0.001442782 | 0.072076295 → 0.072076295 |  |
-| IntentSettlement.attest_settle | Operational | bounded | 60,000,000 | 60,000,000 | 1.00 | 9,355 | 0.000010355 | 0.004932923 → 0.004932923 | 0.24613878 → 0.24613878 |  |
-| IntentSettlement.request_batch_settle | Operational | bounded | 2,088,000,000 | 2,088,000,000 | 1.00 | 37,229 | 0.000038229 | 0.017621864 → 0.017621864 | 0.879219999 → 0.879219999 |  |
-| IntentSettlement.attest_batch_settle | Operational | bounded | 3,900,000,000 | 3,900,000,000 | 1.00 | 17,519 | 0.000018519 | 0.0118954 → 0.0118954 | 0.59386259 → 0.59386259 |  |
+| IntentSettlement.settle_batch_atomic | Operational | bounded | 12,919,447,956 | 77,219,447,956 | 5.98 | 25,967 | 0.000026967 | 0.024145946 → 0.088445946 | 1.205975941 → 4.420975941 | ! |
+| IntentSettlement.attest_batch_intents | Operational | bounded | 12,760,957,476 | 96,010,957,476 | 7.52 | 17,519 | 0.000018519 | 0.020756358 → 0.104006358 | 1.036910463 → 5.199410463 | ! |
+| IntentSettlement.request_batch_vouchers | Operational | bounded | 384,399,003,564 | 474,299,003,564 | 1.23 | 61,807 | 0.000062807 | 0.409333191 → 0.499233191 | 20.463582009 → 24.958582009 |  |
+| IntentSettlement.submit_batch_intents | Normal | bounded | 351,446,419,345 | 383,996,419,345 | 1.09 | 2,411 | 0.000003411 | 0.353663478 → 0.386213478 | 17.683006766 → 19.310506766 |  |
+| IntentSettlement.request_settle | Operational | bounded | 120,780,000 | 1,145,780,000 | 9.49 | 298 | 0.000001298 | 0.001529682 → 0.002554682 | 0.076420486 → 0.127670486 |  |
+| IntentSettlement.attest_settle | Operational | bounded | 10,058,508,676 | 10,958,508,676 | 1.09 | 9,355 | 0.000010355 | 0.014931432 → 0.015831432 | 0.746064214 → 0.791064214 |  |
+| IntentSettlement.supersede_settlement_request | Operational | bounded | 10,109,284,676 | 11,384,284,676 | 1.13 | 9,468 | 0.000010468 | 0.015025427 → 0.016300427 | 0.750758426 → 0.814508426 |  |
+| IntentSettlement.request_batch_settle | Operational | bounded | 24,561,611,664 | 223,211,611,664 | 9.09 | 37,245 | 0.000038245 | 0.040101596 → 0.238751596 | 2.003205773 → 11.935705773 | ! |
+| IntentSettlement.attest_batch_settle | Operational | bounded | 371,721,460,684 | 525,621,460,684 | 1.41 | 17,519 | 0.000018519 | 0.379716861 → 0.533616861 | 18.984935624 → 26.679935624 |  |
 | IntentSettlement.request_expire_policy | Operational | bounded | 35,000,000 | 35,000,000 | 1.00 | 277 | 0.000001277 | 0.00143587 → 0.00143587 | 0.071730923 → 0.071730923 |  |
-| IntentSettlement.attest_expire_policy | Operational | bounded | 55,000,000 | 55,000,000 | 1.00 | 9,355 | 0.000010355 | 0.004927923 → 0.004927923 | 0.24588878 → 0.24588878 |  |
-| IntentSettlement.post_settlement_bond | Operational | bounded | 648,885,000 | 923,885,000 | 1.42 | 153 | 0.000001153 | 0.002002329 → 0.002277329 | 0.100059941 → 0.113809941 |  |
-| IntentSettlement.slash_bad_settlement_evidence | Operational | bounded | 1,095,540,000 | 1,595,540,000 | 1.46 | 9,356 | 0.000010356 | 0.005968846 → 0.006468846 | 0.297934854 → 0.322934854 |  |
-| IntentSettlement.release_settlement_bond | Operational | bounded | 648,885,000 | 1,023,885,000 | 1.58 | 137 | 0.000001137 | 0.001996209 → 0.002371209 | 0.09975475 → 0.11850475 |  |
+| IntentSettlement.attest_expire_policy | Operational | bounded | 10,111,598,676 | 10,536,598,676 | 1.04 | 9,355 | 0.000010355 | 0.014984522 → 0.015409522 | 0.748718714 → 0.769968714 |  |
+| IntentSettlement.post_settlement_bond | Operational | bounded | 214,781,000 | 465,896,000 | 2.17 | 153 | 0.000001153 | 0.001568225 → 0.00181934 | 0.078354741 → 0.090910491 |  |
+| IntentSettlement.slash_bad_settlement_evidence | Operational | bounded | 9,390,844,676 | 9,820,304,676 | 1.05 | 9,356 | 0.000010356 | 0.014264151 → 0.014693611 | 0.712700088 → 0.734173088 |  |
+| IntentSettlement.release_settlement_bond | Operational | bounded | 222,104,000 | 798,219,000 | 3.59 | 137 | 0.000001137 | 0.001569428 → 0.002145543 | 0.0784157 → 0.10722145 |  |
 | TeeAttestation.submit_evidence | Normal | bounded | 1,000,000,000 | 1,000,000,000 | 1.00 | 16,560 | 0.00001756 | 0.008628613 → 0.008628613 | 0.430570192 → 0.430570192 |  |
 | TeeAttestation.set_disabled | Normal | bounded | 1,000,000,000 | 1,000,000,000 | 1.00 | 106 | 0.000001106 | 0.002335468 → 0.002335468 | 0.116719192 → 0.116719192 |  |
 | Billing.topup_self | Normal | bounded | 204,672,000 | 579,672,000 | 2.83 | 121 | 0.000001121 | 0.001545877 → 0.001920877 | 0.077238908 → 0.095988908 |  |
