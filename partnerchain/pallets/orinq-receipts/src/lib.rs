@@ -19,7 +19,7 @@ mod benchmarking;
 #[frame_support::pallet]
 pub mod pallet {
     use alloc::vec::Vec;
-    use alloc::collections::BTreeMap;
+    use alloc::collections::{BTreeMap, BTreeSet};
     use frame_support::dispatch::DispatchResultWithPostInfo;
     use frame_support::pallet_prelude::*;
     use frame_support::traits::{BalanceStatus, Currency, ReservableCurrency};
@@ -144,7 +144,8 @@ pub mod pallet {
     #[pallet::getter(fn attestation_threshold)]
     pub type AttestationThreshold<T: Config> = StorageValue<_, u32, ValueQuery>;
 
-    /// In-progress attestations: receipt_id -> (cert_hash, set of signers so far).
+    /// In-progress attestations: receipt_id -> (cert_hash, signers). Each attest
+    /// drops the signers who have left the committee since.
     #[pallet::storage]
     #[pallet::getter(fn attestations)]
     pub type Attestations<T: Config> = StorageMap<
@@ -589,6 +590,12 @@ pub mod pallet {
         /// The emergency pinned committee was cleared; selection returns to the
         /// L1-driven Ariadne draw immediately.
         PinnedCommitteeCleared,
+        /// `AttestationThreshold` was lowered to the committee's new size after
+        /// a member left or was ejected, so certification stays satisfiable.
+        AttestationThresholdClamped {
+            previous: u32,
+            threshold: u32,
+        },
     }
 
     // Error doc comments ship in on-chain metadata. Keep them actionable.
@@ -1156,15 +1163,24 @@ pub mod pallet {
                     who: attester.clone(),
                     remaining_bond: 0,
                 });
-                // Clamp the threshold to the new committee size so the
-                // certification path never becomes unsatisfiable. Lower bound
-                // of 1 avoids divide-by-zero downstream.
-                let new_size = CommitteeMembers::<T>::get().len() as u32;
-                AttestationThreshold::<T>::mutate(|t| {
-                    *t = (*t).min(new_size).max(1);
-                });
+                Self::clamp_threshold(CommitteeMembers::<T>::get().len() as u32);
             }
             Ok(())
+        }
+
+        /// Clamp `AttestationThreshold` to `committee_size` after a removal so
+        /// the certification path never becomes unsatisfiable, and report a
+        /// lowering. The lower bound of 1 avoids divide-by-zero downstream.
+        fn clamp_threshold(committee_size: u32) {
+            let previous = AttestationThreshold::<T>::get();
+            let threshold = previous.min(committee_size).max(1);
+            AttestationThreshold::<T>::put(threshold);
+            if threshold < previous {
+                Self::deposit_event(Event::AttestationThresholdClamped {
+                    previous,
+                    threshold,
+                });
+            }
         }
 
         /// The derived attestor reserve pot account (`mat/attr`). Slashed
@@ -1581,9 +1597,10 @@ pub mod pallet {
 
         /// Committee member attests an availability certificate for a receipt.
         ///
-        /// When the number of unique attestations reaches the threshold the
-        /// certificate is finalized on the receipt record (same effect as
-        /// `set_availability_cert`).
+        /// When the number of current committee members who have attested
+        /// reaches the threshold the certificate is finalized on the receipt
+        /// record (same effect as `set_availability_cert`), and only those
+        /// members are paid.
         #[pallet::call_index(3)]
         #[pallet::weight(<T as Config>::WeightInfo::attest_threshold(T::MaxCommitteeSize::get())
             .max(<T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get()))
@@ -1661,25 +1678,31 @@ pub mod pallet {
             // The `*existing_hash == cert_h256` check below is tautological
             // post-canonical gate, kept so any future schema drift cannot
             // silently weaken the agreement invariant.
-            let count = Attestations::<T>::try_mutate(receipt_id, |maybe_att| -> Result<u32, DispatchError> {
-                match maybe_att {
-                    Some((existing_hash, ref mut signers)) => {
-                        ensure!(*existing_hash == cert_h256, Error::<T>::CertHashMismatch);
-                        // Insert is idempotent — re-attesting is a no-op.
-                        let _ = signers.try_insert(attester.clone());
-                        Ok(signers.len() as u32)
-                    },
-                    None => {
-                        let mut signers = BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::new();
-                        let _ = signers.try_insert(attester.clone());
-                        *maybe_att = Some((cert_h256, signers));
-                        Ok(1u32)
-                    },
-                }
-            })?;
+            //
+            // Only current members count toward the threshold and share the
+            // payout, so the stored signers are narrowed to the committee
+            // before the attester is added. Being a subset of the committee,
+            // the set always has room for the attester. The narrowing still
+            // decodes the departed signers, so the attest is weighed at the
+            // larger of the stored and current counts.
+            let (decoded, count) = Attestations::<T>::try_mutate(
+                receipt_id,
+                |maybe_att| -> Result<(u32, u32), DispatchError> {
+                    let (existing_hash, signers) = maybe_att
+                        .get_or_insert_with(|| (cert_h256, BoundedBTreeSet::new()));
+                    ensure!(*existing_hash == cert_h256, Error::<T>::CertHashMismatch);
+                    let decoded = signers.len() as u32;
+                    let mut current: BTreeSet<T::AccountId> =
+                        committee.intersection(&**signers).cloned().collect();
+                    current.insert(attester.clone());
+                    *signers = current.try_into().map_err(|_| Error::<T>::CommitteeFull)?;
+                    Ok((decoded, signers.len() as u32))
+                },
+            )?;
+            let weighed = decoded.max(count);
 
             let threshold = AttestationThreshold::<T>::get().max(1);
-            base = <T as Config>::WeightInfo::attest_non_threshold(count);
+            base = <T as Config>::WeightInfo::attest_non_threshold(weighed);
 
             Self::deposit_event(Event::AttestationRecorded {
                 receipt_id,
@@ -1691,7 +1714,7 @@ pub mod pallet {
             // 4. If threshold reached, finalize the cert on the receipt.
             let mut balances_before = BTreeMap::new();
             if count >= threshold {
-                base = <T as Config>::WeightInfo::attest_threshold(count);
+                base = <T as Config>::WeightInfo::attest_threshold(weighed);
                 if let Some((_, signers)) = Attestations::<T>::get(receipt_id) {
                     for signer in signers {
                         balances_before.insert(signer.clone(), T::Currency::free_balance(&signer));
@@ -1928,28 +1951,31 @@ pub mod pallet {
         }
 
         /// Root-only: governance removes `member` from the attestation
-        /// committee. The member stops receiving attestation rewards and can no
-        /// longer attest. Permissionless self-leave was removed in spec-228 so a
+        /// committee. The member stops receiving attestation rewards, can no
+        /// longer attest, and its attestations on receipts not yet certified
+        /// stop counting. A threshold above the smaller committee is clamped to
+        /// its size. Permissionless self-leave was removed in spec-228 so a
         /// misbehaving member cannot dodge eviction/slash by leaving voluntarily;
         /// removal (and slashing) is governance-driven (see `slash_attestor`,
         /// which also auto-ejects when bond drops below requirement).
         #[pallet::call_index(8)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
-            .saturating_add(T::DbWeight::get().reads(1))
-            .saturating_add(T::DbWeight::get().writes(1)))]
+            .saturating_add(T::DbWeight::get().reads(2))
+            .saturating_add(T::DbWeight::get().writes(2)))]
         pub fn leave_committee(origin: OriginFor<T>, member: T::AccountId) -> DispatchResult {
             ensure_root(origin)?;
 
-            CommitteeMembers::<T>::try_mutate(|set| {
+            let size = CommitteeMembers::<T>::try_mutate(|set| {
                 ensure!(set.contains(&member), Error::<T>::NotCommitteeMemberCantLeave);
                 set.remove(&member);
-                let size = set.len() as u32;
-                Self::deposit_event(Event::CommitteeMemberLeft {
-                    who: member,
-                    committee_size: size,
-                });
-                Ok(())
-            })
+                Ok::<u32, DispatchError>(set.len() as u32)
+            })?;
+            Self::deposit_event(Event::CommitteeMemberLeft {
+                who: member,
+                committee_size: size,
+            });
+            Self::clamp_threshold(size);
+            Ok(())
         }
 
         // ── Component 5: governance setters for dynamic reward config ────
@@ -2149,12 +2175,7 @@ pub mod pallet {
                         who: attestor,
                         remaining_bond,
                     });
-                    // Clamp threshold to the new committee size; mirrors the
-                    // clamp in `auto_slash_for_bad_attest`.
-                    let new_size = CommitteeMembers::<T>::get().len() as u32;
-                    AttestationThreshold::<T>::mutate(|t| {
-                        *t = (*t).min(new_size).max(1);
-                    });
+                    Self::clamp_threshold(CommitteeMembers::<T>::get().len() as u32);
                 }
             }
 

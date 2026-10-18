@@ -22,6 +22,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn attest_non_threshold(n: u32) -> Weight {
         crate::attestation_weights::attest_non_threshold::<T>(n)
             .max(crate::attestation_weights::attest_repeated::<T>(n))
+            .max(crate::attestation_weights::attest_departed::<T>(n))
     }
     fn attest_threshold(n: u32) -> Weight {
         crate::attestation_weights::attest_threshold::<T>(n)

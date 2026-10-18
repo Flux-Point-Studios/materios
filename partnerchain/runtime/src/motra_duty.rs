@@ -72,8 +72,10 @@ pub fn deferred_weight(call: &RuntimeCall) -> Weight {
 
 /// At the current threshold `t`: `t` signed attest duties, the `t - 1`
 /// non-threshold attests before the payout, each bounded by the last since
-/// the signer count only grows, and the payout attest with its signers',
-/// submitter's and treasury's balance changes.
+/// the signer count only grows while the committee is unchanged, and the
+/// payout attest with its signers', submitter's and treasury's balance
+/// changes. A member who leaves after signing costs one further attest from
+/// a current member, which this price does not cover.
 fn certification_weight() -> Weight {
     type W = <Runtime as pallet_orinq_receipts::Config>::WeightInfo;
     let t = pallet_orinq_receipts::AttestationThreshold::<Runtime>::get().clamp(
