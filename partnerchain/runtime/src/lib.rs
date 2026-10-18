@@ -1452,6 +1452,21 @@ pub type Executive = frame_executive::Executive<
 // Runtime APIs
 // ---------------------------------------------------------------------------
 
+/// The genesis presets `GenesisBuilder` names, each a patch over every
+/// pallet's genesis defaults. Only a runtime built with `dev-presets`, which
+/// `runtime-benchmarks` turns on, has one: `development`, for
+/// frame-omni-bencher's default `--genesis-builder-preset=development`. A
+/// benchmarking genesis has no guardian and has to say so, and has to seat a
+/// committee, here //Alice, or `build_state` refuses it. The runtime a chain
+/// spec carries names no development key, so it has none.
+#[cfg(feature = "dev-presets")]
+const GENESIS_PRESETS: &[(&str, &[u8])] = &[(
+    sp_genesis_builder::DEV_RUNTIME_PRESET,
+    br#"{"rootTimelock":{"unguarded":true},"sessionCommitteeManagement":{"initialAuthorities":[["KW39r9CJjAVzmkf9zQ4YDb2hqfAVGdRqn53eRqyruqpxAP5YL",{"aura":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","grandpa":"5FA9nQDVg267DEd8m1ZypXLBnvN7SFxYwV7ndqSYGiN9TTpu"}]]}}"#,
+)];
+#[cfg(not(feature = "dev-presets"))]
+const GENESIS_PRESETS: &[(&str, &[u8])] = &[];
+
 impl_runtime_apis! {
     impl sp_api::Core<Block> for Runtime {
         fn version() -> RuntimeVersion {
@@ -1757,24 +1772,18 @@ impl_runtime_apis! {
 
         fn get_preset(id: &Option<sp_genesis_builder::PresetId>) -> Option<Vec<u8>> {
             get_preset::<RuntimeGenesisConfig>(id, |preset_id| {
-                // The `development` preset exists only to satisfy
-                // frame-omni-bencher's default `--genesis-builder-preset=development`,
-                // which applies it as a patch over every pallet's genesis
-                // defaults. A benchmarking genesis has no guardian and has to
-                // say so, and has to seat a committee, here //Alice, or
-                // `build_state` refuses it.
-                if preset_id.as_ref() == sp_genesis_builder::DEV_RUNTIME_PRESET.as_bytes() {
-                    Some(br#"{"rootTimelock":{"unguarded":true},"sessionCommitteeManagement":{"initialAuthorities":[["KW39r9CJjAVzmkf9zQ4YDb2hqfAVGdRqn53eRqyruqpxAP5YL",{"aura":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","grandpa":"5FA9nQDVg267DEd8m1ZypXLBnvN7SFxYwV7ndqSYGiN9TTpu"}]]}}"#.to_vec())
-                } else {
-                    None
-                }
+                GENESIS_PRESETS
+                    .iter()
+                    .find(|(name, _)| preset_id.as_ref() == name.as_bytes())
+                    .map(|(_, patch)| patch.to_vec())
             })
         }
 
         fn preset_names() -> Vec<sp_genesis_builder::PresetId> {
-            alloc::vec![sp_genesis_builder::PresetId::from(
-                sp_genesis_builder::DEV_RUNTIME_PRESET,
-            )]
+            GENESIS_PRESETS
+                .iter()
+                .map(|(name, _)| sp_genesis_builder::PresetId::from(*name))
+                .collect()
         }
     }
 

@@ -19,6 +19,7 @@ use pallet_root_timelock::{
 use parity_scale_codec::Encode;
 use proptest::prelude::*;
 use sidechain_domain::{AssetName, DParameter, EpochNonce, MainchainAddress, PolicyId};
+use sp_genesis_builder::{PresetId, DEV_RUNTIME_PRESET};
 use sp_io::TestExternalities;
 use sp_keyring::Sr25519Keyring::{self as Keyring, Alice, Bob, Charlie, Dave, Eve, Ferdie};
 use sp_runtime::{
@@ -2313,6 +2314,20 @@ fn a_chain_spec_must_name_a_guardian_apart_from_the_sudo_key() {
     );
 }
 
+/// The genesis checks know a development account by its hash, so the runtime
+/// code holds no development key: the hashes are every sr25519 keyring
+/// account's, in keyring order.
+#[test]
+fn the_development_account_hashes_are_the_keyrings() {
+    let keyring: Vec<[u8; 32]> = Keyring::iter()
+        .map(|dev| sp_io::hashing::blake2_256(dev.to_account_id().as_ref()))
+        .collect();
+    assert_eq!(
+        crate::root_gate::DEVELOPMENT_ACCOUNT_HASHES.to_vec(),
+        keyring
+    );
+}
+
 /// On an unguarded chain nothing can stop a stolen sudo key from withdrawing
 /// every rotation scheduled to replace it, so only a chain whose sudo key
 /// anyone may sign for, or which has none, may start without a guardian.
@@ -2340,15 +2355,33 @@ fn only_a_development_chain_may_start_unguarded() {
     assert_eq!(build_chain_spec(unguarded(None)), Ok(()));
 }
 
+/// The runtime's preset names, and its `development` preset if it has one.
+fn presets() -> (Vec<PresetId>, Option<Vec<u8>>) {
+    use sp_genesis_builder::runtime_decl_for_genesis_builder::GenesisBuilder;
+    (
+        <Runtime as GenesisBuilder<Block>>::preset_names(),
+        <Runtime as GenesisBuilder<Block>>::get_preset(&Some(PresetId::from(DEV_RUNTIME_PRESET))),
+    )
+}
+
+#[cfg(feature = "dev-presets")]
 #[test]
 fn the_benchmarking_preset_builds() {
-    let preset = <Runtime as sp_genesis_builder::runtime_decl_for_genesis_builder::GenesisBuilder<Block>>::get_preset(&Some(
-        sp_genesis_builder::PresetId::from(sp_genesis_builder::DEV_RUNTIME_PRESET),
-    ))
-    .expect("the development preset exists");
-    let patch: serde_json::Value = serde_json::from_slice(&preset).expect("the preset is JSON");
+    let (names, preset) = presets();
+    assert_eq!(names, vec![PresetId::from(DEV_RUNTIME_PRESET)]);
+    let patch: serde_json::Value =
+        serde_json::from_slice(&preset.expect("the development preset exists"))
+            .expect("the preset is JSON");
     assert_eq!(patch["sessionCommitteeManagement"], alice_committee());
     assert_eq!(build_chain_spec(patch), Ok(()));
+}
+
+/// The runtime a chain spec carries has no preset: the benchmarking one seats
+/// //Alice.
+#[cfg(not(feature = "dev-presets"))]
+#[test]
+fn a_runtime_built_without_dev_presets_has_no_preset() {
+    assert_eq!(presets(), (vec![], None));
 }
 
 // ---------------------------------------------------------------------------
