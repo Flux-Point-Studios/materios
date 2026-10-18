@@ -129,8 +129,7 @@ unchanged by this work.
 | Treasury payout | 2 for PayFromAccount's transfer |
 | Treasury spend hook | 2 per approval plus 1 pot settlement; `MaxApprovals = 100` |
 | Other Treasury calls | 0; approvals/asset-spend records only |
-| IntentSettlement bond/release | 1 reserve/unreserve |
-| IntentSettlement slash | 4 across two repatriations |
+| IntentSettlement bond, release, slash | 0; measured on this runtime with their 1, 1 and 2 checkpoints |
 | IntentSettlement request, batch request, supersede | 0; measured on this runtime with the reserve and any displaced bond's refund, checkpoints included |
 | Other IntentSettlement calls/hooks | 0; settlement records and vouchers do not mutate MATRA |
 | Billing topups | 1 withdrawal |
@@ -351,10 +350,8 @@ of every call and hook.
 Both pallet-intent-settlement and pallet-oracle pin settlement #55's merge
 commit `0757de35efa52d983c9203a683307827d76ae338`. Its settlement weights were
 generated on this runtime, MOTRA checkpoints included, so the adapter adds no
-checkpoint to the fourteen slots #55 introduced. Their storage terms, checkpoint
-keys among them, are priced through `T::DbWeight`, which stays zero until #71.
-Bond, release and slash keep their earlier 1/4/1 checkpoint budgets on top of
-their now-measured bases.
+checkpoint to any slot. Their storage terms, checkpoint keys among them, are
+priced through `T::DbWeight`.
 
 Genesis-relevant fee-path layout work is tracked in
 [#75](https://github.com/Flux-Point-Studios/materios/issues/75); legacy sponsorship,

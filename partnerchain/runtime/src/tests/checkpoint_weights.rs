@@ -139,15 +139,19 @@ proptest! {
                         "operation {} changed free balance without a checkpoint", operation);
                 }
             }
-            let required = base.saturating_add(pallet_motra::checkpoint_weight::<Runtime>()
-                .saturating_mul(touched.len() as u64));
+            // Settlement's bond slots were measured with their checkpoints;
+            // Balances' SDK weights were not.
+            let measured = operation >= 10;
+            let checkpoints = pallet_motra::checkpoint_weight::<Runtime>()
+                .saturating_mul(touched.len() as u64);
+            let required = if measured { base.max(checkpoints) } else { base.saturating_add(checkpoints) };
             prop_assert!(weight.all_gte(required),
                 "operation {}: {:?} fails to cover {} checkpoint entries: {:?}",
                 operation, weight, touched.len(), required);
             let account_bound = match operation {
                 0..=3 => 2,
                 5 => 3,
-                7 => 0,
+                7 | 10 | 11 => 0,
                 _ => 1,
             };
             prop_assert!(weight.all_lte(base.saturating_add(
