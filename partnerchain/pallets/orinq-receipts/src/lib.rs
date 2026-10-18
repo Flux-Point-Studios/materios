@@ -777,7 +777,9 @@ pub mod pallet {
         BlockNumberFor<T>: Into<u32> + From<u32>,
     {
         fn on_initialize(n: BlockNumberFor<T>) -> Weight {
-            let mut weight = Weight::zero();
+            let db = T::DbWeight::get();
+            // Aura's authorities and the era's start block.
+            let mut weight = db.reads(2);
 
             // REMOVED (flux-point-studios/materios, v3+): a legacy one-time
             // migration that overwrote CommitteeMembers with //Alice/Bob/Charlie/
@@ -794,6 +796,7 @@ pub mod pallet {
             if let Some(author) = Self::find_block_author() {
                 BlocksAuthored::<T>::mutate(&author, |count| *count = count.saturating_add(1));
                 LastAuthoredBlock::<T>::insert(&author, n);
+                weight = weight.saturating_add(db.reads_writes(1, 2));
             }
 
             // Stamp first-selected for the enacted Aura authorities here, in a
@@ -803,14 +806,17 @@ pub mod pallet {
             // as `find_block_author` (first 32 bytes of the encoded key). The
             // stamp is idempotent, so a validator's grace window starts when it
             // first becomes an active authority.
-            for authority in pallet_aura::Authorities::<T>::get().iter() {
+            let authorities = pallet_aura::Authorities::<T>::get();
+            let mut stamped = 0u64;
+            for authority in authorities.iter() {
                 let encoded = parity_scale_codec::Encode::encode(authority);
                 if encoded.len() >= 32 {
                     let mut bytes = [0u8; 32];
                     bytes.copy_from_slice(&encoded[..32]);
-                    Self::stamp_first_selected(&T::AccountId::from(bytes), n);
+                    stamped += u64::from(Self::stamp_first_selected(&T::AccountId::from(bytes), n));
                 }
             }
+            weight = weight.saturating_add(db.reads_writes(authorities.len() as u64, stamped));
 
             // ── Validator rewards: era distribution ──────────────────────
             // Era length: 14400 blocks (~24h at 6s block time), minting until
@@ -822,6 +828,8 @@ pub mod pallet {
             let era_start: u32 = EraStartBlock::<T>::get().into();
 
             if block_num > 0 && block_num.saturating_sub(era_start) >= ERA_LENGTH {
+                // The reserve's running total.
+                weight = weight.saturating_add(db.reads(1));
                 // Distribute rewards for this era
                 let total_distributed = TotalRewardsDistributed::<T>::get();
                 if total_distributed < validator_reserve {
@@ -832,6 +840,7 @@ pub mod pallet {
                     let mut authored: Vec<(T::AccountId, u32)> = Vec::new();
                     let mut total_blocks: u32 = 0;
                     for (account, count) in BlocksAuthored::<T>::iter() {
+                        weight = weight.saturating_add(db.reads(1));
                         if count > 0 {
                             total_blocks = total_blocks.saturating_add(count);
                             authored.push((account, count));
@@ -891,8 +900,10 @@ pub mod pallet {
                                     account,
                                     balance,
                                 );
+                                // The account and its lifetime reward.
                                 weight = weight.saturating_add(
-                                    <T as Config>::WeightInfo::balance_mutations(1),
+                                    <T as Config>::WeightInfo::balance_mutations(1)
+                                        .saturating_add(db.reads_writes(2, 2)),
                                 );
 
                                 // Track lifetime rewards
@@ -922,10 +933,13 @@ pub mod pallet {
                                 balance,
                             );
                             weight = weight.saturating_add(
-                                <T as Config>::WeightInfo::balance_mutations(1),
+                                <T as Config>::WeightInfo::balance_mutations(1)
+                                    .saturating_add(db.reads_writes(1, 1)),
                             );
                         }
 
+                        // Total issuance, and the reserve's running total.
+                        weight = weight.saturating_add(db.reads_writes(1, 2));
                         TotalRewardsDistributed::<T>::mutate(|total| {
                             *total = total.saturating_add(distributed_this_era);
                         });
@@ -944,10 +958,11 @@ pub mod pallet {
                     }
 
                     // Reset for next era
-                    let _ = BlocksAuthored::<T>::clear(u32::MAX, None);
+                    let cleared = BlocksAuthored::<T>::clear(u32::MAX, None).unique;
                     ReceiptsCertifiedInEra::<T>::put(0u32);
                     AttestationRewardsPaidInEra::<T>::put(0u128);
                     EraStartBlock::<T>::put(n);
+                    weight = weight.saturating_add(db.writes(u64::from(cleared) + 3));
                 }
             }
 
@@ -989,19 +1004,6 @@ pub mod pallet {
             if !BadAttestSlashThreshold::<T>::exists() {
                 BadAttestSlashThreshold::<T>::put(1u32);
                 writes += 1;
-            }
-
-            // Clear all mid-attestation entries. Pre-canonical-cert entries
-            // would otherwise be unreachable by honest attesters under the
-            // new SCALE hash and rot until expiry.
-            let cleared = Attestations::<T>::clear(u32::MAX, None).backend;
-            if cleared > 0 {
-                writes = writes.saturating_add(cleared as u64);
-                log::info!(
-                    target: "runtime::orinq-receipts",
-                    "cleared {} mid-attestation entries at canonical-cert migration",
-                    cleared
-                );
             }
 
             T::DbWeight::get().reads_writes(reads, writes)
@@ -1244,10 +1246,13 @@ pub mod pallet {
         /// Record that `who` was selected into a committee at `block`.
         /// Idempotent — only the first call records a value, so the grace
         /// window is measured from a candidate's first-ever selection.
-        pub fn stamp_first_selected(who: &T::AccountId, block: BlockNumberFor<T>) {
-            if !CandidateFirstSelected::<T>::contains_key(who) {
+        /// Returns whether this call recorded the selection.
+        pub fn stamp_first_selected(who: &T::AccountId, block: BlockNumberFor<T>) -> bool {
+            let first = !CandidateFirstSelected::<T>::contains_key(who);
+            if first {
                 CandidateFirstSelected::<T>::insert(who, block);
             }
+            first
         }
 
         /// Component 4 helper: reserve the current `ReceiptSubmissionFee`

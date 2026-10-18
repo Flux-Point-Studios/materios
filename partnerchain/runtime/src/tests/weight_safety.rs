@@ -537,3 +537,142 @@ fn the_widest_duty_batch_fits_and_a_wider_one_is_refused() {
         eprintln!("DUTY widest pure attestation batch: {widest}");
     });
 }
+
+/// The keys `hook` changes, events aside, with every earlier write committed.
+fn keys_written(
+    ext: &mut sp_io::TestExternalities,
+    hook: impl FnOnce() -> Weight,
+) -> (Weight, usize) {
+    ext.commit_all().expect("commit the fixture");
+    let declared = ext.execute_with(hook);
+    let events = [
+        sp_io::hashing::twox_128(b"System"),
+        sp_io::hashing::twox_128(b"Events"),
+    ]
+    .concat();
+    let event_count = [
+        sp_io::hashing::twox_128(b"System"),
+        sp_io::hashing::twox_128(b"EventCount"),
+    ]
+    .concat();
+    let written = ext
+        .overlayed_changes()
+        .changes()
+        .filter(|(key, _)| !key.starts_with(&events) && !key.starts_with(&event_count))
+        .count();
+    (declared, written)
+}
+
+/// Each block, the receipts pallet records its author and stamps every Aura
+/// authority's first selection, and prices both.
+#[test]
+fn receipts_initialization_prices_the_author_and_every_authority() {
+    use frame_support::traits::Hooks;
+    let db = <Runtime as frame_system::Config>::DbWeight::get();
+    let authorities: Vec<AuraId> = (0..MAX_VALIDATORS)
+        .map(|seat| sp_core::sr25519::Public::from_raw([seat as u8 + 1; 32]).into())
+        .collect();
+    let mut ext = genesis();
+    ext.execute_with(|| {
+        pallet_aura::Authorities::<Runtime>::put(
+            sp_runtime::BoundedVec::try_from(authorities.clone()).expect("committee bound"),
+        );
+        System::deposit_log(sp_runtime::DigestItem::PreRuntime(
+            sp_consensus_aura::AURA_ENGINE_ID,
+            7u64.encode(),
+        ));
+    });
+    // Authorities read and era start, the author's two records, and one
+    // read per authority; the first block also stamps every authority.
+    let reads = 2 + 1 + u64::from(MAX_VALIDATORS);
+    for (block, stamps) in [(5u32, MAX_VALIDATORS), (6, 0)] {
+        let (declared, written) = keys_written(&mut ext, || OrinqReceipts::on_initialize(block));
+        assert_eq!(written as u32, 2 + stamps, "block {block}");
+        assert_eq!(
+            declared,
+            Weight::from_parts(10_000_000, 0)
+                .saturating_add(db.reads_writes(reads, 2 + u64::from(stamps))),
+            "block {block}"
+        );
+    }
+}
+
+/// The era distribution prices every key it reads and writes. Its authors
+/// are bounded by the committee's seats times the sessions an era spans:
+/// at preprod's 600-slot sessions, 32 seats over 25 sessions. The
+/// distribution's Wasm execution is not benchmarked, so its declared weight
+/// must fit the block twice over.
+#[test]
+fn the_reward_era_prices_its_storage_and_fits_a_block_at_its_author_bound() {
+    use frame_support::traits::Hooks;
+    const ERA: u32 = 14_400;
+    const SESSION_SLOTS: u32 = 600;
+    let bound = MAX_VALIDATORS * (ERA.div_ceil(SESSION_SLOTS) + 1);
+    let db = <Runtime as frame_system::Config>::DbWeight::get();
+    let max_block = RuntimeBlockWeights::get().max_block;
+    let era = |authors: u32| {
+        let mut ext = genesis();
+        ext.execute_with(|| {
+            for author in 0..authors {
+                let mut account = [0u8; 32];
+                account[..4].copy_from_slice(&author.to_le_bytes());
+                pallet_orinq_receipts::BlocksAuthored::<Runtime>::insert(
+                    AccountId::new(account),
+                    1,
+                );
+            }
+        });
+        let (declared, written) = keys_written(&mut ext, || OrinqReceipts::on_initialize(ERA));
+        ext.execute_with(|| {
+            assert_eq!(
+                pallet_orinq_receipts::BlocksAuthored::<Runtime>::iter_keys().count(),
+                0
+            );
+        });
+        // Every author's entry, account and lifetime reward; the era start,
+        // the reserve's total, the treasury's account and total issuance.
+        let reads = 3 * u64::from(authors) + 5;
+        assert!(
+            declared.ref_time()
+                >= 10_000_000 + db.reads_writes(reads, written as u64).ref_time(),
+            "{authors} authors: {declared:?} for {written} keys written"
+        );
+        declared
+    };
+    let one = era(1);
+    let at_bound = era(bound);
+    let per_author = (at_bound.ref_time() - one.ref_time()) / u64::from(bound - 1);
+    eprintln!(
+        "ERA {bound} authors: {at_bound:?} = {:.2}% of the block; {per_author} per author; {} authors fit twice over",
+        at_bound.ref_time() as f64 * 100.0 / max_block.ref_time() as f64,
+        (max_block.ref_time() / 2 - one.ref_time()) / per_author + 1,
+    );
+    assert!(at_bound.saturating_mul(2).all_lte(max_block));
+}
+
+/// A runtime upgrade's migrations cost the same whatever the attestations
+/// in flight, and fit within the initialization reservation.
+#[test]
+fn a_runtime_upgrade_fits_a_block_whatever_the_attestations_in_flight() {
+    let upgrade = |in_flight: u64| {
+        let mut ext = genesis();
+        ext.execute_with(|| {
+            for receipt in 0..in_flight {
+                pallet_orinq_receipts::Attestations::<Runtime>::insert(
+                    sp_core::H256::from_low_u64_be(receipt),
+                    (sp_core::H256::zero(), frame_support::BoundedBTreeSet::new()),
+                );
+            }
+        });
+        ext.commit_all().expect("commit the fixture");
+        ext.execute_with(Executive::execute_on_runtime_upgrade)
+    };
+    let one = upgrade(1);
+    assert_eq!(upgrade(20_001), one);
+    let max_block = RuntimeBlockWeights::get().max_block;
+    eprintln!(
+        "UPGRADE migrations {one:?} = {:.4}% of the block",
+        one.ref_time() as f64 * 100.0 / max_block.ref_time() as f64
+    );
+    assert!(one.all_lte(AVERAGE_ON_INITIALIZE_RATIO * max_block));
+}
