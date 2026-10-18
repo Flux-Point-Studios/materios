@@ -499,6 +499,44 @@ pub(crate) mod tests {
         }
     }
 
+    /// Every builder starts settlement at its current storage version with
+    /// both legacy cutovers at block zero, which that version reads as
+    /// closed: no upgrade migrates it, and the legacy settle and expire calls
+    /// never run. Its attestors bond the minimum settlement bond.
+    #[test]
+    fn every_builder_starts_settlement_at_its_current_version_with_the_attestor_bond_as_its_minimum(
+    ) {
+        use pallet_intent_settlement::{
+            PolicyExpireCutoverBlock, SettlementStorageVersion, StcaCutoverBlock,
+        };
+        for (name, spec) in [
+            ("development", super::development_config()),
+            ("local", super::local_testnet_config()),
+            ("preprod", crate::chain_spec_preprod::preprod_config()),
+        ] {
+            start(&spec.unwrap()).execute_with(|| {
+                assert_eq!(SettlementStorageVersion::<Runtime>::get(), 4, "{name}");
+                for (cutover, stored) in [
+                    (
+                        StcaCutoverBlock::<Runtime>::get(),
+                        StcaCutoverBlock::<Runtime>::exists(),
+                    ),
+                    (
+                        PolicyExpireCutoverBlock::<Runtime>::get(),
+                        PolicyExpireCutoverBlock::<Runtime>::exists(),
+                    ),
+                ] {
+                    assert_eq!((cutover, stored), (0, true), "{name}");
+                }
+                assert_eq!(
+                    pallet_orinq_receipts::BondRequirement::<Runtime>::get(),
+                    materios_runtime::IntentSettlementMinSettlementBond::get(),
+                    "{name}"
+                );
+            });
+        }
+    }
+
     /// Every spec carries this runtime's code, so a genesis hash is only as
     /// reproducible as that code. The code names its source files in panic
     /// messages, by remapped paths only: the repository as /materios, the

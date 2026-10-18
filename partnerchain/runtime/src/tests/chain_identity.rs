@@ -3,7 +3,7 @@
 //! `chain_getBlockHash(0)`.
 
 use crate::{migrations::PREPROD_GENESIS_HASH, *};
-use frame_support::{assert_noop, assert_ok};
+use frame_support::{assert_noop, assert_ok, traits::Currency};
 use pallet_intent_settlement::types::{Claim, SettlementEvidence, Voucher};
 use sp_core::{sr25519, Pair};
 use sp_runtime::{
@@ -109,6 +109,8 @@ fn requested_claim(requester: AccountId) -> Voucher {
         },
     );
     Vouchers::<Runtime>::insert(voucher.claim_id, &voucher);
+    let bond = IntentSettlementMinSettlementBond::get();
+    Balances::make_free_balance_be(&requester, bond + ExistentialDeposit::get());
     assert_ok!(IntentSettlement::request_settle(
         RuntimeOrigin::signed(requester),
         voucher.claim_id,
@@ -122,6 +124,7 @@ fn requested_claim(requester: AccountId) -> Voucher {
             amount_lovelace: voucher.amount_ada,
             mainchain_genesis_hash: IntentSettlementMainchainGenesisHash::get(),
         },
+        bond,
     ));
     voucher
 }
@@ -185,7 +188,8 @@ fn attest_settle_verifies_over_the_live_genesis_and_refuses_the_preprod_constant
                 RuntimeOrigin::signed(member.clone()),
                 voucher.claim_id,
                 bundle(PREPROD_GENESIS_HASH.0)
-            ),
+            )
+            .map_err(|refused| refused.error),
             pallet_intent_settlement::Error::<Runtime>::InvalidSignature
         );
         assert_ok!(IntentSettlement::attest_settle(
@@ -261,10 +265,14 @@ fn preprod_digests_are_byte_identical_to_the_pinned_constant() {
                 &IntentSettlementMainchainGenesisHash::get(),
             )
         };
+        let request =
+            pallet_intent_settlement::ClaimSettlementRequests::<Runtime>::get(voucher.claim_id)
+                .expect("the claim's settlement is requested");
         let fraud = |chain_id: &[u8; 32]| {
             pallet_intent_settlement::slash_bad_settlement_evidence_payload(
                 chain_id,
                 &voucher.claim_id,
+                &request,
                 &pallet_intent_settlement::types::FraudProof::TxNotFound,
             )
         };

@@ -55,7 +55,8 @@ pub fn admits(who: &AccountId, call: &RuntimeCall) -> bool {
             | Settlement::request_batch_vouchers { .. }
             | Settlement::attest_settle { .. }
             | Settlement::attest_batch_settle { .. }
-            | Settlement::attest_expire_policy { .. },
+            | Settlement::attest_expire_policy { .. }
+            | Settlement::supersede_settlement_request { .. },
         ) => OrinqCommitteeAdapter::is_member(who),
         RuntimeCall::Utility(
             pallet_utility::Call::batch { calls }
