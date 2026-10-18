@@ -26,5 +26,10 @@ pub fn {{benchmark.name}}<T: frame_system::Config>({{#each benchmark.components 
         {{#each benchmark.component_writes as |cw|}}
         .saturating_add(T::DbWeight::get().writes({{cw.slope}}_u64.saturating_mul({{cw.name}}.into())))
         {{/each}}
+        {{#if (or (eq benchmark.name "attest_threshold") (eq benchmark.name "attest_dead_treasury"))}}
+        // The samples hold the checkpoint of each signer and of the treasury
+        // or refunded submitter, which `balance_mutations` charges.
+        .saturating_sub(T::DbWeight::get().reads_writes(1 + u64::from(n), 1 + u64::from(n)))
+        {{/if}}
 }
 {{/each}}

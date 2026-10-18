@@ -30,7 +30,7 @@ const ENVELOPE: usize = 105;
 type Key = (String, String);
 
 #[derive(Clone, Copy, Debug)]
-enum Payer {
+pub(super) enum Payer {
     /// Any funded signer: permissionless settlement keepers and watchers.
     Anyone,
     /// An attestation committee member.
@@ -45,7 +45,7 @@ enum Payer {
 
 /// Every Operational-class call in the runtime, as decoded with zeroed
 /// arguments, and who may pay to send it signed.
-const OPERATIONAL: &[(&str, &str, Payer)] = &[
+pub(super) const OPERATIONAL: &[(&str, &str, Payer)] = &[
     ("System", "set_heap_pages", Payer::Nobody),
     ("System", "set_code", Payer::Nobody),
     ("System", "set_code_without_checks", Payer::Nobody),
@@ -297,12 +297,13 @@ fn kill_prefix(subkeys: u32) -> RuntimeCall {
     })
 }
 
-/// The Operational room one extrinsic can declare after its signed base.
+/// The Operational room one extrinsic can declare.
 fn operational_room() -> u64 {
-    let op = RuntimeBlockWeights::get()
+    RuntimeBlockWeights::get()
         .get(DispatchClass::Operational)
-        .clone();
-    op.max_total.expect("Operational budget").ref_time() - op.base_extrinsic.ref_time()
+        .max_extrinsic
+        .expect("Operational per-call limit")
+        .ref_time()
 }
 
 /// `kill_prefix` sized to fill a block on its own.
@@ -818,6 +819,33 @@ fn length_filling_remark() -> RuntimeCall {
     }
 }
 
+/// The heaviest storage-priced signed Normal call: one `upgrade_accounts`
+/// that declares the whole per-call budget.
+fn block_filling_upgrade_accounts() -> RuntimeCall {
+    let call = |n: usize| {
+        RuntimeCall::Balances(pallet_balances::Call::upgrade_accounts {
+            who: vec![acct(ATTACKER); n],
+        })
+    };
+    let limit = RuntimeBlockWeights::get()
+        .get(DispatchClass::Normal)
+        .max_extrinsic
+        .expect("Normal per-call limit");
+    let (mut fits, mut over) = (0, 1);
+    while call(over).get_dispatch_info().weight.all_lte(limit) {
+        (fits, over) = (over, over * 2);
+    }
+    while over - fits > 1 {
+        let mid = (fits + over) / 2;
+        if call(mid).get_dispatch_info().weight.all_lte(limit) {
+            fits = mid;
+        } else {
+            over = mid;
+        }
+    }
+    call(fits)
+}
+
 #[test]
 fn stuffers_of_weight_or_length_ramp_r_like_the_remark_ramp() {
     ext(Some(GUARDIAN)).execute_with(|| {
@@ -849,6 +877,30 @@ fn stuffers_of_weight_or_length_ramp_r_like_the_remark_ramp() {
             }
             // The remark ramp also pays for its 3% of length work; a stuffer
             // bound by one dimension pays within 10% of it, or more.
+            assert!(
+                cost * 10 >= remark_cost * 9 && cost <= remark_cost * 10,
+                "{name}: ramp cost {cost} vs remark ramp {remark_cost}"
+            );
+        }
+        // Storage-priced calls fill the block in coarser steps and stop short
+        // of the remark ramp's fullness by up to one call, so R may trail it
+        // by that call's share; they pay the same order.
+        for (name, stuffer) in [
+            ("transfer_keep_alive", transfer()),
+            ("block-filling upgrade_accounts", block_filling_upgrade_accounts()),
+        ] {
+            let (rates, cost, weight, length) = ramp(ATTACKER, &stuffer, BLOCKS);
+            let remark_final = remark_rates[remark_rates.len() - 1];
+            eprintln!(
+                "{name}: {} bytes, weight share {weight:?}, length share {length:?}, final R {}, cost {cost}; remark ramp: final R {remark_final}, cost {remark_cost}",
+                len(&stuffer),
+                rates[rates.len() - 1],
+            );
+            assert!(
+                rates[rates.len() - 1] * 100 >= remark_final * 95,
+                "{name}: final R {} trails the remark ramp's {remark_final}",
+                rates[rates.len() - 1]
+            );
             assert!(
                 cost * 10 >= remark_cost * 9 && cost <= remark_cost * 10,
                 "{name}: ramp cost {cost} vs remark ramp {remark_cost}"

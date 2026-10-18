@@ -20,6 +20,7 @@ mod root_timelock;
 mod committee_inherent;
 mod chain_identity;
 mod settlement_bonds;
+mod weight_safety;
 
 /// A committee member: its cross-chain key and its session keys.
 type Authority = (CrossChainPublic, SessionKeys);

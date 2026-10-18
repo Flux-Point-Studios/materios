@@ -3,7 +3,7 @@ use alloc::{collections::BTreeSet, vec::Vec};
 use core::slice;
 use frame_support::{
     traits::{Get, IsSubType},
-    weights::{constants::RocksDbWeight, Weight},
+    weights::Weight,
 };
 use pallet_orinq_receipts::{types::Attestation, weights::WeightInfo};
 use parity_scale_codec::Encode;
@@ -91,7 +91,7 @@ fn certification_weight() -> Weight {
 /// each submission's own weight. Its proof bound is a u32 value under three
 /// 495-byte trie layers.
 pub fn threshold_read() -> Weight {
-    RocksDbWeight::get()
+    <Runtime as frame_system::Config>::DbWeight::get()
         .reads(1)
         .saturating_add(Weight::from_parts(0, 4 + 3 * 495))
 }

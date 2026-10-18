@@ -10,7 +10,8 @@ written once in the database; repeated overlay accesses remain in execution
 time. System.Account belongs to the base Currency weight and is whitelisted;
 the MOTRA checkpoint is not. Its cost is **148,885,000 ref_time / 3,533 proof
 bytes**: 23,885,000 execution plus one RocksDB read and write. The database terms
-use `max(T::DbWeight, RocksDbWeight)` separately for reads and writes.
+are the runtime's `DbWeight`, RocksDB's schedule; see the
+[runtime database weights](runtime-db-weights.md).
 
 Reconciliation uses directed fixed-point exponentiation, bounded by 64 rounds,
 and decays generation within the holding interval. It settles a delegatee's
@@ -128,8 +129,7 @@ unchanged by this work.
 | Treasury payout | 2 for PayFromAccount's transfer |
 | Treasury spend hook | 2 per approval plus 1 pot settlement; `MaxApprovals = 100` |
 | Other Treasury calls | 0; approvals/asset-spend records only |
-| IntentSettlement bond/release | 1 reserve/unreserve |
-| IntentSettlement slash | 4 across two repatriations |
+| IntentSettlement bond, release, slash | 0; measured on this runtime with their 1, 1 and 2 checkpoints |
 | IntentSettlement request, batch request, supersede | 0; measured on this runtime with the reserve and any displaced bond's refund, checkpoints included |
 | Other IntentSettlement calls/hooks | 0; settlement records and vouchers do not mutate MATRA |
 | Billing topups | 1 withdrawal |
@@ -163,8 +163,8 @@ repair, u128 limits, failed dispatch and checkpoint invariants. `try_state`
 rejects a holding above current free MATRA or a future checkpoint block.
 
 Receipt era rewards run every 14,400 blocks; their returned initialization
-weight includes every attempted balance mutation. The separate author-map
-traversal remains outside these checkpoint bounds.
+weight includes every attempted balance mutation and the storage of each
+author's entry, account and lifetime reward.
 
 ## Measurements and capacity
 
@@ -203,22 +203,23 @@ execute ChargeMotra pre_dispatch, real runtime dispatch and ChargeMotra
 post_dispatch, including classifier/tag allocation and unused fee-base release.
 Returned weights also cover the duplicate-backstop fit. Runtime tests compare
 the per-count medians independently and derive proof bounds from StorageInfo.
-The complete paid fee-path bound uses its largest execution sample plus floored
+The complete paid fee-path bound uses its largest execution sample plus its
 database costs and the legacy read. These policies distinguish execution
 estimates from hard storage/proof bounds; neither claims block-import latency.
 
 | Capacity under the normal block budget | Count |
 |---|---:|
-| Separately signed transfers | 920 |
-| Separately signed non-threshold attests | 7873 |
-| Non-threshold attests in pure Utility batches | 16121 in 878 batches |
+| Separately signed transfers | 854 |
+| Separately signed non-threshold attests | 3521 |
+| Non-threshold attests in pure Utility batches | 4419 in 503 batches |
 
 The attestation loops execute CheckWeight, ChargeMotra, real runtime dispatch
 and both post-dispatch paths; each recorded signer and receipt is checked.
 Admission reserves the threshold payout bound, then refunds unused call and
-fee work. The batched regression must meet round four's 15,138 count. These
-are protocol capacity measurements, not live TPS or daemon rollout claims.
-DbWeight=() is unchanged and #71 must recalculate capacity after its fix.
+fee work. The batched regression fills the block at each attestation's actual
+weight. These measure protocol capacity; live TPS and the daemon's rollout are
+separate. Storage access is priced, so each attestation's five reads and one
+write take 225,000,000 ref_time.
 
 The maximum dormant-claim batch remains a native TestExternalities execution
 regression backed by independent Wasm samples. Its native elapsed time excludes
@@ -233,8 +234,9 @@ and the second the escrow taken before dispatch; elsewhere they are equal.
 Non-members and the Operational stuffer (`Utility.with_weight` around
 `cancel_all` from a non-guardian) are invalid before payment. At R=0, only
 minimum and length remain. `submit_receipt` is priced with the certification
-of a 3-member committee at threshold 2. Since length is priced as work, a
-transfer at R=1e9 costs 0.001684018191, 3.25% above round five's 0.001630994.
+of a 3-member committee at threshold 2. A transfer at R=1e9 costs
+0.001809018191, which prices its signed base, length work and one storage read
+and write.
 
 | R | Call | Bytes | Fee (MOTRA) | Priority |
 |---|---|---:|---:|---:|
@@ -246,19 +248,19 @@ transfer at R=1e9 costs 0.001684018191, 3.25% above round five's 0.001630994.
 | 0 | claim | 105 | 0.000001105 | 1000000000 |
 | 0 | set_delegatee | 138 | 0.000001138 | 1000000000 |
 | 0 | Operational stuffer | 114 | Rejected | — |
-| 1,000,000,000 | transfer | 139 | 0.001684018191 | 1294926000000 |
+| 1,000,000,000 | transfer | 139 | 0.001809018191 | 1294926000000 |
 | 1,000,000,000 | remark | 106 | 0.001336605458 | 1294926000000 |
 | 1,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 1,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 1,000,000,000 | submit_receipt | 395 | 0.003323116122 / 0.003472001122 | 1294926000000 |
+| 1,000,000,000 | submit_receipt | 395 | 0.006148116122 / 0.006297001122 | 1294926000000 |
 | 1,000,000,000 | claim | 105 | 0.002382099245 | 1294926000000 |
 | 1,000,000,000 | set_delegatee | 138 | 0.002496363722 | 1294926000000 |
 | 1,000,000,000 | Operational stuffer | 114 | Rejected | — |
-| 50,000,000,000 | transfer | 139 | 0.08414509855 | 64697300000000 |
+| 50,000,000,000 | transfer | 139 | 0.09039509855 | 64697300000000 |
 | 50,000,000,000 | remark | 106 | 0.0667760789 | 64697300000000 |
 | 50,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 50,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 50,000,000,000 | submit_receipt | 395 | 0.1660874511 / 0.1735317011 | 64697300000000 |
+| 50,000,000,000 | submit_receipt | 395 | 0.3073374511 / 0.3147817011 | 64697300000000 |
 | 50,000,000,000 | claim | 105 | 0.11905081725 | 64697300000000 |
 | 50,000,000,000 | set_delegatee | 138 | 0.1247624241 | 64697300000000 |
 | 50,000,000,000 | Operational stuffer | 114 | Rejected | — |
@@ -283,9 +285,16 @@ order:
 | Stuffer | Bytes | Weight share | Length share | Final R | Cost (MOTRA) |
 |---|---:|---:|---:|---:|---:|
 | Remark ramp (weight) | 108 | 74.98% | 2.39% | 49,978,920,005 | 38,631.10 |
-| `request_batch_settle`, 0 entries | 124 | 99.96% | 3.33% | 50,000,000,000 | 51,598.46 |
-| `request_batch_settle`, 256 entries | 37,245 | 99.54% | 54.70% | 50,000,000,000 | 77,047.77 |
+| `request_batch_settle`, 0 entries | 124 | 99.97% | 2.83% | 50,000,000,000 | 51,351.52 |
+| `request_batch_settle`, 256 entries | 37,245 | 89.80% | 5.68% | 50,000,000,000 | 47,695.23 |
 | Normal-length-filling remark | 3,932,160 | 0.14% | 75% (all of Normal's) | 50,000,000,000 | 37,536.71 |
+| `transfer_keep_alive` | 141 | 74.93% | 2.30% | 49,909,744,445 | 38,507.24 |
+| One block-filling `upgrade_accounts` | 164,461 | 73.99% | 3.14% | 48,650,172,222 | 37,483.83 |
+
+The last two fill the block in coarser steps and stop short of the remark
+ramp's fullness by up to one call; their R stays within 5% of the remark
+ramp's. The 256-entry `request_batch_settle` is storage-priced too: eight
+copies fill 89.80% of the block's weight.
 
 Shares are of the whole block. Before round six, the first keeper stuffer
 cost 1.66 MOTRA over the same 1,000 blocks with R at zero. The 256-entry
@@ -331,41 +340,19 @@ The recorded checkpoint key is removed from base DB counts and charged by
 the separate checkpoint surcharge. Billing additionally accounts for
 `Balances.TotalIssuance`, which the standard benchmark whitelist excludes.
 
-## Remaining database-weight dependency
+## Database weights
 
-`System.DbWeight = ()` is unchanged; [#71](https://github.com/Flux-Point-Studios/materios/issues/71)
-owns the runtime-wide fix. Within this PR:
-
-- `runtime/src/balance_weights.rs` preserves SDK base weights for Balances,
-  Vesting, Multisig, Recovery, Treasury and IntentSettlement. Their underlying
-  `T::DbWeight` reads/writes remain zero; only MOTRA checkpoint additions have
-  the RocksDB floor.
-- Receipt attestation base functions use `T::DbWeight`; their non-MOTRA
-  storage remains zero-priced. Threshold DB samples include checkpoint keys
-  that are also covered by the separate checkpoint surcharge, so a future
-  nonzero DbWeight must reconcile that conservative duplication.
-- All refunded receipt Currency bases (submission v1/v2, privileged
-  certification, bond, unbond, slash and expiry) and Billing topups/withdrawal
-  use measured execution but configured `T::DbWeight` for base storage.
-  Those DB terms remain zero; separate checkpoint work retains the RocksDB
-  floor. Billing's unrelated dispatches retain their prior flat weights.
-- Reward-hook base work retains configured database terms; author-map work is
-  not covered by the checkpoint increment.
-- Capacity and exact-weight regression numbers use today's zero base database
-  terms. The checkpoint property test proves the added MOTRA delta, not full
-  Currency cost. These expected numbers must move with #71.
-
-MOTRA checkpoint, reconciliation and fee weights use the RocksDB floor and do
-not depend on zero DbWeight. The fee-router/perp-removal migrations already
-use a RocksDB floor for their base work and add the checkpoint increments.
+Every weight here takes the runtime's `DbWeight`, RocksDB's 25,000,000 ref_time
+per read and 100,000,000 per write. The
+[runtime database weights](runtime-db-weights.md) record each call's weight and
+fee before and after storage was priced, block capacity, and the safety audit
+of every call and hook.
 
 Both pallet-intent-settlement and pallet-oracle pin settlement #55's merge
 commit `0757de35efa52d983c9203a683307827d76ae338`. Its settlement weights were
 generated on this runtime, MOTRA checkpoints included, so the adapter adds no
-checkpoint to the fourteen slots #55 introduced. Their storage terms, checkpoint
-keys among them, are priced through `T::DbWeight`, which stays zero until #71.
-Bond, release and slash keep their earlier 1/4/1 checkpoint budgets on top of
-their now-measured bases.
+checkpoint to any slot. Their storage terms, checkpoint keys among them, are
+priced through `T::DbWeight`.
 
 Genesis-relevant fee-path layout work is tracked in
 [#75](https://github.com/Flux-Point-Studios/materios/issues/75); legacy sponsorship,

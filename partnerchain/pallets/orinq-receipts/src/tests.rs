@@ -2951,46 +2951,28 @@ fn auto_slash_clamps_threshold_below_new_committee_size() {
     });
 }
 
-/// `on_runtime_upgrade` must drain `Attestations` so honest attesters can
-/// re-attest under the canonical scheme; legacy entries would otherwise rot
-/// until expiry because their stored hash cannot match the canonical hash.
+/// A runtime upgrade keeps the attestations in flight: every stored entry
+/// already carries a canonical hash, and its signers must not have to attest
+/// again. The upgrade's own work stays bounded whatever their number.
 #[test]
-fn on_runtime_upgrade_clears_stale_attestations() {
+fn on_runtime_upgrade_keeps_attestations_in_flight() {
     new_test_ext().execute_with(|| {
         use frame_support::BoundedBTreeSet;
-        // Pre-populate Attestations with three legacy entries.
         for byte in 0u8..3 {
             let rid = H256::from([byte; 32]);
-            let legacy_hash = H256::from([0xFA; 32]);
             let mut signers =
                 BoundedBTreeSet::<MockAccountId, <Test as pallet::Config>::MaxCommitteeSize>::new();
             let _ = signers.try_insert(acc(byte + 1));
-            pallet::Attestations::<Test>::insert(rid, (legacy_hash, signers));
+            pallet::Attestations::<Test>::insert(rid, (H256::from([0xFA; 32]), signers));
         }
-        assert_eq!(pallet::Attestations::<Test>::iter().count(), 3);
-
-        // Wipe BadAttestSlashThreshold so we can verify the migration's
-        // existing init path still runs alongside the new clear-step.
         pallet::BadAttestSlashThreshold::<Test>::kill();
-        assert!(!pallet::BadAttestSlashThreshold::<Test>::exists());
 
-        // Run the migration.
         let _weight = <pallet::Pallet<Test> as frame_support::traits::Hooks<
             frame_system::pallet_prelude::BlockNumberFor<Test>,
         >>::on_runtime_upgrade();
 
-        // All three entries must be gone.
-        assert_eq!(
-            pallet::Attestations::<Test>::iter().count(),
-            0,
-            "on_runtime_upgrade must drain Attestations storage"
-        );
-        // BadAttestSlashThreshold init must still have run.
-        assert_eq!(
-            pallet::BadAttestSlashThreshold::<Test>::get(),
-            1,
-            "on_runtime_upgrade must seed BadAttestSlashThreshold=1"
-        );
+        assert_eq!(pallet::Attestations::<Test>::iter().count(), 3);
+        assert_eq!(pallet::BadAttestSlashThreshold::<Test>::get(), 1);
     });
 }
 

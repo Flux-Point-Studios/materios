@@ -386,9 +386,8 @@ fn checkpoint_batch_at_block_limit_cannot_finalize_overweight() {
                     .all_lte(
                         limits
                             .get(normal)
-                            .max_total
-                            .expect("normal cap")
-                            .saturating_sub(limits.get(normal).base_extrinsic),
+                            .max_extrinsic
+                            .expect("normal per-call cap"),
                     )
             })
             .last()
@@ -474,9 +473,6 @@ fn checkpoint_currency_callers_and_fee_extension_have_declared_budgets() {
     covered!(pallet_recovery, remove_recovery(2), 1);
     covered!(pallet_treasury, payout(), 2);
     covered!(pallet_treasury, on_initialize_proposals(100), 201);
-    covered!(pallet_intent_settlement, post_settlement_bond(), 1);
-    covered!(pallet_intent_settlement, slash_bad_settlement_evidence(), 4);
-    covered!(pallet_intent_settlement, release_settlement_bond(), 1);
     use pallet_motra::weights::WeightInfo;
     assert_eq!(RuntimeBlockWeights::get()
         .get(frame_support::dispatch::DispatchClass::Normal)
@@ -586,28 +582,41 @@ fn checkpoint_settlement_bond_dispatches_use_the_configured_weights() {
 }
 
 /// Each settlement slot was generated on this runtime, including the MOTRA
-/// checkpoints of any balance it moves, so the adapter adds none. Bond,
-/// slash and release keep the checkpoint budget they carried before theirs
-/// were generated.
+/// checkpoints of any balance it moves, so the adapter adds none. The bond
+/// paths' slots record one, two and one checkpoint keys, which their
+/// storage terms price.
 #[test]
-fn checkpoint_settlement_weights_add_checkpoints_to_bond_slash_and_release_only() {
+fn checkpoint_settlement_weights_add_no_checkpoints() {
     use pallet_intent_settlement::WeightInfo;
     type Base = pallet_intent_settlement::weights::SubstrateWeight<Runtime>;
     type Configured = <Runtime as pallet_intent_settlement::Config>::WeightInfo;
-    let checkpoints =
-        |accounts: u64| pallet_motra::checkpoint_weight::<Runtime>().saturating_mul(accounts);
-    assert_eq!(
-        Configured::post_settlement_bond(),
-        Base::post_settlement_bond() + checkpoints(1)
-    );
-    assert_eq!(
-        Configured::slash_bad_settlement_evidence(),
-        Base::slash_bad_settlement_evidence() + checkpoints(4)
-    );
-    assert_eq!(
-        Configured::release_settlement_bond(),
-        Base::release_settlement_bond() + checkpoints(1)
-    );
+    let db = <Runtime as frame_system::Config>::DbWeight::get();
+    for (name, configured, base, checkpoints) in [
+        (
+            "post_settlement_bond",
+            Configured::post_settlement_bond(),
+            Base::post_settlement_bond(),
+            1,
+        ),
+        (
+            "slash_bad_settlement_evidence",
+            Configured::slash_bad_settlement_evidence(),
+            Base::slash_bad_settlement_evidence(),
+            2,
+        ),
+        (
+            "release_settlement_bond",
+            Configured::release_settlement_bond(),
+            Base::release_settlement_bond(),
+            1,
+        ),
+    ] {
+        assert_eq!(configured, base, "{name}");
+        assert!(
+            base.all_gte(db.reads_writes(checkpoints, checkpoints)),
+            "{name}'s slot prices its {checkpoints} checkpoint keys"
+        );
+    }
     for (name, configured, base) in [
         (
             "request_settle",

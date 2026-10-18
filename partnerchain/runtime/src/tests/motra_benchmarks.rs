@@ -285,7 +285,7 @@ fn benchmark_maximum_dormant_claim_batch_fits_its_declared_execution_budget() {
         use pallet_utility::WeightInfo;
         let count = (1u32..10_000).take_while(|n| wrapped.get_dispatch_info().weight.saturating_mul(u64::from(*n))
             .saturating_add(<Runtime as pallet_utility::Config>::WeightInfo::batch(*n))
-            .all_lte(limit.max_total.expect("normal cap").saturating_sub(limit.base_extrinsic)))
+            .all_lte(limit.max_extrinsic.expect("normal per-call cap")))
             .last().expect("claims fit");
         System::set_block_number(1);
         for index in 0..count {
@@ -370,6 +370,115 @@ mod currency_db {
     impl frame_system::Config for Test {
         type Block = frame_system::mocking::MockBlock<Test>;
         type DbWeight = Db;
+    }
+}
+
+mod zero_db {
+    use frame_support::derive_impl;
+    frame_support::construct_runtime!(pub enum Test { System: frame_system });
+    #[derive_impl(frame_system::config_preludes::TestDefaultConfig)]
+    impl frame_system::Config for Test {
+        type Block = frame_system::mocking::MockBlock<Test>;
+    }
+}
+
+/// The largest DB counts a reconciliation-sample benchmark records, plus the
+/// legacy read every path but the legacy one adds.
+fn reconciliation_db_counts(name: &str) -> (u64, u64) {
+    let sample = samples()
+        .into_iter()
+        .find(|s| s["benchmark"] == name)
+        .expect("benchmark sample");
+    let rows = sample["db_results"].as_array().expect("DB samples");
+    let max = |field: &str| {
+        rows.iter()
+            .map(|r| r[field].as_u64().expect("DB count"))
+            .max()
+            .expect("DB sample")
+    };
+    (
+        max("reads") + u64::from(name != "reconcile_legacy"),
+        max("writes"),
+    )
+}
+
+#[test]
+fn benchmark_motra_weights_price_storage_at_the_configured_schedule() {
+    use pallet_motra::weights::{SubstrateWeight, WeightInfo};
+    type Priced = SubstrateWeight<currency_db::Test>;
+    type Unpriced = SubstrateWeight<zero_db::Test>;
+    let db = currency_db::Db::get();
+    for (name, priced, unpriced, (reads, writes)) in [
+        (
+            "checkpoint",
+            Priced::checkpoint(),
+            Unpriced::checkpoint(),
+            (1, 1),
+        ),
+        (
+            "fee_path",
+            Priced::fee_path(),
+            Unpriced::fee_path(),
+            reconciliation_db_counts("fee_path"),
+        ),
+        (
+            "claim_motra",
+            Priced::claim_motra(),
+            Unpriced::claim_motra(),
+            reconciliation_db_counts("claim_motra"),
+        ),
+        (
+            "set_delegatee",
+            Priced::set_delegatee(),
+            Unpriced::set_delegatee(),
+            reconciliation_db_counts("set_delegatee"),
+        ),
+        (
+            "reconcile",
+            Priced::reconcile(),
+            Unpriced::reconcile(),
+            reconciliation_db_counts("reconcile"),
+        ),
+    ] {
+        assert_eq!(
+            priced.saturating_sub(unpriced),
+            db.reads_writes(reads, writes),
+            "{name} must price its storage at the runtime's schedule"
+        );
+    }
+}
+
+/// Threshold samples record each changed account's MOTRA checkpoint, a read
+/// and a write for the n signers and the treasury or refunded submitter;
+/// `balance_mutations` charges those, so the attestation's own count
+/// excludes them.
+#[test]
+fn benchmark_threshold_attestation_charges_each_checkpoint_once() {
+    use pallet_orinq_receipts::weights::{SubstrateWeight, WeightInfo};
+    let samples: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
+    ))
+    .expect("attestation samples");
+    for sample in samples.iter().filter(|s| {
+        matches!(
+            s["benchmark"].as_str(),
+            Some("attest_threshold" | "attest_dead_treasury")
+        )
+    }) {
+        for row in sample["db_results"].as_array().expect("DB samples") {
+            let n = row["components"][0][1].as_u64().expect("signer count");
+            let checkpoints = n + 1;
+            let reads = row["reads"].as_u64().expect("reads") - checkpoints;
+            let writes = row["writes"].as_u64().expect("writes") - checkpoints;
+            let storage = SubstrateWeight::<currency_db::Test>::attest_threshold(n as u32)
+                .saturating_sub(SubstrateWeight::<zero_db::Test>::attest_threshold(n as u32));
+            assert_eq!(
+                storage,
+                currency_db::Db::get().reads_writes(reads, writes),
+                "{} with {n} signers charges its checkpoints twice",
+                sample["benchmark"]
+            );
+        }
     }
 }
 
@@ -494,7 +603,11 @@ fn benchmark_currency_refunds_retain_measured_execution_and_proofs() {
             ),
             "{name} must retain the measured base DB counts"
         );
-        eprintln!("currency {name}: declared={actual:?}, measured/proof bound={expected:?}");
+        let expected = expected.saturating_add(
+            <Runtime as frame_system::Config>::DbWeight::get()
+                .reads_writes(db_count("reads"), db_count("writes")),
+        );
+        eprintln!("currency {name}: declared={actual:?}, measured and priced={expected:?}");
         if actual != expected {
             failures.push(format!("{name}: {actual:?} != {expected:?}"));
         }

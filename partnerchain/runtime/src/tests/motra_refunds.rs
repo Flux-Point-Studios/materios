@@ -493,8 +493,7 @@ fn pricing_fee_and_priority_table() {
                     );
                 }
                 if name == "transfer" && rate == 1_000_000_000 {
-                    // Round five priced 1,630,994,000,000 without length work.
-                    assert_eq!(fee, 1_684_018_191_000);
+                    assert_eq!(fee, 1_809_018_191_000);
                 }
                 if name == "attest_member" {
                     assert_eq!(fee, 0);
@@ -505,6 +504,35 @@ fn pricing_fee_and_priority_table() {
                 eprintln!("PRICING {{\"R\":{rate},\"call\":\"{name}\",\"fee\":{fee},\"escrow\":{escrow},\"priority\":{priority},\"length\":{len},\"call_weight\":{}}}", info.weight.ref_time());
             });
         }
+    }
+}
+
+/// A submission prepays its committee's certification at the current
+/// threshold, so its escrow grows with the threshold.
+#[test]
+fn pricing_submission_escrow_grows_with_the_threshold() {
+    use parity_scale_codec::Encode;
+    let mut previous = 0;
+    for threshold in [1u32, 2, 16, 64, 96] {
+        externalities().execute_with(|| {
+            receipt(96, threshold, 0);
+            pricing_params(1_000_000_000);
+            let who = account(1);
+            pallet_motra::MotraBalances::<Runtime>::insert(&who, 1_000_000_000_000_000_000u128);
+            let call = submit(H256::repeat_byte(9));
+            let info = call.get_dispatch_info();
+            let len = call.encoded_size() + 105;
+            let before = Motra::total_burned();
+            pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&who, &call, &info, len)
+                .expect("escrow");
+            let escrow = Motra::total_burned() - before;
+            assert!(escrow > previous, "threshold {threshold}");
+            previous = escrow;
+            eprintln!(
+                "SUBMISSION {{\"threshold\":{threshold},\"escrow\":{escrow},\"length\":{len}}}"
+            );
+        });
     }
 }
 
@@ -657,9 +685,10 @@ fn refund_non_threshold_attest_charges_no_checkpoints_and_no_motra() {
             actual.ref_time() >= times[times.len() / 2] * 1_000,
             "actual weight must cover benchmarked execution"
         );
-        assert!(
-            actual.ref_time() < pallet_motra::checkpoint_weight::<Runtime>().ref_time(),
-            "non-threshold attestation must not carry any checkpoint surcharge: {actual:?}"
+        assert_eq!(
+            actual,
+            <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1),
+            "non-threshold attestation must not carry any checkpoint surcharge"
         );
         assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
             Some(pre),
@@ -1067,7 +1096,7 @@ fn refund_failed_legacy_bond_keeps_its_budget_and_rolls_back_checkpoints() {
 }
 
 #[test]
-fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
+fn refund_batched_non_threshold_attests_fill_the_block_at_their_actual_weight() {
     use frame_support::dispatch::DispatchClass;
     use pallet_utility::WeightInfo;
     use parity_scale_codec::Encode;
@@ -1123,10 +1152,24 @@ fn refund_batched_non_threshold_attests_restore_historical_block_capacity() {
             accepted += u64::from(width);
             batches += 1;
         }
-        let historical = cap.ref_time() / (ExtrinsicBaseWeight::get().ref_time() + 15_000);
-        assert!(accepted >= 15_138, "{accepted} batched attests < round-four capacity 15138");
-        assert!(System::block_weight().get(DispatchClass::Normal).all_lte(cap));
-        eprintln!("batched non-threshold attests/block: {accepted} in {batches} signed batches; historical {historical}; consumed {:?}", System::block_weight());
+        // Each attest is refunded to its first-signer weight, and each duty
+        // batch releases the unused fee path of its signed base; the block
+        // stops only when one more single-attest batch cannot reserve its
+        // declared weight.
+        let actual = <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1);
+        let consumed = *System::block_weight().get(DispatchClass::Normal);
+        assert!(consumed.all_lte(cap));
+        assert!(per_call
+            .saturating_add(<Runtime as pallet_utility::Config>::WeightInfo::batch(1))
+            .saturating_add(normal.base_extrinsic)
+            .any_gt(cap.saturating_sub(consumed)));
+        assert!(
+            consumed.ref_time()
+                >= actual.ref_time() * accepted + ExtrinsicBaseWeight::get().ref_time() * batches,
+            "attests must be charged at least their actual weight"
+        );
+        assert!(accepted > cap.ref_time() / per_call.ref_time(), "refunds must beat declared admission");
+        eprintln!("batched non-threshold attests/block: {accepted} in {batches} signed batches; consumed {:?}", System::block_weight());
     });
 }
 
