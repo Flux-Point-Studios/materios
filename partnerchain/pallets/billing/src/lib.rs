@@ -11,8 +11,12 @@ pub mod weights;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+
 #[frame_support::pallet]
 pub mod pallet {
+    use frame_support::dispatch::DispatchResultWithPostInfo;
     use frame_support::pallet_prelude::*;
     use frame_support::traits::{Currency, ExistenceRequirement, Imbalance};
     use frame_system::pallet_prelude::*;
@@ -200,22 +204,24 @@ pub mod pallet {
         /// Burn `amount` MATRA from caller's pallet-balances account, credit
         /// caller's billing balance by the same amount.
         #[pallet::call_index(0)]
-        #[pallet::weight(T::WeightInfo::topup_self())]
-        pub fn topup_self(origin: OriginFor<T>, amount: u128) -> DispatchResult {
+        #[pallet::weight(T::WeightInfo::topup_self().saturating_add(T::WeightInfo::balance_mutations(1)))]
+        pub fn topup_self(origin: OriginFor<T>, amount: u128) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
-            Self::do_topup(who.clone(), who, amount)
+            Self::do_topup(who.clone(), who, amount)?;
+            Ok(Some(T::WeightInfo::topup_self().saturating_add(T::WeightInfo::balance_mutations(u32::from(amount > 0)))).into())
         }
 
         /// Burn `amount` MATRA from caller, credit `target`'s billing balance.
         #[pallet::call_index(1)]
-        #[pallet::weight(T::WeightInfo::topup_for())]
+        #[pallet::weight(T::WeightInfo::topup_for().saturating_add(T::WeightInfo::balance_mutations(1)))]
         pub fn topup_for(
             origin: OriginFor<T>,
             target: T::AccountId,
             amount: u128,
-        ) -> DispatchResult {
+        ) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
-            Self::do_topup(who, target, amount)
+            Self::do_topup(who, target, amount)?;
+            Ok(Some(T::WeightInfo::topup_for().saturating_add(T::WeightInfo::balance_mutations(u32::from(amount > 0)))).into())
         }
 
         /// Charge the signed origin for one billed request.
@@ -341,8 +347,8 @@ pub mod pallet {
         /// equal the requested amount; otherwise we re-burn any partial credit
         /// and leave the pending entry intact for retry.
         #[pallet::call_index(5)]
-        #[pallet::weight(T::WeightInfo::execute_withdrawal())]
-        pub fn execute_withdrawal(origin: OriginFor<T>) -> DispatchResult {
+        #[pallet::weight(T::WeightInfo::execute_withdrawal().saturating_add(T::WeightInfo::balance_mutations(2)))]
+        pub fn execute_withdrawal(origin: OriginFor<T>) -> DispatchResultWithPostInfo {
             let who = ensure_signed(origin)?;
             let (amount, executable_at) =
                 PendingWithdrawals::<T>::get(&who).ok_or(Error::<T>::NoPendingWithdrawal)?;
@@ -382,7 +388,8 @@ pub mod pallet {
 
             Self::deposit_event(Event::WithdrawalExecuted { who, amount });
 
-            Ok(())
+            Ok(Some(T::WeightInfo::execute_withdrawal()
+                .saturating_add(T::WeightInfo::balance_mutations(u32::from(credited_free > Zero::zero())))).into())
         }
 
         /// Cancel a pending withdrawal: credit any prior pending amount back

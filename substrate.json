@@ -4,7 +4,7 @@
     {
       "id": "orinq-receipts-pallet",
       "name": "Orinq receipts pallet",
-      "desc": "Receipt registry with M-of-N committee attestation, availability certification, anchor records, attestor bonds and slashing, and fee escrow \u2014 the on-chain truth every other primitive commits to.",
+      "desc": "Receipt registry with M-of-N committee attestation, availability certification, anchor records, attestor bonds and slashing, and fee escrow \u2014 the on-chain truth every other primitive commits to. Benchmarked threshold and non-threshold attestation paths return actual weights; conditional Currency calls refund unused MOTRA checkpoint budgets. Every refunded Currency base is pinned to maximum Wasm samples and independent storage proofs, including zero-balance branches. Non-threshold and duplicate backstop weights depend on the actual signer count and cover each measured signer-count median with an upward-adjusted FRAME fit, including the complete duty pre/dispatch/post path. Pure Utility attestation batches must retain at least the prior 15,138-attest block capacity; invalid and non-canonical duty calls are rejected before payment; a pure batch may carry no more stale attests than new ones.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/orinq-receipts"
@@ -15,18 +15,23 @@
     {
       "id": "motra-fee-resource",
       "name": "MOTRA fee resource",
-      "desc": "Non-transferable transaction-fee resource generated from MATRA holdings (NIGHT/DUST model), charged by a signed extension, with sponsor delegation; the extension also gives a runtime-named (signer, call) set the top transaction-pool priority, one slot per signer, so the guardian's veto cannot be outbid for a place in a block.",
+      "desc": "Non-transferable transaction-fee resource generated from the lowest free MATRA held throughout each checkpoint interval (NIGHT/DUST model), with balance-change checkpoints preventing backdated funding and cycling, PalletId sovereign generation excluded, and a constant-cost legacy migration with an upgrade-block earning baseline. Gemtek Wasm benchmarks price checkpoint storage per touched account; runtime dispatch weights and initialization budgets cover Currency callers and batched transfers, with storage-observation property tests. Account creation does not write MOTRA state. Charged by a signed extension, with sponsor delegation for fresh accounts' first fees; the extension also gives a runtime-named (signer, call) set the top transaction-pool priority, one slot per signer, so the guardian's veto cannot be outbid for a place in a block. Retention and generated credit use bounded logarithmic conservative decay; the complete fee extension is benchmarked and refunds unused actual weight using the paid price. Committed Wasm samples pin checkpoint, reconciliation and fee weights. Signed-base and call work are both congestion priced; paid priority uses only the non-refundable base. Canonical new committee attests and pure Utility batches are feeless duties with signer/receipt replay tags and pre-dispatch revalidation; the guardian retains highest priority. Refunds preserve the signed base and max_balance, including arithmetic saturation. Paid Operational-class calls are refused before payment unless the guardian's veto takes them first or the runtime names the signer's path (sudo key's exempt calls, ready timelock enactment, authorized upgrades, settlement committee and bounded keeper calls); a decode sweep pins every Operational call and wrapper. Congestion meters Normal plus Operational weight against the Normal budget, excluding Mandatory weight and the guardian's veto. Receipt submissions prepay their committee's feeless certification work at R.",
       "kind": "pallet",
       "paths": [
-        "partnerchain/pallets/motra"
+        "partnerchain/pallets/motra",
+        "partnerchain/runtime/src/balance_weights.rs",
+        "partnerchain/runtime/src/motra_duty.rs",
+        "partnerchain/runtime/src/paid_operational.rs"
       ],
-      "consumes": [],
+      "consumes": [
+        "orinq-receipts-pallet"
+      ],
       "status": "live"
     },
     {
       "id": "billing-pallet",
       "name": "Billing pallet",
-      "desc": "Application-layer MATRA billing (pay_request) for API calls, metering and attestation evidence \u2014 the user-facing spend surface, distinct from MOTRA tx fees.",
+      "desc": "Application-layer MATRA billing (pay_request) for API calls, metering and attestation evidence \u2014 the user-facing spend surface, distinct from MOTRA tx fees. Topups and withdrawals use measured Wasm execution and storage-proof bounds while refunding unused MOTRA checkpoint surcharges.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/billing"

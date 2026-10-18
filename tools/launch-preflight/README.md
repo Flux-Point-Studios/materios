@@ -666,34 +666,33 @@ The preprod v6 fixture is the published preprod raw chain spec, and the
 genesis-hash test checks the computed hash against the one the live network
 reports.
 
-The spec 240 fixtures are the preprod genesis that spec 240 (transaction version
-5, the Root timelock, no PerpEngine) builds, without its code, and that
-runtime's metadata, trimmed to what the preflight reads. Live preprod runs spec
-239 (transaction version 4), which has no Root timelock and still has
-PerpEngine. They come from a `materios-node` built at f3f9dcb, which is main at
-d3e8e5a with the timelock's `DefaultDelays` and `MaxDelay` declared as metadata
-constants. A test holds both fixtures to the spec and transaction versions the
-runtime source declares. From `partnerchain/`, with subwasm v0.21.3 and jq
+The spec 241 fixtures are the preprod genesis that spec 241 (transaction version
+5, MOTRA holding checkpoints, the Root timelock, no PerpEngine) builds, without
+its code, and that runtime's metadata, trimmed to what the preflight reads.
+A test holds both fixtures to the spec and transaction versions the runtime
+source declares. MOTRA checkpoints are allowed only under canonical account keys,
+at block zero, and with holdings no greater than the account's free MATRA.
+From `partnerchain/`, with subwasm v0.21.3 and jq
 (`build-spec` runs offline, and the scratch base path takes the network key it
 writes):
 
 ```
 materios-node build-spec --chain preprod --raw --disable-default-bootnode --base-path "$(mktemp -d)" > raw.json
-jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec240-raw.json
+jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec241-raw.json
 jq -r '.genesis.raw.top["0x3a636f6465"][2:]' raw.json | xxd -r -p > runtime.wasm
 subwasm metadata runtime.wasm --format json | jq -jcS '{V14: {pallets: [.V14.pallets[]
   | {name, constants: [.constants[] | {name, value}], storage: (.storage | if . == null
   then null else {prefix, entries: [.entries[] | {name}]} end)}], types: {types:
   [.V14.types.types[] | select(.type.path | length > 0) | {id, type: {path: .type.path}}]}}}' \
-  > fixtures/spec240-metadata.json
+  > fixtures/spec241-metadata.json
 ```
 
 The same trim of the preprod v6 runtime's metadata gives
 `fixtures/preprod-v6-metadata.json` byte for byte.
 
-Neither preprod genesis seats a committee: the builder at f3f9dcb leaves
+The historical preprod v6 fixture leaves
 `SessionCommitteeManagement.CurrentCommittee` empty and seeds Aura and GRANDPA
-directly, and rule 9 refuses that. The CLI tests' clean launch seats its
-authorities as the genesis committee, as a builder that seats one writes it:
+directly, and rule 9 refuses that. The spec-241 fixture and the CLI tests' clean
+launch seat their authorities as the genesis committee:
 the committee, then the Aura authors, GRANDPA voters and session validators
 the session genesis takes from it.

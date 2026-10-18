@@ -129,3 +129,12 @@ pub enum SlashReason {
     /// Generic governance-authored slash — reason encoded off-chain.
     Governance,
 }
+
+/// What a committee member's canonical attestation would do if dispatched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Attestation {
+    /// Records a new signer on a pending receipt.
+    New,
+    /// A benign no-op: the receipt is certified, or this member signed it.
+    Stale,
+}

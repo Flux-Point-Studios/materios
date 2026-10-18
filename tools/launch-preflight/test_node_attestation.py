@@ -83,6 +83,13 @@ def test_build_spec_stores_the_last_runtime_upgrade_the_preflight_derives_from_t
     assert lp.check_last_runtime_upgrade(spec) == []
 
 
+def test_build_spec_motra_checkpoints_pass_the_genesis_gate(preprod):
+    spec = lp.load_spec(str(preprod))
+    meta = lp.Metadata.from_v14(lp.subwasm_metadata(spec.code, base.subwasm()))
+    assert any(key.startswith(lp.storage_key("Motra", "AccrualCheckpoint")) for key in spec.storage)
+    assert lp.check_genesis_storage(spec, meta) == []
+
+
 def test_build_spec_writes_committee_scripts_the_preflight_reads(preprod):
     spec = lp.load_spec(str(preprod))
     assert lp.committee_policies(spec) == base.scripts_policies(spec)

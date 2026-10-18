@@ -40,6 +40,8 @@ steps:
       # The timelock's try_state invariants, which only the try-runtime
       # feature compiles in.
       - cargo test -p pallet-root-timelock --features try-runtime --lib --locked
+      - cargo test -p pallet-motra --features try-runtime --lib --locked
+      - cargo test -p pallet-motra -p pallet-orinq-receipts -p pallet-billing --features runtime-benchmarks --lib --locked
       # The node the launch preflight's genesis attestation runs, built
       # before the runtime tests below, which build the runtime without its
       # blob.
@@ -49,6 +51,7 @@ steps:
       # check it, treasury and migrations. They run natively; the blob is
       # already built by the check above.
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast
+      - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --features try-runtime --lib --locked --no-fail-fast
       # The chain-spec builders: each genesis, built from the spec's own code
       # by the runtime's genesis builder as build-spec builds it, carried
       # through the first committee rotation.

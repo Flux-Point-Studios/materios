@@ -140,6 +140,7 @@ impl OnRuntimeUpgrade for SweepFeeRouterPotsIntoTreasury {
         );
 
         db_weight().reads_writes(1 + 2 * SWEEP_READS, 2 * SWEEP_WRITES + 1)
+            .saturating_add(crate::balance_weights::mutations(4))
     }
 }
 
@@ -254,6 +255,7 @@ impl OnRuntimeUpgrade for RemovePerpEngine {
             3 + 3 * bonds + SWEEP_READS + u64::from(scanned),
             3 * bonds + SWEEP_WRITES + u64::from(deleted),
         )
+        .saturating_add(crate::balance_weights::mutations(bonds.saturating_add(2)))
     }
 
     #[cfg(feature = "try-runtime")]

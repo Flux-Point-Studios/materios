@@ -5650,6 +5650,7 @@ dependencies = [
 name = "pallet-billing"
 version = "0.1.0"
 dependencies = [
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "log",
@@ -5701,7 +5702,7 @@ dependencies = [
 [[package]]
 name = "pallet-intent-settlement"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=c60b98f6bcbb99b1745447fe7a74be321c72bd51#c60b98f6bcbb99b1745447fe7a74be321c72bd51"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=feb79e00510d0083de67bc3219e442f802cd1101#feb79e00510d0083de67bc3219e442f802cd1101"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5728,8 +5729,10 @@ dependencies = [
  "pallet-balances",
  "pallet-timestamp",
  "parity-scale-codec",
+ "proptest",
  "scale-info",
  "serde",
+ "sp-arithmetic",
  "sp-io",
  "sp-runtime",
  "sp-std",
@@ -5767,7 +5770,7 @@ dependencies = [
 [[package]]
 name = "pallet-oracle"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=c60b98f6bcbb99b1745447fe7a74be321c72bd51#c60b98f6bcbb99b1745447fe7a74be321c72bd51"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=feb79e00510d0083de67bc3219e442f802cd1101#feb79e00510d0083de67bc3219e442f802cd1101"
 dependencies = [
  "frame-benchmarking",
  "frame-support",

@@ -203,7 +203,11 @@ The returned balance reflects lazy reconciliation — it is computed as of the c
 
 ### Estimate Fee
 
-Estimate the MOTRA fee for a transaction with a given weight:
+Estimate the paid-call MOTRA fee from its call weight. The RPC adds the signed
+base automatically; do not add it to the input. It has no signer/call identity,
+so this generic quote does not describe a validated feeless committee duty.
+The quote uses zero encoded length; add the configured per-byte charge for the
+actual signed extrinsic.
 
 ```bash
 # Estimate fee for a transaction with 50M ref_time weight
@@ -227,7 +231,15 @@ curl -s -H "Content-Type: application/json" \
 
 ### Observing Fee Payment
 
-- Transactions that fail with **"insufficient MOTRA"** need more blocks for generation to accrue. Wait and retry.
+- A newly funded account starts with zero generated MOTRA. For immediate first
+  fees, fund it with MATRA, have a sponsor call `set_delegatee(Some(account))`,
+  then have the sponsor reconcile after generation accrues. `Delegatees` routes
+  that new generation to the account; existing sponsor MOTRA is not transferred.
+  Alternatively, wait until the account's own post-funding accrual covers its fee.
+- Nonzero MATRA top-ups enter the earning base at reconciliation. Claim before
+  moving MATRA to realize the completed holding interval. On the spec-241 upgrade,
+  unchanged legacy balances begin earning from the upgrade block; unproven historical
+  generation is discarded, while stored MOTRA and delegation remain.
 - On a dev chain with block time ~6s and default generation rate, accounts accumulate MOTRA quickly.
 - Use `motra_getParams` to see the current congestion rate — it should be 0 (or near-zero) on an empty dev chain since block fullness is well below the 50% target.
 - To test congestion-based fee increases, submit many transactions in rapid succession to fill blocks above the target threshold.

@@ -3,9 +3,14 @@
 extern crate alloc;
 
 pub use pallet::*;
+mod account_store;
+mod checkpoint_weights;
+mod decay;
 pub mod fee;
+mod reconciliation_weights;
 pub mod types;
 pub mod weights;
+pub use account_store::{checkpoint_weight, reconciliation_weight, MatraAccountStore};
 
 #[cfg(test)]
 mod tests;
@@ -22,13 +27,44 @@ pub mod pallet {
     use crate::types::MotraParams;
     use crate::weights::WeightInfo;
 
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     #[pallet::config]
     pub trait Config: frame_system::Config + pallet_balances::Config {
         /// The overarching runtime event type.
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+
+        /// Runtime-recognized validator duties; None follows the paid path.
+        /// Duty checks must be included in the call weight. A valid duty skips
+        /// fee accounting and releases the fee_path budget from the signed base.
+        fn validate_attestation(
+            _who: &Self::AccountId,
+            _call: &<Self as frame_system::Config>::RuntimeCall,
+        ) -> Option<sp_runtime::transaction_validity::TransactionValidity> {
+            None
+        }
+
+        /// Whether `who` may pay for this Operational-class call. Operational
+        /// weight may take the whole block, beyond the Normal share, so every
+        /// other paid Operational call is invalid. `TakenFirst` calls are
+        /// always admitted.
+        fn pays_for_operational(
+            _who: &Self::AccountId,
+            _call: &<Self as frame_system::Config>::RuntimeCall,
+        ) -> bool {
+            false
+        }
+
+        /// Weight of the feeless duties `call` commits validators to in later
+        /// transactions. It is priced at R with the call, and neither reserved
+        /// in this block nor refunded.
+        fn deferred_duty_weight(_call: &<Self as frame_system::Config>::RuntimeCall) -> Weight {
+            Weight::zero()
+        }
 
         /// Weight information for extrinsics in this pallet.
         type WeightInfo: WeightInfo;
@@ -71,7 +107,7 @@ pub mod pallet {
     #[pallet::getter(fn total_issued)]
     pub type TotalIssued<T: Config> = StorageValue<_, u128, ValueQuery>;
 
-    /// Total MOTRA burned as fees (cumulative, never decreases).
+    /// Total MOTRA burned as fees, net of actual-weight refunds.
     #[pallet::storage]
     #[pallet::getter(fn total_burned)]
     pub type TotalBurned<T: Config> = StorageValue<_, u128, ValueQuery>;
@@ -81,8 +117,17 @@ pub mod pallet {
     #[pallet::getter(fn insufficient_motra_failures)]
     pub type InsufficientMotraFailures<T: Config> = StorageValue<_, u64, ValueQuery>;
 
+    /// Lowest free MATRA held since the checkpoint block. Missing uses the legacy upgrade baseline.
+    #[pallet::storage]
+    pub type AccrualCheckpoint<T: Config> =
+        StorageMap<_, Blake2_128Concat, T::AccountId, (u128, BlockNumberFor<T>), OptionQuery>;
+
+    /// Earliest proven holding block for legacy accounts without a balance mutation.
+    #[pallet::storage]
+    pub type LegacyAccrualStart<T: Config> = StorageValue<_, BlockNumberFor<T>, OptionQuery>;
+
     #[pallet::event]
-    #[pallet::generate_deposit(pub(super) fn deposit_event)]
+    #[pallet::generate_deposit(pub(crate) fn deposit_event)]
     pub enum Event<T: Config> {
         /// MOTRA balance reconciled for account (after decay + generation).
         BalanceReconciled {
@@ -106,6 +151,8 @@ pub mod pallet {
             new_rate: u128,
             block_fullness: Perbill,
         },
+        /// The unused weight portion of a pre-dispatch fee was restored.
+        FeeRefunded { who: T::AccountId, amount: u128 },
     }
 
     #[pallet::error]
@@ -122,6 +169,73 @@ pub mod pallet {
 
     #[pallet::hooks]
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
+        fn on_runtime_upgrade() -> Weight {
+            if StorageVersion::get::<Self>() == StorageVersion::new(0) {
+                // Balance hooks prove unchanged legacy holdings from this block onward.
+                LegacyAccrualStart::<T>::put(frame_system::Pallet::<T>::block_number());
+                StorageVersion::new(1).put::<Self>();
+            }
+            crate::account_store::checkpoint_weight::<T>().saturating_mul(2)
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn try_state(_: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
+            for (who, (held, since)) in AccrualCheckpoint::<T>::iter() {
+                ensure!(
+                    held <= Self::get_matra_balance(&who),
+                    "MOTRA checkpoint exceeds free MATRA"
+                );
+                ensure!(
+                    since <= frame_system::Pallet::<T>::block_number(),
+                    "MOTRA checkpoint is in the future"
+                );
+            }
+            Ok(())
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn pre_upgrade() -> Result<alloc::vec::Vec<u8>, sp_runtime::TryRuntimeError> {
+            ensure!(
+                StorageVersion::get::<Self>() <= STORAGE_VERSION,
+                "unexpected MOTRA version"
+            );
+            Ok((
+                StorageVersion::get::<Self>() == StorageVersion::new(0),
+                frame_system::Pallet::<T>::block_number(),
+                LegacyAccrualStart::<T>::get(),
+                Self::accounting_state(),
+            )
+                .encode())
+        }
+
+        #[cfg(feature = "try-runtime")]
+        fn post_upgrade(state: alloc::vec::Vec<u8>) -> Result<(), sp_runtime::TryRuntimeError> {
+            let (migrating, block, previous_start, accounting): (
+                bool,
+                BlockNumberFor<T>,
+                Option<BlockNumberFor<T>>,
+                alloc::vec::Vec<u8>,
+            ) = Decode::decode(&mut &state[..]).map_err(|_| "invalid MOTRA migration state")?;
+            ensure!(
+                StorageVersion::get::<Self>() == StorageVersion::new(1),
+                "MOTRA version not migrated"
+            );
+            ensure!(
+                Self::accounting_state() == accounting,
+                "migration changed existing MOTRA state"
+            );
+            ensure!(
+                LegacyAccrualStart::<T>::get()
+                    == if migrating {
+                        Some(block)
+                    } else {
+                        previous_start
+                    },
+                "incorrect legacy accrual start"
+            );
+            Ok(())
+        }
+
         /// At end of each block, adjust congestion_rate based on block fullness.
         fn on_finalize(_n: BlockNumberFor<T>) {
             Self::adjust_congestion_rate();
@@ -221,34 +335,65 @@ pub mod pallet {
     }
 
     impl<T: Config> Pallet<T> {
+        #[cfg(feature = "try-runtime")]
+        fn accounting_state() -> alloc::vec::Vec<u8> {
+            (
+                LastTouched::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                MotraBalances::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                Delegatees::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                AccrualCheckpoint::<T>::iter().collect::<alloc::vec::Vec<_>>(),
+                Params::<T>::get(),
+                TotalIssued::<T>::get(),
+                TotalBurned::<T>::get(),
+                InsufficientMotraFailures::<T>::get(),
+            )
+                .encode()
+        }
+
+        fn accrual(who: &T::AccountId, params: &MotraParams) -> (u128, u128) {
+            let now = frame_system::Pallet::<T>::block_number();
+            let last = LastTouched::<T>::get(who);
+            let elapsed: u64 = now.saturating_sub(last).try_into().unwrap_or(u64::MAX);
+            let balance = MotraBalances::<T>::get(who);
+            // PalletId accounts and subaccounts carry the SCALE type prefix `modl`.
+            let (per_block, blocks) = if who.encode().starts_with(b"modl") {
+                (0, 0)
+            } else {
+                let matra = Self::get_matra_balance(who);
+                let checkpoint = AccrualCheckpoint::<T>::get(who).or_else(|| {
+                    LegacyAccrualStart::<T>::get().map(|since| (matra, since.max(last)))
+                });
+                if let Some((held, since)) = checkpoint {
+                    let blocks: u64 = now.saturating_sub(since).try_into().unwrap_or(u64::MAX);
+                    (
+                        held.min(matra)
+                            .saturating_mul(params.generation_per_matra_per_block)
+                            / 1_000_000,
+                        blocks,
+                    )
+                } else {
+                    (0, 0)
+                }
+            };
+            let (decayed, generated) =
+                crate::decay::accrue(balance, per_block, params.decay_rate_per_block, elapsed);
+            if blocks == elapsed {
+                (decayed, generated)
+            } else {
+                (
+                    decayed,
+                    crate::decay::accrue(0, per_block, params.decay_rate_per_block, blocks).1,
+                )
+            }
+        }
+
         /// Read-only projection of what the MOTRA balance would be if reconciled now.
         ///
         /// Unlike `reconcile()`, this does NOT write to storage. Used by RPC queries
         /// so that freshly funded accounts show their projected balance immediately.
         pub fn projected_balance(who: &T::AccountId) -> u128 {
-            let current_block = frame_system::Pallet::<T>::block_number();
-            let last = LastTouched::<T>::get(who);
             let params = Params::<T>::get();
-
-            let elapsed: u64 = current_block
-                .saturating_sub(last)
-                .try_into()
-                .unwrap_or(u64::MAX);
-
-            let stored = MotraBalances::<T>::get(who);
-            if elapsed == 0 {
-                return stored;
-            }
-
-            let decayed = Self::apply_decay_iterative(stored, params.decay_rate_per_block, elapsed);
-
-            let matra_balance: u128 = Self::get_matra_balance(who);
-            // MATRA has 6 decimals; normalize to compute generated MOTRA.
-            let generated = matra_balance
-                .saturating_mul(params.generation_per_matra_per_block)
-                .saturating_mul(elapsed as u128)
-                / 1_000_000u128;
-
+            let (decayed, generated) = Self::accrual(who, &params);
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
             if &generation_target == who {
                 decayed.saturating_add(generated).min(params.max_balance)
@@ -263,31 +408,18 @@ pub mod pallet {
         /// This is called on every fee payment and explicit claim.
         pub fn reconcile(who: &T::AccountId) -> Result<u128, DispatchError> {
             let current_block = frame_system::Pallet::<T>::block_number();
-            let last = LastTouched::<T>::get(who);
+            let matra = Self::get_matra_balance(who);
             let params = Params::<T>::get();
-
-            let elapsed: u64 = current_block
-                .saturating_sub(last)
-                .try_into()
-                .unwrap_or(u64::MAX);
-
-            if elapsed == 0 {
-                return Ok(MotraBalances::<T>::get(who));
-            }
-
             let old_balance = MotraBalances::<T>::get(who);
-
-            let decayed_balance =
-                Self::apply_decay_iterative(old_balance, params.decay_rate_per_block, elapsed);
-
+            if LastTouched::<T>::get(who) == current_block
+                && AccrualCheckpoint::<T>::get(who) == Some((matra, current_block))
+                && old_balance <= params.max_balance
+            {
+                return Ok(old_balance);
+            }
+            let (decayed_balance, generated) = Self::accrual(who, &params);
             let decay_amount = old_balance.saturating_sub(decayed_balance);
-
-            // MATRA has 6 decimals; normalize to compute generated MOTRA.
-            let matra_balance: u128 = Self::get_matra_balance(who);
-            let generated = matra_balance
-                .saturating_mul(params.generation_per_matra_per_block)
-                .saturating_mul(elapsed as u128)
-                / 1_000_000u128;
+            let mut total_decay = decay_amount;
 
             let generation_target = Delegatees::<T>::get(who).unwrap_or_else(|| who.clone());
 
@@ -301,10 +433,15 @@ pub mod pallet {
 
             MotraBalances::<T>::insert(who, new_self_balance);
             LastTouched::<T>::insert(who, current_block);
+            AccrualCheckpoint::<T>::insert(who, (matra, current_block));
 
             if &generation_target != who && generated > 0 {
                 let delegatee_balance = MotraBalances::<T>::get(&generation_target);
-                let new_delegatee_balance = delegatee_balance
+                let current_delegatee_balance =
+                    Self::decay_delegatee(&generation_target, delegatee_balance);
+                total_decay = total_decay
+                    .saturating_add(delegatee_balance.saturating_sub(current_delegatee_balance));
+                let new_delegatee_balance = current_delegatee_balance
                     .saturating_add(generated)
                     .min(params.max_balance);
                 MotraBalances::<T>::insert(&generation_target, new_delegatee_balance);
@@ -312,7 +449,7 @@ pub mod pallet {
 
             TotalIssued::<T>::mutate(|total| {
                 *total = total.saturating_add(generated);
-                *total = total.saturating_sub(decay_amount);
+                *total = total.saturating_sub(total_decay);
             });
 
             Self::deposit_event(Event::BalanceReconciled {
@@ -325,38 +462,27 @@ pub mod pallet {
             Ok(new_self_balance)
         }
 
-        /// Apply multiplicative decay: balance * (rate ^ elapsed).
-        ///
-        /// Uses iterative multiplication of Perbill. For very large elapsed values
-        /// the iteration is capped at 100_000 to prevent DoS.
-        fn apply_decay_iterative(balance: u128, rate: Perbill, elapsed: u64) -> u128 {
-            if balance == 0 {
-                return 0;
-            }
-
-            let iterations = elapsed.min(100_000);
-            let mut result = balance;
-            let mut remaining = iterations;
-
-            while remaining > 0 {
-                let chunk = remaining.min(64);
-                for _ in 0..chunk {
-                    result = rate * result;
-                }
-                remaining -= chunk;
-                if result == 0 {
-                    break;
-                }
-            }
-
-            result
+        fn decay_delegatee(who: &T::AccountId, balance: u128) -> u128 {
+            let now = frame_system::Pallet::<T>::block_number();
+            let elapsed = now
+                .saturating_sub(LastTouched::<T>::get(who))
+                .try_into()
+                .unwrap_or(u64::MAX);
+            let decayed =
+                crate::decay::accrue(balance, 0, Params::<T>::get().decay_rate_per_block, elapsed)
+                    .0;
+            // Decay sponsorship only from its arrival; the separate holding checkpoint
+            // retains the recipient's pending generation without recursive delegation.
+            LastTouched::<T>::insert(who, now);
+            decayed
         }
 
         /// Get MATRA (native token) free balance for an account.
         fn get_matra_balance(who: &T::AccountId) -> u128 {
             use frame_support::traits::fungible::Inspect;
+            use sp_runtime::traits::SaturatedConversion;
             let bal = pallet_balances::Pallet::<T>::balance(who);
-            bal.try_into().unwrap_or(0u128)
+            bal.saturated_into()
         }
 
         /// Burn MOTRA from an account (used by fee payment).
@@ -380,30 +506,81 @@ pub mod pallet {
 
         /// Compute the fee for a transaction given its weight and encoded length.
         ///
-        /// TxFee = min_fee + congestion_rate * (ref_time / 1_000_000) + length_fee_per_byte * len
+        /// TxFee = min_fee + R * (call + signed base + length work) / 1_000_000
+        ///     + length_fee_per_byte * len
         pub fn compute_fee(weight: frame_support::weights::Weight, len: usize) -> u128 {
             let params = Params::<T>::get();
-            let weight_component =
-                params.congestion_rate.saturating_mul(weight.ref_time() as u128) / 1_000_000u128;
+            let weight_component = Self::weight_fee(
+                weight.saturating_add(Self::signed_work(len)),
+                params.congestion_rate,
+            );
             let length_fee = params.length_fee_per_byte.saturating_mul(len as u128);
-            params.min_fee.saturating_add(weight_component).saturating_add(length_fee)
+            params
+                .min_fee
+                .saturating_add(weight_component)
+                .saturating_add(length_fee)
+        }
+
+        /// The Normal class's ref_time and length budgets.
+        fn normal_budget() -> (u64, u32) {
+            use frame_support::dispatch::DispatchClass;
+            let weights = T::BlockWeights::get();
+            (
+                weights
+                    .get(DispatchClass::Normal)
+                    .max_total
+                    .unwrap_or(weights.max_block)
+                    .ref_time()
+                    .max(1),
+                (*T::BlockLength::get().max.get(DispatchClass::Normal)).max(1),
+            )
+        }
+
+        /// The signed base plus the length work of an extrinsic of `len`
+        /// bytes. A byte stands for the Normal ref_time budget over the
+        /// Normal length budget, so a block filled by either costs alike.
+        pub(crate) fn signed_work(len: usize) -> Weight {
+            let (weight, length) = Self::normal_budget();
+            T::BlockWeights::get()
+                .get(frame_support::dispatch::DispatchClass::Normal)
+                .base_extrinsic
+                .saturating_add(Weight::from_parts(
+                    (len as u64).saturating_mul(weight / u64::from(length)),
+                    0,
+                ))
+        }
+
+        pub(crate) fn weight_fee(weight: Weight, rate: u128) -> u128 {
+            sp_arithmetic::helpers_128bit::multiply_by_rational_with_rounding(
+                rate,
+                u128::from(weight.ref_time()),
+                1_000_000,
+                sp_arithmetic::Rounding::Down,
+            )
+            .unwrap_or(u128::MAX)
         }
 
         /// Adjust congestion rate based on block fullness using EMA smoothing.
         ///
+        /// Fullness is the fuller of two dimensions, each against its Normal
+        /// budget and saturating at one, so either drives R when it is the
+        /// bottleneck. Weight is Normal plus Operational consumption:
+        /// Operational traffic may exceed the Normal budget and must still
+        /// raise R. Mandatory weight, which also holds the guardian's veto, is
+        /// excluded. Length is every extrinsic's encoded bytes.
+        ///
         /// Called at `on_finalize`.
         fn adjust_congestion_rate() {
+            use frame_support::dispatch::DispatchClass;
             let consumed = frame_system::Pallet::<T>::block_weight();
-            let max_weight = <T as frame_system::Config>::BlockWeights::get()
-                .get(frame_support::dispatch::DispatchClass::Normal)
-                .max_total
-                .unwrap_or(frame_support::weights::Weight::from_parts(1, 0));
-
-            let consumed_normal = consumed
-                .get(frame_support::dispatch::DispatchClass::Normal)
-                .ref_time();
-            let max_normal = max_weight.ref_time().max(1);
-            let fullness = Perbill::from_rational(consumed_normal, max_normal);
+            let (max_normal, max_length) = Self::normal_budget();
+            let metered = consumed
+                .get(DispatchClass::Normal)
+                .ref_time()
+                .saturating_add(consumed.get(DispatchClass::Operational).ref_time());
+            let length = frame_system::Pallet::<T>::all_extrinsics_len();
+            let fullness = Perbill::from_rational(metered.min(max_normal), max_normal)
+                .max(Perbill::from_rational(length.min(max_length), max_length));
 
             Params::<T>::mutate(|params| {
                 let old_rate = params.congestion_rate;

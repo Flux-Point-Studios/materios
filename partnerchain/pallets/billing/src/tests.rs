@@ -96,7 +96,7 @@ const ALICE: u64 = 1;
 const BOB: u64 = 2;
 const TREASURY: u64 = 999;
 
-fn new_test_ext() -> sp_io::TestExternalities {
+pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     let mut t = frame_system::GenesisConfig::<TestRuntime>::default()
         .build_storage()
         .unwrap();

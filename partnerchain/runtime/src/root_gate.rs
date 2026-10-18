@@ -75,32 +75,28 @@ pub fn ensure_guarded_genesis(genesis: &RuntimeGenesisConfig) -> Result<(), &'st
 /// compromised guardian cannot use the priority to fill blocks.
 pub struct GuardianVeto;
 
+/// The guardian is read only for a veto-shaped call, so the fee extension can
+/// ask about every transaction without a storage read.
 impl ContainsPair<AccountId, RuntimeCall> for GuardianVeto {
     fn contains(who: &AccountId, call: &RuntimeCall) -> bool {
-        let Some(guardian) = Guardian::<Runtime>::get() else {
-            return false;
-        };
-        match call {
+        let signer = match call {
             RuntimeCall::Multisig(pallet_multisig::Call::as_multi_threshold_1 {
                 other_signatories,
                 call,
-            }) => {
-                is_guardian_veto(call)
-                    && multisig_account(who, other_signatories, 1) == Some(guardian)
-            }
+            }) if is_guardian_veto(call) => multisig_account(who, other_signatories, 1),
             RuntimeCall::Multisig(pallet_multisig::Call::as_multi {
                 threshold,
                 other_signatories,
                 call,
                 max_weight,
                 ..
-            }) => {
-                is_guardian_veto(call)
-                    && max_weight.all_lte(call.get_dispatch_info().weight)
-                    && multisig_account(who, other_signatories, *threshold) == Some(guardian)
+            }) if is_guardian_veto(call) && max_weight.all_lte(call.get_dispatch_info().weight) => {
+                multisig_account(who, other_signatories, *threshold)
             }
-            _ => is_guardian_veto(call) && *who == guardian,
-        }
+            _ if is_guardian_veto(call) => Some(who.clone()),
+            _ => None,
+        };
+        signer.is_some_and(|signer| Guardian::<Runtime>::get() == Some(signer))
     }
 }
 
@@ -122,7 +118,7 @@ fn is_guardian_veto(call: &RuntimeCall) -> bool {
 /// The account `pallet_multisig` derives for a call's signatories, or `None`
 /// when they are not the well-formed set the pallet would accept (a zero
 /// threshold, or the caller repeated among the others).
-fn multisig_account(
+pub(crate) fn multisig_account(
     who: &AccountId,
     other_signatories: &[AccountId],
     threshold: u16,
