@@ -89,6 +89,7 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 derive-new = { workspace = true }
 log = { workspace = true }
+hex-literal = { workspace = true }
 
 # Local
 materios-runtime = { workspace = true, features = ["std"] }
@@ -98,6 +99,7 @@ motra-rpc = { workspace = true }
 motra-primitives = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
+flate2 = "1"
 pallet-intent-settlement = { workspace = true, features = ["std"] }
 pallet-orinq-receipts = { workspace = true, features = ["std"] }
 

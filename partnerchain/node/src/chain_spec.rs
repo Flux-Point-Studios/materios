@@ -1,11 +1,11 @@
 use materios_runtime::{
-    opaque::SessionKeys, AccountId, Balance, CrossChainPublic, Signature, TESTNET_TIMELOCK_DELAYS,
-    WASM_BINARY,
+    opaque::SessionKeys, AccountId, Balance, Block, CrossChainPublic, Runtime,
+    SessionCommitteeManagement, Signature, TESTNET_TIMELOCK_DELAYS, WASM_BINARY,
 };
 use sc_service::ChainType;
-use sp_consensus_aura::sr25519::AuthorityId as AuraId;
-use sp_consensus_grandpa::AuthorityId as GrandpaId;
-use sp_core::{ecdsa, sr25519, Pair, Public};
+use sp_consensus_aura::{runtime_decl_for_aura_api::AuraApi, sr25519::AuthorityId as AuraId};
+use sp_consensus_grandpa::{runtime_decl_for_grandpa_api::GrandpaApi, AuthorityId as GrandpaId};
+use sp_core::{ecdsa, sr25519, Pair, Public, H256};
 use sp_runtime::traits::{IdentifyAccount, Verify};
 
 /// Specialized `ChainSpec` for the Materios network.
@@ -55,6 +55,92 @@ pub fn authority_keys_from_seed(s: &str) -> Authority {
             grandpa: get_from_seed::<GrandpaId>(s),
         },
     )
+}
+
+/// Who a chain seats: its committee, the keys Aura takes authors from, and
+/// the keys GRANDPA votes with.
+#[derive(Debug, PartialEq)]
+pub struct Seated {
+    pub committee: Vec<Authority>,
+    pub aura: Vec<AuraId>,
+    pub grandpa: Vec<GrandpaId>,
+}
+
+impl Seated {
+    /// A committee of `authorities`, each authoring and voting with its own
+    /// session keys.
+    pub fn by(authorities: &[Authority]) -> Self {
+        Seated {
+            committee: authorities.to_vec(),
+            aura: authorities
+                .iter()
+                .map(|(_, keys)| keys.aura.clone())
+                .collect(),
+            grandpa: authorities
+                .iter()
+                .map(|(_, keys)| keys.grandpa.clone())
+                .collect(),
+        }
+    }
+}
+
+/// Who the chain state in scope seats.
+pub fn seated_now() -> Seated {
+    Seated {
+        committee: SessionCommitteeManagement::current_committee_storage()
+            .committee
+            .to_vec(),
+        aura: <Runtime as AuraApi<Block, AuraId>>::authorities(),
+        grandpa: <Runtime as GrandpaApi<Block>>::grandpa_authorities()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect(),
+    }
+}
+
+/// The genesis of each chain that started with no genesis committee before
+/// the live-quorum floor existed, so that its first rotation seated Cardano's
+/// draw: preprod v6.
+const SEATED_FROM_CARDANO_AT_FIRST_ROTATION: [H256; 1] = [H256(hex_literal::hex!(
+    "0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf"
+))];
+
+/// Refuses `spec` when a chain started from its genesis does not keep its
+/// authorities through the first committee rotation. A fresh chain's first
+/// Cardano draw fails the live-quorum floor, so that rotation seats the
+/// genesis `SessionCommitteeManagement.CurrentCommittee`: an empty one
+/// schedules an empty GRANDPA set, which no node imports, and any other one
+/// hands authoring or finality to keys that did not hold it. The runtime's
+/// genesis builder refuses both, but a raw spec's genesis never runs it.
+pub fn check_genesis_committee(spec: &dyn sc_service::ChainSpec) -> Result<(), String> {
+    let seated = sp_io::TestExternalities::new(spec.build_storage()?).execute_with(seated_now);
+    let committee = Seated::by(&seated.committee);
+    let refusal = if seated.committee.is_empty() {
+        "its genesis SessionCommitteeManagement.CurrentCommittee is empty: a fresh chain's first \
+         committee rotation seats it and schedules an empty GRANDPA set, which no node imports, \
+         so the chain halts there"
+    } else if seated.aura != committee.aura {
+        "its genesis Aura.Authorities are not its genesis \
+         SessionCommitteeManagement.CurrentCommittee's aura keys, in the committee's order: a \
+         fresh chain's first committee rotation seats the committee, and hands authoring to keys \
+         that did not author before it"
+    } else if seated.grandpa != committee.grandpa {
+        "its genesis Grandpa.Authorities are not its genesis \
+         SessionCommitteeManagement.CurrentCommittee's grandpa keys, in the committee's order: a \
+         fresh chain's first committee rotation seats the committee, and hands finality to keys \
+         that did not finalize before it"
+    } else {
+        return Ok(());
+    };
+    let executor = crate::chain_identity::Executor::builder().build();
+    let genesis = crate::chain_identity::genesis(spec, &executor)?.hash;
+    if SEATED_FROM_CARDANO_AT_FIRST_ROTATION.contains(&genesis) {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing chain spec {}: {refusal} (genesis {genesis:?})",
+        spec.id()
+    ))
 }
 
 /// Number of sidechain slots per epoch.
@@ -205,20 +291,16 @@ fn testnet_genesis(
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use super::{authority_keys_from_seed, AuraId, Authority, ChainSpec, GrandpaId};
+    use super::{authority_keys_from_seed, seated_now, Authority, ChainSpec, GrandpaId, Seated};
     use authority_selection_inherents::authority_selection_inputs::AuthoritySelectionInputs;
-    use materios_runtime::{
-        Block, Header, Runtime, SessionCommitteeManagement, Sidechain, UncheckedExtrinsic,
-        SLOT_DURATION,
-    };
+    use materios_runtime::{Block, Header, Runtime, Sidechain, UncheckedExtrinsic, SLOT_DURATION};
     use sidechain_domain::{
         byte_string::SizedByteString, AuraPublicKey, DParameter, EpochNonce, GrandpaPublicKey,
         PermissionedCandidateData, SidechainPublicKey,
     };
     use sp_api::runtime_decl_for_core::Core;
     use sp_block_builder::runtime_decl_for_block_builder::BlockBuilder;
-    use sp_consensus_aura::{runtime_decl_for_aura_api::AuraApi, Slot, AURA_ENGINE_ID};
-    use sp_consensus_grandpa::runtime_decl_for_grandpa_api::GrandpaApi;
+    use sp_consensus_aura::{Slot, AURA_ENGINE_ID};
     use sp_core::{Decode, Encode};
     use sp_inherents::InherentData;
     use sp_runtime::{
@@ -226,50 +308,10 @@ pub(crate) mod tests {
         BuildStorage, Digest, DigestItem, Storage,
     };
 
-    /// Who a chain seats: its committee, the keys Aura takes authors from,
-    /// and the keys GRANDPA votes with.
-    #[derive(Debug, PartialEq)]
-    pub(crate) struct Seated {
-        pub(crate) committee: Vec<Authority>,
-        pub(crate) aura: Vec<AuraId>,
-        pub(crate) grandpa: Vec<GrandpaId>,
-    }
-
-    impl Seated {
-        /// A committee of `authorities`, each authoring and voting with its
-        /// own session keys.
-        pub(crate) fn by(authorities: &[Authority]) -> Self {
-            Seated {
-                committee: authorities.to_vec(),
-                aura: authorities
-                    .iter()
-                    .map(|(_, keys)| keys.aura.clone())
-                    .collect(),
-                grandpa: authorities
-                    .iter()
-                    .map(|(_, keys)| keys.grandpa.clone())
-                    .collect(),
-            }
-        }
-    }
-
     /// A chain started from `spec`. The runtime's genesis builder builds its
     /// state from the spec's own code, as `build-spec` and a starting node do.
     pub(crate) fn start(spec: &ChainSpec) -> sp_io::TestExternalities {
         sp_io::TestExternalities::new(spec.build_storage().expect("the genesis builds"))
-    }
-
-    pub(crate) fn seated_now() -> Seated {
-        Seated {
-            committee: SessionCommitteeManagement::current_committee_storage()
-                .committee
-                .to_vec(),
-            aura: <Runtime as AuraApi<Block, AuraId>>::authorities(),
-            grandpa: <Runtime as GrandpaApi<Block>>::grandpa_authorities()
-                .into_iter()
-                .map(|(key, _)| key)
-                .collect(),
-        }
     }
 
     pub(crate) fn seated_at_genesis(spec: &ChainSpec) -> Seated {
@@ -646,6 +688,186 @@ pub(crate) mod tests {
         assert_eq!(
             stored_attestor_rewards(storage),
             (1_000_000, 50_000_000_000, 32)
+        );
+    }
+
+    /// The key of the storage value `pallet` keeps as `item`.
+    fn storage_key(pallet: &str, item: &str) -> Vec<u8> {
+        [
+            sp_core::twox_128(pallet.as_bytes()),
+            sp_core::twox_128(item.as_bytes()),
+        ]
+        .concat()
+    }
+
+    /// `spec` as `build-spec --raw` writes it, with `writes` stored over its
+    /// genesis.
+    fn raw(spec: &ChainSpec, writes: &[(Vec<u8>, Vec<u8>)]) -> serde_json::Value {
+        let mut json: serde_json::Value =
+            serde_json::from_str(&spec.as_json(true).unwrap()).unwrap();
+        for (key, value) in writes {
+            json["genesis"]["raw"]["top"][sp_core::bytes::to_hex(key, false).as_str()] =
+                sp_core::bytes::to_hex(value, false).into();
+        }
+        json
+    }
+
+    /// Loads `json` as the node loads the chain spec file `--chain` names.
+    fn load_file(name: &str, json: &serde_json::Value) -> Result<ChainSpec, String> {
+        let path = std::env::temp_dir().join(format!(
+            "materios-node-test-{}-{name}.json",
+            std::process::id()
+        ));
+        std::fs::write(&path, json.to_string()).unwrap();
+        let cli = <crate::cli::Cli as clap::Parser>::parse_from(["materios-node"]);
+        // A spec loaded from a file reads its genesis from the file when used.
+        let loaded = sc_cli::SubstrateCli::load_spec(&cli, path.to_str().unwrap())
+            .and_then(|spec| spec.as_json(true));
+        std::fs::remove_file(&path).unwrap();
+        ChainSpec::from_json_bytes(loaded?.into_bytes())
+    }
+
+    /// Cardano candidates that have never authored a block, so a fresh
+    /// chain's first draw over them fails the live-quorum floor.
+    fn unproven_candidates() -> [Authority; 3] {
+        ["Charlie", "Dave", "Eve"].map(authority_keys_from_seed)
+    }
+
+    /// A raw spec carries its genesis past the runtime's genesis builder, which
+    /// refuses an empty committee. The chain it starts schedules an empty
+    /// GRANDPA set at its first rotation, which no node imports, so the node
+    /// refuses the spec when it loads it.
+    #[test]
+    fn the_node_refuses_a_raw_genesis_whose_committee_is_empty() {
+        let json = raw(
+            &super::local_testnet_config().unwrap(),
+            &[(
+                storage_key("SessionCommitteeManagement", "CurrentCommittee"),
+                (0u64, Vec::<Authority>::new()).encode(),
+            )],
+        );
+        let halting = ChainSpec::from_json_bytes(json.to_string().into_bytes()).unwrap();
+        assert_eq!(
+            seated_after_first_rotation(&halting, &unproven_candidates()).grandpa,
+            Vec::<GrandpaId>::new()
+        );
+        let refused = load_file("empty-committee", &json)
+            .err()
+            .expect("the node refuses it");
+        assert!(
+            refused.contains(
+                "chain spec materios_local: its genesis SessionCommitteeManagement.CurrentCommittee is empty"
+            ),
+            "{refused}"
+        );
+    }
+
+    /// Genesis authors with keys other than its committee's hand authoring
+    /// to the committee at the first rotation, whoever holds its keys.
+    #[test]
+    fn the_node_refuses_a_raw_genesis_whose_aura_authorities_are_not_its_committee() {
+        let [alice, _, charlie] = ["Alice", "Bob", "Charlie"].map(authority_keys_from_seed);
+        let json = raw(
+            &super::local_testnet_config().unwrap(),
+            &[(
+                storage_key("Aura", "Authorities"),
+                vec![alice.1.aura, charlie.1.aura].encode(),
+            )],
+        );
+        let refused = load_file("aura-not-committee", &json)
+            .err()
+            .expect("the node refuses it");
+        assert!(
+            refused.contains(
+                "chain spec materios_local: its genesis Aura.Authorities are not its genesis \
+                 SessionCommitteeManagement.CurrentCommittee's aura keys"
+            ),
+            "{refused}"
+        );
+    }
+
+    /// Genesis voters other than its committee's hand finality to the
+    /// committee at the first rotation, whoever holds its keys.
+    #[test]
+    fn the_node_refuses_a_raw_genesis_whose_grandpa_authorities_are_not_its_committee() {
+        let alice = authority_keys_from_seed("Alice");
+        let json = raw(
+            &super::local_testnet_config().unwrap(),
+            &[(
+                storage_key("Grandpa", "Authorities"),
+                vec![(alice.1.grandpa, 1u64)].encode(),
+            )],
+        );
+        let refused = load_file("grandpa-not-committee", &json)
+            .err()
+            .expect("the node refuses it");
+        assert!(
+            refused.contains(
+                "chain spec materios_local: its genesis Grandpa.Authorities are not its genesis \
+                 SessionCommitteeManagement.CurrentCommittee's grandpa keys"
+            ),
+            "{refused}"
+        );
+    }
+
+    /// Each builder's spec, as `build-spec` writes it, and its raw form, as
+    /// `build-spec --raw` writes it from that file, loads with the committee
+    /// it seats.
+    #[test]
+    fn the_node_loads_every_builder_spec_and_its_build_spec_raw_form() {
+        for (name, spec) in [
+            ("development", super::development_config()),
+            ("local", super::local_testnet_config()),
+            ("preprod", crate::chain_spec_preprod::preprod_config()),
+        ] {
+            let spec = spec.unwrap();
+            let plain: serde_json::Value =
+                serde_json::from_str(&spec.as_json(false).unwrap()).unwrap();
+            let loaded = load_file(&format!("{name}-plain"), &plain).unwrap();
+            let raw: serde_json::Value =
+                serde_json::from_str(&loaded.as_json(true).unwrap()).unwrap();
+            let loaded = load_file(&format!("{name}-raw"), &raw).unwrap();
+            assert_eq!(
+                seated_at_genesis(&loaded),
+                Seated::by(&declared_committee(&spec)),
+                "{name}"
+            );
+        }
+    }
+
+    /// Preprod v6 started with no genesis committee, before the live-quorum
+    /// floor, and its first rotation seated Cardano's draw. The node loads
+    /// that genesis, and refuses the same genesis with any byte changed.
+    #[test]
+    fn the_node_loads_the_preprod_v6_genesis_and_refuses_any_other_without_a_committee() {
+        use std::io::Read;
+        let mut text = String::new();
+        flate2::read::GzDecoder::new(
+            std::fs::File::open(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tools/launch-preflight/fixtures/preprod-v6-raw.json.gz"
+            ))
+            .unwrap(),
+        )
+        .read_to_string(&mut text)
+        .unwrap();
+        let v6: serde_json::Value = serde_json::from_str(&text).unwrap();
+        load_file("preprod-v6", &v6).unwrap();
+
+        let mut other = v6;
+        other["genesis"]["raw"]["top"][sp_core::bytes::to_hex(
+            sp_core::storage::well_known_keys::HEAP_PAGES,
+            false,
+        )
+        .as_str()] = sp_core::bytes::to_hex(&64u64.encode(), false).into();
+        let refused = load_file("preprod-v6-changed", &other)
+            .err()
+            .expect("the node refuses it");
+        assert!(
+            refused.contains(
+                "chain spec materios_preprod_v6: its genesis SessionCommitteeManagement.CurrentCommittee is empty"
+            ),
+            "{refused}"
         );
     }
 }
