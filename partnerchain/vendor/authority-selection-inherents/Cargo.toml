@@ -5,8 +5,9 @@ edition = "2021"
 license = "Apache-2.0"
 
 # Vendored fork of IOG partner-chains `authority-selection-inherents` carrying
-# the Materios patches to src/select_authorities.rs. All dependencies come from
-# the upstream v1.5.1 tag.
+# the Materios patches to src/select_authorities.rs and
+# src/ariadne_inherent_data_provider.rs. All dependencies come from the
+# upstream v1.5.1 tag.
 
 [dependencies]
 async-trait = { version = "0.1", optional = true }

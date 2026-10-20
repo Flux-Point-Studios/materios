@@ -137,7 +137,9 @@ materios-node wizards update-d-parameter \
 ```
 A change made in Cardano epoch N seats committees from the first session that starts in epoch N + 2, five to
 ten days later: each session's committee is drawn from the Cardano data of the epoch two before the one it starts
-in.
+in. Preprod v6 draws its committees this way from the session that starts on 2026-11-13 at 12:00 UTC. Before it,
+v6 draws them under the preprod relaxation it started with, from the data of the Cardano epoch the session starts
+in, so a change seats committees within hours.
 
 ## MATRA Token Reserve
 

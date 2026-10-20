@@ -1,3 +1,4 @@
+use crate::chain_spec_preprod::PREPROD_V6_GENESIS;
 use authority_selection_inherents::ariadne_inherent_data_provider::AriadneInherentDataProvider as AriadneIDP;
 use authority_selection_inherents::authority_selection_inputs::{
 	AuthoritySelectionDataSource, AuthoritySelectionInputs,
@@ -97,6 +98,7 @@ where
 			*slot,
 			authority_selection_data_source.as_ref(),
 			mc_hash.mc_epoch(),
+			ariadne_relaxed_until(client.info().genesis_hash),
 		)
 		.await?;
 		let block_beneficiary_provider =
@@ -188,6 +190,7 @@ where
 			verified_block_slot,
 			authority_selection_data_source.as_ref(),
 			mc_state_reference.epoch,
+			ariadne_relaxed_until(client.info().genesis_hash),
 		)
 		.await?;
 
@@ -214,6 +217,18 @@ pub fn slot_from_predigest(
 	}
 }
 
+/// The first session whose committee the chain with `genesis` draws under
+/// upstream's Ariadne rule. Preprod v6 drew its committees under the preprod
+/// relaxation, and its blocks up to the switch verify only under it.
+fn ariadne_relaxed_until(genesis: <Block as BlockT>::Hash) -> ScEpochNumber {
+	if genesis == PREPROD_V6_GENESIS {
+		// 2026-11-13T12:00:00Z.
+		ScEpochNumber(498_492)
+	} else {
+		ScEpochNumber(0)
+	}
+}
+
 #[derive(new, Clone)]
 pub(crate) struct CreateInherentDataConfig {
 	pub mc_epoch_config: MainchainEpochConfig,
@@ -234,4 +249,29 @@ fn timestamp_and_slot_cidp(
 	let timestamp = TimestampIDP::new(Timestamp::new(time_source.get_current_time_millis()));
 	let slot = AuraIDP::from_timestamp_and_slot_duration(*timestamp, slot_duration);
 	(slot, timestamp)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use sidechain_slots::SlotsPerEpoch;
+
+	/// Preprod v6, whose sessions are 600 slots of 6 s, switches to upstream's
+	/// Ariadne rule with the session that starts on 2026-11-13 at 12:00 UTC.
+	/// Any other genesis, v6's with a byte changed among them, draws every
+	/// committee under upstream's rule.
+	#[test]
+	fn preprod_v6_switches_to_upstreams_ariadne_rule_on_2026_11_13_at_noon_utc() {
+		let v6_sessions = ScSlotConfig {
+			slots_per_epoch: SlotsPerEpoch(600),
+			slot_duration: SlotDuration::from_millis(6_000),
+		};
+		assert_eq!(
+			v6_sessions.epoch_start_time(ariadne_relaxed_until(PREPROD_V6_GENESIS)),
+			Some(sp_core::offchain::Timestamp::from_unix_millis(1_794_571_200_000)),
+		);
+		let mut other = PREPROD_V6_GENESIS;
+		other.0[31] ^= 1;
+		assert_eq!(ariadne_relaxed_until(other), ScEpochNumber(0));
+	}
 }
