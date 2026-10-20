@@ -13,6 +13,9 @@
 //!
 //! `InitRootTimelock` stores the root-timelock delays on a chain that was
 //! running before the pallet existed.
+//!
+//! `PreprodCardanoIds` names the Cardano network preprod's settlement has
+//! bound since its genesis, for settlement's `SeedCardanoIds` to store.
 
 use alloc::vec::Vec;
 use frame_support::{
@@ -20,11 +23,12 @@ use frame_support::{
     traits::{
         fungible::Inspect,
         tokens::{Fortitude, Preservation},
-        Currency, ExistenceRequirement, OnRuntimeUpgrade, ReservableCurrency,
+        Currency, ExistenceRequirement, Get, OnRuntimeUpgrade, ReservableCurrency,
     },
     weights::Weight,
     Blake2_128Concat, PalletId,
 };
+use pallet_intent_settlement::CardanoIdentity;
 use pallet_root_timelock::DelayTable;
 use sp_core::H256;
 use sp_io::hashing::twox_128;
@@ -39,7 +43,7 @@ use {
 
 use crate::{
     AccountId, AttestorReservePalletId, Balance, Balances, BlockNumber, RootTimelockDefaultDelays,
-    Runtime, TreasuryPalletId, TESTNET_TIMELOCK_DELAYS,
+    Runtime, TreasuryPalletId, CARDANO_PREPROD, TESTNET_TIMELOCK_DELAYS,
 };
 
 /// Moves everything `pot` can transfer to the treasury and returns the amount
@@ -403,5 +407,17 @@ impl OnRuntimeUpgrade for InitRootTimelock {
             );
         }
         Ok(())
+    }
+}
+
+/// `CARDANO_PREPROD` on the preprod chain, whose settlement has bound it since
+/// its genesis, and none on any other: `SeedCardanoIds` stores no ids there,
+/// so its settlement refuses rather than bind Cardano preprod.
+pub struct PreprodCardanoIds;
+
+impl Get<Option<CardanoIdentity>> for PreprodCardanoIds {
+    fn get() -> Option<CardanoIdentity> {
+        (frame_system::BlockHash::<Runtime>::get(0) == PREPROD_GENESIS_HASH)
+            .then_some(CARDANO_PREPROD)
     }
 }

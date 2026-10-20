@@ -97,6 +97,8 @@ weights!(pallet_intent_settlement, pallet_intent_settlement::weights::SubstrateW
     attest_batch_settle(n: u32) => 0;
     attest_expire_policy() => 0;
     expire_intents(n: u32) => 0;
+    request_expire_policy() => 0;
+    bind_aegis_policy_v1() => 0;
 });
 
 weights!(pallet_billing, pallet_billing::weights::SubstrateWeight<Runtime>, {

@@ -580,32 +580,55 @@ def test_a_directory_renamed_into_the_chain_spec_path_after_the_node_started_is_
     assert len(found) == 1 and found[0].startswith(changed_after_start("spec")), found
 
 
-def chain_ids(node: Path, spec: Path) -> tuple[str, dict]:
-    """The genesis and the chain ids `materios-node chain-id` reports for `spec`."""
+def chain_ids(node: Path, spec: Path) -> tuple[str, dict, tuple[int, bytes, bytes] | None]:
+    """The genesis, the chain ids and the Cardano ids `materios-node chain-id` reports for `spec`."""
     done = subprocess.run([str(node), "chain-id", "--chain", str(spec)], env={}, stdin=subprocess.DEVNULL,
                           capture_output=True, text=True, timeout=lp.NODE_TIMEOUT, check=True)
     report = json.loads(done.stdout)
-    return report["genesis_hash"], {f"{pallet}.{name}": "0x" + bytes(value).hex()
-                                    for pallet, name, value in report["constants"]}
+    return (report["genesis_hash"], {f"{pallet}.{name}": "0x" + bytes(value).hex()
+                                     for pallet, name, value in report["constants"]},
+            lp.reported_cardano_ids(report["cardano_ids"]))
+
+
+# Cardano preprod as the preprod spec's genesis stores it for settlement: network magic 1, preprod's Shelley genesis
+# hash, and no Aegis policy deployed.
+PREPROD_CARDANO_IDS = (1, base.CARDANO_PREPROD_SHELLEY, bytes(28))
 
 
 def test_the_runtime_this_tree_builds_binds_the_genesis_it_runs_on(node, preprod, tmp_path):
     reset = with_alice_as_root(preprod, tmp_path / "reset.json")
     assert lp.load_spec(str(reset)).code == lp.load_spec(str(preprod)).code
     for path in (preprod, reset):
-        genesis = "0x" + lp.spec_genesis_hash(lp.load_spec(str(path))).hex()
+        spec = lp.load_spec(str(path))
+        genesis = "0x" + lp.spec_genesis_hash(spec).hex()
         assert genesis != "0x" + base.PREPROD_GENESIS
-        built, ids = chain_ids(node, path)
-        ids.pop("IntentSettlement.MainchainGenesisHash")
-        assert (built, ids) == (genesis, {"IntentSettlement.MateriosChainId": genesis,
-                                          "Oracle.MateriosChainId": genesis})
-        assert lp.check_runtime_chain_ids(node, path, bytes.fromhex(genesis[2:]), "authority val0") == []
+        assert lp.stored_cardano_ids(spec) == PREPROD_CARDANO_IDS
+        assert chain_ids(node, path) == (genesis, {"IntentSettlement.MateriosChainId": genesis,
+                                                   "Oracle.MateriosChainId": genesis}, PREPROD_CARDANO_IDS)
+        assert lp.check_runtime_chain_ids(node, path, bytes.fromhex(genesis[2:]), PREPROD_CARDANO_IDS,
+                                          "authority val0") == []
 
 
 def test_chain_id_reads_the_specs_own_runtime_not_the_nodes(node, preprod_path):
-    """The preprod v6 runtime predates settlement's and the oracle's chain ids; the node's own runtime has both."""
+    """The preprod v6 runtime predates settlement's and the oracle's chain ids, and its genesis stores no Cardano ids;
+    the node's own runtime has both chain ids."""
     genesis = "0x" + lp.spec_genesis_hash(lp.load_spec(str(preprod_path))).hex()
-    assert chain_ids(node, preprod_path) == (genesis, {})
+    assert chain_ids(node, preprod_path) == (genesis, {}, None)
+
+
+@pytest.mark.parametrize("aegis", [base.AEGIS_POLICY, bytes(28)], ids=["bound", "bound-after-genesis"])
+def test_chain_id_reads_the_cardano_ids_genesis_stores_as_the_preflight_does(node, preprod, tmp_path, aegis):
+    """The node decodes IntentSettlement.CardanoIds with the runtime's own types; the preflight reads the same ids
+    from the raw spec, so rule 11 checks the ids the chain binds. A mainnet genesis may leave the Aegis policy for
+    Root to bind after launch."""
+    doc = json.loads(preprod.read_text())
+    mainnet = (base.CARDANO_MAINNET_MAGIC, base.CARDANO_MAINNET_SHELLEY, aegis)
+    doc["genesis"]["raw"]["top"]["0x" + lp.storage_key("IntentSettlement", "CardanoIds").hex()] = \
+        "0x" + base.cardano_ids(aegis=aegis).hex()
+    path = tmp_path / "mainnet-ids.json"
+    path.write_text(json.dumps(doc))
+    assert lp.stored_cardano_ids(lp.load_spec(str(path))) == mainnet
+    assert chain_ids(node, path)[2] == mainnet
 
 
 def test_genesis_runs_no_calls_and_stores_the_system_placeholder(node, preprod, tmp_path):

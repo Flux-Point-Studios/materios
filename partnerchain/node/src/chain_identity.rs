@@ -1,7 +1,8 @@
 //! `materios-node chain-id`: the chain ids a chain spec's runtime binds into
-//! signed payloads, read from its own code in the state block one's calls see.
+//! signed payloads, read from its own code in the state block one's calls see,
+//! and the Cardano network its settlement binds, read from its genesis.
 
-use materios_runtime::{Block, System};
+use materios_runtime::{Block, IntentSettlement, System};
 use sp_core::{
     traits::{CallContext, CodeExecutor, RuntimeCode, WrappedRuntimeCode},
     Decode, H256,
@@ -34,10 +35,12 @@ pub fn genesis(spec: &dyn sc_service::ChainSpec, executor: &Executor) -> Result<
     Ok(Genesis { code, state, hash })
 }
 
-/// The genesis hash `spec` builds, as the node builds it at startup, and each
+/// The genesis hash `spec` builds, as the node builds it at startup; each
 /// runtime metadata constant whose name holds `ChainId` or `GenesisHash` in
 /// any case, as the spec's own Wasm reports it once block one has initialised
-/// on that genesis. It opens no database and connects to nothing.
+/// on that genesis; and the `IntentSettlement.CardanoIds` that genesis stores,
+/// decoded with this node's settlement types, or null where it stores none.
+/// It opens no database and connects to nothing.
 pub fn inspect(spec: &dyn sc_service::ChainSpec) -> Result<serde_json::Value, String> {
     let executor = Executor::builder().build();
     let Genesis {
@@ -84,5 +87,10 @@ pub fn inspect(spec: &dyn sc_service::ChainSpec) -> Result<serde_json::Value, St
             name.contains("chainid") || name.contains("genesishash")
         })
         .collect();
-    Ok(serde_json::json!({ "genesis_hash": genesis, "constants": constants }))
+    let cardano_ids = state.execute_with(IntentSettlement::bound_cardano_ids);
+    Ok(serde_json::json!({
+        "genesis_hash": genesis,
+        "constants": constants,
+        "cardano_ids": cardano_ids,
+    }))
 }

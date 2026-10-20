@@ -91,6 +91,7 @@ pub(super) const OPERATIONAL: &[(&str, &str, Payer)] = &[
         "supersede_settlement_request",
         Payer::Member,
     ),
+    ("IntentSettlement", "bind_aegis_policy_v1", Payer::Nobody),
     ("RootTimelock", "cancel", Payer::Guardian),
     ("RootTimelock", "fast_track", Payer::Guardian),
     ("RootTimelock", "cancel_all", Payer::Guardian),

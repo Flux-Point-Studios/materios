@@ -15,11 +15,18 @@ const PAYMENT_HASH: [u8; 28] = [17; 28];
 const CARDANO_TX: [u8; 32] = [21; 32];
 const PAIR_ID: [u8; 32] = [24; 32];
 
+/// System's genesis, and settlement's settling against Cardano preprod.
 fn genesis_state() -> sp_io::TestExternalities {
-    frame_system::GenesisConfig::<Runtime>::default()
-        .build_storage()
-        .expect("system genesis builds")
-        .into()
+    RuntimeGenesisConfig {
+        intent_settlement: pallet_intent_settlement::GenesisConfig {
+            cardano_ids: Some(CARDANO_PREPROD),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .build_storage()
+    .expect("genesis builds")
+    .into()
 }
 
 /// The hash of the genesis block a node builds from the current state.
@@ -66,18 +73,27 @@ fn chain_identity_before_block_one_is_the_system_placeholder() {
     });
 }
 
-/// Seats `pair` as the whole committee, at threshold one.
-fn seat_committee(pair: &sr25519::Pair) -> AccountId {
-    let account = AccountId::from(pair.public().0);
+/// Seats `pairs` as the whole committee, at threshold one, and returns the
+/// first member.
+pub(super) fn seat_committee(pairs: &[&sr25519::Pair]) -> AccountId {
+    let accounts: Vec<AccountId> = pairs
+        .iter()
+        .map(|pair| AccountId::from(pair.public().0))
+        .collect();
     pallet_orinq_receipts::CommitteeMembers::<Runtime>::put(
         frame_support::BoundedBTreeSet::<
             AccountId,
             <Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize,
-        >::try_from(alloc::collections::BTreeSet::from([account.clone()]))
-        .expect("one member fits"),
+        >::try_from(
+            accounts
+                .iter()
+                .cloned()
+                .collect::<alloc::collections::BTreeSet<_>>(),
+        )
+        .expect("the members fit"),
     );
     pallet_orinq_receipts::AttestationThreshold::<Runtime>::put(1);
-    account
+    accounts[0].clone()
 }
 
 /// A claim with a voucher, whose settlement `requester` has requested.
@@ -122,7 +138,7 @@ fn requested_claim(requester: AccountId) -> Voucher {
             observed_slot: 500,
             beneficiary_addr_hash: PAYMENT_HASH,
             amount_lovelace: voucher.amount_ada,
-            mainchain_genesis_hash: IntentSettlementMainchainGenesisHash::get(),
+            mainchain_genesis_hash: CARDANO_PREPROD.mainchain_genesis_hash,
         },
         bond,
     ));
@@ -143,8 +159,8 @@ fn settle_digest(chain_id: [u8; 32], voucher: &Voucher) -> [u8; 32] {
     let voucher_digest = compute_voucher_digest_with_address(
         ChainIdentity {
             materios_chain_id: &chain_id,
-            network_magic: IntentSettlementNetworkMagic::get(),
-            aegis_policy_script_hash: &IntentSettlementAegisPolicyV1ScriptHash::get(),
+            network_magic: CARDANO_PREPROD.network_magic,
+            aegis_policy_script_hash: &CARDANO_PREPROD.aegis_policy_v1_script_hash,
             settlement_version: IntentSettlementSettlementVersion::get(),
         },
         &voucher.claim_id,
@@ -165,7 +181,7 @@ fn settle_digest(chain_id: [u8; 32], voucher: &Voucher) -> [u8; 32] {
         voucher.amount_ada,
         15,
         500,
-        &IntentSettlementMainchainGenesisHash::get(),
+        &CARDANO_PREPROD.mainchain_genesis_hash,
     )
 }
 
@@ -175,7 +191,7 @@ fn attest_settle_verifies_over_the_live_genesis_and_refuses_the_preprod_constant
         let genesis = genesis_hash();
         System::initialize(&1, &genesis, &Default::default());
         let pair = sr25519::Pair::from_seed(&[19; 32]);
-        let member = seat_committee(&pair);
+        let member = seat_committee(&[&pair]);
         let voucher = requested_claim(member.clone());
         let bundle = |chain_id: [u8; 32]| {
             vec![(
@@ -252,7 +268,7 @@ fn preprod_digests_are_byte_identical_to_the_pinned_constant() {
         let live = IntentSettlementMateriosChainId::get().0;
         let pinned = PREPROD_GENESIS_HASH.0;
         let pair = sr25519::Pair::from_seed(&[19; 32]);
-        let member = seat_committee(&pair);
+        let member = seat_committee(&[&pair]);
         let voucher = requested_claim(member.clone());
         let expire = |chain_id: &[u8; 32]| {
             pallet_intent_settlement::expire_policy_attested_payload(
@@ -262,7 +278,7 @@ fn preprod_digests_are_byte_identical_to_the_pinned_constant() {
                 &CARDANO_TX,
                 15,
                 500,
-                &IntentSettlementMainchainGenesisHash::get(),
+                &CARDANO_PREPROD.mainchain_genesis_hash,
             )
         };
         let request =

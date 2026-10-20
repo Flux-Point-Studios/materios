@@ -22,7 +22,9 @@ from pathlib import Path
 
 import base58
 import cbor2
+import coincurve
 import pytest
+import sr25519
 import xxhash
 import zstandard
 from nacl import signing
@@ -111,8 +113,38 @@ def known():
     return lp.load_well_known()
 
 
+# How to sign as the holder of each key a test generates, by its public key.
+KEYHOLDERS = {}
+
+
 def fresh_account() -> bytes:
-    return signing.SigningKey.generate().verify_key.encode()
+    """A new sr25519 key, whose holder the tests can sign as."""
+    pair = sr25519.pair_from_seed(os.urandom(32))
+    KEYHOLDERS[pair[0]] = lambda message: sr25519.sign(pair, message)
+    return pair[0]
+
+
+def fresh_ecdsa_key() -> bytes:
+    """A new ECDSA key, compressed to 33 bytes, whose holder signs as sp_core's ecdsa does: over blake2-256 of the
+    message, with the recovery id after r and s."""
+    secret = coincurve.PrivateKey()
+    public = secret.public_key.format()
+    KEYHOLDERS[public] = lambda message: secret.sign_recoverable(lp.blake2_256(message), hasher=None)
+    return public
+
+
+def stranger() -> bytes:
+    """A key whose holder no test can sign as."""
+    return sr25519.pair_from_seed(os.urandom(32))[0]
+
+
+# The all-zero key, the ristretto identity, and its sr25519 signature of every message, made with no secret: R the
+# identity, s zero, then schnorrkel's marker bit.
+ZERO_KEY, NO_SECRET_POP = bytes(32), bytes(63) + b"\x80"
+
+
+def all_zero(where: str) -> str:
+    return f"[1 dev-keys] {where}: the all-zero key, whose sr25519 signature of any message needs no secret"
 
 
 def put(spec: lp.Spec, pallet: str, item: str, value: bytes) -> None:
@@ -147,8 +179,73 @@ def messages(findings) -> list[str]:
     return [str(f) for f in findings]
 
 
+def role_key(key: bytes) -> str:
+    """A role key as a manifest gives it: SS58 for a 32-byte key, 0x-hex for a 33-byte ECDSA key."""
+    return ss58(key) if len(key) == 32 else "0x" + key.hex()
+
+
 def msig(threshold, *members) -> dict:
-    return {"threshold": threshold, "members": [ss58(m) for m in members]}
+    return {"threshold": threshold, "members": [role_key(m) for m in members]}
+
+
+POP_DOMAIN = b"materios-launch-pop-v1"
+
+
+def scale_text(text: str) -> bytes:
+    return lp.compact(len(text.encode())) + text.encode()
+
+
+def launch_context(spec: lp.Spec, launch: dict) -> bytes:
+    """What every proof of possession of a launch signs first, built here apart from the preflight: the domain, the
+    chain spec's name and id, the genesis hash and the launch manifest hash."""
+    return (POP_DOMAIN + scale_text(spec.doc["name"]) + scale_text(spec.doc["id"]) + lp.spec_genesis_hash(spec)
+            + lp.launch_manifest_hash(launch))
+
+
+def member_challenge(context: bytes, role: str, position: tuple[int, ...]) -> bytes:
+    """The challenge the holder of the member at `position` in `role` signs: the launch's context, the role, then its
+    multisig's index in the role and its index in each multisig down to it, each a u32."""
+    return (context + scale_text(role) + lp.compact(len(position))
+            + b"".join(index.to_bytes(4, "little") for index in position))
+
+
+def challenge(spec: lp.Spec, launch: dict, role: str, position: tuple[int, ...]) -> bytes:
+    return member_challenge(launch_context(spec, launch), role, position)
+
+
+def held(text) -> bytes | None:
+    """The key a member names, when a test can sign as its holder."""
+    try:
+        key = lp.decode_public_key(text)
+    except ValueError:
+        return None
+    return key if key in KEYHOLDERS else None
+
+
+def prove(launch: dict, spec: lp.Spec) -> dict:
+    """The launch with each multisig member whose holder a test can sign as given with that holder's proof of
+    possession, as the ceremony collects them: a bare key becomes {"key": ...}, which fixes the launch manifest hash,
+    and each holder then signs its challenge. A member no test holds stays as it is."""
+    proven, owed = copy.deepcopy(launch), []
+
+    def collect(multisig: dict, role: str, position: tuple[int, ...]) -> None:
+        for j, member in enumerate(multisig["members"]):
+            if lp.is_multisig(member):
+                collect(member, role, (*position, j))
+            elif isinstance(member, str) and held(member):
+                multisig["members"][j] = {"key": member}
+                owed.append((role, (*position, j), multisig["members"][j]))
+            elif isinstance(member, dict) and "pop" not in member and held(member["key"]):
+                owed.append((role, (*position, j), member))
+
+    for role, entries in proven["roles"].items():
+        for i, entry in enumerate(entries):
+            if lp.is_multisig(entry):
+                collect(entry, role, (i,))
+    context = launch_context(spec, proven)
+    for role, position, leaf in owed:
+        leaf["pop"] = "0x" + KEYHOLDERS[held(leaf["key"])](member_challenge(context, role, position)).hex()
+    return proven
 
 
 NO_CARDANO = lp.CardanoView(lock=None, candidates=[], d_parameter=(0, 0))
@@ -319,7 +416,7 @@ def test_malformed_extra_table_is_an_input_error(tmp_path, entries, error):
 # Hex: each input in the one spelling its writer writes
 # ---------------------------------------------------------------------------
 
-SPEC242_RAW = FIXTURES / "preprod-spec242-raw.json"
+SPEC243_RAW = FIXTURES / "preprod-spec243-raw.json"
 GUARDIAN_KEY = "0x" + lp.storage_key("RootTimelock", "Guardian").hex()
 DELAYS_KEY = "0x" + lp.storage_key("RootTimelock", "Delays").hex()
 # 32 bytes whose digits hold letters, so an upper-case spelling differs from it.
@@ -361,8 +458,8 @@ def spelled(spellings: dict):
 
 
 def raw_spec(tmp_path, edit) -> str:
-    """The spec 242 raw spec as a file, its raw storage edited by `edit`."""
-    doc = json.loads(SPEC242_RAW.read_text())
+    """The spec 243 raw spec as a file, its raw storage edited by `edit`."""
+    doc = json.loads(SPEC243_RAW.read_text())
     edit(doc["genesis"]["raw"]["top"])
     path = tmp_path / "raw.json"
     path.write_text(json.dumps(doc))
@@ -398,7 +495,7 @@ def test_a_raw_storage_value_that_is_not_a_string_is_an_input_error(tmp_path, va
      f"chain spec raw storage key '0x{GUARDIAN_KEY[2:].upper()}' {MISSPELLED}"),
 ], ids=["twice", "once with a JSON escape", "once in upper case"])
 def test_a_raw_storage_key_given_twice_in_any_spelling_is_an_input_error(tmp_path, entries, error):
-    doc = json.loads(SPEC242_RAW.read_text())
+    doc = json.loads(SPEC243_RAW.read_text())
     doc["genesis"]["raw"]["top"] = {"@": ""}
     path = tmp_path / "raw.json"
     path.write_text(json.dumps(doc).replace('{"@": ""}', "{" + entries + "}"))
@@ -409,7 +506,7 @@ def test_a_raw_storage_key_given_twice_in_any_spelling_is_an_input_error(tmp_pat
 def test_a_spec_that_repeats_any_key_is_an_input_error(tmp_path):
     """The node refuses a field given twice; the preflight would read the last."""
     path = tmp_path / "raw.json"
-    path.write_text(SPEC242_RAW.read_text().replace('"chainType": "Live"', '"chainType": "Local", "chainType": "Live"'))
+    path.write_text(SPEC243_RAW.read_text().replace('"chainType": "Live"', '"chainType": "Local", "chainType": "Live"'))
     with pytest.raises(lp.InputError, match="an object holds the key 'chainType' twice"):
         lp.load_spec(str(path))
 
@@ -441,7 +538,7 @@ def test_a_spec_with_no_raw_storage_map_is_an_input_error(tmp_path, doc):
 
 
 def test_a_spec_with_child_tries_is_an_input_error(tmp_path):
-    doc = json.loads(SPEC242_RAW.read_text())
+    doc = json.loads(SPEC243_RAW.read_text())
     child = "0x" + b":child_storage:default:a".hex()
     doc["genesis"]["raw"]["childrenDefault"] = {child: {"0x00 ": "0x 01"}}
     path = tmp_path / "raw.json"
@@ -450,7 +547,7 @@ def test_a_spec_with_child_tries_is_an_input_error(tmp_path):
         lp.load_spec(str(path))
 
 
-@pytest.mark.parametrize("name", ["preprod-v6-raw.json.gz", "preprod-spec242-raw.json"])
+@pytest.mark.parametrize("name", ["preprod-v6-raw.json.gz", "preprod-spec243-raw.json"])
 def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
     """build-spec writes each raw storage key and value as 0x and lower case, so its output loads unchanged."""
     data = (FIXTURES / name).read_bytes()
@@ -465,10 +562,10 @@ def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
     assert spec.storage == {bytes.fromhex(key[2:]): bytes.fromhex(value[2:]) for key, value in top.items()}
 
 
-def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_of_its_type(spec, spec242):
+def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_of_its_type(spec, spec243):
     """Every account is an 80-byte AccountInfo filed under its own key, and
     what the accounts hold, free plus reserved, is TotalIssuance."""
-    for genesis in (spec, spec242[0]):
+    for genesis in (spec, spec243[0]):
         numbers = [("OrinqReceipts", item, width) for _, item, width in REWARD_WIDTHS]
         numbers += [("OrinqReceipts", "BondRequirement", 16), ("Balances", "TotalIssuance", 16),
                     ("Sidechain", "SlotsPerEpoch", 4)]
@@ -871,6 +968,18 @@ def test_ecdsa_account_form_and_retired_key_are_named(spec, meta, known):
     found = dev_key_findings(spec, meta, known, launch)
     assert "[1 dev-keys] roles.cert_daemons[0]: //Alice (ecdsa)" in found
     assert any(m.startswith("[1 dev-keys] roles.committee[0]: retired validator key") for m in found)
+
+
+@pytest.mark.parametrize("spelling", [ss58, lambda key: "0x" + key.hex()], ids=["SS58", "0x-hex"])
+def test_the_all_zero_key_is_refused_in_any_role_at_any_depth(spec, meta, known, spelling):
+    zero, sudo = spelling(ZERO_KEY), nested_multisig()
+    sudo["members"][2]["members"][1] = {"key": zero, "pop": "0x" + NO_SECRET_POP.hex()}
+    launch = {"roles": {"anchor_signer": [zero], "sudo": [sudo],
+                        "endowed": [{"threshold": 1, "members": [ss58(fresh_account()), zero]}]}}
+    zeros = ["roles.anchor_signer[0]", "roles.endowed[0].members[1]", "roles.sudo[0].members[2].members[1]"]
+    found = dev_key_findings(spec, meta, known, launch)
+    assert [m for m in found if any(m.startswith(f"[1 dev-keys] {where}:") for where in zeros)] == [
+        all_zero(where) for where in zeros]
 
 
 def test_secret_uri_or_garbage_in_a_role_is_refused_without_echoing_it(spec, meta, known):
@@ -2861,11 +2970,11 @@ def set_id_session_key(set_id: int) -> bytes:
             + encoded)
 
 
-def test_build_spec_starts_grandpa_at_set_0_in_session_0(spec, spec242):
+def test_build_spec_starts_grandpa_at_set_0_in_session_0(spec, spec243):
     """What pallet_grandpa's genesis writes in both preprod genesis: the set id 0 as a u64, and the one SetIdSession
     entry, set 0 beginning in session 0 (a u32)."""
     prefix = lp.storage_key("Grandpa", "SetIdSession")
-    for genesis in (spec, spec242[0]):
+    for genesis in (spec, spec243[0]):
         assert genesis.value("Grandpa", "CurrentSetId") == bytes(8)
         assert {key: value for key, value in genesis.storage.items() if key.startswith(prefix)} == {
             set_id_session_key(0): bytes(4)}
@@ -4163,12 +4272,12 @@ def test_motra_genesis_checkpoint_requires_canonical_endowed_account(spec, meta,
 
 
 @pytest.fixture
-def spec242() -> tuple[lp.Spec, lp.Metadata]:
-    """The preprod genesis spec 242 builds, less its :code, and that code's
+def spec243() -> tuple[lp.Spec, lp.Metadata]:
+    """The preprod genesis spec 243 builds, less its :code, and that code's
     metadata trimmed to what the preflight reads. The README's Tests section
     gives the commands that build both."""
-    v14 = json.loads((FIXTURES / "spec242-metadata.json").read_text())["V14"]
-    return lp.load_spec(str(FIXTURES / "preprod-spec242-raw.json")), lp.Metadata.from_v14(v14)
+    v14 = json.loads((FIXTURES / "spec243-metadata.json").read_text())["V14"]
+    return lp.load_spec(str(FIXTURES / "preprod-spec243-raw.json")), lp.Metadata.from_v14(v14)
 
 
 def version_fields(version: bytes) -> tuple[bytes, int, int]:
@@ -4183,46 +4292,47 @@ def version_fields(version: bytes) -> tuple[bytes, int, int]:
     return name, spec_version, int.from_bytes(version[cursor:cursor + 4], "little")
 
 
-def test_the_spec242_fixtures_are_the_runtime_this_source_builds(spec242):
+def test_the_spec243_fixtures_are_the_runtime_this_source_builds(spec243):
     """The fixtures stand for the runtime this tree builds: its metadata's
     System.Version and the LastRuntimeUpgrade build-spec writes carry the spec
     and transaction versions the runtime source declares."""
     source = (HERE.parent.parent / "partnerchain" / "runtime" / "src" / "lib.rs").read_text()
     declared = [int(re.search(rf"\n\s*{field}: (\d+),", source).group(1))
                 for field in ("spec_version", "transaction_version")]
-    spec, meta = spec242
+    spec, meta = spec243
     name, spec_version, transaction_version = version_fields(meta.constants[("System", "Version")])
     assert (name, [spec_version, transaction_version]) == (b"\x20materios", declared)
     assert spec.value("System", "LastRuntimeUpgrade") == lp.compact(spec_version) + name
 
 
-def test_every_item_the_spec242_preprod_genesis_sets_is_on_the_allowlist(spec242):
+def test_every_item_the_spec243_preprod_genesis_sets_is_on_the_allowlist(spec243):
     """Rule 4 reads which items genesis sets, not what they hold: rule 7
     refuses this genesis's Root timelock delays and guardian."""
-    assert lp.check_genesis_storage(*spec242) == []
+    assert lp.check_genesis_storage(*spec243) == []
 
 
-def test_the_spec242_genesis_starts_settlement_at_its_current_version_with_legacy_paths_closed(spec242):
-    """build-spec writes the settlement pallet's storage version 4 and both
-    legacy cutovers at block zero, which version 4 reads as closed, so no
-    upgrade migrates settlement and no legacy settle or expire call runs."""
-    spec, _ = spec242
-    assert spec.value("IntentSettlement", "SettlementStorageVersion") == (4).to_bytes(4, "little")
+def test_the_spec243_genesis_starts_settlement_at_its_current_version_settling_against_preprod(spec243):
+    """build-spec writes the settlement pallet's storage version 5, both legacy cutovers at block zero, which that
+    version reads as closed, so no upgrade migrates settlement and no legacy settle or expire call runs, and the
+    Cardano network preprod settles against: network magic 1, preprod's Shelley genesis and no Aegis policy."""
+    spec, _ = spec243
+    assert spec.value("IntentSettlement", "SettlementStorageVersion") == (5).to_bytes(4, "little")
     assert spec.value("IntentSettlement", "StcaCutoverBlock") == bytes(4)
     assert spec.value("IntentSettlement", "PolicyExpireCutoverBlock") == bytes(4)
+    assert lp.stored_cardano_ids(spec) == (1, CARDANO_PREPROD_SHELLEY, bytes(28))
 
 
 @pytest.mark.parametrize("item", ["Tasks", "CounterForTasks", "NextTaskId", "PendingGuardianChange", "Approval"])
-def test_a_genesis_that_starts_the_root_timelock_queue_is_refused(spec242, item):
-    spec, meta = spec242
+def test_a_genesis_that_starts_the_root_timelock_queue_is_refused(spec243, item):
+    spec, meta = spec243
     put(spec, "RootTimelock", item, bytes(36))
     assert messages(lp.check_genesis_storage(spec, meta)) == [
         f"[4 supply] genesis sets RootTimelock.{item} (1 entry), which a mainnet genesis may not set: "
         "storage outside the genesis allowlist can hold a claim on MATRA that the supply check does not count"]
 
 
-def test_a_well_known_root_timelock_guardian_is_refused(spec242, known):
-    spec, meta = spec242
+def test_a_well_known_root_timelock_guardian_is_refused(spec243, known):
+    spec, meta = spec243
     spec.storage[lp.CODE_KEY] = b""
     put(spec, "RootTimelock", "Guardian", BOB)
     found = messages(lp.check_dev_keys(spec, meta, {}, NO_CARDANO, [], known))
@@ -4500,7 +4610,7 @@ def nested_members(entry) -> list[str]:
     return [f"[7 timelock] roles.guardian[0].members[{i}] is a multisig: the runtime takes the guardian's veto ahead "
             "of fee-paying calls only when a member key signs it through one as_multi, so a veto through a nested "
             "multisig can be crowded out of blocks"
-            for i, member in enumerate(entry["members"]) if isinstance(member, dict)]
+            for i, member in enumerate(entry["members"]) if lp.is_multisig(member)]
 
 
 def delays(*blocks: int) -> bytes:
@@ -4512,11 +4622,11 @@ def timelock_launch(sudo_members, guardian) -> dict:
 
 
 @pytest.fixture
-def guarded(spec242):
-    """The spec 242 preprod genesis with Root held by a 2-of-3 multisig of fresh
+def guarded(spec243):
+    """The spec 243 preprod genesis with Root held by a 2-of-3 multisig of fresh
     keys, and the timelock guarded by a 2-of-3 multisig of other fresh keys at
     the mainnet delays."""
-    spec, meta = spec242
+    spec, meta = spec243
     sudo, guardian = [fresh_account() for _ in range(3)], [fresh_account() for _ in range(3)]
     put(spec, "Sudo", "Key", lp.multisig_account(sudo, 2))
     put(spec, "RootTimelock", "Guardian", lp.multisig_account(guardian, 2))
@@ -4535,8 +4645,8 @@ def delay_findings(spec, meta, *blocks: int) -> list[str]:
     return messages(lp.check_delays(spec, meta))
 
 
-def test_the_spec242_metadata_declares_the_mainnet_delays_and_their_ceiling(spec242):
-    _, meta = spec242
+def test_the_spec243_metadata_declares_the_mainnet_delays_and_their_ceiling(spec243):
+    _, meta = spec243
     assert meta.constants[("RootTimelock", "DefaultDelays")] == delays(*MAINNET_DELAYS)
     assert meta.constants[("RootTimelock", "MaxDelay")] == MAX_DELAY.to_bytes(4, "little")
 
@@ -4547,8 +4657,8 @@ def test_a_guardian_apart_from_the_sudo_key_at_the_mainnet_delays_passes(guarded
     assert lp.check_delays(spec, meta) == []
 
 
-def test_the_spec242_preprod_timelock_is_refused_on_mainnet(spec242):
-    spec, meta = spec242
+def test_the_spec243_preprod_timelock_is_refused_on_mainnet(spec243):
+    spec, meta = spec243
     assert spec.value("Sudo", "Key") == lp.multisig_account(PREPROD_KEYHOLDERS, 2)
     launch = timelock_launch(PREPROD_KEYHOLDERS, msig(3, *PREPROD_KEYHOLDERS))
     assert messages(lp.check_guardian(spec, meta, launch)) == [
@@ -4756,15 +4866,15 @@ def test_a_sudo_key_that_does_not_decode_leaves_the_guardian_checked(guarded):
         "who can veto Root is unchecked"]
 
 
-def test_the_mainnet_delays_and_delays_up_to_max_delay_pass(spec242):
-    spec, meta = spec242
+def test_the_mainnet_delays_and_delays_up_to_max_delay_pass(spec243):
+    spec, meta = spec243
     assert delay_findings(spec, meta, *MAINNET_DELAYS) == []
     assert delay_findings(spec, meta, MAX_DELAY, MAX_DELAY, MAX_DELAY) == []
 
 
 @pytest.mark.parametrize("index, name", enumerate(("recovery", "standard", "long")))
-def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec242, index, name):
-    spec, meta = spec242
+def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec243, index, name):
+    spec, meta = spec243
     blocks = [*MAINNET_DELAYS]
     blocks[index] -= 1
     assert delay_findings(spec, meta, *blocks) == [
@@ -4773,30 +4883,30 @@ def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec242, index, na
 
 
 @pytest.mark.parametrize("long", [MAX_DELAY + 1, 2**32 - 1])
-def test_a_long_delay_above_max_delay_is_refused(spec242, long):
-    spec, meta = spec242
+def test_a_long_delay_above_max_delay_is_refused(spec243, long):
+    spec, meta = spec243
     assert delay_findings(spec, meta, DAYS, 7 * DAYS, long) == [
         f"[7 timelock] RootTimelock.Delays holds long calls {long} blocks, above the runtime's MaxDelay {MAX_DELAY}: "
         "a guardian change, or a cut to the long delay itself, would wait longer than the runtime lets any delay be"]
 
 
-def test_delays_out_of_the_runtime_order_are_refused(spec242):
-    spec, meta = spec242
+def test_delays_out_of_the_runtime_order_are_refused(spec243):
+    spec, meta = spec243
     assert delay_findings(spec, meta, 20 * DAYS, 7 * DAYS, 30 * DAYS) == [
         f"[7 timelock] RootTimelock.Delays (recovery {20 * DAYS}, standard {7 * DAYS}, long {30 * DAYS} blocks) "
         "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
 
 
-def test_a_standard_delay_above_the_long_delay_is_refused_within_every_other_bound(spec242):
+def test_a_standard_delay_above_the_long_delay_is_refused_within_every_other_bound(spec243):
     """Each delay at least its mainnet delay and long at most MaxDelay: only the order refuses."""
-    spec, meta = spec242
+    spec, meta = spec243
     assert delay_findings(spec, meta, DAYS, 60 * DAYS, 30 * DAYS) == [
         f"[7 timelock] RootTimelock.Delays (recovery {DAYS}, standard {60 * DAYS}, long {30 * DAYS} blocks) "
         "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
 
 
-def test_zero_delays_are_refused(spec242):
-    spec, meta = spec242
+def test_zero_delays_are_refused(spec243):
+    spec, meta = spec243
     found = delay_findings(spec, meta, 0, 0, 0)
     assert len(found) == 4
     assert "[7 timelock] RootTimelock.Delays holds recovery calls 0 blocks, below the 14400 the runtime sets for " \
@@ -4804,8 +4914,8 @@ def test_zero_delays_are_refused(spec242):
     assert found[-1].startswith("[7 timelock] RootTimelock.Delays (recovery 0, standard 0, long 0 blocks) breaks")
 
 
-def test_the_bounds_are_the_runtime_constants(spec242):
-    spec, meta = spec242
+def test_the_bounds_are_the_runtime_constants(spec243):
+    spec, meta = spec243
     meta.constants[("RootTimelock", "DefaultDelays")] = delays(10, 20, 30)
     meta.constants[("RootTimelock", "MaxDelay")] = (40).to_bytes(4, "little")
     assert delay_findings(spec, meta, 10, 20, 40) == []
@@ -4819,8 +4929,8 @@ def test_the_bounds_are_the_runtime_constants(spec242):
     {"DefaultDelays": None}, {"MaxDelay": None}, {"DefaultDelays": None, "MaxDelay": None},
     {"DefaultDelays": bytes(11)}, {"MaxDelay": b""},
 ])
-def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec242, constants):
-    spec, meta = spec242
+def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec243, constants):
+    spec, meta = spec243
     for name, value in constants.items():
         if value is None:
             del meta.constants[("RootTimelock", name)]
@@ -4835,19 +4945,410 @@ def test_a_runtime_with_no_root_timelock_is_refused(spec, meta):
 
 
 @pytest.mark.parametrize("raw", [b"", bytes(11), bytes(13), bytes(24)], ids=lambda raw: f"{len(raw)} bytes")
-def test_delays_that_do_not_decode_are_refused(spec242, raw):
-    spec, meta = spec242
+def test_delays_that_do_not_decode_are_refused(spec243, raw):
+    spec, meta = spec243
     put(spec, "RootTimelock", "Delays", raw)
     assert messages(lp.check_delays(spec, meta)) == [
         f"[7 timelock] RootTimelock.Delays is {len(raw)} bytes, not three 4-byte block counts"]
 
 
-def test_a_genesis_that_stores_no_delays_is_refused(spec242):
-    spec, meta = spec242
+def test_a_genesis_that_stores_no_delays_is_refused(spec243):
+    spec, meta = spec243
     del spec.storage[lp.storage_key("RootTimelock", "Delays")]
     assert messages(lp.check_delays(spec, meta)) == [
         "[7 timelock] genesis sets no RootTimelock.Delays, which every genesis the runtime builds sets: how long "
         "Root's calls wait is unchecked"]
+
+
+# ---------------------------------------------------------------------------
+# Rule 10: every multisig member's holder proves possession of its key
+# ---------------------------------------------------------------------------
+
+def possession_findings(spec: lp.Spec, launch: dict) -> list[str]:
+    return messages(lp.check_possession(spec, launch))
+
+
+def bare(where: str) -> str:
+    return (f"[10 possession] {where} is a bare key: a multisig member is a key given with its holder's pop, "
+            '{"key": ..., "pop": ...}, or a multisig declared by its members, since an address no one proves to hold '
+            "can be a multisig no one declared")
+
+
+def no_pop(where: str, role: str, index: str) -> str:
+    return (f"[10 possession] {where} gives no pop: its holder has not signed its challenge (challenge --role {role} "
+            f"--index {index}), so no one has shown they hold its key")
+
+
+def unproven(where: str, scheme: str, role: str, index: str) -> str:
+    return (f"[10 possession] {where}: its pop is not an {scheme} signature by its key of its challenge (challenge "
+            f"--role {role} --index {index}), which binds this chain, genesis and launch manifest and its role and "
+            "position: another key signed it, or its holder signed for another launch, role or position")
+
+
+def nested_multisig() -> dict:
+    """A 2-of-3 whose third member is a 2-of-2, every key fresh."""
+    return {"threshold": 2, "members": [ss58(fresh_account()), ss58(fresh_account()),
+                                        msig(2, fresh_account(), fresh_account())]}
+
+
+def leaves(entry) -> list:
+    return [leaf for _, _, leaf in lp.role_leaves(entry, "")]
+
+
+def test_a_nested_multisig_whose_every_key_proves_possession_passes(spec):
+    launch = prove({"roles": {"sudo": [nested_multisig()], "guardian": [msig(2, *(fresh_account() for _ in range(3)))],
+                              "endowed": [ss58(fresh_account()), msig(1, fresh_account(), fresh_ecdsa_key())]}}, spec)
+    proven = [leaf for role in ("sudo", "guardian") for leaf in leaves(launch["roles"][role][0])]
+    proven += leaves(launch["roles"]["endowed"][1])
+    assert len(proven) == 9 and all(set(leaf) == {"key", "pop"} for leaf in proven)
+    assert possession_findings(spec, launch) == []
+
+
+def test_a_member_given_as_a_bare_key_is_refused_in_any_role_at_any_depth(spec):
+    sudo, endowed = nested_multisig(), msig(1, fresh_account(), stranger())
+    sudo["members"][2]["members"][1] = ss58(stranger())
+    launch = prove({"roles": {"sudo": [sudo], "endowed": [endowed]}}, spec)
+    assert possession_findings(spec, launch) == [bare("roles.endowed[0].members[1]"),
+                                                 bare("roles.sudo[0].members[2].members[1]")]
+
+
+# The address of a multisig no one declared: no secret signs for it, so it can prove nothing.
+def test_a_multisig_address_given_as_a_member_cannot_prove_possession(spec):
+    hidden = lp.multisig_account([fresh_account(), fresh_account()], 1)
+    launch = prove({"roles": {"sudo": [{"threshold": 2, "members": [
+        ss58(fresh_account()), {"key": ss58(hidden), "pop": "0x" + os.urandom(64).hex()}]}]}}, spec)
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+def test_a_member_given_with_no_pop_is_refused(spec):
+    launch = prove({"roles": {"guardian": [{"threshold": 2, "members": [
+        ss58(fresh_account()), ss58(fresh_account()), {"key": ss58(stranger())}]}]}}, spec)
+    assert possession_findings(spec, launch) == [no_pop("roles.guardian[0].members[2]", "guardian", "0 2")]
+
+
+def another_genesis(spec: lp.Spec) -> lp.Spec:
+    other = lp.Spec(copy.deepcopy(spec.doc), dict(spec.storage), spec.source)
+    put(other, "Sudo", "Key", fresh_account())
+    return other
+
+
+def renamed(spec: lp.Spec, **fields) -> lp.Spec:
+    return lp.Spec(dict(spec.doc, **fields), spec.storage, spec.source)
+
+
+# The challenge the member at roles.sudo[0].members[1] signs, for another launch, role or position than its own.
+OTHER_CHALLENGES = {
+    "another launch manifest": lambda spec, launch: challenge(spec, dict(launch, slots_per_epoch=60), "sudo", (0, 1)),
+    "another role": lambda spec, launch: challenge(spec, launch, "guardian", (0, 1)),
+    "another member index": lambda spec, launch: challenge(spec, launch, "sudo", (0, 2)),
+    "another multisig index": lambda spec, launch: challenge(spec, launch, "sudo", (1, 1)),
+    "a nested position": lambda spec, launch: challenge(spec, launch, "sudo", (0, 1, 0)),
+    "another chain name": lambda spec, launch: challenge(renamed(spec, name="Materios"), launch, "sudo", (0, 1)),
+    "another chain id": lambda spec, launch: challenge(renamed(spec, id="materios"), launch, "sudo", (0, 1)),
+    "another genesis": lambda spec, launch: challenge(another_genesis(spec), launch, "sudo", (0, 1)),
+    "another domain": lambda spec, launch: (b"materios-launch-pop-v2"
+                                            + challenge(spec, launch, "sudo", (0, 1))[len(POP_DOMAIN):]),
+    "the challenge wrapped as polkadot.js signRaw wraps it": lambda spec, launch: (
+        b"<Bytes>" + challenge(spec, launch, "sudo", (0, 1)) + b"</Bytes>"),
+}
+
+
+@pytest.mark.parametrize("other", OTHER_CHALLENGES.values(), ids=OTHER_CHALLENGES.keys())
+def test_a_pop_its_holder_signed_for_another_launch_role_or_position_is_refused(spec, other):
+    member = fresh_account()
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), member, fresh_account())]}}, spec)
+    launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + KEYHOLDERS[member](other(spec, launch)).hex()
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+# What stands in a member's pop in place of its holder's signature of its own challenge.
+FORGERIES = {
+    "another key's signature of its challenge": lambda member, message: KEYHOLDERS[fresh_account()](message),
+    "random bytes": lambda member, message: os.urandom(64),
+    "zeros": lambda member, message: bytes(64),
+    "its signature cut short": lambda member, message: KEYHOLDERS[member](message)[:63],
+    "its signature with a byte more": lambda member, message: KEYHOLDERS[member](message) + b"\0",
+    "nothing": lambda member, message: b"",
+}
+
+
+@pytest.mark.parametrize("forge", FORGERIES.values(), ids=FORGERIES.keys())
+def test_a_pop_that_is_not_its_keys_signature_of_its_challenge_is_refused(spec, forge):
+    member = fresh_account()
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), member)]}}, spec)
+    message = challenge(spec, launch, "sudo", (0, 1))
+    launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + forge(member, message).hex()
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+def no_secret(where: str) -> str:
+    return (f"[10 possession] {where} is the all-zero key, whose sr25519 signature of any message needs no secret: "
+            "its pop shows no one holds it")
+
+
+# schnorrkel, as py-sr25519-bindings and sp_core run it, verifies the all-zero key's signature that needs no secret.
+@pytest.mark.parametrize("spelling", [ss58, lambda key: "0x" + key.hex()], ids=["SS58", "0x-hex"])
+def test_the_all_zero_key_cannot_prove_possession(spec, spelling):
+    zero = {"key": spelling(ZERO_KEY), "pop": "0x" + NO_SECRET_POP.hex()}
+    sudo = nested_multisig()
+    sudo["members"][2]["members"][1] = zero
+    launch = prove({"roles": {"sudo": [sudo], "guardian": [{"threshold": 2, "members": [
+        ss58(fresh_account()), dict(zero), ss58(fresh_account())]}]}}, spec)
+    for role, position in (("guardian", (0, 1)), ("sudo", (0, 2, 1))):
+        assert sr25519.verify(NO_SECRET_POP, challenge(spec, launch, role, position), ZERO_KEY)
+    assert possession_findings(spec, launch) == [no_secret("roles.guardian[0].members[1]"),
+                                                 no_secret("roles.sudo[0].members[2].members[1]")]
+
+
+def test_two_members_pops_swapped_are_refused(spec):
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), fresh_account())]}}, spec)
+    first, second = launch["roles"]["sudo"][0]["members"]
+    first["pop"], second["pop"] = second["pop"], first["pop"]
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[0]", "sr25519", "sudo", "0 0"),
+                                                 unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+# A 33-byte key is ECDSA's, which the manifest admits: sp_core's ecdsa recovers the signer from blake2-256 of the
+# message and the signature's recovery id, and compares it with the key.
+def test_an_ecdsa_member_proves_possession_as_sp_core_verifies_it(spec):
+    member = fresh_ecdsa_key()
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), member)]}}, spec)
+    assert launch["roles"]["sudo"][0]["members"][1]["key"] == "0x" + member.hex()
+    assert possession_findings(spec, launch) == []
+    signature = bytes.fromhex(launch["roles"]["sudo"][0]["members"][1]["pop"][2:])
+    for pop in (signature[:64] + bytes([signature[64] ^ 1]), signature[:64], KEYHOLDERS[fresh_account()](b"")):
+        launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + pop.hex()
+        assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "ECDSA", "sudo", "0 1")]
+
+
+# The manifest says no more of a 32-byte key than that it is an account: it is read as sr25519's, Substrate's default.
+def test_an_ed25519_signature_does_not_prove_possession_of_a_32_byte_key(spec):
+    signer = signing.SigningKey.generate()
+    launch = prove({"roles": {"sudo": [{"threshold": 2, "members": [
+        ss58(fresh_account()), {"key": ss58(signer.verify_key.encode())}]}]}}, spec)
+    launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + signer.sign(
+        challenge(spec, launch, "sudo", (0, 1))).signature.hex()
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+def test_collecting_the_pops_leaves_the_launch_manifest_hash_as_it_was(spec):
+    keyed = {"roles": {"sudo": [{"threshold": 2, "members": [
+        {"key": ss58(fresh_account())}, {"threshold": 2, "members": [{"key": ss58(fresh_account())},
+                                                                   {"key": role_key(fresh_ecdsa_key())}]}]}]}}
+    proven = prove(keyed, spec)
+    assert all("pop" in leaf for leaf in leaves(proven["roles"]["sudo"][0]))
+    assert lp.launch_manifest_hash(proven) == lp.launch_manifest_hash(keyed)
+    key = signing.SigningKey.generate()
+    assert lp.check_checkpoint(spec, proven, lp.signed_manifest(spec, keyed, key), [pub(key)]) == []
+    rekeyed = copy.deepcopy(proven)
+    rekeyed["roles"]["sudo"][0]["members"][0]["key"] = ss58(fresh_account())
+    assert lp.launch_manifest_hash(rekeyed) != lp.launch_manifest_hash(proven)
+
+
+def test_a_role_entry_that_is_not_a_multisig_owes_no_pop(spec):
+    launch = {"roles": {"anchor_signer": [ss58(stranger())], "endowed": [ss58(stranger())]}}
+    assert possession_findings(spec, launch) == []
+
+
+# Rules 1 and 7 read a member given with its pop as its key.
+@pytest.mark.parametrize("build", ONE_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
+def test_rule_1_reads_a_member_given_with_its_pop_as_its_key(spec, meta, known, build):
+    entry, holders = build()
+    proven = prove(sudo_launch(entry), spec)["roles"]["sudo"][0]
+    assert any(isinstance(leaf, dict) for leaf in leaves(proven))
+    assert sudo_findings(spec, meta, known, proven) == [
+        lone_holder("1 dev-keys", "roles.sudo[0]", key, paths, SUDO_POWER) for key, paths in sorted(holders)]
+
+
+# The spec 243 fixture holds no code to hash its genesis with, so the preprod v6 spec's challenges stand in.
+def test_a_guardian_whose_members_are_given_with_their_pops_has_no_nested_multisig(spec, guarded):
+    timelocked, meta, sudo, guardian = guarded
+    entry = prove(timelock_launch(sudo, msig(2, *guardian)), spec)["roles"]["guardian"][0]
+    assert all(set(member) == {"key", "pop"} for member in entry["members"])
+    assert guardian_findings(timelocked, meta, sudo, entry) == []
+
+
+KEY, POP = ss58(stranger()), "0x" + "cd" * 64
+
+
+def with_member(member) -> dict:
+    return {"roles": {"sudo": [{"threshold": 2, "members": [ss58(fresh_account()), member]}]}, "supply": VALID_LOCK}
+
+
+def test_a_member_given_with_its_pop_is_read():
+    lp.validate_launch(with_member({"key": KEY, "pop": POP}))
+    lp.validate_launch(with_member({"key": KEY}))
+
+
+@spelled(MISSPELLINGS)
+def test_a_pop_in_another_spelling_is_an_input_error(misspell):
+    with pytest.raises(lp.InputError, match=rf"^roles\.sudo\[0\]\.members\[1\]\.pop {MISSPELLED}"):
+        lp.validate_launch(with_member({"key": KEY, "pop": misspell("cd" * 64)}))
+
+
+@spelled(HEX_KEY_MISSPELLINGS)
+def test_a_member_key_given_with_its_pop_in_another_spelling_of_hex_is_an_input_error(misspell):
+    with pytest.raises(lp.InputError, match=rf"^roles\.sudo\[0\]\.members\[1\]\.key {MISSPELLED}"):
+        lp.validate_launch(with_member({"key": misspell(DIGITS), "pop": POP}))
+
+
+@pytest.mark.parametrize("member", [
+    {"key": KEY, "pop": POP, "scheme": "sr25519"}, {"key": KEY, "pop": None}, {"key": 7, "pop": POP},
+    {"key": KEY, "pop": [POP]},
+], ids=["an unknown field", "a null pop", "a key that is not a string", "a pop that is not a string"])
+def test_a_member_key_given_in_another_shape_is_an_input_error(member):
+    with pytest.raises(lp.InputError, match=re.escape(
+            "roles.sudo[0].members[1] must hold its key and, once its holder signs, its pop, each a string")):
+        lp.validate_launch(with_member(member))
+
+
+def test_a_pop_for_a_role_entry_that_is_no_multisig_member_is_an_input_error():
+    with pytest.raises(lp.InputError, match=re.escape(
+            "roles.anchor_signer[0] gives a key with a pop: a role entry is a public key or a multisig, and a pop is "
+            "given for a multisig's member")):
+        lp.validate_launch({"roles": {"anchor_signer": [{"key": KEY, "pop": POP}]}, "supply": VALID_LOCK})
+
+
+# ---------------------------------------------------------------------------
+# Rule 11: the Cardano network settlement binds
+# ---------------------------------------------------------------------------
+
+# Cardano mainnet as its published environment gives it (book.world.dev.cardano.org/environments/mainnet), and
+# Cardano preprod as the preprod runtime has bound it.
+CARDANO_MAINNET_MAGIC = 764824073
+CARDANO_MAINNET_SHELLEY = bytes.fromhex("1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81")
+CARDANO_PREPROD_SHELLEY = bytes.fromhex("162d29c4e1cf6b8a84f2d692e67a3ac6bc7851bc3e6e4afe64d15778bed8bd86")
+AEGIS_POLICY = bytes([0x5a]) * 28
+SETTLEMENT = {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex()}
+# A launch whose Aegis policy is applied to the chain's own genesis hash: genesis binds none, and Root binds it with
+# IntentSettlement.bind_aegis_policy_v1 after launch.
+BOUND_AFTER_GENESIS = {"aegis_policy_v1_script_hash": None}
+
+
+def cardano_ids(magic: int = CARDANO_MAINNET_MAGIC, shelley: bytes = CARDANO_MAINNET_SHELLEY,
+                aegis: bytes = AEGIS_POLICY) -> bytes:
+    """IntentSettlement.CardanoIds as SCALE encodes it: the network magic, a u32, then the Shelley genesis hash
+    and the aegis_policy_v1 script hash."""
+    return magic.to_bytes(4, "little") + shelley + aegis
+
+
+def settles_on_mainnet(spec: lp.Spec) -> None:
+    put(spec, "IntentSettlement", "CardanoIds", cardano_ids())
+
+
+def with_cardano_ids(metadata_v14: dict) -> dict:
+    """The fixture metadata plus the item a runtime that stores settlement's Cardano network declares."""
+    v14 = copy.deepcopy(metadata_v14)
+    pallet = next(p for p in v14["pallets"] if p["name"] == "IntentSettlement")
+    pallet["storage"]["entries"].append({"name": "CardanoIds"})
+    return v14
+
+
+def test_the_preflight_holds_cardano_mainnet_to_its_published_shelley_genesis():
+    """The networkMagic of mainnet's published shelley-genesis.json, and that file's blake2b-256, which mainnet's
+    config.json publishes as ShelleyGenesisHash."""
+    shelley = (FIXTURES / "cardano-mainnet-shelley-genesis.json").read_bytes()
+    config = json.loads((FIXTURES / "cardano-mainnet-config.json").read_text())
+    assert json.loads(shelley)["networkMagic"] == lp.CARDANO_MAINNET_NETWORK_MAGIC == CARDANO_MAINNET_MAGIC
+    assert lp.blake2_256(shelley) == lp.CARDANO_MAINNET_SHELLEY_GENESIS_HASH == CARDANO_MAINNET_SHELLEY
+    assert config["ShelleyGenesisHash"] == CARDANO_MAINNET_SHELLEY.hex()
+
+
+def test_a_genesis_settling_against_cardano_mainnet_and_the_declared_aegis_policy_passes(spec):
+    settles_on_mainnet(spec)
+    assert lp.check_settlement(spec, {"settlement": SETTLEMENT}) == []
+
+
+def test_a_genesis_binding_no_aegis_policy_passes_where_the_launch_binds_it_after_genesis(spec):
+    put(spec, "IntentSettlement", "CardanoIds", cardano_ids(aegis=bytes(28)))
+    assert lp.check_settlement(spec, {"settlement": BOUND_AFTER_GENESIS}) == []
+
+
+def test_a_genesis_binding_an_aegis_policy_is_refused_where_the_launch_binds_it_after_genesis(spec):
+    settles_on_mainnet(spec)
+    assert messages(lp.check_settlement(spec, {"settlement": BOUND_AFTER_GENESIS})) == [
+        f"[11 settlement] genesis IntentSettlement.CardanoIds binds aegis_policy_v1 script hash 0x{AEGIS_POLICY.hex()}"
+        ", where the launch declares the policy bound after genesis (null): bind_aegis_policy_v1 binds one only "
+        "while none is bound, so the policy deployed on the chain's genesis hash could not be bound"]
+
+
+AGAINST = ("every voucher the committee signs binds it and all settlement and expiry evidence must name its Shelley "
+           "genesis, so the chain settles against another Cardano network than the mainnet it launches on")
+
+
+@pytest.mark.parametrize("stored, refusals", [
+    (cardano_ids(magic=1, shelley=CARDANO_PREPROD_SHELLEY, aegis=bytes(28)), [
+        f"genesis IntentSettlement.CardanoIds holds network magic 1, not Cardano mainnet's 764824073: {AGAINST}",
+        f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x{CARDANO_PREPROD_SHELLEY.hex()}, not "
+        f"Cardano mainnet's 0x{CARDANO_MAINNET_SHELLEY.hex()}: {AGAINST}",
+        f"genesis IntentSettlement.CardanoIds binds no aegis_policy_v1 script hash, not the 0x{AEGIS_POLICY.hex()} the "
+        "launch declares deployed: every voucher the committee signs binds it (a launch that binds it after genesis "
+        "declares null)"]),
+    (cardano_ids(magic=1), [
+        f"genesis IntentSettlement.CardanoIds holds network magic 1, not Cardano mainnet's 764824073: {AGAINST}"]),
+    (cardano_ids(shelley=CARDANO_PREPROD_SHELLEY), [
+        f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x{CARDANO_PREPROD_SHELLEY.hex()}, not "
+        f"Cardano mainnet's 0x{CARDANO_MAINNET_SHELLEY.hex()}: {AGAINST}"]),
+    (cardano_ids(aegis=bytes([0x5b]) * 28), [
+        f"genesis IntentSettlement.CardanoIds binds aegis_policy_v1 script hash 0x{'5b' * 28}, not the "
+        f"0x{AEGIS_POLICY.hex()} the launch declares deployed: every voucher the committee signs binds it"]),
+    (cardano_ids(aegis=bytes(28)), [
+        f"genesis IntentSettlement.CardanoIds binds no aegis_policy_v1 script hash, not the 0x{AEGIS_POLICY.hex()} the "
+        "launch declares deployed: every voucher the committee signs binds it (a launch that binds it after genesis "
+        "declares null)"]),
+], ids=["preprod", "preprod-magic", "preprod-shelley", "another-aegis-policy", "no-aegis-policy"])
+def test_a_genesis_settling_against_another_cardano_network_or_policy_is_refused(spec, stored, refusals):
+    put(spec, "IntentSettlement", "CardanoIds", stored)
+    assert messages(lp.check_settlement(spec, {"settlement": SETTLEMENT})) == [
+        f"[11 settlement] {refusal}" for refusal in refusals]
+
+
+def test_a_genesis_that_stores_no_cardano_network_is_refused(spec):
+    assert messages(lp.check_settlement(spec, {"settlement": SETTLEMENT})) == [
+        "[11 settlement] genesis stores no IntentSettlement.CardanoIds: settlement refuses every voucher, settlement "
+        "and expiry"]
+
+
+def test_a_launch_that_declares_no_aegis_policy_is_refused(spec):
+    settles_on_mainnet(spec)
+    assert messages(lp.check_settlement(spec, {})) == [
+        "[11 settlement] the launch declares no settlement.aegis_policy_v1_script_hash: the Aegis policy deployed on "
+        "Cardano mainnet that genesis binds, or null where Root binds it after genesis"]
+
+
+@pytest.mark.parametrize("length", [63, 65])
+def test_cardano_ids_of_another_width_are_unreadable(spec, length):
+    put(spec, "IntentSettlement", "CardanoIds", cardano_ids()[:length].ljust(length, b"\0"))
+    with pytest.raises(lp.InputError, match=f"IntentSettlement.CardanoIds is {length} bytes, not the 64"):
+        lp.check_settlement(spec, {"settlement": SETTLEMENT})
+
+
+@pytest.mark.parametrize("settlement", [
+    [], {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex(), "network_magic": 1},
+    {"aegis_policy_v1_script_hash": AEGIS_POLICY.hex()}, {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex().upper()},
+    {"aegis_policy_v1_script_hash": "0x" + bytes(32).hex()}, {"aegis_policy_v1_script_hash": 7},
+    {"aegis_policy_v1_script_hash": "0x" + bytes(28).hex()},
+], ids=["list", "unknown-field", "no-0x", "upper-hex", "32-bytes", "number", "zero"])
+def test_an_unreadable_settlement_declaration_is_an_input_error(spec, settlement):
+    with pytest.raises(lp.InputError, match="settlement"):
+        lp.validate_launch({**clean_manifest_fields(), "settlement": settlement})
+
+
+def clean_manifest_fields() -> dict:
+    return {"roles": {}, "supply": {"genesis_lock": LOCK}}
+
+
+@pytest.mark.parametrize("settlement", [SETTLEMENT, BOUND_AFTER_GENESIS], ids=["in-genesis", "after-genesis"])
+def test_a_launch_declares_the_aegis_policy_genesis_binds_or_null(settlement):
+    lp.validate_launch({**clean_manifest_fields(), "settlement": settlement})
+
+
+def test_genesis_may_store_settlements_cardano_network(spec, metadata_v14):
+    """Rule 11 checks what the item holds; it holds no MATRA."""
+    meta = lp.Metadata.from_v14(with_cardano_ids(metadata_v14))
+    without = messages(lp.check_genesis_storage(spec, meta))
+    settles_on_mainnet(spec)
+    assert messages(lp.check_genesis_storage(spec, meta)) == without
 
 
 # ---------------------------------------------------------------------------
@@ -4857,10 +5358,12 @@ def test_a_genesis_that_stores_no_delays_is_refused(spec242):
 # materios-node export-blocks, answering what the attestation asks: block 0 of the chain its --chain names, a raw
 # spec file or a chain built into the node, written as export-blocks --binary writes it. It builds a file's genesis
 # with the preflight's own computation, so these tests see the attestation's plumbing; test_node_attestation.py
-# runs the real node. Its chain-id reports that genesis as settlement's and the oracle's chain ids. KNOBS: tamper
-# builds another state root, fail builds none from a file, built_in_refused none from a built-in chain, as the
-# runtime refuses its genesis committee, export writes other bytes, chain_ids reports other chain ids, no_chain_id
-# has no chain-id subcommand, log records each call.
+# runs the real node. A --chain it cannot open as a file fails with the OS's error, as sc-chain-spec reports it. Its
+# chain-id reports that genesis as settlement's and the oracle's chain ids, and the Cardano network settlement binds
+# as the preflight reads it from the spec. KNOBS: tamper builds another state root, fail builds none from a file,
+# built_in_refused none from a built-in chain, as the runtime refuses its genesis committee, preprod names the spec
+# file whose genesis its built-in preprod builds, export writes other bytes, chain_ids reports other chain ids,
+# no_chain_id has no chain-id subcommand, cardano_ids reports other Cardano ids, log records each call.
 FAKE_NODE = '''#!@PYTHON@
 import hashlib
 import json
@@ -4888,8 +5391,12 @@ if sys.argv[1] == "chain-id":
     genesis = lp.spec_genesis_hash(lp.load_spec(sys.argv[sys.argv.index("--chain") + 1]))
     ids = {"IntentSettlement.MateriosChainId": list(genesis), "Oracle.MateriosChainId": list(genesis),
            **KNOBS.get("chain_ids", {})}
+    stored = lp.stored_cardano_ids(lp.load_spec(sys.argv[sys.argv.index("--chain") + 1]))
+    cardano = stored and {"network_magic": stored[0], "mainchain_genesis_hash": list(stored[1]),
+                          "aegis_policy_v1_script_hash": list(stored[2])}
     print(json.dumps({"genesis_hash": "0x" + genesis.hex(),
-                      "constants": [[*constant.split("."), value] for constant, value in ids.items()]}))
+                      "constants": [[*constant.split("."), value] for constant, value in ids.items()],
+                      "cardano_ids": KNOBS.get("cardano_ids", cardano)}))
     sys.exit(0)
 
 VALUED = {"--base-path", "--from", "--to", "--database", "--db", "--db-cache", "--state-pruning", "--pruning",
@@ -4916,17 +5423,22 @@ while i < len(args):
     else:
         out, i = args[i], i + 1
 chain = chain if chain is not None else "dev" if dev else ""
-if chain in ("", "dev", "local", "preprod"):
-    if KNOBS.get("built_in_refused"):
-        sys.exit('Error: Service(Client(Storage("the genesis committee is empty, so its first rotation would '
-                 'schedule an empty GRANDPA set; list the authorities in sessionCommitteeManagement.'
-                 'initialAuthorities for blob:\\\\n{}")))')
+built_in = chain in ("", "dev", "local", "preprod")
+if built_in and KNOBS.get("built_in_refused"):
+    sys.exit('Error: Service(Client(Storage("the genesis committee is empty, so its first rotation would '
+             'schedule an empty GRANDPA set; list the authorities in sessionCommitteeManagement.'
+             'initialAuthorities for blob:\\\\n{}")))')
+if not built_in:
+    try:
+        os.close(os.open(chain, os.O_RDONLY))
+    except OSError as e:
+        sys.exit(f"Error: Input(\\"Error opening spec file `{chain}`: {e.strerror} (os error {e.errno})\\")")
+source = KNOBS.get("preprod") if chain == "preprod" else None if built_in else chain
+if source is None:
     root, version = lp.blake2_256(chain.encode()), 1
-elif not os.path.exists(chain):
-    sys.exit(f"Error: Input(\\"Error opening spec file `{chain}`: No such file or directory (os error 2)\\")")
 else:
     try:
-        spec = lp.load_spec(chain)
+        spec = lp.load_spec(source)
     except lp.InputError as e:
         sys.exit(f"Error: Input(\\"Error parsing spec file: {e}\\")")
     if KNOBS.get("fail"):
@@ -5374,6 +5886,28 @@ def test_a_node_that_fails_on_a_chain_name_without_missing_that_file_is_an_input
         node_findings(preprod_path, node)
 
 
+# The red team's case, which the real-node suite runs on the node's own preprod: a chain built into the node whose
+# genesis is the checked one is refused all the same.
+def test_the_chain_built_into_the_node_as_preprod_is_refused_though_its_genesis_matches(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain=preprod"],
+                    exe=fake_node(tmp_path, preprod=str(preprod_path)))
+    assert node_findings(preprod_path, node) == [
+        f"[8 node] authority val0: --chain 'preprod' builds genesis 0x{preprod_genesis_hex(preprod_path)} with no file "
+        "of that name here: the node takes it as a chain built into it, not the checked chain spec"]
+
+
+# A --chain through a file on this host, which the node fails to open, and not as a missing file.
+def test_a_chain_path_through_a_file_on_this_host_is_an_input_error(tmp_path, preprod_path):
+    (tmp_path / "raw.json").write_bytes(preprod_path.read_bytes())
+    value = str(tmp_path / "raw.json" / "raw.json")
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", value])
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val0: its node builds no genesis from --chain {value!r} here, and does not report it as a "
+            "missing file: the preflight cannot tell whether the node reads it as a file or as a chain built into it "
+            f'(Error: Input("Error opening spec file `{value}`: Not a directory (os error 20)")')):
+        node_findings(preprod_path, node)
+
+
 def test_an_authority_that_loads_its_chain_spec_by_a_relative_path_is_attested(tmp_path, preprod_path):
     node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", "raw.json", "--validator"])
     assert node_findings(preprod_path, node) == []
@@ -5388,6 +5922,18 @@ def test_a_chain_spec_path_that_names_the_checked_spec_on_this_host_is_attested(
     assert node_findings(preprod_path, node) == []
     assert [call["argv"][call["argv"].index("--chain") + 1] == str(here) for call in node_calls(log)
             if call["argv"][1] == "export-blocks"] == [True, False]
+
+
+# The checked spec at the path its --chain names on this host, which the node builds no genesis from.
+def test_a_node_that_builds_no_genesis_from_the_checked_spec_on_this_host_is_an_input_error(tmp_path, preprod_path):
+    here = tmp_path / "here-raw.json"
+    here.write_bytes(preprod_path.read_bytes())
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", str(here)],
+                    exe=fake_node(tmp_path, fail=True))
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val0: its node builds no genesis from --chain {str(here)!r} on this host, where it is the "
+            'checked chain spec: Error: Service(Other("the fake node builds no genesis"))')):
+        node_findings(preprod_path, node)
 
 
 def test_a_chain_spec_path_that_names_another_file_on_this_host_is_an_input_error(tmp_path, preprod_path):
@@ -5636,7 +6182,8 @@ class Launch:
     keys at the mainnet delays, the tuned rewards stored, one attestor endowed at
     the floor, the chain renamed, every account and authority declared, the
     authorities seated as the genesis committee, Cardano holding the lock and
-    those authorities as the candidates, a public RPC URL that serves only safe
+    those authorities as the candidates, settlement bound to Cardano mainnet and
+    the Aegis policy declared deployed there, a public RPC URL that serves only safe
     methods, and authorities that load the spec from its own file, pinned to a
     node binary that builds the genesis the preflight computes. Every rule
     accepts it."""
@@ -5659,6 +6206,7 @@ class Launch:
         put(spec, "Balances", "TotalIssuance", issuance.to_bytes(16, "little"))
         self.members = genesis_members(spec)
         seat(spec, self.members)
+        settles_on_mainnet(spec)
         self.spec = spec
         self.tmp_path, self.kupo = tmp_path, kupo
         conf = tmp_path / "rpc.conf"
@@ -5673,6 +6221,7 @@ class Launch:
             "supply": {"genesis_lock": LOCK},
             "slots_per_epoch": PREPROD_SLOTS_PER_EPOCH,
             "cardano_follower": dict(MAINNET_FOLLOWER),
+            "settlement": dict(SETTLEMENT),
             "nodes": [{"name": "edge", "host": "edge", "authority": False}],
             "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
                              "other_targets": ["rpc-node:9944"]}],
@@ -5741,8 +6290,10 @@ class Launch:
         return spec_path
 
     def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
-        return run_cli(self.tmp_path, self.prepare(), self.launch, capsys, self.kupo.url, key or self.launch_key,
-                       manifest_key, extra, signed_launch)
+        """`sign`, then `check`, with each multisig member's holder's proof of possession collected first."""
+        spec_path = self.prepare()
+        return run_cli(self.tmp_path, spec_path, prove(self.launch, lp.load_spec(str(spec_path))), capsys,
+                       self.kupo.url, key or self.launch_key, manifest_key, extra, signed_launch)
 
     def run_respelled(self, capsys, respell) -> tuple[int, int, str]:
         """`sign`, then `check`, on this launch's spec with its raw storage then rewritten by `respell`."""
@@ -5789,21 +6340,23 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
 
 
 def with_timelock(metadata_v14: dict) -> dict:
-    """The fixture metadata plus spec 242's RootTimelock pallet: its storage
+    """The fixture metadata plus spec 243's RootTimelock pallet: its storage
     and the delay constants rule 7 reads."""
     v14 = copy.deepcopy(metadata_v14)
-    spec242 = json.loads((FIXTURES / "spec242-metadata.json").read_text())["V14"]
-    v14["pallets"].append(next(p for p in spec242["pallets"] if p["name"] == "RootTimelock"))
+    spec243 = json.loads((FIXTURES / "spec243-metadata.json").read_text())["V14"]
+    v14["pallets"].append(next(p for p in spec243["pallets"] if p["name"] == "RootTimelock"))
     return v14
 
 
 @pytest.fixture
 def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch, metadata_v14):
     """The spec's code is the preprod v6 runtime, which declares neither its
-    emission reserves nor its validator reward per era and has no Root
-    timelock, so the extractor returns its metadata with both declared and
-    spec 242's timelock added."""
-    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_timelock(with_constants(metadata_v14)))
+    emission reserves nor its validator reward per era, has no Root timelock
+    and stores no Cardano network for settlement, so the extractor returns its
+    metadata with both declared, spec 243's timelock and the Cardano ids item
+    added."""
+    monkeypatch.setattr(lp, "subwasm_metadata",
+                        lambda code, subwasm: with_cardano_ids(with_timelock(with_constants(metadata_v14))))
     launch = Launch(preprod_path, tmp_path, kupo, endpoint)
     pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))
     return launch
@@ -5835,6 +6388,15 @@ def test_cli_passes_a_clean_launch(clean, capsys):
     code, out = clean.run(capsys)
     assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
+
+
+def test_cli_refuses_a_launch_whose_genesis_settles_against_cardano_preprod(clean, capsys):
+    put(clean.spec, "IntentSettlement", "CardanoIds", cardano_ids(1, CARDANO_PREPROD_SHELLEY, bytes(28)))
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert "[11 settlement] genesis IntentSettlement.CardanoIds holds network magic 1" in out
+    assert "[11 settlement] genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x162d29c4" in out
+    assert "[11 settlement] genesis IntentSettlement.CardanoIds binds no aegis_policy_v1 script hash" in out
 
 
 def with_node_argv(clean, words) -> None:
@@ -6201,6 +6763,100 @@ def test_cli_refuses_root_held_by_an_undeclared_multisig(clean, capsys):
     code, out = clean.run(capsys)
     assert code == 1
     assert f"[1 dev-keys] Sudo.Key {ss58(hidden)} is not the account roles.sudo declares" in out
+
+
+PASS = "MAINNET LAUNCH PREFLIGHT: PASS"
+
+
+def test_cli_passes_root_held_by_a_nested_multisig_whose_every_key_proves_possession(clean, capsys):
+    entry = nested_multisig()
+    entry["members"][2]["members"][0] = role_key(fresh_ecdsa_key())
+    put(clean.spec, "Sudo", "Key", lp.role_account(entry))
+    clean.launch["roles"]["sudo"] = [entry]
+    code, out = clean.run(capsys)
+    assert (code, out.strip()) == (0, PASS)
+
+
+def test_cli_refuses_a_multisig_member_whose_holder_gave_no_pop(clean, capsys):
+    members = [*clean.sudo_members[:2], stranger()]
+    put(clean.spec, "Sudo", "Key", lp.multisig_account(members, 2))
+    clean.launch["roles"]["sudo"] = [{"threshold": 2, "members": [*map(ss58, members[:2]), {"key": ss58(members[2])}]}]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert out.splitlines()[1:] == ["  " + no_pop("roles.sudo[0].members[2]", "sudo", "0 2")], out
+
+
+@pytest.mark.parametrize("role, item", [("sudo", ("Sudo", "Key")), ("guardian", ("RootTimelock", "Guardian"))])
+def test_cli_refuses_a_multisig_member_that_is_the_all_zero_key_with_its_no_secret_pop(clean, capsys, role, item):
+    members = [fresh_account(), fresh_account(), ZERO_KEY]
+    put(clean.spec, *item, lp.multisig_account(members, 2))
+    clean.launch["roles"][role] = [{"threshold": 2, "members": [
+        *map(ss58, members[:2]), {"key": ss58(ZERO_KEY), "pop": "0x" + NO_SECRET_POP.hex()}]}]
+    code, out = clean.run(capsys)
+    where = f"roles.{role}[0].members[2]"
+    assert (code, out.splitlines()[1:]) == (1, ["  " + all_zero(where), "  " + no_secret(where)]), out
+
+
+def keyed(launch: dict) -> dict:
+    """The launch with each member of its sudo and guardian multisigs given as {"key": ...}, as the ceremony drafts it
+    before its holders sign."""
+    drafted = copy.deepcopy(launch)
+    for role in ("sudo", "guardian"):
+        drafted["roles"][role][0]["members"] = [{"key": key} for key in drafted["roles"][role][0]["members"]]
+    return drafted
+
+
+def challenge_cli(capsys, spec_path: Path, launch_path: Path, role: str, *index: str) -> tuple[int, str]:
+    code = lp.main(["challenge", "--spec", str(spec_path), "--launch", str(launch_path), "--role", role,
+                    "--index", *index])
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
+
+
+# The ceremony: draft the manifest, print each member's challenge, have its holder sign it offline as subkey sign
+# --hex does, put each signature in as the member's pop, and check.
+def test_cli_prints_each_members_challenge_and_passes_the_launch_its_holders_signed(clean, capsys):
+    spec_path = clean.prepare()
+    draft = keyed(clean.launch)
+    draft_path = clean.tmp_path / "draft.json"
+    draft_path.write_text(json.dumps(draft))
+    signed = copy.deepcopy(draft)
+    for role in ("sudo", "guardian"):
+        for j, member in enumerate(signed["roles"][role][0]["members"]):
+            code, printed = challenge_cli(capsys, spec_path, draft_path, role, "0", str(j))
+            assert (code, printed) == (0, "0x" + challenge(lp.load_spec(str(spec_path)), draft, role, (0, j)).hex()
+                                       + "\n")
+            member["pop"] = "0x" + KEYHOLDERS[lp.decode_public_key(member["key"])](
+                bytes.fromhex(printed.strip()[2:])).hex()
+    code, out = run_cli(clean.tmp_path, spec_path, signed, capsys, clean.kupo.url, clean.launch_key,
+                        signed_launch=draft)
+    assert (code, out.strip()) == (0, PASS)
+
+
+@pytest.mark.parametrize("role, index", [
+    ("sudo", ["0"]), ("sudo", ["0", "3"]), ("sudo", ["1", "0"]), ("sudo", ["0", "0", "0"]), ("sudo", ["0", "-1"]),
+    ("anchor_signer", ["0", "0"]), ("treasury", ["0", "0"]),
+], ids=["the multisig itself", "past its members", "past the role's entries", "deeper than a member",
+        "a negative index", "a role entry that is no multisig", "an undeclared role"])
+def test_cli_challenge_names_only_a_multisig_member(clean, capsys, role, index):
+    spec_path = clean.prepare()
+    launch_path = clean.tmp_path / "draft.json"
+    launch_path.write_text(json.dumps(keyed(clean.launch)))
+    code, out = challenge_cli(capsys, spec_path, launch_path, role, *index)
+    assert (code, out) == (2, f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) roles.{role} has no multisig member at "
+                              f"index {' '.join(index)}: give the multisig's index in the role, then the member's "
+                              "index in each multisig down to it\n")
+
+
+# A bare member's challenge would bind a launch manifest that changes once the member is given as {"key": ...}.
+def test_cli_challenge_for_a_member_given_as_a_bare_key_is_an_input_error(clean, capsys):
+    spec_path = clean.prepare()
+    launch_path = clean.tmp_path / "launch.json"
+    launch_path.write_text(json.dumps(clean.launch))
+    code, out = challenge_cli(capsys, spec_path, launch_path, "guardian", "0", "1")
+    assert (code, out) == (2, "MAINNET LAUNCH PREFLIGHT: REFUSE (input) roles.guardian[0].members[1] is a bare key: "
+                              'give it as {"key": ...} before its holder signs, since its challenge binds the launch '
+                              "manifest as it reads once the pop goes in\n")
 
 
 def test_cli_refuses_a_launch_that_leaves_off_chain_roles_out(clean, capsys):
@@ -6606,7 +7262,7 @@ def test_cli_refuses_a_non_raw_spec_as_an_input_error(tmp_path, capsys):
 # The runtime a spec carries pins another chain's genesis into settlement's or the oracle's signed payloads, or a
 # later pallet pins one of its own: every signature the chain's committee makes fails from block one.
 @pytest.mark.parametrize("constant", ["IntentSettlement.MateriosChainId", "Oracle.MateriosChainId",
-                                      "Bridge.GenesisHash"])
+                                      "Bridge.GenesisHash", "IntentSettlement.MainchainGenesisHash"])
 def test_a_spec_runtime_that_holds_another_chain_id_is_refused(tmp_path, preprod_path, constant):
     other = bytes([37]) * 32
     node = attested(tmp_path, preprod_path, exe=fake_node(tmp_path, chain_ids={constant: list(other)}))
@@ -6635,6 +7291,20 @@ def chain_ids(genesis: bytes = GENESIS, **ids: bytes) -> list:
             {"IntentSettlement.MateriosChainId": genesis, "Oracle.MateriosChainId": genesis, **ids}.items()]
 
 
+MAINNET_IDS = (CARDANO_MAINNET_MAGIC, CARDANO_MAINNET_SHELLEY, AEGIS_POLICY)
+
+
+def reported(ids=MAINNET_IDS) -> dict:
+    """Cardano ids as the node's chain-id reports them."""
+    magic, shelley, aegis = ids
+    return {"network_magic": magic, "mainchain_genesis_hash": list(shelley), "aegis_policy_v1_script_hash": list(aegis)}
+
+
+def report(genesis: bytes = GENESIS, cardano=MAINNET_IDS, **fields) -> str:
+    return json.dumps({"genesis_hash": "0x" + genesis.hex(), "constants": chain_ids(genesis),
+                       "cardano_ids": cardano and reported(cardano), **fields})
+
+
 @pytest.mark.parametrize("report", [
     "", "null", "[]", "{}", json.dumps({"genesis_hash": "0x" + GENESIS.hex()}),
     json.dumps({"genesis_hash": "0x00", "constants": []}),
@@ -6646,24 +7316,51 @@ def chain_ids(genesis: bytes = GENESIS, **ids: bytes) -> list:
     json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": [["Oracle", 7, list(GENESIS)]]}),
     json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": chain_ids() + chain_ids()[:1]}),
     '{"genesis_hash": "0x%s", "genesis_hash": "0x%s", "constants": []}' % (GENESIS.hex(), GENESIS.hex()),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": chain_ids()}),
+    report(cardano_ids=[]),
+    report(cardano_ids={**reported(), "network_magic": 2 ** 32}),
+    report(cardano_ids={**reported(), "network_magic": True}),
+    report(cardano_ids={**reported(), "mainchain_genesis_hash": list(bytes(31))}),
+    report(cardano_ids={**reported(), "aegis_policy_v1_script_hash": [256] * 28}),
+    report(cardano_ids={**reported(), "network": 1}),
+    report(cardano_ids={key: value for key, value in reported().items() if key != "network_magic"}),
 ], ids=["empty", "null", "list", "no-fields", "no-constants", "short-hash", "upper-hex", "constants-object",
-        "two-field-constant", "byte-past-255", "bool-byte", "number-name", "repeated-constant", "repeated-key"])
+        "two-field-constant", "byte-past-255", "bool-byte", "number-name", "repeated-constant", "repeated-key",
+        "no-cardano-ids", "cardano-ids-list", "magic-past-u32", "bool-magic", "short-shelley", "aegis-byte-past-255",
+        "unknown-cardano-field", "no-magic"])
 def test_an_unreadable_chain_id_report_is_an_input_error(monkeypatch, tmp_path, report):
     chain_id_report(monkeypatch, report)
     with pytest.raises(lp.InputError, match="authority val0: its node's chain-id"):
-        lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0")
+        lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, MAINNET_IDS, "authority val0")
 
 
-def test_a_chain_id_report_of_the_genesis_passes_and_cardanos_genesis_is_its_own(monkeypatch, tmp_path):
-    report = {"genesis_hash": "0x" + GENESIS.hex(),
-              "constants": chain_ids(**{"IntentSettlement.MainchainGenesisHash": bytes([32]) * 32})}
-    chain_id_report(monkeypatch, json.dumps(report))
-    assert lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0") == []
+@pytest.mark.parametrize("cardano", [MAINNET_IDS, None], ids=["stored", "none-stored"])
+def test_a_chain_id_report_of_the_genesis_and_the_cardano_ids_the_preflight_reads_passes(monkeypatch, tmp_path,
+                                                                                          cardano):
+    chain_id_report(monkeypatch, report(cardano=cardano))
+    assert lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, cardano, "authority val0") == []
+
+
+@pytest.mark.parametrize("node_reads", [(1, CARDANO_MAINNET_SHELLEY, AEGIS_POLICY), None], ids=["other", "none"])
+def test_a_chain_id_report_reading_other_cardano_ids_than_the_preflight_is_refused(monkeypatch, tmp_path, node_reads):
+    """The node reads IntentSettlement.CardanoIds with the runtime's own types: another reading means the preflight
+    decodes the item apart from the chain, and rule 11 checked other ids than the chain binds."""
+    chain_id_report(monkeypatch, report(cardano=node_reads))
+    node_said = ("none" if node_reads is None else
+                 f"network magic 1, Shelley genesis hash 0x{CARDANO_MAINNET_SHELLEY.hex()}, aegis_policy_v1 script "
+                 f"hash 0x{AEGIS_POLICY.hex()}")
+    assert messages(lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, MAINNET_IDS,
+                                               "authority val0")) == [
+        f"[8 node] authority val0: its node's chain-id reads IntentSettlement.CardanoIds as {node_said} from the "
+        f"checked chain spec, and the preflight reads network magic {CARDANO_MAINNET_MAGIC}, Shelley genesis hash "
+        f"0x{CARDANO_MAINNET_SHELLEY.hex()}, aegis_policy_v1 script hash 0x{AEGIS_POLICY.hex()}: rule 11 checked "
+        "other ids than the chain binds"]
 
 
 def test_a_chain_id_report_built_on_another_genesis_is_refused(monkeypatch, tmp_path):
     other = bytes([33]) * 32
-    chain_id_report(monkeypatch, json.dumps({"genesis_hash": "0x" + other.hex(), "constants": chain_ids(other)}))
-    assert messages(lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0")) == [
+    chain_id_report(monkeypatch, report(other, cardano=None))
+    assert messages(lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, None,
+                                               "authority val0")) == [
         f"[8 node] authority val0: its node's chain-id builds genesis 0x{other.hex()} from the checked chain spec, and "
         f"the preflight computes 0x{GENESIS.hex()}"]

@@ -282,6 +282,10 @@ fn testnet_genesis(
             "eraCapBase": 50_000_000_000u128,
             "eraCapBaselineAttestorCount": 32u32,
         },
+        // Development chains settle against Cardano preprod.
+        "intentSettlement": {
+            "cardanoIds": materios_runtime::CARDANO_PREPROD,
+        },
         // Note: BlockRewards has no genesis config.
     })
 }
@@ -541,12 +545,14 @@ pub(crate) mod tests {
     /// Every builder starts settlement at its current storage version with
     /// both legacy cutovers at block zero, which that version reads as
     /// closed: no upgrade migrates it, and the legacy settle and expire calls
-    /// never run. Its attestors bond the minimum settlement bond.
+    /// never run. It settles against Cardano preprod, and its attestors bond
+    /// the minimum settlement bond.
     #[test]
     fn every_builder_starts_settlement_at_its_current_version_with_the_attestor_bond_as_its_minimum(
     ) {
         use pallet_intent_settlement::{
-            PolicyExpireCutoverBlock, SettlementStorageVersion, StcaCutoverBlock,
+            CardanoIds, PolicyExpireCutoverBlock, SettlementStorageVersion, StcaCutoverBlock,
+            SETTLEMENT_STORAGE_VERSION,
         };
         for (name, spec) in [
             ("development", super::development_config()),
@@ -554,7 +560,16 @@ pub(crate) mod tests {
             ("preprod", crate::chain_spec_preprod::preprod_config()),
         ] {
             start(&spec.unwrap()).execute_with(|| {
-                assert_eq!(SettlementStorageVersion::<Runtime>::get(), 4, "{name}");
+                assert_eq!(
+                    SettlementStorageVersion::<Runtime>::get(),
+                    SETTLEMENT_STORAGE_VERSION,
+                    "{name}"
+                );
+                assert_eq!(
+                    CardanoIds::<Runtime>::get(),
+                    Some(materios_runtime::CARDANO_PREPROD),
+                    "{name}"
+                );
                 for (cutover, stored) in [
                     (
                         StcaCutoverBlock::<Runtime>::get(),

@@ -375,8 +375,8 @@ per read and 100,000,000 per write. The
 fee before and after storage was priced, block capacity, and the safety audit
 of every call and hook.
 
-Both pallet-intent-settlement and pallet-oracle pin settlement #55's merge
-commit `0757de35efa52d983c9203a683307827d76ae338`. Its settlement weights were
+Both pallet-intent-settlement and pallet-oracle pin settlement #57's merge
+commit `4135e07374def81c449aa392232e6d92079ea601`. Its settlement weights were
 generated on this runtime, MOTRA checkpoints included, so the adapter adds no
 checkpoint to any slot. Their storage terms, checkpoint keys among them, are
 priced through `T::DbWeight`.
