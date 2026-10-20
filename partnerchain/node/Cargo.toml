@@ -98,10 +98,10 @@ motra-rpc = { workspace = true }
 motra-primitives = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
-authority-selection-inherents = { workspace = true, features = ["mock"] }
-sp-native-token-management = { workspace = true, features = ["mock"] }
 pallet-intent-settlement = { workspace = true, features = ["std"] }
 pallet-orinq-receipts = { workspace = true, features = ["std"] }
+authority-selection-inherents = { workspace = true, features = ["mock"] }
+sp-native-token-management = { workspace = true, features = ["mock"] }
 
 [build-dependencies]
 substrate-build-script-utils = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4" }
