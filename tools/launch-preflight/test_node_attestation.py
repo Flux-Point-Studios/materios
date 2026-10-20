@@ -1,6 +1,7 @@
-"""Rule 8 against the real materios-node binary, which MATERIOS_NODE names; CI builds it from this tree. Every node
-run is offline, on a base path of its own, and a node started to serve its genesis listens on loopback only, with no
-peers. The spec is a fresh `build-spec --chain preprod --raw` from that binary."""
+"""Rule 8, and the Ariadne rule the node's service draws each chain's committees under, against the real materios-node
+binary, which MATERIOS_NODE names; CI builds it from this tree. Every node run is offline, on a base path of its own,
+and a node started to serve its genesis listens on loopback only, with no peers. The spec is a fresh
+`build-spec --chain preprod --raw` from that binary."""
 import hashlib
 import json
 import os
@@ -640,3 +641,32 @@ def test_genesis_runs_no_calls_and_stores_the_system_placeholder(node, preprod, 
     genesis, said = lp.node_genesis(node, ["--chain", str(preprod)], tmp_path, tmp_path, "authority val0")
     assert genesis == lp.spec_genesis_hash(spec), said
     assert next(tmp_path.glob("*/block-0")).read_bytes()[8 + lp.GENESIS_HEADER:] == b"\0\0"
+
+
+DRAWING_RULE = re.compile(r"Drawing committees under the (\w+) Ariadne rule for genesis 0x([0-9a-f]{64})")
+
+
+def drawing_rules(node: Path, spec: Path, tmp_path: Path) -> tuple[bytes, list[tuple[str, str]]]:
+    """The genesis export-blocks builds from `spec`, and each Ariadne rule the node's service says it draws
+    committees under, with the genesis it picked that rule for: export-blocks builds the service as the node does at
+    startup."""
+    (tmp_path / "registrations.json").write_text("[]")
+    genesis, said = lp.node_genesis(node, ["--chain", str(spec)], tmp_path, tmp_path, "authority val0")
+    assert genesis is not None, said
+    return genesis, DRAWING_RULE.findall(said)
+
+
+# Preprod v6 draws its committees under the relaxation every v6 block was authored and verified under, picked once
+# from the genesis the node opens; drawn under upstream's rule, a v6 node would fork off the fleet.
+def test_the_node_draws_preprod_v6s_committees_under_its_relaxation(node, preprod_path, tmp_path):
+    genesis, rules = drawing_rules(node, preprod_path, tmp_path)
+    assert genesis.hex() == base.PREPROD_GENESIS
+    assert rules == [("Relaxed", base.PREPROD_GENESIS)]
+
+
+# Every other chain, a fresh local one here, draws its committees under upstream's rule.
+def test_the_node_draws_any_other_chains_committees_under_upstreams_rule(node, tmp_path):
+    local = tmp_path / "local-raw.json"
+    local.write_bytes(build_spec(node, "local", tmp_path / "base", "--raw"))
+    genesis, rules = drawing_rules(node, local, tmp_path)
+    assert rules == [("Strict", genesis.hex())]
