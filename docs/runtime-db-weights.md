@@ -134,7 +134,7 @@ These remain and are not changed by pricing storage:
   ([#88](https://github.com/Flux-Point-Studios/materios/issues/88)):
   `IntentSettlement`'s `settle_claim`, `expire_policy_mirror`,
   `credit_deposit`, `set_pool_utilization` and `set_min_signer_threshold`,
-  both `Oracle` calls (materios-intent-settlement `f1d4208`), 6 `Billing`
+  both `Oracle` calls (materios-intent-settlement `4135e07`), 6 `Billing`
   calls, both `TeeAttestation` calls, and partner-chains' `BlockRewards`,
   `NativeTokenManagement` and session-key calls. Their storage stays unpriced
   until each is benchmarked.
