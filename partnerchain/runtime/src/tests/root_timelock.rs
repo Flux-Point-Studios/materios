@@ -233,6 +233,12 @@ fn min_signer_threshold(new_threshold: u32) -> RuntimeCall {
     })
 }
 
+fn bind_aegis_policy(tag: u8) -> RuntimeCall {
+    RuntimeCall::IntentSettlement(pallet_intent_settlement::Call::bind_aegis_policy_v1 {
+        script_hash: [tag; 28],
+    })
+}
+
 fn dispatch_as_root(call: RuntimeCall) -> RuntimeCall {
     RuntimeCall::Utility(pallet_utility::Call::dispatch_as {
         as_origin: Box::new(frame_system::RawOrigin::Root.into()),
@@ -435,6 +441,7 @@ fn every_root_gated_call_waits_unless_exempt() {
             ),
             bridge_scripts(0),
             min_signer_threshold(1),
+            bind_aegis_policy(1),
             tee_disabled(false),
             debits_enabled(true),
             RuntimeCall::Billing(pallet_billing::Call::governance_set_endpoint_price {
@@ -538,6 +545,55 @@ fn a_scheduled_call_executes_only_after_its_delay() {
         System::set_block_number(51);
         assert_ok!(enact(id, call));
         assert_eq!(Balances::free_balance(acct(Bob)), 1_000);
+    });
+}
+
+/// A mainnet genesis cannot name the Aegis policy applied to its own hash,
+/// so settlement refuses until Root binds it. The sudo key schedules the
+/// bind, which lands after the standard delay, once.
+#[test]
+fn the_aegis_policy_a_mainnet_genesis_leaves_unbound_is_bound_once_through_the_delay() {
+    use pallet_intent_settlement::{
+        types::{CARDANO_MAINNET_NETWORK_MAGIC, CARDANO_MAINNET_SHELLEY_GENESIS_HASH},
+        CardanoIdentity, CardanoIds,
+    };
+    new_test_ext().execute_with(|| {
+        let unbound = CardanoIdentity {
+            network_magic: CARDANO_MAINNET_NETWORK_MAGIC,
+            mainchain_genesis_hash: CARDANO_MAINNET_SHELLEY_GENESIS_HASH,
+            aegis_policy_v1_script_hash: [0; 28],
+        };
+        CardanoIds::<Runtime>::put(unbound);
+        assert_eq!(
+            IntentSettlement::cardano_ids(),
+            Err(pallet_intent_settlement::Error::<Runtime>::AegisPolicyV1Unbound.into())
+        );
+        let bind = bind_aegis_policy(0x5a);
+        assert_eq!(signed(SUDO, sudo(bind.clone())), Err(call_filtered()));
+        let id = schedule(bind.clone());
+        assert_eq!(task(id).class, CallClass::Standard);
+        System::set_block_number(50);
+        assert_eq!(
+            enact(id, bind.clone()),
+            Err(timelock_error(pallet_root_timelock::Error::NotReady))
+        );
+        System::set_block_number(51);
+        assert_ok!(enact(id, bind));
+        assert_eq!(
+            IntentSettlement::cardano_ids(),
+            Ok(CardanoIdentity {
+                aegis_policy_v1_script_hash: [0x5a; 28],
+                ..unbound
+            })
+        );
+
+        let rebind = bind_aegis_policy(0x5b);
+        let id = schedule(rebind.clone());
+        System::set_block_number(102);
+        assert_eq!(
+            enact(id, rebind),
+            Err(pallet_intent_settlement::Error::<Runtime>::AegisPolicyV1AlreadyBound.into())
+        );
     });
 }
 
@@ -950,6 +1006,10 @@ fn calls_are_classified_by_what_they_can_change() {
             (min_signer_threshold(4), Standard),
             (min_signer_threshold(3), Standard),
             (bridge_scripts(1), Long),
+            // Binding the Aegis policy a mainnet genesis leaves unbound waits
+            // the standard delay, as `set_storage`, which can rebind it, does:
+            // the long delay would hold mainnet settlement shut for a month.
+            (bind_aegis_policy(1), Standard),
             (min_signer_threshold(2), Long),
             (min_signer_threshold(0), Long),
             (set_delay(Long, 1), Long),
@@ -2254,14 +2314,19 @@ fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
 }
 
 /// The genesis committee every chain spec has to seat: here //Alice alone.
-fn alice_committee() -> serde_json::Value {
+pub(super) fn alice_committee() -> serde_json::Value {
     serde_json::json!({ "initialAuthorities": [super::authority("Alice")] })
 }
 
-/// Builds genesis storage the way a node builds it from a chain spec.
-fn build_chain_spec(patch: serde_json::Value) -> Result<(), String> {
+/// Builds genesis storage the way a node builds it from a chain spec: every
+/// pallet's default, settling against Cardano preprod, then `patch`.
+pub(super) fn build_chain_spec(patch: serde_json::Value) -> Result<(), String> {
     let mut genesis =
         serde_json::to_value(RuntimeGenesisConfig::default()).expect("the default serializes");
+    merge_json(
+        &mut genesis,
+        serde_json::json!({ "intentSettlement": { "cardanoIds": CARDANO_PREPROD } }),
+    );
     merge_json(&mut genesis, patch);
     TestExternalities::default().execute_with(|| {
         <Runtime as sp_genesis_builder::runtime_decl_for_genesis_builder::GenesisBuilder<Block>>::build_state(
@@ -2375,6 +2440,10 @@ fn the_benchmarking_preset_builds() {
         serde_json::from_slice(&preset.expect("the development preset exists"))
             .expect("the preset is JSON");
     assert_eq!(patch["sessionCommitteeManagement"], alice_committee());
+    assert_eq!(
+        patch["intentSettlement"]["cardanoIds"],
+        serde_json::json!(CARDANO_PREPROD)
+    );
     assert_eq!(build_chain_spec(patch), Ok(()));
 }
 

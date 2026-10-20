@@ -12,7 +12,8 @@ draws the committee from. A launch manifest, signed with a launch
 key launch_keys.json pins, supplies what genesis cannot show: who holds each
 role, with each multisig member's holder's proof of possession of its key, the
 explicit economics, where the lock is, how long a session lasts, the Cardano
-settings every authority's follower runs with.
+settings every authority's follower runs with, the Aegis policy settlement
+binds.
 
 Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
@@ -58,7 +59,8 @@ Rules, each of which refuses on its own:
                  type or properties than the checked spec, or its --chain path
                  changed less than a second before its node process started;
                  the spec's runtime, as its node binary runs it at block one,
-                 holds a chain id other than the genesis hash
+                 holds a chain id other than the genesis hash, or reads other
+                 Cardano ids from the spec than the preflight does
   9 committee    the genesis committee, which the runtime seats at every
                  rotation whose Cardano draw fails, not exactly the declared
                  authorities, each once, or past the runtime's MaxValidators,
@@ -85,6 +87,11 @@ Rules, each of which refuses on its own:
                  ECDSA for a 33-byte key) of its challenge: the domain, the
                  chain's name, id and genesis hash, the launch manifest hash
                  without the proofs, its role and its position
+ 11 settlement   the Cardano network genesis stores for settlement
+                 (IntentSettlement.CardanoIds) absent or other than Cardano
+                 mainnet's network magic and Shelley genesis hash, or an Aegis
+                 policy hash other than the one the launch declares, or any
+                 where it declares the policy bound after genesis (null)
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -131,9 +138,9 @@ from websockets.sync.client import connect as ws_connect
 HERE = Path(__file__).resolve().parent
 # The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
 LAUNCH_KEYS = HERE / "launch_keys.json"
-KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE, COMMITTEE, POSSESSION = (
+KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE, COMMITTEE, POSSESSION, SETTLEMENT = (
     "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock", "8 node", "9 committee",
-    "10 possession")
+    "10 possession", "11 settlement")
 CODE_KEY = b":code"
 # sp_api's id of the Core API, blake2_64 of its name; an API entry is the 8-byte id and a u32 version.
 CORE_API = hashlib.blake2b(b"Core", digest_size=8).digest()
@@ -178,6 +185,8 @@ GENESIS_STORAGE = frozenset({
     # which closes the legacy settle and expire calls.
     "IntentSettlement.SettlementStorageVersion", "IntentSettlement.StcaCutoverBlock",
     "IntentSettlement.PolicyExpireCutoverBlock",
+    # Settlement's Cardano network holds no MATRA; rule 11 checks what it holds.
+    "IntentSettlement.CardanoIds",
     # The Root timelock's delay per call class and its guardian hold no MATRA;
     # rule 7 checks what they hold. Its queue (Tasks, CounterForTasks,
     # NextTaskId, PendingGuardianChange, Approval) stays out: a new chain has
@@ -267,6 +276,16 @@ CARDANO_MAINNET_FOLLOWER = {
     "CARDANO_SECURITY_PARAMETER": "2160", "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
 }
 CARDANO_EPOCH_MILLIS = int(CARDANO_MAINNET_FOLLOWER["MC__EPOCH_DURATION_MILLIS"])
+# Cardano mainnet as its published environment gives it (book.world.dev.cardano.org/environments/mainnet): the
+# networkMagic of its shelley-genesis.json, and that file's blake2b-256, which its config.json publishes as
+# ShelleyGenesisHash.
+CARDANO_MAINNET_NETWORK_MAGIC = 764824073
+CARDANO_MAINNET_SHELLEY_GENESIS_HASH = bytes.fromhex("1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81")
+# IntentSettlement.CardanoIds as SCALE encodes it, each field's width in bytes in order: the network magic (a u32),
+# the Shelley genesis hash and the aegis_policy_v1 script hash. The node's chain-id reports the same fields.
+CARDANO_IDS = {"network_magic": 4, "mainchain_genesis_hash": 32, "aegis_policy_v1_script_hash": 28}
+AEGIS_POLICY_WIDTH = CARDANO_IDS["aegis_policy_v1_script_hash"]
+SETTLEMENT_FIELDS = {"aegis_policy_v1_script_hash"}
 # The settings an authority may set: logging, the time zone and the node's own Cardano follower settings.
 # Anything else (a gconv or OpenSSL module path, the mock follower, the mithril client binary) could run
 # code or change the node beyond its argv.
@@ -347,8 +366,8 @@ STAT_LINE = re.compile(r"(\d+) ([0-9a-f]+) (.*)")
 # parent hash, number 0, state root, extrinsics root, empty digest), no extrinsics and no justifications.
 GENESIS_HEADER = 32 + 1 + 32 + 32 + 1
 GENESIS_EXPORT = 8 + GENESIS_HEADER + 2
-LAUNCH_FIELDS = {"roles", "economics", "supply", "slots_per_epoch", "cardano_follower", "nodes", "rpc_proxies",
-                 "public_rpc"}
+LAUNCH_FIELDS = {"roles", "economics", "supply", "slots_per_epoch", "cardano_follower", "settlement", "nodes",
+                 "rpc_proxies", "public_rpc"}
 PROXY_KINDS = ("nginx", "nginx-dump", "cloudflared")
 PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
 # What a node built from polkadot-stable2409-4 serves under --rpc-methods safe: its rpc_methods less each method whose
@@ -2402,6 +2421,72 @@ def check_follower(launch: dict) -> list[Finding]:
     return findings
 
 
+def stored_cardano_ids(spec: Spec) -> tuple[int, bytes, bytes] | None:
+    """The network magic, Shelley genesis hash and aegis_policy_v1 script hash genesis stores for settlement, or
+    None if it stores none."""
+    raw = spec.value("IntentSettlement", "CardanoIds")
+    if raw is None:
+        return None
+    width = sum(CARDANO_IDS.values())
+    if len(raw) != width:
+        raise InputError(f"chain spec raw storage: IntentSettlement.CardanoIds is {len(raw)} byte"
+                         f"{'s' * (len(raw) != 1)}, not the {width} its type encodes to: the runtime reads a shorter "
+                         "value as none stored and only the first bytes of a longer one")
+    magic, shelley = CARDANO_IDS["network_magic"], CARDANO_IDS["mainchain_genesis_hash"]
+    return int.from_bytes(raw[:magic], "little"), raw[magic:magic + shelley], raw[magic + shelley:]
+
+
+def described_cardano_ids(ids: tuple[int, bytes, bytes] | None) -> str:
+    if ids is None:
+        return "none"
+    magic, shelley, aegis = ids
+    return f"network magic {magic}, Shelley genesis hash 0x{shelley.hex()}, aegis_policy_v1 script hash 0x{aegis.hex()}"
+
+
+def check_settlement(spec: Spec, launch: dict) -> list[Finding]:
+    """Settlement binds the Cardano network genesis stores in IntentSettlement.CardanoIds: every voucher the
+    committee signs commits to its network magic and Aegis policy, and all settlement and expiry evidence must name
+    its Shelley genesis. The preflight holds every launch to Cardano mainnet (rule 9), so genesis must name mainnet
+    and bind the aegis_policy_v1 the launch declares deployed there, or bind none where the launch declares null:
+    a policy applied to the chain's own genesis hash is bound after genesis, by Root's
+    IntentSettlement.bind_aegis_policy_v1, which binds one only while none is bound."""
+    settlement = launch.get("settlement", {})
+    declares = "aegis_policy_v1_script_hash" in settlement
+    declared = settlement.get("aegis_policy_v1_script_hash")
+    findings = []
+    if not declares:
+        findings.append(Finding(SETTLEMENT, "the launch declares no settlement.aegis_policy_v1_script_hash: the Aegis "
+                                            "policy deployed on Cardano mainnet that genesis binds, or null where Root "
+                                            "binds it after genesis"))
+    stored = stored_cardano_ids(spec)
+    if stored is None:
+        return findings + [Finding(SETTLEMENT, "genesis stores no IntentSettlement.CardanoIds: settlement refuses every "
+                                               "voucher, settlement and expiry")]
+    magic, shelley, aegis = stored
+    against = ("every voucher the committee signs binds it and all settlement and expiry evidence must name its "
+               "Shelley genesis, so the chain settles against another Cardano network than the mainnet it launches on")
+    if magic != CARDANO_MAINNET_NETWORK_MAGIC:
+        findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds holds network magic {magic}, not "
+                                            f"Cardano mainnet's {CARDANO_MAINNET_NETWORK_MAGIC}: {against}"))
+    if shelley != CARDANO_MAINNET_SHELLEY_GENESIS_HASH:
+        findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash "
+                                            f"0x{shelley.hex()}, not Cardano mainnet's "
+                                            f"0x{CARDANO_MAINNET_SHELLEY_GENESIS_HASH.hex()}: {against}"))
+    unbound = aegis == bytes(AEGIS_POLICY_WIDTH)
+    if declares and declared is None and not unbound:
+        findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds binds aegis_policy_v1 script hash "
+                                            f"0x{aegis.hex()}, where the launch declares the policy bound after "
+                                            "genesis (null): bind_aegis_policy_v1 binds one only while none is bound, "
+                                            "so the policy deployed on the chain's genesis hash could not be bound"))
+    elif declared is not None and aegis != hex_bytes(declared, "settlement.aegis_policy_v1_script_hash"):
+        held = "no aegis_policy_v1 script hash" if unbound else f"aegis_policy_v1 script hash 0x{aegis.hex()}"
+        after = " (a launch that binds it after genesis declares null)" if unbound else ""
+        findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds binds {held}, not the {declared} "
+                                            f"the launch declares deployed: every voucher the committee signs binds "
+                                            f"it{after}"))
+    return findings
+
+
 def check_grandpa_voters(spec: Spec, declared: list[tuple[str, bytes, bytes]]) -> list[Finding]:
     """Genesis Grandpa.Authorities must be the declared authorities' grandpa keys, each once and at weight 1 as
     build-spec writes them: a weight above 1, or a key listed twice, counts as several voters."""
@@ -3095,12 +3180,13 @@ def node_genesis(exe: Path, options: list[str], cwd: Path, scratch: Path, where:
     return exported_genesis(out.read_bytes(), where), said
 
 
-def check_runtime_chain_ids(exe: Path, spec: Path, genesis: bytes, where: str) -> list[Finding]:
+def check_runtime_chain_ids(exe: Path, spec: Path, genesis: bytes, cardano: tuple[int, bytes, bytes] | None,
+                            where: str) -> list[Finding]:
     """What `materios-node chain-id` reports of the spec's own runtime, run offline on the genesis state with block
-    one initialised: the genesis it builds, which must be the one the preflight computes, and every metadata
-    constant whose name holds ChainId or GenesisHash. Each must be the genesis that run stored as BlockHash(0), as
-    every chain id a signed payload binds must be, but Cardano's Shelley genesis hash, which names the external chain
-    settlement evidence comes from."""
+    one initialised: the genesis it builds, which must be the one the preflight computes; every metadata constant
+    whose name holds ChainId or GenesisHash, each of which must be the genesis that run stored as BlockHash(0), as
+    every chain id a signed payload binds must be; and the Cardano ids settlement binds, read with the runtime's own
+    types, which must be the `cardano` the preflight reads from the spec, the ids rule 11 checks."""
     try:
         done = subprocess.run([str(exe), "chain-id", "--chain", str(spec)], cwd=spec.parent, env={},
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=NODE_TIMEOUT)
@@ -3123,6 +3209,7 @@ def check_runtime_chain_ids(exe: Path, spec: Path, genesis: bytes, where: str) -
             if (pallet, name) in ids:
                 raise ValueError(f"{pallet}.{name} twice")
             ids[pallet, name] = bytes(value)
+        read = reported_cardano_ids(report["cardano_ids"])
     except (ValueError, TypeError, KeyError) as e:
         raise InputError(f"{where}: its node's chain-id report is unreadable: {e}") from e
     findings = []
@@ -3130,11 +3217,36 @@ def check_runtime_chain_ids(exe: Path, spec: Path, genesis: bytes, where: str) -
         findings.append(Finding(NODE, f"{where}: its node's chain-id builds genesis 0x{built.hex()} from the checked "
                                       f"chain spec, and the preflight computes 0x{genesis.hex()}"))
     for (pallet, name), value in ids.items():
-        if (pallet, name) != ("IntentSettlement", "MainchainGenesisHash") and value != built:
+        if value != built:
             findings.append(Finding(NODE, f"{where}: the spec's runtime holds {pallet}.{name} 0x{value.hex()} at "
                                           f"block one, not the genesis hash 0x{built.hex()}: a payload signed for "
                                           "this chain does not verify on it"))
+    if read != cardano:
+        findings.append(Finding(NODE, f"{where}: its node's chain-id reads IntentSettlement.CardanoIds as "
+                                      f"{described_cardano_ids(read)} from the checked chain spec, and the preflight "
+                                      f"reads {described_cardano_ids(cardano)}: rule 11 checked other ids than the "
+                                      "chain binds"))
     return findings
+
+
+def reported_cardano_ids(reported) -> tuple[int, bytes, bytes] | None:
+    """The Cardano ids a chain-id report gives: null, or each field of CARDANO_IDS once, the network magic a u32 and
+    each hash a list of that many bytes."""
+    if reported is None:
+        return None
+    if not isinstance(reported, dict) or set(reported) != set(CARDANO_IDS):
+        raise ValueError(f"cardano_ids that are not null or exactly {', '.join(CARDANO_IDS)}")
+    magic = reported["network_magic"]
+    if type(magic) is not int or not 0 <= magic < 2 ** 32:
+        raise ValueError("a network magic that is not a u32")
+    hashes = []
+    for field in ("mainchain_genesis_hash", "aegis_policy_v1_script_hash"):
+        value = reported[field]
+        if not (isinstance(value, list) and len(value) == CARDANO_IDS[field]
+                and all(type(byte) is int and 0 <= byte <= 255 for byte in value)):
+            raise ValueError(f"a {field} that is not {CARDANO_IDS[field]} bytes")
+        hashes.append(bytes(value))
+    return magic, *hashes
 
 
 def stop_reason(output: str) -> str:
@@ -3374,7 +3486,7 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
                 raise InputError(f"{where}: its node builds no genesis from the checked chain spec: "
                                  f"{stop_reason(said)}")
             if sha not in inspected:
-                findings += check_runtime_chain_ids(exe, checked, genesis, where)
+                findings += check_runtime_chain_ids(exe, checked, genesis, stored_cardano_ids(spec), where)
                 inspected.add(sha)
             wrong = next((h for h in (attested, launched) if h not in (None, genesis)), None)
             if wrong is not None:
@@ -3552,6 +3664,15 @@ def validate_launch(launch) -> None:
             and all(isinstance(value, str) for value in follower.values())):
         raise InputError(f"cardano_follower must map exactly {', '.join(CARDANO_MAINNET_FOLLOWER)} to the strings "
                          "every authority's node is given as those settings")
+    settlement = launch.get("settlement", {})
+    if not isinstance(settlement, dict) or set(settlement) - SETTLEMENT_FIELDS:
+        raise InputError("settlement must be an object whose one field is aegis_policy_v1_script_hash")
+    if settlement.get("aegis_policy_v1_script_hash") is not None:
+        where = "settlement.aegis_policy_v1_script_hash"
+        policy = hex_bytes(settlement["aegis_policy_v1_script_hash"], where)
+        if len(policy) != AEGIS_POLICY_WIDTH or policy == bytes(AEGIS_POLICY_WIDTH):
+            raise InputError(f"{where} must be the deployed policy's {AEGIS_POLICY_WIDTH}-byte script hash, or null "
+                             "where Root binds it after genesis")
     nodes = launch.get("nodes", [])
     if not isinstance(nodes, list):
         raise InputError("nodes must be a list")
@@ -3620,7 +3741,8 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_observation(spec)
             + check_guardian(spec, meta, launch)
             + check_delays(spec, meta)
-            + check_node_genesis(spec, launch))
+            + check_node_genesis(spec, launch)
+            + check_settlement(spec, launch))
 
 
 def unique_keys(pairs: list[tuple[str, object]]) -> dict:

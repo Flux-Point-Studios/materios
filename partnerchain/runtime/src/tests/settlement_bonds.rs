@@ -1,8 +1,6 @@
 //! Settlement requests carry at least `MinSettlementBond` of MATRA, held under
-//! the `settbond` named reserve. The upgrade that enacts this runtime moves a
-//! version-3 chain's outstanding anonymous bonds there, and leaves preprod's
-//! spec-239 settlement state, which holds none, unchanged but for its storage
-//! version.
+//! the `settbond` named reserve. An upgrade moves a version-3 chain's
+//! outstanding anonymous bonds there.
 //!
 //! The reserve id is spelled out here rather than taken from the pallet, so the
 //! identifier operators and indexers see is pinned independently.
@@ -15,6 +13,7 @@ use frame_support::{
 use pallet_intent_settlement::{
     types::{SettlementEvidence, SettlementRequestRecord},
     BondedClaimAttestedAt, BondedClaimRequester, ClaimSettlementRequests, SettlementStorageVersion,
+    NAMED_RESERVE_VERSION, SETTLEMENT_STORAGE_VERSION,
 };
 use parity_scale_codec::Decode;
 use sp_io::{hashing::twox_128, TestExternalities};
@@ -22,10 +21,9 @@ use sp_keyring::Sr25519Keyring::{Dave, Eve, Ferdie};
 use sp_runtime::BuildStorage;
 
 const SETTLEMENT_RESERVE: [u8; 8] = *b"settbond";
-const CURRENT_VERSION: u32 = 4;
 
 /// Every key under the settlement pallet's prefix, with its value.
-fn settlement_storage() -> Vec<(Vec<u8>, Vec<u8>)> {
+pub(super) fn settlement_storage() -> Vec<(Vec<u8>, Vec<u8>)> {
     let prefix = twox_128(b"IntentSettlement");
     let mut entries = Vec::new();
     let mut cursor = prefix.to_vec();
@@ -40,11 +38,7 @@ fn settlement_storage() -> Vec<(Vec<u8>, Vec<u8>)> {
     entries
 }
 
-fn version_key() -> Vec<u8> {
-    SettlementStorageVersion::<Runtime>::hashed_key().to_vec()
-}
-
-fn settlement_events() -> Vec<pallet_intent_settlement::Event<Runtime>> {
+pub(super) fn settlement_events() -> Vec<pallet_intent_settlement::Event<Runtime>> {
     System::events()
         .into_iter()
         .filter_map(|record| match record.event {
@@ -54,7 +48,7 @@ fn settlement_events() -> Vec<pallet_intent_settlement::Event<Runtime>> {
         .collect()
 }
 
-fn chain(balances: Vec<(AccountId, Balance)>) -> TestExternalities {
+pub(super) fn chain(balances: Vec<(AccountId, Balance)>) -> TestExternalities {
     let mut storage = frame_system::GenesisConfig::<Runtime>::default()
         .build_storage()
         .expect("system genesis builds");
@@ -96,89 +90,21 @@ fn the_minimum_settlement_bond_is_one_thousand_matra_as_the_attestor_bond_is() {
 #[test]
 fn an_upgrade_leaves_a_fresh_genesis_settlement_state_unchanged() {
     chain(Vec::new()).execute_with(|| {
-        pallet_intent_settlement::GenesisConfig::<Runtime>::default().build();
-        assert_eq!(SettlementStorageVersion::<Runtime>::get(), CURRENT_VERSION);
+        pallet_intent_settlement::GenesisConfig::<Runtime> {
+            cardano_ids: Some(CARDANO_PREPROD),
+            ..Default::default()
+        }
+        .build();
+        assert_eq!(
+            SettlementStorageVersion::<Runtime>::get(),
+            SETTLEMENT_STORAGE_VERSION
+        );
         let before = settlement_storage();
 
         Executive::execute_on_runtime_upgrade();
 
         assert_eq!(settlement_storage(), before);
         assert!(settlement_events().is_empty());
-    });
-}
-
-/// Preprod's settlement state at a finalized spec-239 block, read from a
-/// node: storage version 3, no pending or attested bond.
-fn preprod_settlement_state() -> (BlockNumber, Vec<(Vec<u8>, Vec<u8>)>) {
-    let snapshot: serde_json::Value =
-        serde_json::from_str(include_str!("preprod-settlement-2332901.json"))
-            .expect("the snapshot is JSON");
-    let hex = |field: &serde_json::Value| {
-        sp_core::bytes::from_hex(field.as_str().expect("a hex string")).expect("valid hex")
-    };
-    let entries = snapshot["entries"]
-        .as_array()
-        .expect("snapshot entries")
-        .iter()
-        .map(|entry| (hex(&entry["key"]), hex(&entry["value"])))
-        .collect();
-    let block = snapshot["block_number"].as_u64().expect("a block number");
-    (block as BlockNumber, entries)
-}
-
-#[test]
-fn upgrading_preprods_settlement_state_changes_only_its_storage_version() {
-    let (block, entries) = preprod_settlement_state();
-    chain(Vec::new()).execute_with(|| {
-        System::set_block_number(block + 1);
-        for (key, value) in &entries {
-            sp_io::storage::set(key, value);
-        }
-        let before = settlement_storage();
-        assert_eq!(before, {
-            let mut sorted = entries.clone();
-            sorted.sort();
-            sorted
-        });
-        assert_eq!(SettlementStorageVersion::<Runtime>::get(), 3);
-        assert_eq!(ClaimSettlementRequests::<Runtime>::iter().count(), 0);
-        assert_eq!(BondedClaimRequester::<Runtime>::iter().count(), 0);
-
-        Executive::execute_on_runtime_upgrade();
-
-        let expected: Vec<_> = before
-            .into_iter()
-            .map(|(key, value)| {
-                if key == version_key() {
-                    (key, CURRENT_VERSION.to_le_bytes().to_vec())
-                } else {
-                    (key, value)
-                }
-            })
-            .collect();
-        assert_eq!(settlement_storage(), expected);
-        assert!(settlement_events().is_empty());
-    });
-}
-
-/// The settlement pallet's pre- and post-upgrade checks pass over preprod's
-/// state: it decodes, its cutovers and audit flags hold, and every
-/// requester's bonds fit their settlement reserve. Every other pallet stands
-/// at its in-code storage version, as genesis leaves it.
-#[cfg(feature = "try-runtime")]
-#[test]
-fn preprods_settlement_state_passes_the_upgrade_checks() {
-    use frame_support::traits::OnGenesis;
-    let (block, entries) = preprod_settlement_state();
-    chain(Vec::new()).execute_with(|| {
-        AllPalletsWithSystem::on_genesis();
-        System::set_block_number(block + 1);
-        for (key, value) in &entries {
-            sp_io::storage::set(key, value);
-        }
-        Executive::try_runtime_upgrade(frame_try_runtime::UpgradeCheckSelect::PreAndPost)
-            .expect("every pre- and post-upgrade check passes");
-        assert_eq!(SettlementStorageVersion::<Runtime>::get(), CURRENT_VERSION);
     });
 }
 
@@ -189,7 +115,7 @@ fn evidence(tag: u8) -> SettlementEvidence {
         observed_slot: 1,
         beneficiary_addr_hash: [2; 28],
         amount_lovelace: 1,
-        mainchain_genesis_hash: IntentSettlementMainchainGenesisHash::get(),
+        mainchain_genesis_hash: CARDANO_PREPROD.mainchain_genesis_hash,
     }
 }
 
@@ -242,7 +168,10 @@ fn upgrading_from_version_3_moves_outstanding_bonds_into_the_settlement_reserve(
 
         Executive::execute_on_runtime_upgrade();
 
-        assert_eq!(SettlementStorageVersion::<Runtime>::get(), CURRENT_VERSION);
+        assert_eq!(
+            SettlementStorageVersion::<Runtime>::get(),
+            NAMED_RESERVE_VERSION
+        );
         assert_eq!(
             Balances::reserved_balance_named(&SETTLEMENT_RESERVE, &keeper),
             pending_bond + attested_bond

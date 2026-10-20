@@ -204,7 +204,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 242,
+    spec_version: 243,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 6,
@@ -651,11 +651,6 @@ parameter_types! {
     /// stores a placeholder, but it carries no extrinsics and block one
     /// writes the real hash before its first call; System never prunes it.
     pub IntentSettlementMateriosChainId: H256 = frame_system::BlockHash::<Runtime>::get(0);
-    /// Cardano preprod network magic. Mainnet flip: 764824073.
-    pub const IntentSettlementNetworkMagic: u32 = 1;
-    /// 28-byte blake2b224 of the deployed `aegis_policy_v1` script.
-    /// Production runtime MUST pin the real script hash from `aiken build`.
-    pub const IntentSettlementAegisPolicyV1ScriptHash: [u8; 28] = [0u8; 28];
     /// Settlement-protocol semver. Bump on any breaking preimage change.
     pub const IntentSettlementSettlementVersion: u32 = 1;
     /// Cardano block depth that a `request_settle` / `request_expire_policy`
@@ -664,17 +659,6 @@ parameter_types! {
     pub const IntentSettlementMinFinalityDepth: u32 = 15;
     /// 2400 blocks @ 6s = 4 hours.
     pub const IntentSettlementSettlementRequestTtl: u32 = 2400;
-    /// Cardano preprod Shelley genesis hash pin. Rejects any
-    /// `SettlementEvidence` / `ExpiryEvidence` whose `mainchain_genesis_hash`
-    /// ≠ this constant — prevents preprod bundles from ever settling
-    /// mainnet claims (and vice versa). Mainnet flip: replace with the
-    /// mainnet `ShelleyGenesisHash`.
-    pub const IntentSettlementMainchainGenesisHash: [u8; 32] = [
-        0x16, 0x2d, 0x29, 0xc4, 0xe1, 0xcf, 0x6b, 0x8a,
-        0x84, 0xf2, 0xd6, 0x92, 0xe6, 0x7a, 0x3a, 0xc6,
-        0xbc, 0x78, 0x51, 0xbc, 0x3e, 0x6e, 0x4a, 0xfe,
-        0x64, 0xd1, 0x57, 0x78, 0xbe, 0xd8, 0xbd, 0x86,
-    ];
     /// Basis-point share of a slashed settlement bond paid to the watcher
     /// who proved the fraud. Pallet clamps at the call site to [0, 10_000].
     pub const IntentSettlementSlashWatcherShareBps: u32 = 5000;
@@ -686,6 +670,24 @@ parameter_types! {
     /// slashes: 1,000 MATRA, the attestor bond.
     pub const IntentSettlementMinSettlementBond: u128 = 1_000 * MATRA;
 }
+
+/// Cardano preprod as preprod's settlement has bound it since its genesis:
+/// network magic 1, the blake2b-256 of preprod's published
+/// `shelley-genesis.json` (its `config.json` `ShelleyGenesisHash`,
+/// book.world.dev.cardano.org/environments/preprod), and no Aegis policy
+/// deployed. The development and preprod chain specs settle against it; a
+/// mainnet genesis names Cardano mainnet, and its Aegis policy unless Root
+/// binds that after launch.
+pub const CARDANO_PREPROD: pallet_intent_settlement::CardanoIdentity =
+    pallet_intent_settlement::CardanoIdentity {
+        network_magic: 1,
+        mainchain_genesis_hash: [
+            0x16, 0x2d, 0x29, 0xc4, 0xe1, 0xcf, 0x6b, 0x8a, 0x84, 0xf2, 0xd6, 0x92, 0xe6, 0x7a,
+            0x3a, 0xc6, 0xbc, 0x78, 0x51, 0xbc, 0x3e, 0x6e, 0x4a, 0xfe, 0x64, 0xd1, 0x57, 0x78,
+            0xbe, 0xd8, 0xbd, 0x86,
+        ],
+        aegis_policy_v1_script_hash: [0; 28],
+    };
 
 impl pallet_intent_settlement::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
@@ -705,12 +707,10 @@ impl pallet_intent_settlement::Config for Runtime {
     type MaxVoucherBatch = IntentSettlementMaxVoucherBatch;
     type MaxSubmitBatch = IntentSettlementMaxSubmitBatch;
     type MateriosChainId = IntentSettlementMateriosChainId;
-    type NetworkMagic = IntentSettlementNetworkMagic;
-    type AegisPolicyV1ScriptHash = IntentSettlementAegisPolicyV1ScriptHash;
     type SettlementVersion = IntentSettlementSettlementVersion;
     type MinFinalityDepth = IntentSettlementMinFinalityDepth;
     type SettlementRequestTtl = IntentSettlementSettlementRequestTtl;
-    type MainchainGenesisHash = IntentSettlementMainchainGenesisHash;
+    type CardanoIdsToSeed = migrations::PreprodCardanoIds;
     type Currency = Balances;
     type SlashWatcherShareBps = IntentSettlementSlashWatcherShareBps;
     type BondReleaseDelayBlocks = IntentSettlementBondReleaseDelayBlocks;
@@ -1458,6 +1458,7 @@ pub type Executive = frame_executive::Executive<
         migrations::SweepFeeRouterPotsIntoTreasury,
         migrations::InitRootTimelock,
         migrations::RemovePerpEngine,
+        pallet_intent_settlement::migrations::SeedCardanoIds<Runtime>,
     ),
 >;
 
@@ -1469,13 +1470,14 @@ pub type Executive = frame_executive::Executive<
 /// pallet's genesis defaults. Only a runtime built with `dev-presets`, which
 /// `runtime-benchmarks` turns on, has one: `development`, for
 /// frame-omni-bencher's default `--genesis-builder-preset=development`. A
-/// benchmarking genesis has no guardian and has to say so, and has to seat a
-/// committee, here //Alice, or `build_state` refuses it. The runtime a chain
-/// spec carries names no development key, so it has none.
+/// benchmarking genesis has no guardian and has to say so, has to seat a
+/// committee, here //Alice, and has to name the Cardano network settlement
+/// binds, here `CARDANO_PREPROD`, or `build_state` refuses it. The runtime a
+/// chain spec carries names no development key, so it has none.
 #[cfg(feature = "dev-presets")]
 const GENESIS_PRESETS: &[(&str, &[u8])] = &[(
     sp_genesis_builder::DEV_RUNTIME_PRESET,
-    br#"{"rootTimelock":{"unguarded":true},"sessionCommitteeManagement":{"initialAuthorities":[["KW39r9CJjAVzmkf9zQ4YDb2hqfAVGdRqn53eRqyruqpxAP5YL",{"aura":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","grandpa":"5FA9nQDVg267DEd8m1ZypXLBnvN7SFxYwV7ndqSYGiN9TTpu"}]]}}"#,
+    br#"{"rootTimelock":{"unguarded":true},"sessionCommitteeManagement":{"initialAuthorities":[["KW39r9CJjAVzmkf9zQ4YDb2hqfAVGdRqn53eRqyruqpxAP5YL",{"aura":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","grandpa":"5FA9nQDVg267DEd8m1ZypXLBnvN7SFxYwV7ndqSYGiN9TTpu"}]]},"intentSettlement":{"cardanoIds":{"network_magic":1,"mainchain_genesis_hash":[22,45,41,196,225,207,107,138,132,242,214,146,230,122,58,198,188,120,81,188,62,110,74,254,100,209,87,120,190,216,189,134],"aegis_policy_v1_script_hash":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}}}"#,
 )];
 #[cfg(not(feature = "dev-presets"))]
 const GENESIS_PRESETS: &[(&str, &[u8])] = &[];
@@ -1779,6 +1781,7 @@ impl_runtime_apis! {
                 .map_err(|e| sp_runtime::format_runtime_string!("Invalid JSON blob: {}", e))?;
             root_gate::ensure_guarded_genesis(&genesis)?;
             genesis_committee::ensure_runnable_genesis_committee(&genesis)?;
+            genesis.intent_settlement.ensure_cardano_ids()?;
             <RuntimeGenesisConfig as frame_support::traits::BuildGenesisConfig>::build(&genesis);
             Ok(())
         }

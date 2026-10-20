@@ -133,11 +133,11 @@ These remain and are not changed by pricing storage:
 - Hand weights that never call `T::DbWeight`, so no schedule reaches them
   ([#88](https://github.com/Flux-Point-Studios/materios/issues/88)):
   `IntentSettlement`'s `settle_claim`, `expire_policy_mirror`,
-  `credit_deposit`, `set_pool_utilization`, `set_min_signer_threshold` and
-  `request_expire_policy`, both `Oracle` calls (materios-intent-settlement
-  `0757de3`), 6 `Billing` calls, both `TeeAttestation` calls, and
-  partner-chains' `BlockRewards`, `NativeTokenManagement` and session-key
-  calls. Their storage stays unpriced until each is benchmarked.
+  `credit_deposit`, `set_pool_utilization` and `set_min_signer_threshold`,
+  both `Oracle` calls (materios-intent-settlement `4135e07`), 6 `Billing`
+  calls, both `TeeAttestation` calls, and partner-chains' `BlockRewards`,
+  `NativeTokenManagement` and session-key calls. Their storage stays unpriced
+  until each is benchmarked.
 - The treasury's per-block inactive-funds update returns no weight (SDK).
 
 ## Capacity

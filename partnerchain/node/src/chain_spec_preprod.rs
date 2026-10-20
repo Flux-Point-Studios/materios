@@ -325,6 +325,9 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
             },
         },
         "palletSession": {},
+        "intentSettlement": {
+            "cardanoIds": materios_runtime::CARDANO_PREPROD,
+        },
         // nativeTokenManagement left to runtime defaults until a token is
         // deployed. Expected snake_case fields if set later:
         // native_token_policy_id, native_token_asset_name,
@@ -815,6 +818,52 @@ mod tests {
             });
         }
         assert!(rejected.is_empty(), "{rejected:#?}");
+    }
+
+    /// The spec's own code refuses a genesis that names no Cardano network
+    /// for settlement, or names Cardano mainnet in part, and builds one naming
+    /// Cardano mainnet with its Aegis policy or with none, for Root to bind
+    /// after launch.
+    #[test]
+    fn genesis_names_the_cardano_network_settlement_binds() {
+        use pallet_intent_settlement::types::{
+            CARDANO_MAINNET_NETWORK_MAGIC, CARDANO_MAINNET_SHELLEY_GENESIS_HASH,
+        };
+        let naming = |cardano_ids: serde_json::Value| {
+            patched(&preprod_config().unwrap(), |patch| {
+                patch["intentSettlement"]["cardanoIds"] = cardano_ids;
+            })
+            .build_storage()
+        };
+        let mainnet = pallet_intent_settlement::CardanoIdentity {
+            network_magic: CARDANO_MAINNET_NETWORK_MAGIC,
+            mainchain_genesis_hash: CARDANO_MAINNET_SHELLEY_GENESIS_HASH,
+            aegis_policy_v1_script_hash: [0x5a; 28],
+        };
+        let in_part = pallet_intent_settlement::CardanoIdentity {
+            mainchain_genesis_hash: materios_runtime::CARDANO_PREPROD.mainchain_genesis_hash,
+            ..mainnet
+        };
+        for (cardano_ids, reason) in [
+            (serde_json::Value::Null, "names no Cardano network"),
+            (serde_json::json!(in_part), "name it only together"),
+        ] {
+            let refused = naming(cardano_ids).expect_err("refused");
+            assert!(refused.contains(reason), "{refused}");
+        }
+        let unbound = pallet_intent_settlement::CardanoIdentity {
+            aegis_policy_v1_script_hash: [0; 28],
+            ..mainnet
+        };
+        for ids in [mainnet, unbound] {
+            let storage = naming(serde_json::json!(ids)).expect("a mainnet genesis builds");
+            sp_io::TestExternalities::new(storage).execute_with(|| {
+                assert_eq!(
+                    pallet_intent_settlement::CardanoIds::<materios_runtime::Runtime>::get(),
+                    Some(ids)
+                );
+            });
+        }
     }
 
     #[test]
