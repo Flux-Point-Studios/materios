@@ -73,7 +73,7 @@
     {
       "id": "main-chain-follower",
       "name": "Main-chain follower",
-      "desc": "Cardano main-chain follower backends (db-sync and yaci-store with Mithril-certified stake) supplying candidate registrations and the D-parameter to authority selection. Like upstream partner-chains, both serve the committee for a Cardano epoch from the data of the epoch two before it, and the Ariadne inherent data provider gives no data from the stable reference block's own epoch, so a node on a Cardano epoch layout less than one epoch off has data for every block it can produce or verify. Preprod v6 draws the committees of its sessions before 2026-11-13T12:00Z under the relaxation it ran, from the data of the Cardano epoch each session starts in, so that its blocks still verify.",
+      "desc": "Cardano main-chain follower backends (db-sync and yaci-store with Mithril-certified stake) supplying candidate registrations and the D-parameter to authority selection. Like upstream partner-chains, both serve the committee for a Cardano epoch from the data of the epoch two before it. Preprod v6, keyed by its genesis hash, draws every committee under the relaxation it has always run, from the data of the Cardano epoch each session starts in.",
       "kind": "engine",
       "paths": [
         "partnerchain/vendor/db-sync-follower",

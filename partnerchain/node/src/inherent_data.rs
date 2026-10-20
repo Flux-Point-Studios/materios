@@ -1,5 +1,7 @@
 use crate::chain_spec_preprod::PREPROD_V6_GENESIS;
-use authority_selection_inherents::ariadne_inherent_data_provider::AriadneInherentDataProvider as AriadneIDP;
+use authority_selection_inherents::ariadne_inherent_data_provider::{
+	AriadneInherentDataProvider as AriadneIDP, AriadneRule,
+};
 use authority_selection_inherents::authority_selection_inputs::{
 	AuthoritySelectionDataSource, AuthoritySelectionInputs,
 };
@@ -79,7 +81,8 @@ where
 			authority_selection_data_source,
 			native_token_data_source,
 		} = self;
-		let CreateInherentDataConfig { mc_epoch_config, sc_slot_config, time_source } = config;
+		let CreateInherentDataConfig { mc_epoch_config, sc_slot_config, time_source, ariadne_rule } =
+			config;
 
 		let (slot, timestamp) =
 			timestamp_and_slot_cidp(sc_slot_config.slot_duration, time_source.clone());
@@ -98,7 +101,7 @@ where
 			*slot,
 			authority_selection_data_source.as_ref(),
 			mc_hash.mc_epoch(),
-			ariadne_relaxed_until(client.info().genesis_hash),
+			*ariadne_rule,
 		)
 		.await?;
 		let block_beneficiary_provider =
@@ -167,7 +170,8 @@ where
 			authority_selection_data_source,
 			native_token_data_source,
 		} = self;
-		let CreateInherentDataConfig { mc_epoch_config, sc_slot_config, time_source, .. } = config;
+		let CreateInherentDataConfig { mc_epoch_config, sc_slot_config, time_source, ariadne_rule } =
+			config;
 
 		let timestamp = TimestampIDP::new(Timestamp::new(time_source.get_current_time_millis()));
 		let parent_header = client.expect_header(parent_hash)?;
@@ -190,7 +194,7 @@ where
 			verified_block_slot,
 			authority_selection_data_source.as_ref(),
 			mc_state_reference.epoch,
-			ariadne_relaxed_until(client.info().genesis_hash),
+			*ariadne_rule,
 		)
 		.await?;
 
@@ -217,26 +221,33 @@ pub fn slot_from_predigest(
 	}
 }
 
-/// The first session whose committee the chain with `genesis` draws under
-/// upstream's Ariadne rule. Preprod v6 drew its committees under the preprod
-/// relaxation, and its blocks up to the switch verify only under it.
-fn ariadne_relaxed_until(genesis: <Block as BlockT>::Hash) -> ScEpochNumber {
-	if genesis == PREPROD_V6_GENESIS {
-		// 2026-11-13T12:00:00Z.
-		ScEpochNumber(498_492)
-	} else {
-		ScEpochNumber(0)
-	}
-}
-
-#[derive(new, Clone)]
+#[derive(Clone)]
 pub(crate) struct CreateInherentDataConfig {
 	pub mc_epoch_config: MainchainEpochConfig,
 	pub sc_slot_config: ScSlotConfig,
 	pub time_source: Arc<dyn TimeSource + Send + Sync>,
+	ariadne_rule: AriadneRule,
 }
 
 impl CreateInherentDataConfig {
+	/// The config of the chain whose genesis block is `genesis`. Preprod v6
+	/// draws its committees under the Ariadne rule every one of its blocks was
+	/// authored and verified under, so that every binary draws them alike;
+	/// every other chain draws them under upstream's.
+	pub fn new(
+		mc_epoch_config: MainchainEpochConfig,
+		sc_slot_config: ScSlotConfig,
+		time_source: Arc<dyn TimeSource + Send + Sync>,
+		genesis: <Block as BlockT>::Hash,
+	) -> Self {
+		let ariadne_rule =
+			if genesis == PREPROD_V6_GENESIS { AriadneRule::Relaxed } else { AriadneRule::Strict };
+		log::info!(
+			"🗳️  Drawing committees under the {ariadne_rule:?} Ariadne rule for genesis {genesis:?}"
+		);
+		Self { mc_epoch_config, sc_slot_config, time_source, ariadne_rule }
+	}
+
 	pub fn slot_duration(&self) -> SlotDuration {
 		self.sc_slot_config.slot_duration
 	}
@@ -254,24 +265,186 @@ fn timestamp_and_slot_cidp(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use authority_selection_inherents::mock::FollowerMock;
+	use sidechain_domain::{MainchainBlock, McBlockNumber, McEpochNumber, McSlotNumber};
+	use sidechain_mc_hash::mock::MockMcHashDataSource;
 	use sidechain_slots::SlotsPerEpoch;
+	use sp_core::H256;
+	use sp_native_token_management::mock::MockNativeTokenDataSource;
 
-	/// Preprod v6, whose sessions are 600 slots of 6 s, switches to upstream's
-	/// Ariadne rule with the session that starts on 2026-11-13 at 12:00 UTC.
-	/// Any other genesis, v6's with a byte changed among them, draws every
-	/// committee under upstream's rule.
-	#[test]
-	fn preprod_v6_switches_to_upstreams_ariadne_rule_on_2026_11_13_at_noon_utc() {
-		let v6_sessions = ScSlotConfig {
+	/// A chain at its genesis block, whose next committee to draw is session
+	/// `next_unset`'s, and which has no native-token scripts.
+	#[derive(Clone)]
+	struct Chain {
+		next_unset: ScEpochNumber,
+	}
+
+	impl ProvideRuntimeApi<Block> for Chain {
+		type Api = Chain;
+
+		fn runtime_api(&self) -> sp_api::ApiRef<Self::Api> {
+			self.clone().into()
+		}
+	}
+
+	sp_api::mock_impl_runtime_apis! {
+		impl SessionValidatorManagementApi<
+			Block,
+			SessionKeys,
+			CrossChainPublic,
+			AuthoritySelectionInputs,
+			ScEpochNumber,
+		> for Chain {
+			fn get_current_committee() -> (ScEpochNumber, Vec<CrossChainPublic>) {
+				unimplemented!()
+			}
+			fn get_next_unset_epoch_number() -> ScEpochNumber {
+				self.next_unset
+			}
+			fn calculate_committee(
+				_authority_selection_inputs: AuthoritySelectionInputs,
+				_sidechain_epoch: ScEpochNumber,
+			) -> Option<Vec<(CrossChainPublic, SessionKeys)>> {
+				unimplemented!()
+			}
+			fn get_main_chain_scripts() -> sp_session_validator_management::MainChainScripts {
+				Default::default()
+			}
+		}
+
+		impl NativeTokenManagementApi<Block> for Chain {
+			fn get_main_chain_scripts() -> Option<sp_native_token_management::MainChainScripts> {
+				None
+			}
+			fn initialized() -> bool {
+				unimplemented!()
+			}
+		}
+	}
+
+	impl HeaderBackend<Block> for Chain {
+		fn header(
+			&self,
+			_hash: <Block as BlockT>::Hash,
+		) -> sp_blockchain::Result<Option<<Block as BlockT>::Header>> {
+			let genesis = materios_runtime::opaque::Header::new(
+				0,
+				H256::zero(),
+				H256::zero(),
+				H256::zero(),
+				Default::default(),
+			);
+			Ok(Some(genesis))
+		}
+
+		fn info(&self) -> sp_blockchain::Info<Block> {
+			unimplemented!()
+		}
+
+		fn status(
+			&self,
+			_hash: <Block as BlockT>::Hash,
+		) -> sp_blockchain::Result<sp_blockchain::BlockStatus> {
+			unimplemented!()
+		}
+
+		fn number(&self, _hash: <Block as BlockT>::Hash) -> sp_blockchain::Result<Option<u32>> {
+			unimplemented!()
+		}
+
+		fn hash(&self, _number: u32) -> sp_blockchain::Result<Option<<Block as BlockT>::Hash>> {
+			unimplemented!()
+		}
+	}
+
+	/// The config the service builds for the chain whose genesis is
+	/// `genesis`, with preprod's one-hour sessions and the fleet's MC__ epoch
+	/// layout, which starts every Cardano epoch a day early.
+	fn preprod_config(genesis: <Block as BlockT>::Hash) -> CreateInherentDataConfig {
+		let fleet_epochs = MainchainEpochConfig {
+			first_epoch_timestamp_millis: sp_core::offchain::Timestamp::from_unix_millis(
+				1_655_683_200_000,
+			),
+			first_epoch_number: 4,
+			epoch_duration_millis: sp_core::offchain::Duration::from_millis(432_000_000),
+			first_slot_number: 0,
+		};
+		let sessions = ScSlotConfig {
 			slots_per_epoch: SlotsPerEpoch(600),
 			slot_duration: SlotDuration::from_millis(6_000),
 		};
-		assert_eq!(
-			v6_sessions.epoch_start_time(ariadne_relaxed_until(PREPROD_V6_GENESIS)),
-			Some(sp_core::offchain::Timestamp::from_unix_millis(1_794_571_200_000)),
-		);
+		let time_source = Arc::new(time_source::SystemTimeSource);
+		CreateInherentDataConfig::new(fleet_epochs, sessions, time_source, genesis)
+	}
+
+	/// The Cardano epoch whose data the proposer's and then the verifier's
+	/// inherent data provider give a block on the genesis of `config`'s chain,
+	/// for the committee of session `next_unset`, while the block's stable
+	/// reference block is in epoch `reference`.
+	async fn data_given(
+		config: &CreateInherentDataConfig,
+		next_unset: u64,
+		reference: u32,
+	) -> [Option<u32>; 2] {
+		let client = Arc::new(Chain { next_unset: ScEpochNumber(next_unset) });
+		let reference_block = MainchainBlock {
+			number: McBlockNumber(1),
+			hash: McBlockHash([1; 32]),
+			epoch: McEpochNumber(reference),
+			slot: McSlotNumber(1),
+			timestamp: 1,
+		};
+		let mc_hash = Arc::new(MockMcHashDataSource::from(vec![reference_block.clone()]));
+		let follower = Arc::new(FollowerMock { lag: 2 });
+		let native_token = Arc::new(MockNativeTokenDataSource::default());
+		let (_, _, _, proposed, _, _) = ProposalCIDP::new(
+			config.clone(),
+			client.clone(),
+			mc_hash.clone(),
+			follower.clone(),
+			native_token.clone(),
+		)
+		.create_inherent_data_providers(H256::zero(), ())
+		.await
+		.unwrap();
+		let (_, verified, _) =
+			VerifierCIDP::new(config.clone(), client, mc_hash, follower, native_token)
+				.create_inherent_data_providers(H256::zero(), (Slot::from(1), reference_block.hash))
+				.await
+				.unwrap();
+		[proposed, verified].map(|ariadne| {
+			ariadne.data.map(|inputs| u32::from_be_bytes(inputs.epoch_nonce.0.try_into().unwrap()))
+		})
+	}
+
+	/// The service picks the Ariadne rule from the genesis, and the proposer
+	/// and the verifier both draw under it: preprod v6's relaxation for v6,
+	/// and upstream's rule for any other genesis, v6's with a byte changed
+	/// among them. The draws, with upstream's followers:
+	/// - preprod block #2102140's, for session 497_472, which starts with
+	///   epoch 317 on the fleet's layout, while its stable reference block is
+	///   in epoch 316; then with the reference block in 317;
+	/// - for session 498_552, which starts on 2026-11-16 at 00:00 UTC with
+	///   epoch 326, with the reference block in 325, then in 326.
+	#[tokio::test]
+	async fn the_proposer_and_the_verifier_draw_under_the_rule_the_genesis_picks() {
+		// The proposer reads its block beneficiary from the environment.
+		std::env::set_var("SIDECHAIN_BLOCK_BENEFICIARY", format!("0x{}", "01".repeat(32)));
 		let mut other = PREPROD_V6_GENESIS;
 		other.0[31] ^= 1;
-		assert_eq!(ariadne_relaxed_until(other), ScEpochNumber(0));
+		let draws = [(497_472, 316), (497_472, 317), (498_552, 325), (498_552, 326)];
+		for (genesis, data_epochs) in [
+			(PREPROD_V6_GENESIS, [None, Some(317), None, Some(326)]),
+			(other, [Some(315), Some(315), Some(324), Some(324)]),
+		] {
+			let config = preprod_config(genesis);
+			for ((next_unset, reference), data_epoch) in draws.into_iter().zip(data_epochs) {
+				assert_eq!(
+					data_given(&config, next_unset, reference).await,
+					[data_epoch, data_epoch],
+					"genesis {genesis:?}, session {next_unset}, reference epoch {reference}"
+				);
+			}
+		}
 	}
 }

@@ -220,14 +220,15 @@ core2 = { path = "vendor/core2" }
 #       at Materios block #26197 (4h30m stall). Applied inside
 #       `select_authorities` after the sampler and before the pallet
 #       receives the committee vec. See Task #60 handoff.
-#    b. [materios-patch: relaxed-until] — the Ariadne inherent data
-#       provider draws the committees of sessions before a session the node
-#       names under the preprod relaxation the chain drew them under (data
-#       stored up to the Cardano epoch the session starts in, given once the
-#       stable reference block is in that epoch), so that the chain's blocks
-#       still verify. The node names that session per genesis in
-#       `ariadne_relaxed_until` (node/src/inherent_data.rs): preprod v6's
-#       switch, and session 0 for every other chain.
+#    b. [materios-patch: preprod-v6-relaxation] — the Ariadne inherent
+#       data provider takes an `AriadneRule`. `Strict` is upstream's rule.
+#       `Relaxed` is the rule every preprod v6 block was authored and
+#       verified under: the data stored up to the Cardano epoch the session
+#       starts in, given once the stable reference block is in that epoch.
+#       The node picks `Relaxed` for preprod v6's genesis only, once, when it
+#       builds its service (`CreateInherentDataConfig::new` in
+#       node/src/inherent_data.rs). `src/mock.rs` adds `FollowerMock`, the
+#       follower double the provider's and the node's tests share.
 #
 # 2. `db-sync-follower` — upstream v1.5.1 sources under a manifest that pins
 #    its dependencies itself. Like upstream, and like `yaci-follower`, it
@@ -249,8 +250,8 @@ core2 = { path = "vendor/core2" }
 #   - Patch 1a (ariadne-output-dedup): safe for mainnet as-is. Should ALSO
 #     be upstreamed; the with-replacement sampler bug is not preprod-
 #     specific.
-#   - Patch 1b (relaxed-until): inert on every chain but preprod v6, mainnet
-#     included, which draws every committee under upstream's rule.
+#   - Patch 1b (preprod-v6-relaxation): every chain but preprod v6,
+#     mainnet included, draws every committee under upstream's rule.
 #   - Patch 3 (idp-none-fallback): preserve until task #123 lands the
 #     upstream "last-known-good Ariadne IDP cache" (tracked in IOG issue
 #     #1154). The workaround is safe but masks an architectural mismatch

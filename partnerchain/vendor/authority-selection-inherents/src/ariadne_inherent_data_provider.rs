@@ -21,6 +21,21 @@ use {
 /// The type of the inherent.
 pub type InherentType = AuthoritySelectionInputs;
 
+/// [materios-patch: preprod-v6-relaxation] Which Cardano data the provider
+/// draws a session's committee from. The node picks the rule per genesis.
+#[cfg(feature = "std")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AriadneRule {
+	/// Upstream's: the data the follower serves for the Cardano epoch the
+	/// session starts in, given once the stable reference block is past the
+	/// epoch that data was stored up to.
+	Strict,
+	/// Preprod v6's, under which every one of its blocks was authored and
+	/// verified: the data stored up to the Cardano epoch the session starts
+	/// in, given once the stable reference block is in that epoch.
+	Relaxed,
+}
+
 #[derive(Clone, Debug, Encode, Decode)]
 pub struct AriadneInherentDataProvider {
 	pub data: Option<AuthoritySelectionInputs>,
@@ -41,11 +56,6 @@ impl AriadneInherentDataProvider {
 		})
 	}
 
-	/// [materios-patch: relaxed-until] The committees of sessions before
-	/// `relaxed_until` are drawn under the preprod relaxation their chain drew
-	/// them under, so that its blocks still verify: from the data stored up to
-	/// the Cardano epoch the session starts in, given once the stable reference
-	/// block is in that epoch. Later committees are drawn under upstream's rule.
 	pub async fn new<Block, SessionKeys, CrossChainPublic, T>(
 		client: &T,
 		sc_slot_config: &ScSlotConfig,
@@ -54,7 +64,7 @@ impl AriadneInherentDataProvider {
 		slot: Slot,
 		candidate_data_source: &(dyn AuthoritySelectionDataSource + Send + Sync),
 		mc_reference_epoch: McEpochNumber,
-		relaxed_until: ScEpochNumber,
+		rule: AriadneRule,
 	) -> Result<Self, InherentProviderCreationError>
 	where
 		SessionKeys: Decode,
@@ -69,18 +79,31 @@ impl AriadneInherentDataProvider {
 			ScEpochNumber,
 		>,
 	{
-		let for_sc_epoch = sc_epoch_for_next_ariadne_cidp(client, sc_slot_config, parent_hash, slot)?;
-		let for_mc_epoch = sc_epoch_to_mc_epoch(for_sc_epoch, sc_slot_config, mc_epoch_config)?;
-		let relaxed = for_sc_epoch < relaxed_until;
-		// A follower serves the data stored up to an epoch for the epoch two after it.
-		let usage_epoch =
-			if relaxed { McEpochNumber(for_mc_epoch.0 + 2) } else { for_mc_epoch };
+		let for_mc_epoch = mc_epoch_for_next_ariadne_cidp(
+			client,
+			sc_slot_config,
+			mc_epoch_config,
+			parent_hash,
+			slot,
+		)?;
 
+		// [materios-patch: preprod-v6-relaxation] A follower serves the data
+		// stored up to an epoch for the epoch two after it.
+		let usage_epoch = match rule {
+			AriadneRule::Strict => for_mc_epoch,
+			AriadneRule::Relaxed => McEpochNumber(for_mc_epoch.0 + 2),
+		};
 		let data_epoch = candidate_data_source.data_epoch(usage_epoch).await?;
 		// We could accept mc_reference at last slot of data_epoch, but calculations are much easier like that.
-		// Additionally, in current implementation, the inequality below is always true, thus there is no need to make it more accurate.
+		// The inequality does not always hold. Under Strict it holds for every block a node can author or
+		// verify on a Cardano epoch layout at most an epoch less two sessions and 3k/f early; Relaxed
+		// fails it around every Cardano epoch boundary. See the tests.
 		let scripts = client.runtime_api().get_main_chain_scripts(parent_hash)?;
-		if data_epoch < mc_reference_epoch || (relaxed && data_epoch == mc_reference_epoch) {
+		let given = match rule {
+			AriadneRule::Strict => data_epoch < mc_reference_epoch,
+			AriadneRule::Relaxed => data_epoch <= mc_reference_epoch,
+		};
+		if given {
 			Ok(AriadneInherentDataProvider::from_mc_data(
 				candidate_data_source,
 				usage_epoch,
@@ -109,12 +132,13 @@ pub enum InherentProviderCreationError {
 }
 
 #[cfg(feature = "std")]
-fn sc_epoch_for_next_ariadne_cidp<Block, SessionKeys, CrossChainPublic, T>(
+fn mc_epoch_for_next_ariadne_cidp<Block, SessionKeys, CrossChainPublic, T>(
 	client: &T,
 	sc_slot_config: &ScSlotConfig,
+	epoch_config: &MainchainEpochConfig,
 	parent_hash: <Block as BlockT>::Hash,
 	slot: Slot,
-) -> Result<ScEpochNumber, InherentProviderCreationError>
+) -> Result<McEpochNumber, InherentProviderCreationError>
 where
 	Block: BlockT,
 	SessionKeys: Decode,
@@ -130,14 +154,18 @@ where
 {
 	let next_unset_epoch = client.runtime_api().get_next_unset_epoch_number(parent_hash)?;
 
-	// A special case for the genesis committee (current epoch 0, next unset epoch 1).
-	// The genesis committee epoch is initialized with 0, so in the very first block we need to provide
-	// the epoch number based on the current slot number
-	if next_unset_epoch == ScEpochNumber(1) {
-		Ok(sc_slot_config.epoch_number(slot))
-	} else {
-		Ok(next_unset_epoch)
-	}
+	let for_sc_epoch_number = {
+		// A special case for the genesis committee (current epoch 0, next unset epoch 1).
+		// The genesis committee epoch is initialized with 0, so in the very first block we need to provide
+		// the epoch number based on the current slot number
+		if next_unset_epoch == ScEpochNumber(1) {
+			sc_slot_config.epoch_number(slot)
+		} else {
+			next_unset_epoch
+		}
+	};
+
+	sc_epoch_to_mc_epoch(for_sc_epoch_number, sc_slot_config, epoch_config)
 }
 
 #[cfg(feature = "std")]
@@ -195,8 +223,7 @@ pub struct CommitteeConfig {
 mod tests {
 	use super::*;
 	use crate::ariadne_inherent_data_provider::AriadneInherentDataProvider;
-	use crate::authority_selection_inputs::AriadneParameters;
-	use crate::mock::MockAuthoritySelectionDataSource;
+	use crate::mock::{FollowerMock, MockAuthoritySelectionDataSource};
 	use crate::runtime_api_mock::*;
 	use sidechain_domain::mainchain_epoch::*;
 	use sidechain_slots::*;
@@ -233,70 +260,13 @@ mod tests {
 			Slot::from(400u64),
 			&MockAuthoritySelectionDataSource::default(),
 			mc_reference_epoch,
-			UPSTREAM,
+			AriadneRule::Strict,
 		)
 		.await;
 
 		assert!(empty_ariadne_idp.is_ok());
 		assert!(empty_ariadne_idp.unwrap().data.is_none());
 	}
-
-	/// Cardano data as an upstream follower serves it: for the epoch two
-	/// before the one it is used in. Its epoch nonce names the epoch whose
-	/// data it is.
-	struct Follower;
-
-	fn stored_for(epoch: McEpochNumber) -> McEpochNumber {
-		McEpochNumber(epoch.0 - 2)
-	}
-
-	#[async_trait::async_trait]
-	impl AuthoritySelectionDataSource for Follower {
-		async fn get_ariadne_parameters(
-			&self,
-			_epoch: McEpochNumber,
-			_d_parameter: PolicyId,
-			_permissioned_candidates: PolicyId,
-		) -> Result<AriadneParameters, Box<dyn std::error::Error + Send + Sync>> {
-			Ok(AriadneParameters {
-				d_parameter: DParameter {
-					num_permissioned_candidates: 1,
-					num_registered_candidates: 0,
-				},
-				permissioned_candidates: vec![],
-			})
-		}
-
-		async fn get_candidates(
-			&self,
-			_epoch: McEpochNumber,
-			_committee_candidate_address: MainchainAddress,
-		) -> Result<Vec<CandidateRegistrations>, Box<dyn std::error::Error + Send + Sync>> {
-			Ok(vec![])
-		}
-
-		async fn get_epoch_nonce(
-			&self,
-			epoch: McEpochNumber,
-		) -> Result<Option<EpochNonce>, Box<dyn std::error::Error + Send + Sync>> {
-			Ok(Some(EpochNonce(stored_for(epoch).0.to_be_bytes().to_vec())))
-		}
-
-		async fn data_epoch(
-			&self,
-			for_epoch: McEpochNumber,
-		) -> Result<McEpochNumber, Box<dyn std::error::Error + Send + Sync>> {
-			Ok(stored_for(for_epoch))
-		}
-	}
-
-	/// Every committee drawn under upstream's rule.
-	const UPSTREAM: ScEpochNumber = ScEpochNumber(0);
-	/// Every committee drawn under the relaxation.
-	const RELAXED: ScEpochNumber = ScEpochNumber(u64::MAX);
-	/// The committees of sessions before 498_492, which starts on 2026-11-13
-	/// at 12:00 UTC, drawn under the relaxation.
-	const SWITCH: ScEpochNumber = ScEpochNumber(498_492);
 
 	const HOUR: u64 = 3_600_000;
 
@@ -320,14 +290,20 @@ mod tests {
 		}
 	}
 
+	/// When Cardano preprod's epoch 0 started.
+	const PREPROD_EPOCH_0: u64 = 1_654_041_600_000;
+
+	/// When Cardano mainnet's epoch 208, its first under Shelley, started.
+	const MAINNET_EPOCH_208: u64 = 1_596_059_091_000;
+
 	/// Cardano preprod's epochs, which start at 00:00 UTC.
 	fn preprod() -> MainchainEpochConfig {
-		five_day_epochs(1_654_041_600_000, 0)
+		five_day_epochs(PREPROD_EPOCH_0, 0)
 	}
 
 	/// When Cardano preprod's epoch `epoch` starts.
 	fn preprod_boundary(epoch: u64) -> u64 {
-		1_654_041_600_000 + epoch * 120 * HOUR
+		PREPROD_EPOCH_0 + epoch * 120 * HOUR
 	}
 
 	/// The MC__ epoch layout the preprod fleet's start scripts set, which
@@ -338,7 +314,12 @@ mod tests {
 
 	/// Cardano mainnet's epochs since Shelley.
 	fn mainnet() -> MainchainEpochConfig {
-		five_day_epochs(1_596_059_091_000, 208)
+		five_day_epochs(MAINNET_EPOCH_208, 208)
+	}
+
+	/// When Cardano mainnet's epoch `epoch` starts.
+	fn mainnet_boundary(epoch: u64) -> u64 {
+		MAINNET_EPOCH_208 + (epoch - 208) * 120 * HOUR
 	}
 
 	/// A Cardano block is stable k blocks deep, k/f of its slots: 432/0.05 s
@@ -346,53 +327,109 @@ mod tests {
 	const PREPROD_STABILITY: u64 = 8_640_000;
 	const MAINNET_STABILITY: u64 = 43_200_000;
 
-	/// The Cardano epoch whose data the provider gives a block for the
-	/// committee of session `next_unset`, on epoch layout `node_epochs`, while
-	/// the block's stable reference block is in epoch `reference`.
-	async fn data_given(
-		node_epochs: &MainchainEpochConfig,
-		next_unset: u64,
-		reference: u32,
-		relaxed_until: ScEpochNumber,
-	) -> Option<u32> {
-		AriadneInherentDataProvider::new(
-			&TestApi { next_unset_epoch_number: ScEpochNumber(next_unset) },
-			&materios_slots(),
-			node_epochs,
-			H256::zero(),
-			Slot::from(0),
-			&Follower,
-			McEpochNumber(reference),
-			relaxed_until,
-		)
-		.await
-		.unwrap()
-		.data
-		.map(|inputs| u32::from_be_bytes(inputs.epoch_nonce.0.try_into().unwrap()))
+	/// From 30 h before `boundary` to 40 h after it (Unix ms).
+	fn around(boundary: u64) -> (u64, u64) {
+		(boundary - 30 * HOUR, boundary + 40 * HOUR)
 	}
 
-	/// Seconds in which a node with Cardano epoch layout `node_epochs` has no
-	/// Ariadne data for the committee its chain asks for next, from `from` to
-	/// `to` (Unix ms). Its stable reference block is `reference_age` behind
-	/// each slot, in the epochs `cardano_epochs` lays out: from k/f, the newest
-	/// stable block, to 3k/f, the oldest the mc-hash inherent accepts.
+	/// A node binary, as far as the committee inputs it draws.
+	#[derive(Clone, Copy)]
+	enum Binary {
+		/// This crate's provider under the rule, with upstream's followers.
+		Current(AriadneRule),
+		/// The provider and followers of preprod v6's earlier binaries:
+		/// followers that serve the data stored up to an epoch for that epoch
+		/// itself, and data given while the stable reference block is in that
+		/// epoch or later.
+		PreprodV6Earlier,
+	}
+
+	impl Binary {
+		/// The inputs the binary gives a block at `slot` for the committee of
+		/// session `next_unset`, on Cardano epoch layout `node_epochs`, while
+		/// the block's stable reference block is in epoch `reference`.
+		async fn draw(
+			self,
+			node_epochs: &MainchainEpochConfig,
+			next_unset: u64,
+			slot: u64,
+			reference: u32,
+		) -> Option<AuthoritySelectionInputs> {
+			let client = TestApi { next_unset_epoch_number: ScEpochNumber(next_unset) };
+			let (slot, reference) = (Slot::from(slot), McEpochNumber(reference));
+			match self {
+				Binary::Current(rule) => AriadneInherentDataProvider::new(
+					&client,
+					&materios_slots(),
+					node_epochs,
+					H256::zero(),
+					slot,
+					&FollowerMock { lag: 2 },
+					reference,
+					rule,
+				)
+				.await
+				.unwrap()
+				.data,
+				Binary::PreprodV6Earlier => {
+					let follower = FollowerMock { lag: 0 };
+					let for_mc_epoch = mc_epoch_for_next_ariadne_cidp(
+						&client,
+						&materios_slots(),
+						node_epochs,
+						H256::zero(),
+						slot,
+					)
+					.unwrap();
+					let data_epoch = follower.data_epoch(for_mc_epoch).await.unwrap();
+					let scripts = client.runtime_api().get_main_chain_scripts(H256::zero()).unwrap();
+					if data_epoch <= reference {
+						AriadneInherentDataProvider::from_mc_data(&follower, for_mc_epoch, scripts)
+							.await
+							.unwrap()
+							.data
+					} else {
+						None
+					}
+				},
+			}
+		}
+
+		/// The Cardano epoch whose data the binary gives that draw, at slot 0.
+		async fn data_given(
+			self,
+			node_epochs: &MainchainEpochConfig,
+			next_unset: u64,
+			reference: u32,
+		) -> Option<u32> {
+			self.draw(node_epochs, next_unset, 0, reference)
+				.await
+				.map(|inputs| u32::from_be_bytes(inputs.epoch_nonce.0.try_into().unwrap()))
+		}
+	}
+
+	/// What `binary` gives each slot from `from` to `to` (Unix ms), on Cardano
+	/// epoch layout `node_epochs`, while its stable reference block is
+	/// `reference_age` behind the slot, in the epochs `cardano_epochs` lays
+	/// out: from k/f, the newest stable block, to 3k/f, the oldest the mc-hash
+	/// inherent accepts.
 	///
 	/// The chain stores the next committee at the first block that has the
 	/// data, and rotates to it at the next session; with none stored, it
 	/// keeps the committee in force and asks again for the one after it.
-	async fn seconds_without_data(
+	async fn draws(
+		binary: Binary,
 		node_epochs: &MainchainEpochConfig,
 		cardano_epochs: &MainchainEpochConfig,
 		(from, to): (u64, u64),
 		reference_age: u64,
-		relaxed_until: ScEpochNumber,
-	) -> u64 {
+	) -> Vec<Option<AuthoritySelectionInputs>> {
 		let slots = materios_slots();
 		let slot_millis = slots.slot_duration.as_millis();
 		let (first, last) = (from / slot_millis, to / slot_millis);
 		let mut current = slots.epoch_number(Slot::from(first));
 		let mut next: Option<ScEpochNumber> = None;
-		let mut without = 0;
+		let mut drawn = vec![];
 		for slot in first..last {
 			if slots.epoch_number(Slot::from(slot)) > current {
 				if let Some(stored) = next.take() {
@@ -404,27 +441,26 @@ mod tests {
 					slot * slot_millis - reference_age,
 				))
 				.unwrap();
-			let client =
-				TestApi { next_unset_epoch_number: ScEpochNumber(next.unwrap_or(current).0 + 1) };
-			let idp = AriadneInherentDataProvider::new(
-				&client,
-				&slots,
-				node_epochs,
-				H256::zero(),
-				Slot::from(slot),
-				&Follower,
-				reference,
-				relaxed_until,
-			)
-			.await
-			.unwrap();
-			match idp.data {
-				None => without += slot_millis / 1000,
-				Some(_) if next.is_none() => next = Some(ScEpochNumber(current.0 + 1)),
-				Some(_) => {},
+			let draw = binary.draw(node_epochs, next.unwrap_or(current).0 + 1, slot, reference.0).await;
+			if draw.is_some() && next.is_none() {
+				next = Some(ScEpochNumber(current.0 + 1));
 			}
+			drawn.push(draw);
 		}
-		without
+		drawn
+	}
+
+	/// Seconds in which `binary` gives no data, as `draws` sweeps them.
+	async fn seconds_without_data(
+		binary: Binary,
+		node_epochs: &MainchainEpochConfig,
+		cardano_epochs: &MainchainEpochConfig,
+		from_to: (u64, u64),
+		reference_age: u64,
+	) -> u64 {
+		let drawn = draws(binary, node_epochs, cardano_epochs, from_to, reference_age).await;
+		let slot_seconds = materios_slots().slot_duration.as_millis() / 1000;
+		drawn.iter().filter(|draw| draw.is_none()).count() as u64 * slot_seconds
 	}
 
 	/// Session 497_976 starts with Cardano preprod's epoch 321 on 2026-10-23 at
@@ -433,39 +469,38 @@ mod tests {
 	/// none until the reference block is in epoch 320.
 	#[tokio::test]
 	async fn no_data_from_the_cardano_epoch_of_the_stable_reference_block() {
-		assert_eq!(data_given(&preprod(), 497_976, 319, UPSTREAM).await, None);
-		assert_eq!(data_given(&preprod(), 497_976, 320, UPSTREAM).await, Some(319));
+		let strict = Binary::Current(AriadneRule::Strict);
+		assert_eq!(strict.data_given(&preprod(), 497_976, 319).await, None);
+		assert_eq!(strict.data_given(&preprod(), 497_976, 320).await, Some(319));
 	}
 
 	/// Preprod block #2102140, 2026-10-01T23:00Z, was authored inside the
 	/// relaxation's window with no `set`: its parent asks for session 497_472,
 	/// which starts on 2026-10-02 at 00:00 UTC, in epoch 317 on the fleet's
 	/// layout, while its stable reference block is in epoch 316. A verifier
-	/// with data refuses such a block, so the relaxation gives none, as the
-	/// author had; upstream's rule, from the session the relaxation ends with,
-	/// gives epoch 315's. Once the reference block is in epoch 317, which is
-	/// when the fleet's `set`s resumed (#2118655, 2026-10-03T02:35:30Z), the
-	/// relaxation gives that epoch's own data.
+	/// with data refuses such a block, so preprod v6's rule gives none, as the
+	/// author had; upstream's rule gives epoch 315's. Once the reference block
+	/// is in epoch 317, which is when the fleet's `set`s resumed (#2118655,
+	/// 2026-10-03T02:35:30Z), preprod v6's rule gives that epoch's own data.
 	#[tokio::test]
-	async fn a_relaxed_session_gets_the_data_its_blocks_were_authored_with() {
+	async fn preprod_v6s_rule_gives_the_data_its_blocks_were_authored_with() {
 		let fleet = preprod_fleet();
-		assert_eq!(data_given(&fleet, 497_472, 316, RELAXED).await, None);
-		assert_eq!(data_given(&fleet, 497_472, 317, RELAXED).await, Some(317));
-		assert_eq!(data_given(&fleet, 497_472, 316, ScEpochNumber(497_473)).await, None);
-		assert_eq!(data_given(&fleet, 497_472, 316, ScEpochNumber(497_472)).await, Some(315));
-		assert_eq!(data_given(&fleet, 497_472, 316, UPSTREAM).await, Some(315));
+		let relaxed = Binary::Current(AriadneRule::Relaxed);
+		assert_eq!(relaxed.data_given(&fleet, 497_472, 316).await, None);
+		assert_eq!(relaxed.data_given(&fleet, 497_472, 317).await, Some(317));
+		let strict = Binary::Current(AriadneRule::Strict);
+		assert_eq!(strict.data_given(&fleet, 497_472, 316).await, Some(315));
 	}
 
 	/// Upstream's rule gives every block data, on preprod and mainnet, on the
 	/// fleet's early epoch layout as on Cardano's, for any stable reference
-	/// block the mc-hash inherent accepts. The relaxation leaves without data
-	/// the two sessions that start before each Cardano epoch boundary and the
-	/// reference block's age after it: 4.4 h on preprod, whose boundaries
+	/// block the mc-hash inherent accepts. Preprod v6's rule leaves without
+	/// data the two sessions that start before each Cardano epoch boundary and
+	/// the reference block's age after it: 4.4 h on preprod, whose boundaries
 	/// start a session, 13.7 h at a mainnet boundary 44 min 51 s into a
 	/// session, and 28.4 h on the fleet's layout.
 	#[tokio::test]
-	async fn upstreams_rule_leaves_no_block_without_data_where_the_relaxation_has_its_window() {
-		let mainnet_boundary = 1_596_059_091_000 + (600 - 208) * 120 * HOUR;
+	async fn upstreams_rule_leaves_no_block_without_data_where_preprod_v6s_has_its_window() {
 		for (name, node_epochs, cardano_epochs, boundary, stability, relaxed_window) in [
 			("preprod", preprod(), preprod(), preprod_boundary(321), PREPROD_STABILITY, 15_834),
 			(
@@ -476,11 +511,12 @@ mod tests {
 				PREPROD_STABILITY,
 				102_234,
 			),
-			("mainnet", mainnet(), mainnet(), mainnet_boundary, MAINNET_STABILITY, 49_488),
+			("mainnet", mainnet(), mainnet(), mainnet_boundary(600), MAINNET_STABILITY, 49_488),
 		] {
-			let around = (boundary - 30 * HOUR, boundary + 40 * HOUR);
+			let (relaxed, strict) =
+				(Binary::Current(AriadneRule::Relaxed), Binary::Current(AriadneRule::Strict));
 			assert_eq!(
-				seconds_without_data(&node_epochs, &cardano_epochs, around, stability, RELAXED)
+				seconds_without_data(relaxed, &node_epochs, &cardano_epochs, around(boundary), stability)
 					.await,
 				relaxed_window,
 				"{name}, relaxed"
@@ -488,11 +524,11 @@ mod tests {
 			for reference_age in [stability, 3 * stability] {
 				assert_eq!(
 					seconds_without_data(
+						strict,
 						&node_epochs,
 						&cardano_epochs,
-						around,
-						reference_age,
-						UPSTREAM
+						around(boundary),
+						reference_age
 					)
 					.await,
 					0,
@@ -502,27 +538,105 @@ mod tests {
 		}
 	}
 
-	/// Session 498_492 starts on 2026-11-13 at 12:00 UTC, in epoch 325 on the
-	/// fleet's layout. Switching to upstream's rule with it, the session
-	/// before is drawn from epoch 325's own data and it from epoch 323's, and
-	/// no block lacks data from 30 h before the switch to 40 h after the
-	/// Cardano epoch boundary of 2026-11-17, around which the relaxation
-	/// leaves its 28.4 h window.
+	/// Upstream's rule gives every block data on a Cardano epoch layout that
+	/// starts each epoch early by up to an epoch less two sessions and 3k/f:
+	/// 110.8 h on preprod and 82 h on mainnet. A block asks for the committee
+	/// of a session that starts at most two sessions after it, and its stable
+	/// reference block is at most 3k/f old, so on such a layout the two are
+	/// never two Cardano epochs apart. An hour earlier still, blocks whose
+	/// reference block is 3k/f old go without data.
 	#[tokio::test]
-	async fn switching_to_upstreams_rule_leaves_no_block_without_data() {
-		let fleet = preprod_fleet();
-		assert_eq!(data_given(&fleet, 498_491, 325, SWITCH).await, Some(325));
-		assert_eq!(data_given(&fleet, 498_492, 325, SWITCH).await, Some(323));
-		let switch = SWITCH.0 * HOUR;
-		let through = (switch - 30 * HOUR, preprod_boundary(326) + 40 * HOUR);
-		for (relaxed_until, without) in [(SWITCH, 0), (RELAXED, 102_234)] {
-			assert_eq!(
-				seconds_without_data(&fleet, &preprod(), through, PREPROD_STABILITY, relaxed_until)
+	async fn upstreams_rule_gives_data_on_a_layout_up_to_an_epoch_less_two_sessions_and_3k_f_early() {
+		let strict = Binary::Current(AriadneRule::Strict);
+		for (name, first_epoch, first_epoch_number, boundary, stability) in [
+			("preprod", PREPROD_EPOCH_0, 0, preprod_boundary(321), PREPROD_STABILITY),
+			("mainnet", MAINNET_EPOCH_208, 208, mainnet_boundary(600), MAINNET_STABILITY),
+		] {
+			let cardano_epochs = five_day_epochs(first_epoch, first_epoch_number);
+			let early = |by: u64| five_day_epochs(first_epoch - by, first_epoch_number);
+			let bound = 120 * HOUR - 2 * HOUR - 3 * stability;
+			for reference_age in [stability, 3 * stability] {
+				assert_eq!(
+					seconds_without_data(
+						strict,
+						&early(bound),
+						&cardano_epochs,
+						around(boundary),
+						reference_age
+					)
 					.await,
-				without,
-				"relaxed until session {}",
-				relaxed_until.0
-			);
+					0,
+					"{name}, {bound} ms early, reference {reference_age} ms old"
+				);
+			}
+			let beyond = seconds_without_data(
+				strict,
+				&early(bound + HOUR),
+				&cardano_epochs,
+				around(boundary),
+				3 * stability,
+			)
+			.await;
+			assert!(beyond > 0, "{name}, an hour beyond the bound");
+		}
+	}
+
+	/// Under `AriadneRule::Relaxed`, with upstream's followers, the provider
+	/// gives exactly the inputs preprod v6's earlier binaries gave, so a fleet
+	/// that mixes the two, in any order, stores and accepts the same
+	/// committees. Compared slot by slot as the window test sweeps them,
+	/// around Cardano epoch boundaries from 2025-12 to 2027-01, on Cardano
+	/// preprod's layout, the fleet's and mainnet's, at both ends of the stable
+	/// reference window; then for every session in the ten days around the
+	/// fleet's epoch boundary of 2026-11-16, as the next unset session and as
+	/// the genesis committee's, against every reference epoch from 321 to 331.
+	#[tokio::test]
+	async fn preprod_v6s_rule_draws_what_its_earlier_binaries_drew() {
+		let (earlier, relaxed) = (Binary::PreprodV6Earlier, Binary::Current(AriadneRule::Relaxed));
+		for (name, node_epochs, cardano_epochs, boundary, stability) in [
+			("preprod, epoch 321", preprod(), preprod(), preprod_boundary(321), PREPROD_STABILITY),
+			(
+				"preprod fleet, epoch 321",
+				preprod_fleet(),
+				preprod(),
+				preprod_boundary(321),
+				PREPROD_STABILITY,
+			),
+			(
+				"preprod fleet, epoch 326",
+				preprod_fleet(),
+				preprod(),
+				preprod_boundary(326),
+				PREPROD_STABILITY,
+			),
+			("mainnet, epoch 600", mainnet(), mainnet(), mainnet_boundary(600), MAINNET_STABILITY),
+			("mainnet, epoch 680", mainnet(), mainnet(), mainnet_boundary(680), MAINNET_STABILITY),
+		] {
+			for reference_age in [stability, 3 * stability] {
+				let sweep = |binary| {
+					draws(binary, &node_epochs, &cardano_epochs, around(boundary), reference_age)
+				};
+				let (before, now) = (sweep(earlier).await, sweep(relaxed).await);
+				assert_eq!(
+					before.iter().zip(&now).position(|(before, now)| before != now),
+					None,
+					"{name}, reference {reference_age} ms old: the first slot that differs"
+				);
+			}
+		}
+		let fleet = preprod_fleet();
+		let fleet_boundary = preprod_boundary(326) - 24 * HOUR;
+		for session in (fleet_boundary - 120 * HOUR) / HOUR..(fleet_boundary + 120 * HOUR) / HOUR {
+			let first_slot = session * HOUR / materios_slots().slot_duration.as_millis();
+			for next_unset in [session, 1] {
+				for reference in 321..=331 {
+					assert_eq!(
+						earlier.draw(&fleet, next_unset, first_slot, reference).await,
+						relaxed.draw(&fleet, next_unset, first_slot, reference).await,
+						"session {session}, next unset {next_unset}, reference epoch {reference}"
+					);
+				}
+			}
 		}
 	}
 }
