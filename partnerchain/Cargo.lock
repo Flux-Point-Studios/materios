@@ -5703,7 +5703,7 @@ dependencies = [
 [[package]]
 name = "pallet-intent-settlement"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=0757de35efa52d983c9203a683307827d76ae338#0757de35efa52d983c9203a683307827d76ae338"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=619887ae67068660313dd6dc74e39d12f2e2a7d5#619887ae67068660313dd6dc74e39d12f2e2a7d5"
 dependencies = [
  "frame-benchmarking",
  "frame-support",
@@ -5771,7 +5771,7 @@ dependencies = [
 [[package]]
 name = "pallet-oracle"
 version = "0.1.0"
-source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=0757de35efa52d983c9203a683307827d76ae338#0757de35efa52d983c9203a683307827d76ae338"
+source = "git+https://github.com/Flux-Point-Studios/materios-intent-settlement.git?rev=619887ae67068660313dd6dc74e39d12f2e2a7d5#619887ae67068660313dd6dc74e39d12f2e2a7d5"
 dependencies = [
  "frame-benchmarking",
  "frame-support",

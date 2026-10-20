@@ -2254,14 +2254,19 @@ fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
 }
 
 /// The genesis committee every chain spec has to seat: here //Alice alone.
-fn alice_committee() -> serde_json::Value {
+pub(super) fn alice_committee() -> serde_json::Value {
     serde_json::json!({ "initialAuthorities": [super::authority("Alice")] })
 }
 
-/// Builds genesis storage the way a node builds it from a chain spec.
-fn build_chain_spec(patch: serde_json::Value) -> Result<(), String> {
+/// Builds genesis storage the way a node builds it from a chain spec: every
+/// pallet's default, settling against Cardano preprod, then `patch`.
+pub(super) fn build_chain_spec(patch: serde_json::Value) -> Result<(), String> {
     let mut genesis =
         serde_json::to_value(RuntimeGenesisConfig::default()).expect("the default serializes");
+    merge_json(
+        &mut genesis,
+        serde_json::json!({ "intentSettlement": { "cardanoIds": CARDANO_PREPROD } }),
+    );
     merge_json(&mut genesis, patch);
     TestExternalities::default().execute_with(|| {
         <Runtime as sp_genesis_builder::runtime_decl_for_genesis_builder::GenesisBuilder<Block>>::build_state(
@@ -2375,6 +2380,10 @@ fn the_benchmarking_preset_builds() {
         serde_json::from_slice(&preset.expect("the development preset exists"))
             .expect("the preset is JSON");
     assert_eq!(patch["sessionCommitteeManagement"], alice_committee());
+    assert_eq!(
+        patch["intentSettlement"]["cardanoIds"],
+        serde_json::json!(CARDANO_PREPROD)
+    );
     assert_eq!(build_chain_spec(patch), Ok(()));
 }
 

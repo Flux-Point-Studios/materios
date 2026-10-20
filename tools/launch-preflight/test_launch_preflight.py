@@ -319,7 +319,7 @@ def test_malformed_extra_table_is_an_input_error(tmp_path, entries, error):
 # Hex: each input in the one spelling its writer writes
 # ---------------------------------------------------------------------------
 
-SPEC242_RAW = FIXTURES / "preprod-spec242-raw.json"
+SPEC243_RAW = FIXTURES / "preprod-spec243-raw.json"
 GUARDIAN_KEY = "0x" + lp.storage_key("RootTimelock", "Guardian").hex()
 DELAYS_KEY = "0x" + lp.storage_key("RootTimelock", "Delays").hex()
 # 32 bytes whose digits hold letters, so an upper-case spelling differs from it.
@@ -361,8 +361,8 @@ def spelled(spellings: dict):
 
 
 def raw_spec(tmp_path, edit) -> str:
-    """The spec 242 raw spec as a file, its raw storage edited by `edit`."""
-    doc = json.loads(SPEC242_RAW.read_text())
+    """The spec 243 raw spec as a file, its raw storage edited by `edit`."""
+    doc = json.loads(SPEC243_RAW.read_text())
     edit(doc["genesis"]["raw"]["top"])
     path = tmp_path / "raw.json"
     path.write_text(json.dumps(doc))
@@ -398,7 +398,7 @@ def test_a_raw_storage_value_that_is_not_a_string_is_an_input_error(tmp_path, va
      f"chain spec raw storage key '0x{GUARDIAN_KEY[2:].upper()}' {MISSPELLED}"),
 ], ids=["twice", "once with a JSON escape", "once in upper case"])
 def test_a_raw_storage_key_given_twice_in_any_spelling_is_an_input_error(tmp_path, entries, error):
-    doc = json.loads(SPEC242_RAW.read_text())
+    doc = json.loads(SPEC243_RAW.read_text())
     doc["genesis"]["raw"]["top"] = {"@": ""}
     path = tmp_path / "raw.json"
     path.write_text(json.dumps(doc).replace('{"@": ""}', "{" + entries + "}"))
@@ -409,7 +409,7 @@ def test_a_raw_storage_key_given_twice_in_any_spelling_is_an_input_error(tmp_pat
 def test_a_spec_that_repeats_any_key_is_an_input_error(tmp_path):
     """The node refuses a field given twice; the preflight would read the last."""
     path = tmp_path / "raw.json"
-    path.write_text(SPEC242_RAW.read_text().replace('"chainType": "Live"', '"chainType": "Local", "chainType": "Live"'))
+    path.write_text(SPEC243_RAW.read_text().replace('"chainType": "Live"', '"chainType": "Local", "chainType": "Live"'))
     with pytest.raises(lp.InputError, match="an object holds the key 'chainType' twice"):
         lp.load_spec(str(path))
 
@@ -441,7 +441,7 @@ def test_a_spec_with_no_raw_storage_map_is_an_input_error(tmp_path, doc):
 
 
 def test_a_spec_with_child_tries_is_an_input_error(tmp_path):
-    doc = json.loads(SPEC242_RAW.read_text())
+    doc = json.loads(SPEC243_RAW.read_text())
     child = "0x" + b":child_storage:default:a".hex()
     doc["genesis"]["raw"]["childrenDefault"] = {child: {"0x00 ": "0x 01"}}
     path = tmp_path / "raw.json"
@@ -450,7 +450,7 @@ def test_a_spec_with_child_tries_is_an_input_error(tmp_path):
         lp.load_spec(str(path))
 
 
-@pytest.mark.parametrize("name", ["preprod-v6-raw.json.gz", "preprod-spec242-raw.json"])
+@pytest.mark.parametrize("name", ["preprod-v6-raw.json.gz", "preprod-spec243-raw.json"])
 def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
     """build-spec writes each raw storage key and value as 0x and lower case, so its output loads unchanged."""
     data = (FIXTURES / name).read_bytes()
@@ -465,10 +465,10 @@ def test_build_spec_output_loads_byte_for_byte(tmp_path, name):
     assert spec.storage == {bytes.fromhex(key[2:]): bytes.fromhex(value[2:]) for key, value in top.items()}
 
 
-def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_of_its_type(spec, spec242):
+def test_build_spec_output_stores_each_number_the_preflight_reads_at_the_width_of_its_type(spec, spec243):
     """Every account is an 80-byte AccountInfo filed under its own key, and
     what the accounts hold, free plus reserved, is TotalIssuance."""
-    for genesis in (spec, spec242[0]):
+    for genesis in (spec, spec243[0]):
         numbers = [("OrinqReceipts", item, width) for _, item, width in REWARD_WIDTHS]
         numbers += [("OrinqReceipts", "BondRequirement", 16), ("Balances", "TotalIssuance", 16),
                     ("Sidechain", "SlotsPerEpoch", 4)]
@@ -2861,11 +2861,11 @@ def set_id_session_key(set_id: int) -> bytes:
             + encoded)
 
 
-def test_build_spec_starts_grandpa_at_set_0_in_session_0(spec, spec242):
+def test_build_spec_starts_grandpa_at_set_0_in_session_0(spec, spec243):
     """What pallet_grandpa's genesis writes in both preprod genesis: the set id 0 as a u64, and the one SetIdSession
     entry, set 0 beginning in session 0 (a u32)."""
     prefix = lp.storage_key("Grandpa", "SetIdSession")
-    for genesis in (spec, spec242[0]):
+    for genesis in (spec, spec243[0]):
         assert genesis.value("Grandpa", "CurrentSetId") == bytes(8)
         assert {key: value for key, value in genesis.storage.items() if key.startswith(prefix)} == {
             set_id_session_key(0): bytes(4)}
@@ -4163,12 +4163,12 @@ def test_motra_genesis_checkpoint_requires_canonical_endowed_account(spec, meta,
 
 
 @pytest.fixture
-def spec242() -> tuple[lp.Spec, lp.Metadata]:
-    """The preprod genesis spec 242 builds, less its :code, and that code's
+def spec243() -> tuple[lp.Spec, lp.Metadata]:
+    """The preprod genesis spec 243 builds, less its :code, and that code's
     metadata trimmed to what the preflight reads. The README's Tests section
     gives the commands that build both."""
-    v14 = json.loads((FIXTURES / "spec242-metadata.json").read_text())["V14"]
-    return lp.load_spec(str(FIXTURES / "preprod-spec242-raw.json")), lp.Metadata.from_v14(v14)
+    v14 = json.loads((FIXTURES / "spec243-metadata.json").read_text())["V14"]
+    return lp.load_spec(str(FIXTURES / "preprod-spec243-raw.json")), lp.Metadata.from_v14(v14)
 
 
 def version_fields(version: bytes) -> tuple[bytes, int, int]:
@@ -4183,46 +4183,47 @@ def version_fields(version: bytes) -> tuple[bytes, int, int]:
     return name, spec_version, int.from_bytes(version[cursor:cursor + 4], "little")
 
 
-def test_the_spec242_fixtures_are_the_runtime_this_source_builds(spec242):
+def test_the_spec243_fixtures_are_the_runtime_this_source_builds(spec243):
     """The fixtures stand for the runtime this tree builds: its metadata's
     System.Version and the LastRuntimeUpgrade build-spec writes carry the spec
     and transaction versions the runtime source declares."""
     source = (HERE.parent.parent / "partnerchain" / "runtime" / "src" / "lib.rs").read_text()
     declared = [int(re.search(rf"\n\s*{field}: (\d+),", source).group(1))
                 for field in ("spec_version", "transaction_version")]
-    spec, meta = spec242
+    spec, meta = spec243
     name, spec_version, transaction_version = version_fields(meta.constants[("System", "Version")])
     assert (name, [spec_version, transaction_version]) == (b"\x20materios", declared)
     assert spec.value("System", "LastRuntimeUpgrade") == lp.compact(spec_version) + name
 
 
-def test_every_item_the_spec242_preprod_genesis_sets_is_on_the_allowlist(spec242):
+def test_every_item_the_spec243_preprod_genesis_sets_is_on_the_allowlist(spec243):
     """Rule 4 reads which items genesis sets, not what they hold: rule 7
     refuses this genesis's Root timelock delays and guardian."""
-    assert lp.check_genesis_storage(*spec242) == []
+    assert lp.check_genesis_storage(*spec243) == []
 
 
-def test_the_spec242_genesis_starts_settlement_at_its_current_version_with_legacy_paths_closed(spec242):
-    """build-spec writes the settlement pallet's storage version 4 and both
-    legacy cutovers at block zero, which version 4 reads as closed, so no
-    upgrade migrates settlement and no legacy settle or expire call runs."""
-    spec, _ = spec242
-    assert spec.value("IntentSettlement", "SettlementStorageVersion") == (4).to_bytes(4, "little")
+def test_the_spec243_genesis_starts_settlement_at_its_current_version_settling_against_preprod(spec243):
+    """build-spec writes the settlement pallet's storage version 5, both legacy cutovers at block zero, which that
+    version reads as closed, so no upgrade migrates settlement and no legacy settle or expire call runs, and the
+    Cardano network preprod settles against: network magic 1, preprod's Shelley genesis and no Aegis policy."""
+    spec, _ = spec243
+    assert spec.value("IntentSettlement", "SettlementStorageVersion") == (5).to_bytes(4, "little")
     assert spec.value("IntentSettlement", "StcaCutoverBlock") == bytes(4)
     assert spec.value("IntentSettlement", "PolicyExpireCutoverBlock") == bytes(4)
+    assert lp.stored_cardano_ids(spec) == (1, CARDANO_PREPROD_SHELLEY, bytes(28))
 
 
 @pytest.mark.parametrize("item", ["Tasks", "CounterForTasks", "NextTaskId", "PendingGuardianChange", "Approval"])
-def test_a_genesis_that_starts_the_root_timelock_queue_is_refused(spec242, item):
-    spec, meta = spec242
+def test_a_genesis_that_starts_the_root_timelock_queue_is_refused(spec243, item):
+    spec, meta = spec243
     put(spec, "RootTimelock", item, bytes(36))
     assert messages(lp.check_genesis_storage(spec, meta)) == [
         f"[4 supply] genesis sets RootTimelock.{item} (1 entry), which a mainnet genesis may not set: "
         "storage outside the genesis allowlist can hold a claim on MATRA that the supply check does not count"]
 
 
-def test_a_well_known_root_timelock_guardian_is_refused(spec242, known):
-    spec, meta = spec242
+def test_a_well_known_root_timelock_guardian_is_refused(spec243, known):
+    spec, meta = spec243
     spec.storage[lp.CODE_KEY] = b""
     put(spec, "RootTimelock", "Guardian", BOB)
     found = messages(lp.check_dev_keys(spec, meta, {}, NO_CARDANO, [], known))
@@ -4512,11 +4513,11 @@ def timelock_launch(sudo_members, guardian) -> dict:
 
 
 @pytest.fixture
-def guarded(spec242):
-    """The spec 242 preprod genesis with Root held by a 2-of-3 multisig of fresh
+def guarded(spec243):
+    """The spec 243 preprod genesis with Root held by a 2-of-3 multisig of fresh
     keys, and the timelock guarded by a 2-of-3 multisig of other fresh keys at
     the mainnet delays."""
-    spec, meta = spec242
+    spec, meta = spec243
     sudo, guardian = [fresh_account() for _ in range(3)], [fresh_account() for _ in range(3)]
     put(spec, "Sudo", "Key", lp.multisig_account(sudo, 2))
     put(spec, "RootTimelock", "Guardian", lp.multisig_account(guardian, 2))
@@ -4535,8 +4536,8 @@ def delay_findings(spec, meta, *blocks: int) -> list[str]:
     return messages(lp.check_delays(spec, meta))
 
 
-def test_the_spec242_metadata_declares_the_mainnet_delays_and_their_ceiling(spec242):
-    _, meta = spec242
+def test_the_spec243_metadata_declares_the_mainnet_delays_and_their_ceiling(spec243):
+    _, meta = spec243
     assert meta.constants[("RootTimelock", "DefaultDelays")] == delays(*MAINNET_DELAYS)
     assert meta.constants[("RootTimelock", "MaxDelay")] == MAX_DELAY.to_bytes(4, "little")
 
@@ -4547,8 +4548,8 @@ def test_a_guardian_apart_from_the_sudo_key_at_the_mainnet_delays_passes(guarded
     assert lp.check_delays(spec, meta) == []
 
 
-def test_the_spec242_preprod_timelock_is_refused_on_mainnet(spec242):
-    spec, meta = spec242
+def test_the_spec243_preprod_timelock_is_refused_on_mainnet(spec243):
+    spec, meta = spec243
     assert spec.value("Sudo", "Key") == lp.multisig_account(PREPROD_KEYHOLDERS, 2)
     launch = timelock_launch(PREPROD_KEYHOLDERS, msig(3, *PREPROD_KEYHOLDERS))
     assert messages(lp.check_guardian(spec, meta, launch)) == [
@@ -4756,15 +4757,15 @@ def test_a_sudo_key_that_does_not_decode_leaves_the_guardian_checked(guarded):
         "who can veto Root is unchecked"]
 
 
-def test_the_mainnet_delays_and_delays_up_to_max_delay_pass(spec242):
-    spec, meta = spec242
+def test_the_mainnet_delays_and_delays_up_to_max_delay_pass(spec243):
+    spec, meta = spec243
     assert delay_findings(spec, meta, *MAINNET_DELAYS) == []
     assert delay_findings(spec, meta, MAX_DELAY, MAX_DELAY, MAX_DELAY) == []
 
 
 @pytest.mark.parametrize("index, name", enumerate(("recovery", "standard", "long")))
-def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec242, index, name):
-    spec, meta = spec242
+def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec243, index, name):
+    spec, meta = spec243
     blocks = [*MAINNET_DELAYS]
     blocks[index] -= 1
     assert delay_findings(spec, meta, *blocks) == [
@@ -4773,30 +4774,30 @@ def test_a_delay_one_block_below_the_mainnet_delay_is_refused(spec242, index, na
 
 
 @pytest.mark.parametrize("long", [MAX_DELAY + 1, 2**32 - 1])
-def test_a_long_delay_above_max_delay_is_refused(spec242, long):
-    spec, meta = spec242
+def test_a_long_delay_above_max_delay_is_refused(spec243, long):
+    spec, meta = spec243
     assert delay_findings(spec, meta, DAYS, 7 * DAYS, long) == [
         f"[7 timelock] RootTimelock.Delays holds long calls {long} blocks, above the runtime's MaxDelay {MAX_DELAY}: "
         "a guardian change, or a cut to the long delay itself, would wait longer than the runtime lets any delay be"]
 
 
-def test_delays_out_of_the_runtime_order_are_refused(spec242):
-    spec, meta = spec242
+def test_delays_out_of_the_runtime_order_are_refused(spec243):
+    spec, meta = spec243
     assert delay_findings(spec, meta, 20 * DAYS, 7 * DAYS, 30 * DAYS) == [
         f"[7 timelock] RootTimelock.Delays (recovery {20 * DAYS}, standard {7 * DAYS}, long {30 * DAYS} blocks) "
         "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
 
 
-def test_a_standard_delay_above_the_long_delay_is_refused_within_every_other_bound(spec242):
+def test_a_standard_delay_above_the_long_delay_is_refused_within_every_other_bound(spec243):
     """Each delay at least its mainnet delay and long at most MaxDelay: only the order refuses."""
-    spec, meta = spec242
+    spec, meta = spec243
     assert delay_findings(spec, meta, DAYS, 60 * DAYS, 30 * DAYS) == [
         f"[7 timelock] RootTimelock.Delays (recovery {DAYS}, standard {60 * DAYS}, long {30 * DAYS} blocks) "
         "breaks the order 0 < recovery <= standard <= long that the runtime's genesis builder asserts"]
 
 
-def test_zero_delays_are_refused(spec242):
-    spec, meta = spec242
+def test_zero_delays_are_refused(spec243):
+    spec, meta = spec243
     found = delay_findings(spec, meta, 0, 0, 0)
     assert len(found) == 4
     assert "[7 timelock] RootTimelock.Delays holds recovery calls 0 blocks, below the 14400 the runtime sets for " \
@@ -4804,8 +4805,8 @@ def test_zero_delays_are_refused(spec242):
     assert found[-1].startswith("[7 timelock] RootTimelock.Delays (recovery 0, standard 0, long 0 blocks) breaks")
 
 
-def test_the_bounds_are_the_runtime_constants(spec242):
-    spec, meta = spec242
+def test_the_bounds_are_the_runtime_constants(spec243):
+    spec, meta = spec243
     meta.constants[("RootTimelock", "DefaultDelays")] = delays(10, 20, 30)
     meta.constants[("RootTimelock", "MaxDelay")] = (40).to_bytes(4, "little")
     assert delay_findings(spec, meta, 10, 20, 40) == []
@@ -4819,8 +4820,8 @@ def test_the_bounds_are_the_runtime_constants(spec242):
     {"DefaultDelays": None}, {"MaxDelay": None}, {"DefaultDelays": None, "MaxDelay": None},
     {"DefaultDelays": bytes(11)}, {"MaxDelay": b""},
 ])
-def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec242, constants):
-    spec, meta = spec242
+def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec243, constants):
+    spec, meta = spec243
     for name, value in constants.items():
         if value is None:
             del meta.constants[("RootTimelock", name)]
@@ -4835,19 +4836,134 @@ def test_a_runtime_with_no_root_timelock_is_refused(spec, meta):
 
 
 @pytest.mark.parametrize("raw", [b"", bytes(11), bytes(13), bytes(24)], ids=lambda raw: f"{len(raw)} bytes")
-def test_delays_that_do_not_decode_are_refused(spec242, raw):
-    spec, meta = spec242
+def test_delays_that_do_not_decode_are_refused(spec243, raw):
+    spec, meta = spec243
     put(spec, "RootTimelock", "Delays", raw)
     assert messages(lp.check_delays(spec, meta)) == [
         f"[7 timelock] RootTimelock.Delays is {len(raw)} bytes, not three 4-byte block counts"]
 
 
-def test_a_genesis_that_stores_no_delays_is_refused(spec242):
-    spec, meta = spec242
+def test_a_genesis_that_stores_no_delays_is_refused(spec243):
+    spec, meta = spec243
     del spec.storage[lp.storage_key("RootTimelock", "Delays")]
     assert messages(lp.check_delays(spec, meta)) == [
         "[7 timelock] genesis sets no RootTimelock.Delays, which every genesis the runtime builds sets: how long "
         "Root's calls wait is unchecked"]
+
+
+# ---------------------------------------------------------------------------
+# Rule 10: the Cardano network settlement binds
+# ---------------------------------------------------------------------------
+
+# Cardano mainnet as its published environment gives it (book.world.dev.cardano.org/environments/mainnet), and
+# Cardano preprod as the preprod runtime has bound it.
+CARDANO_MAINNET_MAGIC = 764824073
+CARDANO_MAINNET_SHELLEY = bytes.fromhex("1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81")
+CARDANO_PREPROD_SHELLEY = bytes.fromhex("162d29c4e1cf6b8a84f2d692e67a3ac6bc7851bc3e6e4afe64d15778bed8bd86")
+AEGIS_POLICY = bytes([0x5a]) * 28
+SETTLEMENT = {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex()}
+
+
+def cardano_ids(magic: int = CARDANO_MAINNET_MAGIC, shelley: bytes = CARDANO_MAINNET_SHELLEY,
+                aegis: bytes = AEGIS_POLICY) -> bytes:
+    """IntentSettlement.CardanoIds as SCALE encodes it: the network magic, a u32, then the Shelley genesis hash
+    and the aegis_policy_v1 script hash."""
+    return magic.to_bytes(4, "little") + shelley + aegis
+
+
+def settles_on_mainnet(spec: lp.Spec) -> None:
+    put(spec, "IntentSettlement", "CardanoIds", cardano_ids())
+
+
+def with_cardano_ids(metadata_v14: dict) -> dict:
+    """The fixture metadata plus the item a runtime that stores settlement's Cardano network declares."""
+    v14 = copy.deepcopy(metadata_v14)
+    pallet = next(p for p in v14["pallets"] if p["name"] == "IntentSettlement")
+    pallet["storage"]["entries"].append({"name": "CardanoIds"})
+    return v14
+
+
+def test_the_preflight_holds_cardano_mainnet_to_its_published_shelley_genesis():
+    """The networkMagic of mainnet's published shelley-genesis.json, and that file's blake2b-256, which mainnet's
+    config.json publishes as ShelleyGenesisHash."""
+    shelley = (FIXTURES / "cardano-mainnet-shelley-genesis.json").read_bytes()
+    config = json.loads((FIXTURES / "cardano-mainnet-config.json").read_text())
+    assert json.loads(shelley)["networkMagic"] == lp.CARDANO_MAINNET_NETWORK_MAGIC == CARDANO_MAINNET_MAGIC
+    assert lp.blake2_256(shelley) == lp.CARDANO_MAINNET_SHELLEY_GENESIS_HASH == CARDANO_MAINNET_SHELLEY
+    assert config["ShelleyGenesisHash"] == CARDANO_MAINNET_SHELLEY.hex()
+
+
+def test_a_genesis_settling_against_cardano_mainnet_and_the_declared_aegis_policy_passes(spec):
+    settles_on_mainnet(spec)
+    assert lp.check_settlement(spec, {"settlement": SETTLEMENT}) == []
+
+
+AGAINST = ("every voucher the committee signs binds it and all settlement and expiry evidence must name its Shelley "
+           "genesis, so the chain settles against another Cardano network than the mainnet it launches on")
+
+
+@pytest.mark.parametrize("stored, refusals", [
+    (cardano_ids(magic=1, shelley=CARDANO_PREPROD_SHELLEY, aegis=bytes(28)), [
+        f"genesis IntentSettlement.CardanoIds holds network magic 1, not Cardano mainnet's 764824073: {AGAINST}",
+        f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x{CARDANO_PREPROD_SHELLEY.hex()}, not "
+        f"Cardano mainnet's 0x{CARDANO_MAINNET_SHELLEY.hex()}: {AGAINST}",
+        "genesis IntentSettlement.CardanoIds names no aegis_policy_v1 script hash: every voucher the committee signs "
+        "binds it, and Cardano mainnet's Aegis validators accept no voucher bound to none"]),
+    (cardano_ids(magic=1), [
+        f"genesis IntentSettlement.CardanoIds holds network magic 1, not Cardano mainnet's 764824073: {AGAINST}"]),
+    (cardano_ids(shelley=CARDANO_PREPROD_SHELLEY), [
+        f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x{CARDANO_PREPROD_SHELLEY.hex()}, not "
+        f"Cardano mainnet's 0x{CARDANO_MAINNET_SHELLEY.hex()}: {AGAINST}"]),
+    (cardano_ids(aegis=bytes([0x5b]) * 28), [
+        f"genesis IntentSettlement.CardanoIds holds aegis_policy_v1 script hash 0x{'5b' * 28}, not the "
+        f"0x{AEGIS_POLICY.hex()} the launch declares deployed: every voucher the committee signs binds it"]),
+], ids=["preprod", "preprod-magic", "preprod-shelley", "another-aegis-policy"])
+def test_a_genesis_settling_against_another_cardano_network_or_policy_is_refused(spec, stored, refusals):
+    put(spec, "IntentSettlement", "CardanoIds", stored)
+    assert messages(lp.check_settlement(spec, {"settlement": SETTLEMENT})) == [
+        f"[10 settlement] {refusal}" for refusal in refusals]
+
+
+def test_a_genesis_that_stores_no_cardano_network_is_refused(spec):
+    assert messages(lp.check_settlement(spec, {"settlement": SETTLEMENT})) == [
+        "[10 settlement] genesis stores no IntentSettlement.CardanoIds: settlement refuses every voucher, settlement "
+        "and expiry"]
+
+
+def test_a_launch_that_declares_no_aegis_policy_is_refused(spec):
+    settles_on_mainnet(spec)
+    assert messages(lp.check_settlement(spec, {})) == [
+        "[10 settlement] the launch declares no settlement.aegis_policy_v1_script_hash, the Aegis policy deployed on "
+        "Cardano mainnet that genesis must name"]
+
+
+@pytest.mark.parametrize("length", [63, 65])
+def test_cardano_ids_of_another_width_are_unreadable(spec, length):
+    put(spec, "IntentSettlement", "CardanoIds", cardano_ids()[:length].ljust(length, b"\0"))
+    with pytest.raises(lp.InputError, match=f"IntentSettlement.CardanoIds is {length} bytes, not the 64"):
+        lp.check_settlement(spec, {"settlement": SETTLEMENT})
+
+
+@pytest.mark.parametrize("settlement", [
+    [], {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex(), "network_magic": 1},
+    {"aegis_policy_v1_script_hash": AEGIS_POLICY.hex()}, {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex().upper()},
+    {"aegis_policy_v1_script_hash": "0x" + bytes(32).hex()}, {"aegis_policy_v1_script_hash": 7},
+], ids=["list", "unknown-field", "no-0x", "upper-hex", "32-bytes", "number"])
+def test_an_unreadable_settlement_declaration_is_an_input_error(spec, settlement):
+    with pytest.raises(lp.InputError, match="settlement"):
+        lp.validate_launch({**clean_manifest_fields(), "settlement": settlement})
+
+
+def clean_manifest_fields() -> dict:
+    return {"roles": {}, "supply": {"genesis_lock": LOCK}}
+
+
+def test_genesis_may_store_settlements_cardano_network(spec, metadata_v14):
+    """Rule 10 checks what the item holds; it holds no MATRA."""
+    meta = lp.Metadata.from_v14(with_cardano_ids(metadata_v14))
+    without = messages(lp.check_genesis_storage(spec, meta))
+    settles_on_mainnet(spec)
+    assert messages(lp.check_genesis_storage(spec, meta)) == without
 
 
 # ---------------------------------------------------------------------------
@@ -4857,10 +4973,11 @@ def test_a_genesis_that_stores_no_delays_is_refused(spec242):
 # materios-node export-blocks, answering what the attestation asks: block 0 of the chain its --chain names, a raw
 # spec file or a chain built into the node, written as export-blocks --binary writes it. It builds a file's genesis
 # with the preflight's own computation, so these tests see the attestation's plumbing; test_node_attestation.py
-# runs the real node. Its chain-id reports that genesis as settlement's and the oracle's chain ids. KNOBS: tamper
+# runs the real node. Its chain-id reports that genesis as settlement's and the oracle's chain ids, and the Cardano
+# network settlement binds as the preflight reads it from the spec. KNOBS: tamper
 # builds another state root, fail builds none from a file, built_in_refused none from a built-in chain, as the
 # runtime refuses its genesis committee, export writes other bytes, chain_ids reports other chain ids, no_chain_id
-# has no chain-id subcommand, log records each call.
+# has no chain-id subcommand, cardano_ids reports other Cardano ids, log records each call.
 FAKE_NODE = '''#!@PYTHON@
 import hashlib
 import json
@@ -4888,8 +5005,12 @@ if sys.argv[1] == "chain-id":
     genesis = lp.spec_genesis_hash(lp.load_spec(sys.argv[sys.argv.index("--chain") + 1]))
     ids = {"IntentSettlement.MateriosChainId": list(genesis), "Oracle.MateriosChainId": list(genesis),
            **KNOBS.get("chain_ids", {})}
+    stored = lp.stored_cardano_ids(lp.load_spec(sys.argv[sys.argv.index("--chain") + 1]))
+    cardano = stored and {"network_magic": stored[0], "mainchain_genesis_hash": list(stored[1]),
+                          "aegis_policy_v1_script_hash": list(stored[2])}
     print(json.dumps({"genesis_hash": "0x" + genesis.hex(),
-                      "constants": [[*constant.split("."), value] for constant, value in ids.items()]}))
+                      "constants": [[*constant.split("."), value] for constant, value in ids.items()],
+                      "cardano_ids": KNOBS.get("cardano_ids", cardano)}))
     sys.exit(0)
 
 VALUED = {"--base-path", "--from", "--to", "--database", "--db", "--db-cache", "--state-pruning", "--pruning",
@@ -5636,7 +5757,8 @@ class Launch:
     keys at the mainnet delays, the tuned rewards stored, one attestor endowed at
     the floor, the chain renamed, every account and authority declared, the
     authorities seated as the genesis committee, Cardano holding the lock and
-    those authorities as the candidates, a public RPC URL that serves only safe
+    those authorities as the candidates, settlement bound to Cardano mainnet and
+    the Aegis policy declared deployed there, a public RPC URL that serves only safe
     methods, and authorities that load the spec from its own file, pinned to a
     node binary that builds the genesis the preflight computes. Every rule
     accepts it."""
@@ -5659,6 +5781,7 @@ class Launch:
         put(spec, "Balances", "TotalIssuance", issuance.to_bytes(16, "little"))
         self.members = genesis_members(spec)
         seat(spec, self.members)
+        settles_on_mainnet(spec)
         self.spec = spec
         self.tmp_path, self.kupo = tmp_path, kupo
         conf = tmp_path / "rpc.conf"
@@ -5673,6 +5796,7 @@ class Launch:
             "supply": {"genesis_lock": LOCK},
             "slots_per_epoch": PREPROD_SLOTS_PER_EPOCH,
             "cardano_follower": dict(MAINNET_FOLLOWER),
+            "settlement": dict(SETTLEMENT),
             "nodes": [{"name": "edge", "host": "edge", "authority": False}],
             "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
                              "other_targets": ["rpc-node:9944"]}],
@@ -5789,21 +5913,23 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
 
 
 def with_timelock(metadata_v14: dict) -> dict:
-    """The fixture metadata plus spec 242's RootTimelock pallet: its storage
+    """The fixture metadata plus spec 243's RootTimelock pallet: its storage
     and the delay constants rule 7 reads."""
     v14 = copy.deepcopy(metadata_v14)
-    spec242 = json.loads((FIXTURES / "spec242-metadata.json").read_text())["V14"]
-    v14["pallets"].append(next(p for p in spec242["pallets"] if p["name"] == "RootTimelock"))
+    spec243 = json.loads((FIXTURES / "spec243-metadata.json").read_text())["V14"]
+    v14["pallets"].append(next(p for p in spec243["pallets"] if p["name"] == "RootTimelock"))
     return v14
 
 
 @pytest.fixture
 def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch, metadata_v14):
     """The spec's code is the preprod v6 runtime, which declares neither its
-    emission reserves nor its validator reward per era and has no Root
-    timelock, so the extractor returns its metadata with both declared and
-    spec 242's timelock added."""
-    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: with_timelock(with_constants(metadata_v14)))
+    emission reserves nor its validator reward per era, has no Root timelock
+    and stores no Cardano network for settlement, so the extractor returns its
+    metadata with both declared, spec 243's timelock and the Cardano ids item
+    added."""
+    monkeypatch.setattr(lp, "subwasm_metadata",
+                        lambda code, subwasm: with_cardano_ids(with_timelock(with_constants(metadata_v14))))
     launch = Launch(preprod_path, tmp_path, kupo, endpoint)
     pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))
     return launch
@@ -5835,6 +5961,15 @@ def test_cli_passes_a_clean_launch(clean, capsys):
     code, out = clean.run(capsys)
     assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
+
+
+def test_cli_refuses_a_launch_whose_genesis_settles_against_cardano_preprod(clean, capsys):
+    put(clean.spec, "IntentSettlement", "CardanoIds", cardano_ids(1, CARDANO_PREPROD_SHELLEY, bytes(28)))
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert "[10 settlement] genesis IntentSettlement.CardanoIds holds network magic 1" in out
+    assert "[10 settlement] genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x162d29c4" in out
+    assert "[10 settlement] genesis IntentSettlement.CardanoIds names no aegis_policy_v1 script hash" in out
 
 
 def with_node_argv(clean, words) -> None:
@@ -6606,7 +6741,7 @@ def test_cli_refuses_a_non_raw_spec_as_an_input_error(tmp_path, capsys):
 # The runtime a spec carries pins another chain's genesis into settlement's or the oracle's signed payloads, or a
 # later pallet pins one of its own: every signature the chain's committee makes fails from block one.
 @pytest.mark.parametrize("constant", ["IntentSettlement.MateriosChainId", "Oracle.MateriosChainId",
-                                      "Bridge.GenesisHash"])
+                                      "Bridge.GenesisHash", "IntentSettlement.MainchainGenesisHash"])
 def test_a_spec_runtime_that_holds_another_chain_id_is_refused(tmp_path, preprod_path, constant):
     other = bytes([37]) * 32
     node = attested(tmp_path, preprod_path, exe=fake_node(tmp_path, chain_ids={constant: list(other)}))
@@ -6635,6 +6770,20 @@ def chain_ids(genesis: bytes = GENESIS, **ids: bytes) -> list:
             {"IntentSettlement.MateriosChainId": genesis, "Oracle.MateriosChainId": genesis, **ids}.items()]
 
 
+MAINNET_IDS = (CARDANO_MAINNET_MAGIC, CARDANO_MAINNET_SHELLEY, AEGIS_POLICY)
+
+
+def reported(ids=MAINNET_IDS) -> dict:
+    """Cardano ids as the node's chain-id reports them."""
+    magic, shelley, aegis = ids
+    return {"network_magic": magic, "mainchain_genesis_hash": list(shelley), "aegis_policy_v1_script_hash": list(aegis)}
+
+
+def report(genesis: bytes = GENESIS, cardano=MAINNET_IDS, **fields) -> str:
+    return json.dumps({"genesis_hash": "0x" + genesis.hex(), "constants": chain_ids(genesis),
+                       "cardano_ids": cardano and reported(cardano), **fields})
+
+
 @pytest.mark.parametrize("report", [
     "", "null", "[]", "{}", json.dumps({"genesis_hash": "0x" + GENESIS.hex()}),
     json.dumps({"genesis_hash": "0x00", "constants": []}),
@@ -6646,24 +6795,51 @@ def chain_ids(genesis: bytes = GENESIS, **ids: bytes) -> list:
     json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": [["Oracle", 7, list(GENESIS)]]}),
     json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": chain_ids() + chain_ids()[:1]}),
     '{"genesis_hash": "0x%s", "genesis_hash": "0x%s", "constants": []}' % (GENESIS.hex(), GENESIS.hex()),
+    json.dumps({"genesis_hash": "0x" + GENESIS.hex(), "constants": chain_ids()}),
+    report(cardano_ids=[]),
+    report(cardano_ids={**reported(), "network_magic": 2 ** 32}),
+    report(cardano_ids={**reported(), "network_magic": True}),
+    report(cardano_ids={**reported(), "mainchain_genesis_hash": list(bytes(31))}),
+    report(cardano_ids={**reported(), "aegis_policy_v1_script_hash": [256] * 28}),
+    report(cardano_ids={**reported(), "network": 1}),
+    report(cardano_ids={key: value for key, value in reported().items() if key != "network_magic"}),
 ], ids=["empty", "null", "list", "no-fields", "no-constants", "short-hash", "upper-hex", "constants-object",
-        "two-field-constant", "byte-past-255", "bool-byte", "number-name", "repeated-constant", "repeated-key"])
+        "two-field-constant", "byte-past-255", "bool-byte", "number-name", "repeated-constant", "repeated-key",
+        "no-cardano-ids", "cardano-ids-list", "magic-past-u32", "bool-magic", "short-shelley", "aegis-byte-past-255",
+        "unknown-cardano-field", "no-magic"])
 def test_an_unreadable_chain_id_report_is_an_input_error(monkeypatch, tmp_path, report):
     chain_id_report(monkeypatch, report)
     with pytest.raises(lp.InputError, match="authority val0: its node's chain-id"):
-        lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0")
+        lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, MAINNET_IDS, "authority val0")
 
 
-def test_a_chain_id_report_of_the_genesis_passes_and_cardanos_genesis_is_its_own(monkeypatch, tmp_path):
-    report = {"genesis_hash": "0x" + GENESIS.hex(),
-              "constants": chain_ids(**{"IntentSettlement.MainchainGenesisHash": bytes([32]) * 32})}
-    chain_id_report(monkeypatch, json.dumps(report))
-    assert lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0") == []
+@pytest.mark.parametrize("cardano", [MAINNET_IDS, None], ids=["stored", "none-stored"])
+def test_a_chain_id_report_of_the_genesis_and_the_cardano_ids_the_preflight_reads_passes(monkeypatch, tmp_path,
+                                                                                          cardano):
+    chain_id_report(monkeypatch, report(cardano=cardano))
+    assert lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, cardano, "authority val0") == []
+
+
+@pytest.mark.parametrize("node_reads", [(1, CARDANO_MAINNET_SHELLEY, AEGIS_POLICY), None], ids=["other", "none"])
+def test_a_chain_id_report_reading_other_cardano_ids_than_the_preflight_is_refused(monkeypatch, tmp_path, node_reads):
+    """The node reads IntentSettlement.CardanoIds with the runtime's own types: another reading means the preflight
+    decodes the item apart from the chain, and rule 10 checked other ids than the chain binds."""
+    chain_id_report(monkeypatch, report(cardano=node_reads))
+    node_said = ("none" if node_reads is None else
+                 f"network magic 1, Shelley genesis hash 0x{CARDANO_MAINNET_SHELLEY.hex()}, aegis_policy_v1 script "
+                 f"hash 0x{AEGIS_POLICY.hex()}")
+    assert messages(lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, MAINNET_IDS,
+                                               "authority val0")) == [
+        f"[8 node] authority val0: its node's chain-id reads IntentSettlement.CardanoIds as {node_said} from the "
+        f"checked chain spec, and the preflight reads network magic {CARDANO_MAINNET_MAGIC}, Shelley genesis hash "
+        f"0x{CARDANO_MAINNET_SHELLEY.hex()}, aegis_policy_v1 script hash 0x{AEGIS_POLICY.hex()}: rule 10 checked "
+        "other ids than the chain binds"]
 
 
 def test_a_chain_id_report_built_on_another_genesis_is_refused(monkeypatch, tmp_path):
     other = bytes([33]) * 32
-    chain_id_report(monkeypatch, json.dumps({"genesis_hash": "0x" + other.hex(), "constants": chain_ids(other)}))
-    assert messages(lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, "authority val0")) == [
+    chain_id_report(monkeypatch, report(other, cardano=None))
+    assert messages(lp.check_runtime_chain_ids(tmp_path / "node", tmp_path / "spec", GENESIS, None,
+                                               "authority val0")) == [
         f"[8 node] authority val0: its node's chain-id builds genesis 0x{other.hex()} from the checked chain spec, and "
         f"the preflight computes 0x{GENESIS.hex()}"]

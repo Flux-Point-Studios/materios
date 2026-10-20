@@ -30,8 +30,9 @@ It reads:
   and `stat` of each step of its `--chain` path;
 - a **launch manifest**: who holds each role, the economics, where the genesis
   lock is, how many slots each session lasts, the Cardano settings every
-  authority's follower runs with, each node's launch command, the RPC proxy
-  configs and the public RPC URLs;
+  authority's follower runs with, the Aegis policy deployed on Cardano
+  mainnet, each node's launch command, the RPC proxy configs and the public
+  RPC URLs;
 - a **signed launch manifest**: the genesis hash, runtime code hash, chain-spec
   hash and launch manifest hash, signed with an ed25519 launch key that
   `launch_keys.json` pins.
@@ -47,8 +48,9 @@ It reads:
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
 | 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Genesis may store `System.LastRuntimeUpgrade` only as build-spec writes it for its code, that code's spec version and spec name, or not at all: frame-executive runs a runtime's migrations when its spec version is above the stored one or its name differs, so another value runs them at block 1 or skips them at a later upgrade. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
 | 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian whose account is the genesis guardian, or that guardian does not need two keyholders to act or has a multisig as a member (see [Multisig roles](#multisig-roles)); or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
-| 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). Its running node answers `system_chain`, `system_chainType` or `system_properties` with other than the checked spec's name, chain type (`Live` when the spec names none) or properties (none as `{}`), or a step of its `--chain` path (a directory on it, or the file) last changed less than a full second before its node process started: the node reads its spec once, at its start, and keeps it when the file is replaced, and a spec can hold the checked genesis under another name, or with a code substitute that runs other code. An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. Also refuses a spec whose runtime, run by the authority's node binary at block one, holds a chain id other than the genesis hash: any metadata constant whose name holds `ChainId` or `GenesisHash`, Cardano's `IntentSettlement.MainchainGenesisHash` aside. See [Node attestation](#node-attestation). |
+| 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). Its running node answers `system_chain`, `system_chainType` or `system_properties` with other than the checked spec's name, chain type (`Live` when the spec names none) or properties (none as `{}`), or a step of its `--chain` path (a directory on it, or the file) last changed less than a full second before its node process started: the node reads its spec once, at its start, and keeps it when the file is replaced, and a spec can hold the checked genesis under another name, or with a code substitute that runs other code. An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. Also refuses a spec whose runtime, run by the authority's node binary at block one, holds a chain id other than the genesis hash: any metadata constant whose name holds `ChainId` or `GenesisHash`; or whose genesis `IntentSettlement.CardanoIds`, as that node reads it with the runtime's own types, is not what the preflight reads from the raw spec, so rule 10 would have checked other ids than the chain binds. See [Node attestation](#node-attestation). |
 | 9 committee | Genesis `SessionCommitteeManagement.CurrentCommittee` is not exactly the declared authorities' `aura` and `grandpa` key pairs, each once, two of its members share a cross-chain key, or it lists more members than the runtime's `SessionCommitteeManagement.MaxValidators`, read from the runtime metadata (a runtime that does not declare it is refused). The runtime seats this committee at every rotation whose Cardano draw fails, and a fresh chain's first draw fails, since the live-quorum floor counts no candidate that has not authored yet: an empty committee halts the chain there (GRANDPA refuses an empty authority set), an undeclared member authors and finalizes unchecked, and a committee past MaxValidators does not decode and reads as empty. The committee serves another epoch than the 0 build-spec writes: the node takes only an epoch-0 committee as the genesis one, and otherwise asks Cardano at block 1 for the committee of the epoch after it instead of the current one's, which it cannot derive for an epoch that began before Cardano's first, so the chain never authors block 1. Genesis `Aura.Authorities` or `Grandpa.Authorities` is not exactly the declared authorities' `aura` or `grandpa` keys, each once, a voter at weight 1 as build-spec writes them: a key listed twice, or a weight above 1, counts as several authors or voters. Genesis `Grandpa.CurrentSetId` is set and not 0, or `Grandpa.SetIdSession` is not build-spec's one entry, set 0 beginning in session 0: every GRANDPA client starts the genesis authority set at set id 0, and a node that warp- or state-syncs takes the runtime's set id instead, so it would hold another set id than the one its peers sign votes and justifications under. `Session.ValidatorsAndKeys` is not the committee as the session genesis writes it (each member's account, blake2-256 of its cross-chain key, with its session keys, in the committee's order), or `PalletSession.QueuedKeys` or `PalletSession.Validators` is not the empty list build-spec writes: the session keys they hold would go unchecked. Two authorities declare the same `aura` or `grandpa` key: two nodes that sign with one key equivocate. A Cardano permissioned candidate's `gran` key is not the `grandpa` key that the authority with its `aura` key declares: the candidates vote on finality with those keys once the committee is drawn from Cardano. A declared authority's `aura` key is on no permissioned candidate: Ariadne seats every candidate when all fit, so the first committee drawn from Cardano leaves that authority out, and a datum of 2 of 4 authorities seats a committee of 2, which GRANDPA needs both of to finalize, so it tolerates no fault. The permissioned candidates datum holds a candidate Ariadne drops (a partner chains key not 33 bytes, an `aura` or `gran` key not 32), one that repeats an earlier candidate's key (the runtime keeps the first), or fewer than two candidates the runtime can seat: from fewer than two it draws no committee, and every rotation seats the genesis committee again. The D-parameter seats registered candidates (a Cardano stake pool that registers would join the committee, and the preflight reads no registration), fewer permissioned seats than the datum's candidates (Ariadne would draw the seats at random, with repeats, so a declared authority could be left out), or more than `MaxValidators` (the runtime refuses a whole draw past a cap of its own that its metadata does not declare). The node reads both datums with partner-chains v1.5.1's decoder: a legacy datum or version 0 of the versioned one; any other version refuses as unreadable. The launch declares no `slots_per_epoch`, genesis `Sidechain.SlotsPerEpoch` is absent (the runtime then reads partner-chains' default of 60) or not that declared length, it is 0 (the runtime divides each block's slot by it as it initializes the block, so block 1 traps), or a session of that many slots of the runtime's `Aura.SlotDuration` does not divide Cardano's 432,000-second epoch, as partner-chains' sidechain-slots requires: a session longer than a Cardano epoch skips the committees Cardano holds for the epochs it spans, and in a session that began before Cardano's first epoch, as one of 2^32-1 slots did, the node cannot draw block 1's committee, so the chain never authors it. A runtime whose metadata declares no `Aura.SlotDuration` is refused. The launch declares no `cardano_follower`, or one other than Cardano mainnet's (see [Launch manifest](#launch-manifest)); or an authority does not set each of those settings, or sets one, in its `env` or anywhere in its launch, to any other value or spelling than the declared one: every node derives Cardano's epochs and slots, and which Cardano blocks are stable, from them, so an authority whose settings differ from its peers' draws another committee or judges another Cardano block stable, and refuses the committee changes and blocks they make. A launch that declares none is held to Cardano mainnet's. |
+| 10 settlement | Genesis `IntentSettlement.CardanoIds`, the Cardano network settlement binds, is absent (settlement then refuses every voucher, settlement and expiry), holds a network magic other than Cardano mainnet's 764824073 or a Shelley genesis hash other than mainnet's `1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81`, or holds an `aegis_policy_v1` script hash that is zero or other than the one `settlement.aegis_policy_v1_script_hash` declares; or the launch declares none. Every voucher the committee signs commits to the network magic and the Aegis policy, and all settlement and expiry evidence must name the Shelley genesis, so a chain launched with another network's ids settles against that network. The preflight holds every launch to Cardano mainnet (rule 9). Mainnet's ids are those its published environment gives (book.world.dev.cardano.org/environments/mainnet): the `networkMagic` of its `shelley-genesis.json`, and that file's blake2b-256, which its `config.json` publishes as `ShelleyGenesisHash`; `fixtures/cardano-mainnet-*.json` are those files, and a test holds the preflight to them. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including hex in
@@ -153,7 +155,9 @@ Each number the preflight reads from genesis must be exactly as long as its
 type: `OrinqReceipts.AttestationRewardPerSigner`, `OrinqReceipts.EraCapBase`,
 `OrinqReceipts.BondRequirement` and `Balances.TotalIssuance` 16 bytes (u128),
 `OrinqReceipts.EraCapBaselineAttestorCount` and `Sidechain.SlotsPerEpoch` 4
-(u32), `Grandpa.CurrentSetId` 8 (u64), and every `System.Account` value 80 (`AccountInfo`: four u32 counters,
+(u32), `Grandpa.CurrentSetId` 8 (u64), `IntentSettlement.CardanoIds` 64 (a u32
+network magic, then the 32-byte Shelley genesis hash and the 28-byte
+`aegis_policy_v1` script hash), and every `System.Account` value 80 (`AccountInfo`: four u32 counters,
 then free, reserved, frozen and flags as u128), filed under blake2_128 of its
 account followed by the account. FRAME reads a value too short for its type as
 the item's default (zero, and 60 slots for `Sidechain.SlotsPerEpoch`), and
@@ -208,6 +212,7 @@ state version but 0 as V1. A version section the node cannot decode refuses.
     "genesis_lock": {"utxo": "<tx id>#<index>", "address": "addr1w...", "native_script": "0x8303..."}
   },
   "slots_per_epoch": 600,
+  "settlement": {"aegis_policy_v1_script_hash": "0x<28-byte script hash>"},
   "cardano_follower": {
     "MC__FIRST_EPOCH_TIMESTAMP_MILLIS": "1596059091000", "MC__EPOCH_DURATION_MILLIS": "432000000",
     "MC__FIRST_EPOCH_NUMBER": "208", "MC__FIRST_SLOT_NUMBER": "4492800", "MC__SLOT_DURATION_MILLIS": "1000",
@@ -265,6 +270,11 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   twentieth of a session without the timelock, and at most 30 blocks, the
   delay the recovery tooling uses: a session under 600 slots lowers that
   bound.
+- `settlement.aegis_policy_v1_script_hash` is the blake2b-224 script hash of
+  the `aegis_policy_v1` validator deployed on Cardano mainnet, as 0x-hex of 28
+  bytes: genesis `IntentSettlement.CardanoIds` must hold it (rule 10). A
+  launch that declares none refuses; another spelling or width refuses as
+  unreadable.
 - `cardano_follower` maps each Cardano follower setting every authority's
   node must run with to the string it is given: Cardano mainnet's Shelley-era
   layout (`MC__FIRST_EPOCH_TIMESTAMP_MILLIS` 1596059091000, the start of epoch
@@ -518,11 +528,14 @@ authority, `check`:
   any case, must be that hash: signed payloads bind these ids, so a runtime
   that pins another chain's fails every signature this chain's committee and
   attestors make (settlement's and the oracle's `MateriosChainId` are two).
-  `IntentSettlement.MainchainGenesisHash` is Cardano's Shelley genesis hash,
-  the external chain settlement evidence comes from, and is not compared. Metadata read with no chain state, as subwasm reads it, holds the
+  Metadata read with no chain state, as subwasm reads it, holds the
   ids that come from `System.BlockHash(0)` as zero, so only a run on the
-  genesis can tell them from a pinned value. A binary with no `chain-id`, or
-  a report the preflight cannot read, refuses as unreadable.
+  genesis can tell them from a pinned value. The report also gives the
+  genesis `IntentSettlement.CardanoIds`, decoded with the node's settlement
+  types (null when genesis stores none), which must be the network magic,
+  Shelley genesis hash and Aegis policy hash the preflight reads from the raw
+  spec for rule 10. A binary with no `chain-id`, or a report the preflight
+  cannot read, refuses as unreadable.
 
 Where the `--chain` value names no file on this host, the as-launched run
 tells a file from a chain built into the node: a node that builds a genesis
@@ -667,9 +680,9 @@ The preprod v6 fixture is the published preprod raw chain spec, and the
 genesis-hash test checks the computed hash against the one the live network
 reports.
 
-The spec 242 fixtures are the preprod genesis that spec 242 (transaction version
-6, MOTRA holding checkpoints, the Root timelock, bonded settlement requests, no
-PerpEngine) builds, without
+The spec 243 fixtures are the preprod genesis that spec 243 (transaction version
+6, MOTRA holding checkpoints, the Root timelock, bonded settlement requests,
+settlement's Cardano ids in genesis storage, no PerpEngine) builds, without
 its code, and that runtime's metadata, trimmed to what the preflight reads.
 A test holds both fixtures to the spec and transaction versions the runtime
 source declares. MOTRA checkpoints are allowed only under canonical account keys,
@@ -680,13 +693,13 @@ writes):
 
 ```
 materios-node build-spec --chain preprod --raw --disable-default-bootnode --base-path "$(mktemp -d)" > raw.json
-jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec242-raw.json
+jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec243-raw.json
 jq -r '.genesis.raw.top["0x3a636f6465"][2:]' raw.json | xxd -r -p > runtime.wasm
 subwasm metadata runtime.wasm --format json | jq -jcS '{V14: {pallets: [.V14.pallets[]
   | {name, constants: [.constants[] | {name, value}], storage: (.storage | if . == null
   then null else {prefix, entries: [.entries[] | {name}]} end)}], types: {types:
   [.V14.types.types[] | select(.type.path | length > 0) | {id, type: {path: .type.path}}]}}}' \
-  > fixtures/spec242-metadata.json
+  > fixtures/spec243-metadata.json
 ```
 
 The same trim of the preprod v6 runtime's metadata gives
@@ -694,7 +707,7 @@ The same trim of the preprod v6 runtime's metadata gives
 
 The historical preprod v6 fixture leaves
 `SessionCommitteeManagement.CurrentCommittee` empty and seeds Aura and GRANDPA
-directly, and rule 9 refuses that. The spec-242 fixture and the CLI tests' clean
+directly, and rule 9 refuses that. The spec-243 fixture and the CLI tests' clean
 launch seat their authorities as the genesis committee:
 the committee, then the Aura authors, GRANDPA voters and session validators
 the session genesis takes from it.

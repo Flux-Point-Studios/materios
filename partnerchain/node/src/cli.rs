@@ -18,8 +18,9 @@ pub enum OrinqCmd {
 
 #[derive(Debug, clap::Subcommand)]
 pub enum Subcommand {
-    /// Print, as JSON, the genesis hash a chain spec builds and the chain ids
-    /// its runtime reports once block one has initialised on it. Offline.
+    /// Print, as JSON, the genesis hash a chain spec builds, the chain ids
+    /// its runtime reports once block one has initialised on it, and the
+    /// Cardano network its genesis stores for settlement. Offline.
     ChainId {
         /// A chain spec file, or the name of a chain built into the node.
         #[arg(long)]
