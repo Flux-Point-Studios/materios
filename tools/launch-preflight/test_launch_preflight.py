@@ -4862,6 +4862,9 @@ CARDANO_MAINNET_SHELLEY = bytes.fromhex("1a3be38bcbb7911969283716ad7aa550250226b
 CARDANO_PREPROD_SHELLEY = bytes.fromhex("162d29c4e1cf6b8a84f2d692e67a3ac6bc7851bc3e6e4afe64d15778bed8bd86")
 AEGIS_POLICY = bytes([0x5a]) * 28
 SETTLEMENT = {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex()}
+# A launch whose Aegis policy is applied to the chain's own genesis hash: genesis binds none, and Root binds it with
+# IntentSettlement.bind_aegis_policy_v1 after launch.
+BOUND_AFTER_GENESIS = {"aegis_policy_v1_script_hash": None}
 
 
 def cardano_ids(magic: int = CARDANO_MAINNET_MAGIC, shelley: bytes = CARDANO_MAINNET_SHELLEY,
@@ -4898,6 +4901,19 @@ def test_a_genesis_settling_against_cardano_mainnet_and_the_declared_aegis_polic
     assert lp.check_settlement(spec, {"settlement": SETTLEMENT}) == []
 
 
+def test_a_genesis_binding_no_aegis_policy_passes_where_the_launch_binds_it_after_genesis(spec):
+    put(spec, "IntentSettlement", "CardanoIds", cardano_ids(aegis=bytes(28)))
+    assert lp.check_settlement(spec, {"settlement": BOUND_AFTER_GENESIS}) == []
+
+
+def test_a_genesis_binding_an_aegis_policy_is_refused_where_the_launch_binds_it_after_genesis(spec):
+    settles_on_mainnet(spec)
+    assert messages(lp.check_settlement(spec, {"settlement": BOUND_AFTER_GENESIS})) == [
+        f"[10 settlement] genesis IntentSettlement.CardanoIds binds aegis_policy_v1 script hash 0x{AEGIS_POLICY.hex()}"
+        ", where the launch declares the policy bound after genesis (null): bind_aegis_policy_v1 binds one only "
+        "while none is bound, so the policy deployed on the chain's genesis hash could not be bound"]
+
+
 AGAINST = ("every voucher the committee signs binds it and all settlement and expiry evidence must name its Shelley "
            "genesis, so the chain settles against another Cardano network than the mainnet it launches on")
 
@@ -4907,17 +4923,22 @@ AGAINST = ("every voucher the committee signs binds it and all settlement and ex
         f"genesis IntentSettlement.CardanoIds holds network magic 1, not Cardano mainnet's 764824073: {AGAINST}",
         f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x{CARDANO_PREPROD_SHELLEY.hex()}, not "
         f"Cardano mainnet's 0x{CARDANO_MAINNET_SHELLEY.hex()}: {AGAINST}",
-        "genesis IntentSettlement.CardanoIds names no aegis_policy_v1 script hash: every voucher the committee signs "
-        "binds it, and Cardano mainnet's Aegis validators accept no voucher bound to none"]),
+        f"genesis IntentSettlement.CardanoIds binds no aegis_policy_v1 script hash, not the 0x{AEGIS_POLICY.hex()} the "
+        "launch declares deployed: every voucher the committee signs binds it (a launch that binds it after genesis "
+        "declares null)"]),
     (cardano_ids(magic=1), [
         f"genesis IntentSettlement.CardanoIds holds network magic 1, not Cardano mainnet's 764824073: {AGAINST}"]),
     (cardano_ids(shelley=CARDANO_PREPROD_SHELLEY), [
         f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x{CARDANO_PREPROD_SHELLEY.hex()}, not "
         f"Cardano mainnet's 0x{CARDANO_MAINNET_SHELLEY.hex()}: {AGAINST}"]),
     (cardano_ids(aegis=bytes([0x5b]) * 28), [
-        f"genesis IntentSettlement.CardanoIds holds aegis_policy_v1 script hash 0x{'5b' * 28}, not the "
+        f"genesis IntentSettlement.CardanoIds binds aegis_policy_v1 script hash 0x{'5b' * 28}, not the "
         f"0x{AEGIS_POLICY.hex()} the launch declares deployed: every voucher the committee signs binds it"]),
-], ids=["preprod", "preprod-magic", "preprod-shelley", "another-aegis-policy"])
+    (cardano_ids(aegis=bytes(28)), [
+        f"genesis IntentSettlement.CardanoIds binds no aegis_policy_v1 script hash, not the 0x{AEGIS_POLICY.hex()} the "
+        "launch declares deployed: every voucher the committee signs binds it (a launch that binds it after genesis "
+        "declares null)"]),
+], ids=["preprod", "preprod-magic", "preprod-shelley", "another-aegis-policy", "no-aegis-policy"])
 def test_a_genesis_settling_against_another_cardano_network_or_policy_is_refused(spec, stored, refusals):
     put(spec, "IntentSettlement", "CardanoIds", stored)
     assert messages(lp.check_settlement(spec, {"settlement": SETTLEMENT})) == [
@@ -4933,8 +4954,8 @@ def test_a_genesis_that_stores_no_cardano_network_is_refused(spec):
 def test_a_launch_that_declares_no_aegis_policy_is_refused(spec):
     settles_on_mainnet(spec)
     assert messages(lp.check_settlement(spec, {})) == [
-        "[10 settlement] the launch declares no settlement.aegis_policy_v1_script_hash, the Aegis policy deployed on "
-        "Cardano mainnet that genesis must name"]
+        "[10 settlement] the launch declares no settlement.aegis_policy_v1_script_hash: the Aegis policy deployed on "
+        "Cardano mainnet that genesis binds, or null where Root binds it after genesis"]
 
 
 @pytest.mark.parametrize("length", [63, 65])
@@ -4948,7 +4969,8 @@ def test_cardano_ids_of_another_width_are_unreadable(spec, length):
     [], {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex(), "network_magic": 1},
     {"aegis_policy_v1_script_hash": AEGIS_POLICY.hex()}, {"aegis_policy_v1_script_hash": "0x" + AEGIS_POLICY.hex().upper()},
     {"aegis_policy_v1_script_hash": "0x" + bytes(32).hex()}, {"aegis_policy_v1_script_hash": 7},
-], ids=["list", "unknown-field", "no-0x", "upper-hex", "32-bytes", "number"])
+    {"aegis_policy_v1_script_hash": "0x" + bytes(28).hex()},
+], ids=["list", "unknown-field", "no-0x", "upper-hex", "32-bytes", "number", "zero"])
 def test_an_unreadable_settlement_declaration_is_an_input_error(spec, settlement):
     with pytest.raises(lp.InputError, match="settlement"):
         lp.validate_launch({**clean_manifest_fields(), "settlement": settlement})
@@ -4956,6 +4978,11 @@ def test_an_unreadable_settlement_declaration_is_an_input_error(spec, settlement
 
 def clean_manifest_fields() -> dict:
     return {"roles": {}, "supply": {"genesis_lock": LOCK}}
+
+
+@pytest.mark.parametrize("settlement", [SETTLEMENT, BOUND_AFTER_GENESIS], ids=["in-genesis", "after-genesis"])
+def test_a_launch_declares_the_aegis_policy_genesis_binds_or_null(settlement):
+    lp.validate_launch({**clean_manifest_fields(), "settlement": settlement})
 
 
 def test_genesis_may_store_settlements_cardano_network(spec, metadata_v14):
@@ -5969,7 +5996,7 @@ def test_cli_refuses_a_launch_whose_genesis_settles_against_cardano_preprod(clea
     assert code == 1, out
     assert "[10 settlement] genesis IntentSettlement.CardanoIds holds network magic 1" in out
     assert "[10 settlement] genesis IntentSettlement.CardanoIds holds Shelley genesis hash 0x162d29c4" in out
-    assert "[10 settlement] genesis IntentSettlement.CardanoIds names no aegis_policy_v1 script hash" in out
+    assert "[10 settlement] genesis IntentSettlement.CardanoIds binds no aegis_policy_v1 script hash" in out
 
 
 def with_node_argv(clean, words) -> None:

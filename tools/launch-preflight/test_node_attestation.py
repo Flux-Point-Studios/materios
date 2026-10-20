@@ -616,13 +616,15 @@ def test_chain_id_reads_the_specs_own_runtime_not_the_nodes(node, preprod_path):
     assert chain_ids(node, preprod_path) == (genesis, {}, None)
 
 
-def test_chain_id_reads_the_cardano_ids_genesis_stores_as_the_preflight_does(node, preprod, tmp_path):
+@pytest.mark.parametrize("aegis", [base.AEGIS_POLICY, bytes(28)], ids=["bound", "bound-after-genesis"])
+def test_chain_id_reads_the_cardano_ids_genesis_stores_as_the_preflight_does(node, preprod, tmp_path, aegis):
     """The node decodes IntentSettlement.CardanoIds with the runtime's own types; the preflight reads the same ids
-    from the raw spec, so rule 10 checks the ids the chain binds."""
+    from the raw spec, so rule 10 checks the ids the chain binds. A mainnet genesis may leave the Aegis policy for
+    Root to bind after launch."""
     doc = json.loads(preprod.read_text())
-    mainnet = (base.CARDANO_MAINNET_MAGIC, base.CARDANO_MAINNET_SHELLEY, base.AEGIS_POLICY)
+    mainnet = (base.CARDANO_MAINNET_MAGIC, base.CARDANO_MAINNET_SHELLEY, aegis)
     doc["genesis"]["raw"]["top"]["0x" + lp.storage_key("IntentSettlement", "CardanoIds").hex()] = \
-        "0x" + base.cardano_ids().hex()
+        "0x" + base.cardano_ids(aegis=aegis).hex()
     path = tmp_path / "mainnet-ids.json"
     path.write_text(json.dumps(doc))
     assert lp.stored_cardano_ids(lp.load_spec(str(path))) == mainnet

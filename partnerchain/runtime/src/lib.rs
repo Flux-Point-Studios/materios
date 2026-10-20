@@ -676,7 +676,8 @@ parameter_types! {
 /// `shelley-genesis.json` (its `config.json` `ShelleyGenesisHash`,
 /// book.world.dev.cardano.org/environments/preprod), and no Aegis policy
 /// deployed. The development and preprod chain specs settle against it; a
-/// mainnet genesis names Cardano mainnet and its deployed Aegis policy.
+/// mainnet genesis names Cardano mainnet, and its Aegis policy unless Root
+/// binds that after launch.
 pub const CARDANO_PREPROD: pallet_intent_settlement::CardanoIdentity =
     pallet_intent_settlement::CardanoIdentity {
         network_magic: 1,
@@ -709,6 +710,7 @@ impl pallet_intent_settlement::Config for Runtime {
     type SettlementVersion = IntentSettlementSettlementVersion;
     type MinFinalityDepth = IntentSettlementMinFinalityDepth;
     type SettlementRequestTtl = IntentSettlementSettlementRequestTtl;
+    type CardanoIdsToSeed = migrations::PreprodCardanoIds;
     type Currency = Balances;
     type SlashWatcherShareBps = IntentSettlementSlashWatcherShareBps;
     type BondReleaseDelayBlocks = IntentSettlementBondReleaseDelayBlocks;
@@ -1456,10 +1458,7 @@ pub type Executive = frame_executive::Executive<
         migrations::SweepFeeRouterPotsIntoTreasury,
         migrations::InitRootTimelock,
         migrations::RemovePerpEngine,
-        pallet_intent_settlement::migrations::SeedCardanoIds<
-            Runtime,
-            migrations::PreprodCardanoIds,
-        >,
+        pallet_intent_settlement::migrations::SeedCardanoIds<Runtime>,
     ),
 >;
 

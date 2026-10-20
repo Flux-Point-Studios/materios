@@ -22,6 +22,7 @@ use pallet_intent_settlement::{
     BatchAttestEntryBytes, CardanoIds, Claims, Error, Intents, SettlementStorageVersion, Vouchers,
     NAMED_RESERVE_VERSION, SETTLEMENT_STORAGE_VERSION,
 };
+use parity_scale_codec::Decode;
 use sp_core::{sr25519, Pair};
 
 /// Preprod's published Cardano environment
@@ -383,6 +384,78 @@ fn upgraded_preprod_computes_every_digest_and_evidence_check_spec_242_did() {
         });
 }
 
+/// What runtime metadata reports for settlement's constant `name`, read in
+/// the current state: its value, held to the type `V` the constant has.
+fn metadata_constant<V: Decode + scale_info::TypeInfo + 'static>(name: &str) -> V {
+    let constant = IntentSettlement::pallet_constants_metadata()
+        .into_iter()
+        .find(|constant| constant.name == name)
+        .unwrap_or_else(|| panic!("the metadata declares no IntentSettlement.{name}"));
+    assert_eq!(constant.ty, scale_info::meta_type::<V>(), "{name}");
+    V::decode(&mut &constant.value[..]).expect("the constant decodes as its type")
+}
+
+/// Committee daemons rebuild every voucher digest from the metadata
+/// constants `MateriosChainId`, `NetworkMagic`, `AegisPolicyV1ScriptHash`
+/// and `SettlementVersion`, and keep the metadata they first read for a spec
+/// version. A client can first read the new spec's in the state of the block
+/// that sets its code, before the next block's upgrade stores the ids. From
+/// that state on, the metadata reports the ids spec 242's configuration
+/// reported, with the same types, and every recorded voucher digest
+/// rebuilds from them.
+#[test]
+fn metadata_reports_spec_242s_ids_from_the_block_that_sets_the_new_code() {
+    use pallet_intent_settlement::voucher_canonicalize::{
+        compute_voucher_digest_with_address, ChainIdentity,
+    };
+    let recorded = recorded();
+    holding_preprods_settlement(PREPROD_GENESIS_HASH, Vec::new()).execute_with(|| {
+        let reported = || {
+            (
+                metadata_constant::<H256>("MateriosChainId"),
+                metadata_constant::<u32>("NetworkMagic"),
+                metadata_constant::<[u8; 28]>("AegisPolicyV1ScriptHash"),
+                metadata_constant::<u32>("SettlementVersion"),
+            )
+        };
+        let at_the_new_code = reported();
+        let (chain_id, magic, aegis, version) = at_the_new_code;
+        assert_eq!(hex(&recorded["materios_chain_id"]), chain_id.0.to_vec());
+        assert_eq!(recorded["network_magic"], serde_json::json!(magic));
+        assert_eq!(
+            hex(&recorded["aegis_policy_v1_script_hash"]),
+            aegis.to_vec()
+        );
+        let identity = ChainIdentity {
+            materios_chain_id: &chain_id.0,
+            network_magic: magic,
+            aegis_policy_script_hash: &aegis,
+            settlement_version: version,
+        };
+        for recorded_voucher in recorded["vouchers"].as_array().expect("vouchers") {
+            let claim_id = H256::from_slice(&hex(&recorded_voucher["claim_id"]));
+            let voucher = Vouchers::<Runtime>::get(claim_id).expect("a recorded voucher");
+            let beneficiary =
+                IntentSettlement::beneficiary_cbor_for(&voucher.beneficiary_cardano_addr)
+                    .expect("a type-0 address");
+            let digest = compute_voucher_digest_with_address(
+                identity,
+                &voucher.claim_id,
+                &voucher.policy_id,
+                &beneficiary,
+                voucher.amount_ada,
+                &voucher.batch_fairness_proof_digest,
+                voucher.issued_block,
+                voucher.expiry_slot_cardano,
+            );
+            assert_eq!(digest.to_vec(), hex(&recorded_voucher["voucher_digest"]));
+        }
+
+        Executive::execute_on_runtime_upgrade();
+        assert_eq!(reported(), at_the_new_code);
+    });
+}
+
 /// Settlement's pre- and post-upgrade checks, and the seeding migration's,
 /// pass over preprod's state. Every other pallet stands at its in-code
 /// storage version, as genesis leaves it.
@@ -404,8 +477,8 @@ fn preprods_settlement_state_passes_the_upgrade_checks() {
 
 /// The genesis builder refuses a chain spec that names no Cardano network
 /// for settlement, names none with a zero network magic or Shelley genesis
-/// hash, or names Cardano mainnet in part or with no Aegis policy; it builds
-/// preprod's ids and mainnet's with its deployed policy.
+/// hash, or names Cardano mainnet in part; it builds preprod's ids, and
+/// mainnet's with its deployed policy or with none for Root to bind.
 #[test]
 fn a_chain_spec_must_name_the_cardano_network_settlement_binds() {
     let spec = |cardano_ids: serde_json::Value| {
@@ -422,6 +495,13 @@ fn a_chain_spec_must_name_the_cardano_network_settlement_binds() {
     };
     assert_eq!(spec(serde_json::json!(CARDANO_PREPROD)), Ok(()));
     assert_eq!(spec(serde_json::json!(mainnet)), Ok(()));
+    assert_eq!(
+        spec(serde_json::json!(CardanoIdentity {
+            aegis_policy_v1_script_hash: [0; 28],
+            ..mainnet
+        })),
+        Ok(())
+    );
     for (ids, reason) in [
         (serde_json::Value::Null, "names no Cardano network"),
         (
@@ -444,13 +524,6 @@ fn a_chain_spec_must_name_the_cardano_network_settlement_binds() {
                 ..mainnet
             }),
             "name it only together",
-        ),
-        (
-            serde_json::json!(CardanoIdentity {
-                aegis_policy_v1_script_hash: [0; 28],
-                ..mainnet
-            }),
-            "no aegis_policy_v1 script hash",
         ),
     ] {
         let refused = spec(ids.clone()).expect_err("refused");

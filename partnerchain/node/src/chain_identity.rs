@@ -68,7 +68,7 @@ pub fn inspect(spec: &dyn sc_service::ChainSpec) -> Result<serde_json::Value, St
             name.contains("chainid") || name.contains("genesishash")
         })
         .collect();
-    let cardano_ids = state.execute_with(|| IntentSettlement::cardano_ids().ok());
+    let cardano_ids = state.execute_with(IntentSettlement::bound_cardano_ids);
     Ok(serde_json::json!({
         "genesis_hash": genesis,
         "constants": constants,

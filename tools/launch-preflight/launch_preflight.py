@@ -2412,12 +2412,17 @@ def check_settlement(spec: Spec, launch: dict) -> list[Finding]:
     """Settlement binds the Cardano network genesis stores in IntentSettlement.CardanoIds: every voucher the
     committee signs commits to its network magic and Aegis policy, and all settlement and expiry evidence must name
     its Shelley genesis. The preflight holds every launch to Cardano mainnet (rule 9), so genesis must name mainnet
-    and the aegis_policy_v1 the launch declares deployed there."""
-    declared = launch.get("settlement", {}).get("aegis_policy_v1_script_hash")
+    and bind the aegis_policy_v1 the launch declares deployed there, or bind none where the launch declares null:
+    a policy applied to the chain's own genesis hash is bound after genesis, by Root's
+    IntentSettlement.bind_aegis_policy_v1, which binds one only while none is bound."""
+    settlement = launch.get("settlement", {})
+    declares = "aegis_policy_v1_script_hash" in settlement
+    declared = settlement.get("aegis_policy_v1_script_hash")
     findings = []
-    if declared is None:
-        findings.append(Finding(SETTLEMENT, "the launch declares no settlement.aegis_policy_v1_script_hash, the Aegis "
-                                            "policy deployed on Cardano mainnet that genesis must name"))
+    if not declares:
+        findings.append(Finding(SETTLEMENT, "the launch declares no settlement.aegis_policy_v1_script_hash: the Aegis "
+                                            "policy deployed on Cardano mainnet that genesis binds, or null where Root "
+                                            "binds it after genesis"))
     stored = stored_cardano_ids(spec)
     if stored is None:
         return findings + [Finding(SETTLEMENT, "genesis stores no IntentSettlement.CardanoIds: settlement refuses every "
@@ -2432,14 +2437,18 @@ def check_settlement(spec: Spec, launch: dict) -> list[Finding]:
         findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds holds Shelley genesis hash "
                                             f"0x{shelley.hex()}, not Cardano mainnet's "
                                             f"0x{CARDANO_MAINNET_SHELLEY_GENESIS_HASH.hex()}: {against}"))
-    if aegis == bytes(AEGIS_POLICY_WIDTH):
-        findings.append(Finding(SETTLEMENT, "genesis IntentSettlement.CardanoIds names no aegis_policy_v1 script hash: "
-                                            "every voucher the committee signs binds it, and Cardano mainnet's Aegis "
-                                            "validators accept no voucher bound to none"))
+    unbound = aegis == bytes(AEGIS_POLICY_WIDTH)
+    if declares and declared is None and not unbound:
+        findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds binds aegis_policy_v1 script hash "
+                                            f"0x{aegis.hex()}, where the launch declares the policy bound after "
+                                            "genesis (null): bind_aegis_policy_v1 binds one only while none is bound, "
+                                            "so the policy deployed on the chain's genesis hash could not be bound"))
     elif declared is not None and aegis != hex_bytes(declared, "settlement.aegis_policy_v1_script_hash"):
-        findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds holds aegis_policy_v1 script hash "
-                                            f"0x{aegis.hex()}, not the {declared} the launch declares deployed: every "
-                                            "voucher the committee signs binds it"))
+        held = "no aegis_policy_v1 script hash" if unbound else f"aegis_policy_v1 script hash 0x{aegis.hex()}"
+        after = " (a launch that binds it after genesis declares null)" if unbound else ""
+        findings.append(Finding(SETTLEMENT, f"genesis IntentSettlement.CardanoIds binds {held}, not the {declared} "
+                                            f"the launch declares deployed: every voucher the committee signs binds "
+                                            f"it{after}"))
     return findings
 
 
@@ -3520,10 +3529,12 @@ def validate_launch(launch) -> None:
     settlement = launch.get("settlement", {})
     if not isinstance(settlement, dict) or set(settlement) - SETTLEMENT_FIELDS:
         raise InputError("settlement must be an object whose one field is aegis_policy_v1_script_hash")
-    if "aegis_policy_v1_script_hash" in settlement:
+    if settlement.get("aegis_policy_v1_script_hash") is not None:
         where = "settlement.aegis_policy_v1_script_hash"
-        if len(hex_bytes(settlement["aegis_policy_v1_script_hash"], where)) != AEGIS_POLICY_WIDTH:
-            raise InputError(f"{where} must be the {AEGIS_POLICY_WIDTH}-byte script hash")
+        policy = hex_bytes(settlement["aegis_policy_v1_script_hash"], where)
+        if len(policy) != AEGIS_POLICY_WIDTH or policy == bytes(AEGIS_POLICY_WIDTH):
+            raise InputError(f"{where} must be the deployed policy's {AEGIS_POLICY_WIDTH}-byte script hash, or null "
+                             "where Root binds it after genesis")
     nodes = launch.get("nodes", [])
     if not isinstance(nodes, list):
         raise InputError("nodes must be a list")

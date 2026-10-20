@@ -126,8 +126,8 @@ chrono = { version = "0.4", default-features = false }
 # Flux-Point-Studios/materios-intent-settlement, which pins the same
 # `polkadot-stable2409-4` SDK tag as this workspace so no version dance is
 # required. Pin by `rev` (not `branch = "main"`) for reproducibility.
-pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "e0bab63bd16d88ee7fa2c8c5db7afebb845dad74", default-features = false }
-pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "e0bab63bd16d88ee7fa2c8c5db7afebb845dad74", default-features = false }
+pallet-intent-settlement = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "f1d4208c6d38d34bf50f2bdeec92dac59587b5ce", default-features = false }
+pallet-oracle = { git = "https://github.com/Flux-Point-Studios/materios-intent-settlement.git", rev = "f1d4208c6d38d34bf50f2bdeec92dac59587b5ce", default-features = false }
 
 # MOTRA
 sp-arithmetic = { git = "https://github.com/paritytech/polkadot-sdk.git", tag = "polkadot-stable2409-4", default-features = false }
