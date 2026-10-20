@@ -619,7 +619,7 @@ def test_chain_id_reads_the_specs_own_runtime_not_the_nodes(node, preprod_path):
 @pytest.mark.parametrize("aegis", [base.AEGIS_POLICY, bytes(28)], ids=["bound", "bound-after-genesis"])
 def test_chain_id_reads_the_cardano_ids_genesis_stores_as_the_preflight_does(node, preprod, tmp_path, aegis):
     """The node decodes IntentSettlement.CardanoIds with the runtime's own types; the preflight reads the same ids
-    from the raw spec, so rule 10 checks the ids the chain binds. A mainnet genesis may leave the Aegis policy for
+    from the raw spec, so rule 11 checks the ids the chain binds. A mainnet genesis may leave the Aegis policy for
     Root to bind after launch."""
     doc = json.loads(preprod.read_text())
     mainnet = (base.CARDANO_MAINNET_MAGIC, base.CARDANO_MAINNET_SHELLEY, aegis)
