@@ -5,7 +5,7 @@ use materios_runtime::{
 use sc_service::ChainType;
 use sp_consensus_aura::{runtime_decl_for_aura_api::AuraApi, sr25519::AuthorityId as AuraId};
 use sp_consensus_grandpa::{runtime_decl_for_grandpa_api::GrandpaApi, AuthorityId as GrandpaId};
-use sp_core::{ecdsa, sr25519, Pair, Public, H256};
+use sp_core::{ecdsa, sr25519, Pair, Public};
 use sp_runtime::traits::{IdentifyAccount, Verify};
 
 /// Specialized `ChainSpec` for the Materios network.
@@ -98,12 +98,6 @@ pub fn seated_now() -> Seated {
     }
 }
 
-/// The genesis of each chain that started with no genesis committee before
-/// the live-quorum floor existed, so that its first rotation seated Cardano's
-/// draw: preprod v6.
-const SEATED_FROM_CARDANO_AT_FIRST_ROTATION: [H256; 1] =
-    [crate::chain_spec_preprod::PREPROD_V6_GENESIS];
-
 /// Refuses `spec` when a chain started from its genesis does not keep its
 /// authorities through the first committee rotation. A fresh chain's first
 /// Cardano draw fails the live-quorum floor, so that rotation seats the
@@ -111,6 +105,10 @@ const SEATED_FROM_CARDANO_AT_FIRST_ROTATION: [H256; 1] =
 /// schedules an empty GRANDPA set, which no node imports, and any other one
 /// hands authoring or finality to keys that did not hold it. The runtime's
 /// genesis builder refuses both, but a raw spec's genesis never runs it.
+///
+/// Preprod v6 is the one exception: it started with no genesis committee
+/// before the live-quorum floor existed, so its first rotation seated
+/// Cardano's draw.
 pub fn check_genesis_committee(spec: &dyn sc_service::ChainSpec) -> Result<(), String> {
     let seated = sp_io::TestExternalities::new(spec.build_storage()?).execute_with(seated_now);
     let committee = Seated::by(&seated.committee);
@@ -133,7 +131,7 @@ pub fn check_genesis_committee(spec: &dyn sc_service::ChainSpec) -> Result<(), S
     };
     let executor = crate::chain_identity::Executor::builder().build();
     let genesis = crate::chain_identity::genesis(spec, &executor)?.hash;
-    if SEATED_FROM_CARDANO_AT_FIRST_ROTATION.contains(&genesis) {
+    if genesis == crate::chain_spec_preprod::PREPROD_V6_GENESIS {
         return Ok(());
     }
     Err(format!(
