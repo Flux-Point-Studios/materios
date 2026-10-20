@@ -89,7 +89,6 @@ async-trait = { workspace = true }
 tokio = { workspace = true }
 derive-new = { workspace = true }
 log = { workspace = true }
-hex-literal = { workspace = true }
 
 # Local
 materios-runtime = { workspace = true, features = ["std"] }

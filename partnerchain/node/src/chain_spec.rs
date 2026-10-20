@@ -101,9 +101,8 @@ pub fn seated_now() -> Seated {
 /// The genesis of each chain that started with no genesis committee before
 /// the live-quorum floor existed, so that its first rotation seated Cardano's
 /// draw: preprod v6.
-const SEATED_FROM_CARDANO_AT_FIRST_ROTATION: [H256; 1] = [H256(hex_literal::hex!(
-    "0e46e33f639a56cc8780fd871d9a15e16d99af248526f907cb560cb40849f7bf"
-))];
+const SEATED_FROM_CARDANO_AT_FIRST_ROTATION: [H256; 1] =
+    [crate::chain_spec_preprod::PREPROD_V6_GENESIS];
 
 /// Refuses `spec` when a chain started from its genesis does not keep its
 /// authorities through the first committee rotation. A fresh chain's first

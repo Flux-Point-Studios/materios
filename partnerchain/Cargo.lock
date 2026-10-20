@@ -4634,7 +4634,6 @@ dependencies = [
  "frame-metadata",
  "frame-system",
  "futures",
- "hex-literal",
  "jsonrpsee",
  "log",
  "main-chain-follower-mock",
