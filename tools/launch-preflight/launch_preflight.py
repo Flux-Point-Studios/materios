@@ -2963,24 +2963,13 @@ def possession_challenge(context: bytes, role: str, position: tuple[int, ...]) -
             + b"".join(index.to_bytes(4, "little") for index in position))
 
 
-def possession_verifies(key: bytes, challenge: bytes, pop: bytes) -> bool:
-    """Whether `pop` is the signature by `key` of `challenge` that subkey sign writes: sr25519 under Substrate's
-    signing context for a 32-byte key; for a 33-byte key ECDSA over blake2-256 of the challenge, whose signer,
-    recovered by the signature's own recovery id, must be the key, as sp_core's ecdsa verifies it. A signature or key
-    the scheme cannot read verifies nothing."""
-    try:
-        if len(key) == 33:
-            signer = coincurve.PublicKey.from_signature_and_message(pop, blake2_256(challenge), hasher=None)
-            return signer.format() == key
-        return sr25519.verify(pop, challenge, key)
-    except ValueError:
-        return False
-
-
 def check_possession(spec: Spec, launch: dict) -> list[Finding]:
     """Each member of each multisig in each role, at any depth, must be a key whose holder signed its challenge: one
     no one proves to hold can be the address of a multisig no one declared, which no secret signs for, so the
-    multisig it is in would need fewer keyholders than its threshold says, or keyholders no one checked."""
+    multisig it is in would need fewer keyholders than its threshold says, or keyholders no one checked. Its pop is
+    the signature subkey sign writes: sr25519 under Substrate's signing context for a 32-byte key; for a 33-byte key
+    ECDSA over blake2-256 of the challenge, whose signer, recovered by the signature's own recovery id, must be the
+    key, as sp_core's ecdsa verifies it. A signature or key the scheme cannot read verifies nothing."""
     findings, context = [], None
     for role, where, position, leaf in multisig_members(launch):
         command = f"challenge --role {role} --index {' '.join(map(str, position))}"
@@ -2999,8 +2988,16 @@ def check_possession(spec: Spec, launch: dict) -> list[Finding]:
         except ValueError:
             continue  # rule 1 already refuses a role key that does not decode
         context = context or possession_context(spec, launch)
-        if not possession_verifies(key, possession_challenge(context, role, position),
-                                   hex_bytes(leaf["pop"], f"{where}.pop")):
+        challenge, pop = possession_challenge(context, role, position), hex_bytes(leaf["pop"], f"{where}.pop")
+        try:
+            if len(key) == 33:
+                signer = coincurve.PublicKey.from_signature_and_message(pop, blake2_256(challenge), hasher=None)
+                held = signer.format() == key
+            else:
+                held = sr25519.verify(pop, challenge, key)
+        except ValueError:
+            held = False
+        if not held:
             scheme = "ECDSA" if len(key) == 33 else "sr25519"
             findings.append(Finding(POSSESSION, f"{where}: its pop is not an {scheme} signature by its key of its "
                                                 f"challenge ({command}), which binds this chain, genesis and launch "
