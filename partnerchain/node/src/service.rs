@@ -131,7 +131,7 @@ pub fn new_partial(
 		epoch_config,
 		sc_slot_config,
 		Arc::new(SystemTimeSource),
-		client.chain_info().genesis_hash,
+		&*client,
 	);
 
 	let import_queue = partner_chains_aura_import_queue::import_queue::<

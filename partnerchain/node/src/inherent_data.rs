@@ -230,16 +230,14 @@ pub(crate) struct CreateInherentDataConfig {
 }
 
 impl CreateInherentDataConfig {
-	/// The config of the chain whose genesis block is `genesis`. Preprod v6
-	/// draws its committees under the Ariadne rule every one of its blocks was
-	/// authored and verified under, so that every binary draws them alike;
-	/// every other chain draws them under upstream's.
+	/// Preprod v6 keeps its historical rule; all other genesis hashes select Strict.
 	pub fn new(
 		mc_epoch_config: MainchainEpochConfig,
 		sc_slot_config: ScSlotConfig,
 		time_source: Arc<dyn TimeSource + Send + Sync>,
-		genesis: <Block as BlockT>::Hash,
+		client: &impl HeaderBackend<Block>,
 	) -> Self {
+		let genesis = client.info().genesis_hash;
 		let ariadne_rule =
 			if genesis == PREPROD_V6_GENESIS { AriadneRule::Relaxed } else { AriadneRule::Strict };
 		log::info!(
@@ -272,10 +270,10 @@ mod tests {
 	use sp_core::H256;
 	use sp_native_token_management::mock::MockNativeTokenDataSource;
 
-	/// A chain at its genesis block, whose next committee to draw is session
-	/// `next_unset`'s, and which has no native-token scripts.
+	// Distinct genesis, best and finalized hashes detect selection from the wrong block.
 	#[derive(Clone)]
 	struct Chain {
+		genesis: H256,
 		next_unset: ScEpochNumber,
 	}
 
@@ -338,7 +336,16 @@ mod tests {
 		}
 
 		fn info(&self) -> sp_blockchain::Info<Block> {
-			unimplemented!()
+			sp_blockchain::Info {
+				best_hash: H256::repeat_byte(0xbe),
+				best_number: 2,
+				genesis_hash: self.genesis,
+				finalized_hash: H256::repeat_byte(0xf1),
+				finalized_number: 1,
+				finalized_state: None,
+				number_leaves: 1,
+				block_gap: None,
+			}
 		}
 
 		fn status(
@@ -357,10 +364,10 @@ mod tests {
 		}
 	}
 
-	/// The config the service builds for the chain whose genesis is
-	/// `genesis`, with preprod's one-hour sessions and the fleet's MC__ epoch
-	/// layout, which starts every Cardano epoch a day early.
-	fn preprod_config(genesis: <Block as BlockT>::Hash) -> CreateInherentDataConfig {
+	/// The config the service builds for `client`'s chain, with preprod's
+	/// one-hour sessions and the fleet's MC__ epoch layout, which starts every
+	/// Cardano epoch a day early.
+	fn preprod_config(client: &Chain) -> CreateInherentDataConfig {
 		let fleet_epochs = MainchainEpochConfig {
 			first_epoch_timestamp_millis: sp_core::offchain::Timestamp::from_unix_millis(
 				1_655_683_200_000,
@@ -374,19 +381,17 @@ mod tests {
 			slot_duration: SlotDuration::from_millis(6_000),
 		};
 		let time_source = Arc::new(time_source::SystemTimeSource);
-		CreateInherentDataConfig::new(fleet_epochs, sessions, time_source, genesis)
+		CreateInherentDataConfig::new(fleet_epochs, sessions, time_source, client)
 	}
 
 	/// The Cardano epoch whose data the proposer's and then the verifier's
-	/// inherent data provider give a block on the genesis of `config`'s chain,
-	/// for the committee of session `next_unset`, while the block's stable
-	/// reference block is in epoch `reference`.
-	async fn data_given(
-		config: &CreateInherentDataConfig,
-		next_unset: u64,
-		reference: u32,
-	) -> [Option<u32>; 2] {
-		let client = Arc::new(Chain { next_unset: ScEpochNumber(next_unset) });
+	/// inherent data provider give a block on the genesis `genesis`, under the
+	/// config the service builds for its chain, for the committee of session
+	/// `next_unset`, while the block's stable reference block is in epoch
+	/// `reference`.
+	async fn data_given(genesis: H256, next_unset: u64, reference: u32) -> [Option<u32>; 2] {
+		let client = Arc::new(Chain { genesis, next_unset: ScEpochNumber(next_unset) });
+		let config = preprod_config(&client);
 		let reference_block = MainchainBlock {
 			number: McBlockNumber(1),
 			hash: McBlockHash([1; 32]),
@@ -408,7 +413,7 @@ mod tests {
 		.await
 		.unwrap();
 		let (_, verified, _) =
-			VerifierCIDP::new(config.clone(), client, mc_hash, follower, native_token)
+			VerifierCIDP::new(config, client, mc_hash, follower, native_token)
 				.create_inherent_data_providers(H256::zero(), (Slot::from(1), reference_block.hash))
 				.await
 				.unwrap();
@@ -417,10 +422,11 @@ mod tests {
 		})
 	}
 
-	/// The service picks the Ariadne rule from the genesis, and the proposer
-	/// and the verifier both draw under it: preprod v6's relaxation for v6,
-	/// and upstream's rule for any other genesis, v6's with a byte changed
-	/// among them. The draws, with upstream's followers:
+	/// The service picks the Ariadne rule from the genesis its client reports,
+	/// not from its best or finalized block, and the proposer and the verifier
+	/// both draw under it: preprod v6's relaxation for v6, and upstream's rule
+	/// for any other genesis, v6's with a byte changed among them. The draws,
+	/// with upstream's followers:
 	/// - preprod block #2102140's, for session 497_472, which starts with
 	///   epoch 317 on the fleet's layout, while its stable reference block is
 	///   in epoch 316; then with the reference block in 317;
@@ -437,10 +443,9 @@ mod tests {
 			(PREPROD_V6_GENESIS, [None, Some(317), None, Some(326)]),
 			(other, [Some(315), Some(315), Some(324), Some(324)]),
 		] {
-			let config = preprod_config(genesis);
 			for ((next_unset, reference), data_epoch) in draws.into_iter().zip(data_epochs) {
 				assert_eq!(
-					data_given(&config, next_unset, reference).await,
+					data_given(genesis, next_unset, reference).await,
 					[data_epoch, data_epoch],
 					"genesis {genesis:?}, session {next_unset}, reference epoch {reference}"
 				);
