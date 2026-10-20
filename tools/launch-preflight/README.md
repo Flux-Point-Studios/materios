@@ -28,7 +28,8 @@ It reads:
 - **when each authority's node started, and when its chain spec path last
   changed**: copies of its `/proc/<pid>/stat` and its machine's `/proc/stat`,
   and `stat` of each step of its `--chain` path;
-- a **launch manifest**: who holds each role, the economics, where the genesis
+- a **launch manifest**: who holds each role, with each multisig member's
+  holder's proof of possession of its key, the economics, where the genesis
   lock is, how many slots each session lasts, the Cardano settings every
   authority's follower runs with, each node's launch command, the RPC proxy
   configs and the public RPC URLs;
@@ -49,6 +50,7 @@ It reads:
 | 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian whose account is the genesis guardian, or that guardian does not need two keyholders to act or has a multisig as a member (see [Multisig roles](#multisig-roles)); or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
 | 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). Its running node answers `system_chain`, `system_chainType` or `system_properties` with other than the checked spec's name, chain type (`Live` when the spec names none) or properties (none as `{}`), or a step of its `--chain` path (a directory on it, or the file) last changed less than a full second before its node process started: the node reads its spec once, at its start, and keeps it when the file is replaced, and a spec can hold the checked genesis under another name, or with a code substitute that runs other code. An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. Also refuses a spec whose runtime, run by the authority's node binary at block one, holds a chain id other than the genesis hash: any metadata constant whose name holds `ChainId` or `GenesisHash`, Cardano's `IntentSettlement.MainchainGenesisHash` aside. See [Node attestation](#node-attestation). |
 | 9 committee | Genesis `SessionCommitteeManagement.CurrentCommittee` is not exactly the declared authorities' `aura` and `grandpa` key pairs, each once, two of its members share a cross-chain key, or it lists more members than the runtime's `SessionCommitteeManagement.MaxValidators`, read from the runtime metadata (a runtime that does not declare it is refused). The runtime seats this committee at every rotation whose Cardano draw fails, and a fresh chain's first draw fails, since the live-quorum floor counts no candidate that has not authored yet: an empty committee halts the chain there (GRANDPA refuses an empty authority set), an undeclared member authors and finalizes unchecked, and a committee past MaxValidators does not decode and reads as empty. The committee serves another epoch than the 0 build-spec writes: the node takes only an epoch-0 committee as the genesis one, and otherwise asks Cardano at block 1 for the committee of the epoch after it instead of the current one's, which it cannot derive for an epoch that began before Cardano's first, so the chain never authors block 1. Genesis `Aura.Authorities` or `Grandpa.Authorities` is not exactly the declared authorities' `aura` or `grandpa` keys, each once, a voter at weight 1 as build-spec writes them: a key listed twice, or a weight above 1, counts as several authors or voters. Genesis `Grandpa.CurrentSetId` is set and not 0, or `Grandpa.SetIdSession` is not build-spec's one entry, set 0 beginning in session 0: every GRANDPA client starts the genesis authority set at set id 0, and a node that warp- or state-syncs takes the runtime's set id instead, so it would hold another set id than the one its peers sign votes and justifications under. `Session.ValidatorsAndKeys` is not the committee as the session genesis writes it (each member's account, blake2-256 of its cross-chain key, with its session keys, in the committee's order), or `PalletSession.QueuedKeys` or `PalletSession.Validators` is not the empty list build-spec writes: the session keys they hold would go unchecked. Two authorities declare the same `aura` or `grandpa` key: two nodes that sign with one key equivocate. A Cardano permissioned candidate's `gran` key is not the `grandpa` key that the authority with its `aura` key declares: the candidates vote on finality with those keys once the committee is drawn from Cardano. A declared authority's `aura` key is on no permissioned candidate: Ariadne seats every candidate when all fit, so the first committee drawn from Cardano leaves that authority out, and a datum of 2 of 4 authorities seats a committee of 2, which GRANDPA needs both of to finalize, so it tolerates no fault. The permissioned candidates datum holds a candidate Ariadne drops (a partner chains key not 33 bytes, an `aura` or `gran` key not 32), one that repeats an earlier candidate's key (the runtime keeps the first), or fewer than two candidates the runtime can seat: from fewer than two it draws no committee, and every rotation seats the genesis committee again. The D-parameter seats registered candidates (a Cardano stake pool that registers would join the committee, and the preflight reads no registration), fewer permissioned seats than the datum's candidates (Ariadne would draw the seats at random, with repeats, so a declared authority could be left out), or more than `MaxValidators` (the runtime refuses a whole draw past a cap of its own that its metadata does not declare). The node reads both datums with partner-chains v1.5.1's decoder: a legacy datum or version 0 of the versioned one; any other version refuses as unreadable. The launch declares no `slots_per_epoch`, genesis `Sidechain.SlotsPerEpoch` is absent (the runtime then reads partner-chains' default of 60) or not that declared length, it is 0 (the runtime divides each block's slot by it as it initializes the block, so block 1 traps), or a session of that many slots of the runtime's `Aura.SlotDuration` does not divide Cardano's 432,000-second epoch, as partner-chains' sidechain-slots requires: a session longer than a Cardano epoch skips the committees Cardano holds for the epochs it spans, and in a session that began before Cardano's first epoch, as one of 2^32-1 slots did, the node cannot draw block 1's committee, so the chain never authors it. A runtime whose metadata declares no `Aura.SlotDuration` is refused. The launch declares no `cardano_follower`, or one other than Cardano mainnet's (see [Launch manifest](#launch-manifest)); or an authority does not set each of those settings, or sets one, in its `env` or anywhere in its launch, to any other value or spelling than the declared one: every node derives Cardano's epochs and slots, and which Cardano blocks are stable, from them, so an authority whose settings differ from its peers' draws another committee or judges another Cardano block stable, and refuses the committee changes and blocks they make. A launch that declares none is held to Cardano mainnet's. |
+| 10 possession | A member of a multisig, in any role and at any depth, is not proven held: it is a bare key, it gives no `pop`, or its `pop` is not its key's signature (sr25519, or ECDSA for a 33-byte key) of its challenge, which binds the domain, the chain spec's name and id, the genesis hash, the launch manifest hash, its role and its position. A member no one proves to hold can be the address of a multisig no one declared, which no secret signs for, so the multisig it is in needs fewer keyholders, or other ones, than it reads. See [Proof of possession](#proof-of-possession). |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including hex in
@@ -65,6 +67,9 @@ public RPC URL whose answers the probe cannot resolve.
 
 ```
 pip install -r requirements.txt
+
+# Each multisig member's holder signs its challenge offline (see Proof of possession).
+python3 launch_preflight.py challenge --spec mainnet-raw.json --launch launch.json --role sudo --index 0 1
 
 # The launch key holder signs the hashes of the exact raw spec and launch manifest.
 python3 launch_preflight.py sign --spec mainnet-raw.json --launch launch.json --key launch.key --out signed.json
@@ -93,7 +98,14 @@ rehearsal shows every other reason next to that one.
 The genesis hash is computed here (Substrate trie root of the raw storage at the
 runtime's state version, then the genesis header), so the check does not trust a
 node to report it. The chain-spec and launch manifest hashes are blake2-256 of
-their canonical JSON (sorted keys, no whitespace).
+their canonical JSON (sorted keys, no whitespace), the launch manifest's without
+its `pop` fields: each multisig member's holder signs that hash, so the launch
+key can sign before, while or after their proofs come in.
+
+`requirements.txt` pins every package, each one's dependencies included, by
+sha256, so pip installs no file but the ones pinned. It is `pip-compile`
+(pip-tools) output from `requirements.in`, the direct dependencies, regenerated
+with the command its header names.
 
 The Kupo must follow Cardano mainnet and index the genesis lock address and the
 D-parameter and permissioned candidates policies, the two policy ids after the
@@ -189,12 +201,15 @@ state version but 0 as V1. A version section the node cannot decode refuses.
 ```json
 {
   "roles": {
-    "sudo": [{"threshold": 2, "members": ["5D...", "5H...", "5C..."]}],
-    "guardian": [{"threshold": 2, "members": ["5E...", "5F...", "5G..."]}],
-    "anchor_signer": ["5F..."],
-    "attestors": ["5G..."],
+    "sudo": [{"threshold": 2, "members": [{"key": "5D...", "pop": "0x..."}, {"key": "5H...", "pop": "0x..."},
+                                          {"key": "5C...", "pop": "0x..."}]}],
+    "guardian": [{"threshold": 2, "members": [{"key": "5E...", "pop": "0x..."}, {"key": "5F...", "pop": "0x..."},
+                                              {"key": "5G...", "pop": "0x..."}]}],
+    "anchor_signer": ["5J..."],
+    "attestors": ["5K..."],
     "oracle": [],
-    "endowed": ["5E...", {"threshold": 2, "members": ["5A...", "5B..."]}]
+    "endowed": ["5L...", {"threshold": 2, "members": [{"key": "5A...", "pop": "0x..."},
+                                                      {"key": "5B...", "pop": "0x..."}]}]
   },
   "economics": {
     "attestation_reward_per_signer": 1000000,
@@ -235,12 +250,15 @@ state version but 0 as V1. A version section the node cannot decode refuses.
 
 - `roles` maps a role name to entries. An entry is a public key (SS58, or
   0x-hex 32-byte account or 33-byte ECDSA key), never a secret URI, or a
-  multisig `{"threshold": k, "members": [...]}` whose members are entries too;
-  its account is pallet_multisig's for those members and threshold, and every
-  member is checked. A flat entry asserts one key that its holder alone
-  controls: the preflight cannot see inside an address, so a multisig written
-  as the address a wallet shows has its members unchecked. Declare every
-  multisig by its members. `sudo`, `anchor_signer`, `attestors` and `oracle`
+  multisig `{"threshold": k, "members": [...]}`; its account is
+  pallet_multisig's for those members and threshold, and every member is
+  checked. A member is a multisig in turn, declared by its members, or a key
+  given with its holder's proof of possession, `{"key": "5D...", "pop":
+  "0x..."}`, with no `pop` until its holder signs (see
+  [Proof of possession](#proof-of-possession)). Rule 10 refuses a member given
+  as a bare key, so a multisig written as the address a wallet shows refuses
+  until it is declared by its members. An entry that is no multisig asserts
+  one key its holder alone controls. `sudo`, `anchor_signer`, `attestors` and `oracle`
   must be present; an empty `oracle` states that no oracle signer runs.
   `roles.sudo` must name exactly the genesis `Sudo.Key` (or be empty when
   genesis sets none), and `roles.guardian` exactly the genesis
@@ -459,12 +477,73 @@ wraps one `as_multi` in another, so its veto competes on fees and a stolen
 sudo key could crowd it out of blocks. The runtime test
 `a_veto_through_a_nested_multisig_member_is_not_taken_first` pins that.
 
-The preflight cannot see inside a flat member address: one that is the account
-of a multisig not declared in the role (of the other role's keyholders, of
-well-known keys, or of the role's own members) reads as one more key, as does
-a key its holder shares with another member's, and as a guardian member its
-veto goes unprioritized unseen. The manifest's word on who holds each key is
-trusted.
+## Proof of possession
+
+Every member of every multisig, in any role and at any depth, is a multisig
+declared by its members or a key given with its `pop`: its holder's signature
+of the member's challenge. Rule 10 refuses a member given as a bare key, one
+with no `pop`, and a `pop` that does not verify. A secret signs for its own key
+and nothing else, so a member that proves possession is a key someone holds,
+never the address of a multisig no one declared, which no secret signs for:
+each multisig needs the keyholders its threshold says, at every depth, and
+rules 1 and 7 see every one of them. The ceremony keeps the holders apart:
+each signs on their own device, and no one sees another's secret.
+
+The challenge is these bytes, which `challenge` prints as 0x-hex:
+
+| Bytes | Holds |
+|---|---|
+| `materios-launch-pop-v1` | the domain, which nothing else a key signs for a launch starts with |
+| SCALE string | the chain spec's `name` |
+| SCALE string | the chain spec's `id` |
+| 32 | the genesis hash the preflight computes |
+| 32 | the launch manifest hash, which leaves every `pop` out |
+| SCALE string | the role |
+| SCALE `Vec<u32>` | the position: the multisig's index in the role, then the member's index in each multisig down to it |
+
+A SCALE string is its UTF-8 length as a compact integer, then its UTF-8. So
+`roles.sudo[0].members[2].members[1]` signs role `sudo` at position 0 2 1, and
+its `pop` proves nothing for another chain, genesis, launch manifest, role or
+position.
+
+A 32-byte key proves possession with sr25519 under Substrate's signing
+context, as `subkey sign` signs. The manifest says no more of a 32-byte key
+than that it is an account, and sr25519 is Substrate's default for one, so an
+ed25519 signature does not verify. A 33-byte key is ECDSA's: its `pop` is the
+65-byte signature sp_core's ECDSA makes over blake2-256 of the challenge, whose
+signer, recovered by its recovery id, must be the key. A signer that wraps
+what it signs, as polkadot.js `signRaw` wraps it in `<Bytes>`, signs another
+message, which does not verify. sr25519 is verified with py-sr25519-bindings,
+schnorrkel's binding, which the operator kit's multisig aggregator also
+verifies with, and ECDSA with coincurve, libsecp256k1's, the library sp_core's
+ECDSA calls in the node.
+
+The ceremony step, once the spec and every other field of the manifest are
+final, since the challenge binds both:
+
+1. Give each multisig member as `{"key": "5D..."}`. A member still given as a
+   bare key has no challenge: `challenge` refuses it as unreadable, since
+   giving it as `{"key": ...}` changes the launch manifest hash its challenge
+   binds.
+2. Print each member's challenge, for `roles.sudo[0].members[1]`:
+
+   ```
+   python3 launch_preflight.py challenge --spec mainnet-raw.json --launch launch.json --role sudo --index 0 1
+   ```
+
+3. Its holder signs it offline on their own device, with their secret URI in a
+   file only they can read, and `--scheme ecdsa` for a 33-byte key:
+
+   ```
+   subkey sign --suri <secret URI file> --hex --message 0x<challenge>
+   ```
+
+4. Put each signature subkey prints in as its member's `pop`. The launch
+   manifest hash leaves every `pop` out, so the proofs go in in any order, and
+   a launch key signature made before them still verifies.
+
+Each rule 10 refusal names the `challenge` command that prints the member's
+challenge.
 
 ## Public RPC probe
 
@@ -654,7 +733,10 @@ SUBWASM=./subwasm python3 -m pytest test_launch_preflight.py
 
 The CLI tests run the real subwasm, a local server that answers like Kupo, one
 that answers JSON-RPC over HTTP and a WebSocket like a node or a filter, and a
-script that answers `export-blocks` like the node. The tests against the real
+script that answers `export-blocks` like the node. Every `pop` in the tests is
+signed by an sr25519 or ECDSA key the test generates, never a dev or well-known
+key, over a challenge the tests build apart from the preflight, and the CLI
+tests' launches carry one for each multisig member. The tests against the real
 node take its path: rule 8's, and the clean launch carrying the runtime this
 tree builds, which rule 1 scans for well-known keys:
 

@@ -10,8 +10,9 @@ public RPC URL serves, probed live, and what Cardano holds, through a Kupo index
 the cMATRA lock that backs genesis and the permissioned candidates the runtime
 draws the committee from. A launch manifest, signed with a launch
 key launch_keys.json pins, supplies what genesis cannot show: who holds each
-role, the explicit economics, where the lock is, how long a session lasts, the
-Cardano settings every authority's follower runs with.
+role, with each multisig member's holder's proof of possession of its key, the
+explicit economics, where the lock is, how long a session lasts, the Cardano
+settings every authority's follower runs with.
 
 Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
@@ -76,11 +77,18 @@ Rules, each of which refuses on its own:
                  follower settings (the MC__ epoch layout, k and f) are not
                  the declared cardano_follower, or one other than Cardano
                  mainnet's
+ 10 possession   a member of a multisig in any role, at any depth, that is a
+                 bare key, gives no proof of possession, or gives one that is
+                 not its key's signature (sr25519, or ECDSA for a 33-byte key)
+                 of its challenge: the domain, the chain's name, id and genesis
+                 hash, the launch manifest hash without the proofs, its role
+                 and its position
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
         [--manifest-key 0x<ed25519 pubkey>] [--extra-well-known exposed.json ...] [--subwasm PATH]
     launch_preflight.py sign --spec raw.json --launch launch.json --key <ed25519 seed file> --out signed.json
+    launch_preflight.py challenge --spec raw.json --launch launch.json --role sudo --index 0 1
 
 Exit 0 only when every rule passes; 1 with every reason when any refuses;
 2 when an input cannot be read.
@@ -108,6 +116,8 @@ from pathlib import Path
 
 import base58
 import cbor2
+import coincurve
+import sr25519
 import xxhash
 import yaml
 import zstandard
@@ -119,8 +129,9 @@ from websockets.sync.client import connect as ws_connect
 HERE = Path(__file__).resolve().parent
 # The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
 LAUNCH_KEYS = HERE / "launch_keys.json"
-KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE, COMMITTEE = (
-    "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock", "8 node", "9 committee")
+KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE, COMMITTEE, POSSESSION = (
+    "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock", "8 node", "9 committee",
+    "10 possession")
 CODE_KEY = b":code"
 # sp_api's id of the Core API, blake2_64 of its name; an API entry is the 8-byte id and a u32 version.
 CORE_API = hashlib.blake2b(b"Core", digest_size=8).digest()
@@ -132,6 +143,8 @@ CODE_BOMB_LIMIT = 50 * 1024 * 1024
 ZSTD_STEP = 256
 DOMAIN = b"materios-launch-manifest-v1"
 DOMAIN_32 = DOMAIN.ljust(32, b"\0")
+# What a multisig member's proof of possession signs first, apart from anything else a key signs.
+POP_DOMAIN = b"materios-launch-pop-v1"
 HASH_FIELDS = ("genesis_hash", "code_hash", "chain_spec_hash", "launch_manifest_hash")
 # Pallet name in construct_runtime, and the crate its types keep under any name.
 FORBIDDEN_PALLETS = {"PerpEngine": "pallet_perp_engine"}
@@ -946,24 +959,36 @@ def multisig_account(members: list[bytes], threshold: int) -> bytes:
                       + threshold.to_bytes(2, "little"))
 
 
+def is_multisig(entry) -> bool:
+    return isinstance(entry, dict) and "members" in entry
+
+
+def key_text(leaf) -> str:
+    """The public key a role entry that is no multisig names: a bare key, or a multisig member's key given with its
+    holder's proof of possession."""
+    return leaf["key"] if isinstance(leaf, dict) else leaf
+
+
 def role_leaves(entry, where: str):
-    """(where, key string) for a role entry: the key itself, or every member of its multisig."""
-    if isinstance(entry, dict):
+    """(where, path, leaf) for each key of a role entry: the entry itself, or each member of its multisig, at any
+    depth, that is no multisig, with its index in each multisig down to it."""
+    if is_multisig(entry):
         for i, member in enumerate(entry["members"]):
-            yield from role_leaves(member, f"{where}.members[{i}]")
+            for leaf_where, path, leaf in role_leaves(member, f"{where}.members[{i}]"):
+                yield leaf_where, (i, *path), leaf
     else:
-        yield where, entry
+        yield where, (), entry
 
 
 def role_account(entry) -> bytes:
     """The on-chain account a role entry names: a public key's account, or its
     multisig's. Raises ValueError when a key does not decode."""
-    if isinstance(entry, dict):
+    if is_multisig(entry):
         members = [role_account(member) for member in entry["members"]]
         if len(set(members)) != len(members):
             raise ValueError("a multisig lists a member twice")
         return multisig_account(members, entry["threshold"])
-    raw = decode_public_key(entry)
+    raw = decode_public_key(key_text(entry))
     return blake2_256(raw) if len(raw) == 33 else raw
 
 
@@ -971,14 +996,14 @@ def role_accounts(entry, where: str):
     """(where, account) for a role entry and each member of its multisig, at any
     depth. Raises ValueError when a key does not decode."""
     yield where, role_account(entry)
-    if isinstance(entry, dict):
+    if is_multisig(entry):
         for i, member in enumerate(entry["members"]):
             yield from role_accounts(member, f"{where}.members[{i}]")
 
 
 def role_multisigs(entry, where: str):
     """(where, multisig) for a role entry's multisig and each one nested in it."""
-    if isinstance(entry, dict):
+    if is_multisig(entry):
         yield where, entry
         for i, member in enumerate(entry["members"]):
             yield from role_multisigs(member, f"{where}.members[{i}]")
@@ -1004,7 +1029,7 @@ def lone_holders(entry) -> list[bytes]:
                     grown = True
         return target in signs_as
 
-    return sorted(key for key in {role_account(text) for _, text in role_leaves(entry, "")} if acts_alone(key))
+    return sorted(key for key in {role_account(leaf) for _, _, leaf in role_leaves(entry, "")} if acts_alone(key))
 
 
 def uint_constant(meta: Metadata, pallet: str, name: str, width: int) -> int | None:
@@ -1019,7 +1044,7 @@ def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, pr
     single key, one key meets its threshold alone, or pallet_multisig refuses
     to sign through it or through a multisig nested in it, since it has more
     members than the runtime's MaxSignatories."""
-    if not isinstance(entry, dict):
+    if not is_multisig(entry):
         return [f"{where} is a single key: {name} must be a multisig with a threshold of at least 2, declared by its "
                 "members so each one is checked"]
     limit = uint_constant(meta, "Multisig", "MaxSignatories", 4)
@@ -1037,8 +1062,8 @@ def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, pr
     except ValueError:
         return faults  # rule 1 refuses a key that does not decode and a multisig that lists a member twice
     paths: dict[bytes, list[str]] = {}
-    for path, text in role_leaves(entry, where):
-        paths.setdefault(role_account(text), []).append(path)
+    for path, _, leaf in role_leaves(entry, where):
+        paths.setdefault(role_account(leaf), []).append(path)
     return faults + [f"{where}: {ss58(key, prefix)}, the member at {' and '.join(paths[key])}, meets its threshold "
                      f"alone by also signing as a nested multisig, so one keyholder alone {power}"
                      for key in holders]
@@ -1377,7 +1402,8 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
         for i, entry in enumerate(entries):
             where = f"roles.{role}[{i}]"
             decoded = True
-            for leaf, text in role_leaves(entry, where):
+            for leaf, _, member in role_leaves(entry, where):
+                text = key_text(member)
                 uri = phraseless_uri(text) or dev_uri(text)
                 if uri:
                     findings.append(Finding(KEYS, f"{leaf}: well-known secret URI {uri}"))
@@ -2713,8 +2739,18 @@ def canonical_payload(hashes: dict[str, bytes]) -> bytes:
     return DOMAIN_32 + b"".join(hashes[name] for name in HASH_FIELDS)
 
 
+def without_pops(entry):
+    """A role entry as the launch manifest hash reads it: with no multisig member's pop."""
+    if is_multisig(entry):
+        return dict(entry, members=[without_pops(member) for member in entry["members"]])
+    return {field: value for field, value in entry.items() if field != "pop"} if isinstance(entry, dict) else entry
+
+
 def launch_manifest_hash(launch: dict) -> bytes:
-    return canonical_json_hash(launch)
+    """blake2-256 of the launch manifest's canonical JSON with no pop in it: each multisig member's holder signs this
+    hash, so collecting their pops leaves it as it was."""
+    return canonical_json_hash(dict(launch, roles={role: [without_pops(entry) for entry in entries]
+                                                   for role, entries in launch["roles"].items()}))
 
 
 def spec_genesis_hash(spec: Spec) -> bytes:
@@ -2827,12 +2863,12 @@ def check_guardian(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     findings += [Finding(TIMELOCK, fault) for fault in multisig_faults(
         entries[0], "roles.guardian[0]", "the guardian", "can veto Root's queued calls or co-sign them early", meta,
         spec.ss58_prefix)]
-    if isinstance(entries[0], dict):
+    if is_multisig(entries[0]):
         findings += [Finding(TIMELOCK, f"roles.guardian[0].members[{i}] is a multisig: the runtime takes the "
                                        "guardian's veto ahead of fee-paying calls only when a member key signs it "
                                        "through one as_multi, so a veto through a nested multisig can be crowded out "
                                        "of blocks")
-                     for i, member in enumerate(entries[0]["members"]) if isinstance(member, dict)]
+                     for i, member in enumerate(entries[0]["members"]) if is_multisig(member)]
     try:
         guardian = list(role_accounts(entries[0], "roles.guardian[0]"))
     except ValueError:
@@ -2891,6 +2927,85 @@ def check_delays(spec: Spec, meta: Metadata) -> list[Finding]:
         findings.append(Finding(TIMELOCK, f"RootTimelock.Delays (recovery {recovery}, standard {standard}, long {long} "
                                           "blocks) breaks the order 0 < recovery <= standard <= long that the "
                                           "runtime's genesis builder asserts"))
+    return findings
+
+
+def multisig_members(launch: dict):
+    """(role, where, position, leaf) for each member of each multisig in each role that is no multisig, at any depth:
+    its position is its multisig's index in the role, then its index in each multisig down to it."""
+    for role, entries in sorted(launch["roles"].items()):
+        for i, entry in enumerate(entries):
+            if is_multisig(entry):
+                for where, path, leaf in role_leaves(entry, f"roles.{role}[{i}]"):
+                    yield role, where, (i, *path), leaf
+
+
+def scale_text(text: str) -> bytes:
+    """A string as SCALE encodes it: its UTF-8 length as a compact integer, then its UTF-8."""
+    raw = text.encode()
+    return compact(len(raw)) + raw
+
+
+def possession_context(spec: Spec, launch: dict) -> bytes:
+    """What every proof of possession of a launch signs first: the domain, the chain spec's name and id, the genesis
+    hash and the launch manifest hash, so a pop proves nothing for another chain, genesis or launch."""
+    name, chain_id = spec.doc.get("name"), spec.doc.get("id")
+    if not (isinstance(name, str) and isinstance(chain_id, str)):
+        raise InputError("the chain spec must give its name and id as strings, as the node reads a spec: each proof "
+                         "of possession binds both")
+    return POP_DOMAIN + scale_text(name) + scale_text(chain_id) + spec_genesis_hash(spec) + launch_manifest_hash(launch)
+
+
+def possession_challenge(context: bytes, role: str, position: tuple[int, ...]) -> bytes:
+    """What the holder of the member at `position` in `role` signs: the launch's context, the role, then the
+    position as a SCALE list of u32 indices."""
+    return (context + scale_text(role) + compact(len(position))
+            + b"".join(index.to_bytes(4, "little") for index in position))
+
+
+def possession_verifies(key: bytes, challenge: bytes, pop: bytes) -> bool:
+    """Whether `pop` is the signature by `key` of `challenge` that subkey sign writes: sr25519 under Substrate's
+    signing context for a 32-byte key; for a 33-byte key ECDSA over blake2-256 of the challenge, whose signer,
+    recovered by the signature's own recovery id, must be the key, as sp_core's ecdsa verifies it. A signature or key
+    the scheme cannot read verifies nothing."""
+    try:
+        if len(key) == 33:
+            signer = coincurve.PublicKey.from_signature_and_message(pop, blake2_256(challenge), hasher=None)
+            return signer.format() == key
+        return sr25519.verify(pop, challenge, key)
+    except ValueError:
+        return False
+
+
+def check_possession(spec: Spec, launch: dict) -> list[Finding]:
+    """Each member of each multisig in each role, at any depth, must be a key whose holder signed its challenge: one
+    no one proves to hold can be the address of a multisig no one declared, which no secret signs for, so the
+    multisig it is in would need fewer keyholders than its threshold says, or keyholders no one checked."""
+    findings, context = [], None
+    for role, where, position, leaf in multisig_members(launch):
+        command = f"challenge --role {role} --index {' '.join(map(str, position))}"
+        if not isinstance(leaf, dict):
+            findings.append(Finding(POSSESSION, f'{where} is a bare key: a multisig member is a key given with its '
+                                                f'holder\'s pop, {{"key": ..., "pop": ...}}, or a multisig declared by '
+                                                "its members, since an address no one proves to hold can be a "
+                                                "multisig no one declared"))
+            continue
+        if "pop" not in leaf:
+            findings.append(Finding(POSSESSION, f"{where} gives no pop: its holder has not signed its challenge "
+                                                f"({command}), so no one has shown they hold its key"))
+            continue
+        try:
+            key = decode_public_key(leaf["key"])
+        except ValueError:
+            continue  # rule 1 already refuses a role key that does not decode
+        context = context or possession_context(spec, launch)
+        if not possession_verifies(key, possession_challenge(context, role, position),
+                                   hex_bytes(leaf["pop"], f"{where}.pop")):
+            scheme = "ECDSA" if len(key) == 33 else "sr25519"
+            findings.append(Finding(POSSESSION, f"{where}: its pop is not an {scheme} signature by its key of its "
+                                                f"challenge ({command}), which binds this chain, genesis and launch "
+                                                "manifest and its role and position: another key signed it, or its "
+                                                "holder signed for another launch, role or position"))
     return findings
 
 
@@ -3310,12 +3425,25 @@ def validate_key_text(text: str, where: str) -> None:
         hex_bytes(text, where)
 
 
-def validate_role_entry(entry, where: str) -> None:
+def validate_role_entry(entry, where: str, member: bool = False) -> None:
+    """A role entry: a public key, or a multisig of at least two members. A member may also be a key given with its
+    holder's proof of possession, {"key": ..., "pop": ...}, with no pop until its holder signs; rule 10 refuses a
+    member with none, and one given as a bare key."""
     if isinstance(entry, str):
         validate_key_text(entry, where)
         return
     if not isinstance(entry, dict):
         raise InputError(f"{where} must be a public key string or a multisig")
+    if "key" in entry:
+        if not member:
+            raise InputError(f"{where} gives a key with a pop: a role entry is a public key or a multisig, and a pop "
+                             "is given for a multisig's member")
+        if set(entry) - {"key", "pop"} or not all(isinstance(value, str) for value in entry.values()):
+            raise InputError(f"{where} must hold its key and, once its holder signs, its pop, each a string")
+        validate_key_text(entry["key"], f"{where}.key")
+        if "pop" in entry:
+            hex_bytes(entry["pop"], f"{where}.pop")
+        return
     if set(entry) != {"threshold", "members"}:
         raise InputError(f"{where} must hold exactly threshold and members")
     members, threshold = entry["members"], entry["threshold"]
@@ -3324,7 +3452,7 @@ def validate_role_entry(entry, where: str) -> None:
     if not isinstance(threshold, int) or isinstance(threshold, bool) or not 1 <= threshold <= len(members):
         raise InputError(f"{where} threshold must be an integer from 1 to {len(members)}")
     for i, member in enumerate(members):
-        validate_role_entry(member, f"{where}.members[{i}]")
+        validate_role_entry(member, f"{where}.members[{i}]", member=True)
 
 
 def validate_node(node, where: str) -> None:
@@ -3462,6 +3590,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
     well_known = load_well_known(extra_well_known)
     return (check_chain_identity(spec)
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
+            + check_possession(spec, launch)
             + check_committee(spec, meta, launch)
             + check_sessions(spec, meta, launch)
             + check_follower(launch)
@@ -3552,6 +3681,22 @@ def cmd_sign(args) -> int:
     return 0
 
 
+def cmd_challenge(args) -> int:
+    launch = read_json(args.launch, "launch manifest")
+    validate_launch(launch)
+    position = tuple(args.index)
+    where, leaf = next(((where, leaf) for role, where, at, leaf in multisig_members(launch)
+                        if (role, at) == (args.role, position)), (None, None))
+    if where is None:
+        raise InputError(f"roles.{args.role} has no multisig member at index {' '.join(map(str, position))}: give the "
+                         "multisig's index in the role, then the member's index in each multisig down to it")
+    if not isinstance(leaf, dict):
+        raise InputError(f'{where} is a bare key: give it as {{"key": ...}} before its holder signs, since its '
+                         "challenge binds the launch manifest as it reads once the pop goes in")
+    print("0x" + possession_challenge(possession_context(load_spec(args.spec), launch), args.role, position).hex())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -3573,6 +3718,14 @@ def main(argv: list[str] | None = None) -> int:
     sign.add_argument("--key", required=True, help="file holding the 32-byte ed25519 seed as 0x-hex")
     sign.add_argument("--out", required=True)
     sign.set_defaults(func=cmd_sign)
+    challenge = sub.add_parser("challenge", help="print, as 0x-hex, the challenge a multisig member's holder signs "
+                                                 "offline to prove possession of its key")
+    challenge.add_argument("--spec", required=True, help="raw chain spec")
+    challenge.add_argument("--launch", required=True, help="launch manifest JSON")
+    challenge.add_argument("--role", required=True)
+    challenge.add_argument("--index", required=True, type=int, nargs="+",
+                           help="the multisig's index in the role, then the member's index in each multisig down to it")
+    challenge.set_defaults(func=cmd_challenge)
     args = parser.parse_args(argv)
     try:
         return args.func(args)

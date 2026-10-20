@@ -22,7 +22,9 @@ from pathlib import Path
 
 import base58
 import cbor2
+import coincurve
 import pytest
+import sr25519
 import xxhash
 import zstandard
 from nacl import signing
@@ -111,8 +113,29 @@ def known():
     return lp.load_well_known()
 
 
+# How to sign as the holder of each key a test generates, by its public key.
+KEYHOLDERS = {}
+
+
 def fresh_account() -> bytes:
-    return signing.SigningKey.generate().verify_key.encode()
+    """A new sr25519 key, whose holder the tests can sign as."""
+    pair = sr25519.pair_from_seed(os.urandom(32))
+    KEYHOLDERS[pair[0]] = lambda message: sr25519.sign(pair, message)
+    return pair[0]
+
+
+def fresh_ecdsa_key() -> bytes:
+    """A new ECDSA key, compressed to 33 bytes, whose holder signs as sp_core's ecdsa does: over blake2-256 of the
+    message, with the recovery id after r and s."""
+    secret = coincurve.PrivateKey()
+    public = secret.public_key.format()
+    KEYHOLDERS[public] = lambda message: secret.sign_recoverable(lp.blake2_256(message), hasher=None)
+    return public
+
+
+def stranger() -> bytes:
+    """A key whose holder no test can sign as."""
+    return sr25519.pair_from_seed(os.urandom(32))[0]
 
 
 def put(spec: lp.Spec, pallet: str, item: str, value: bytes) -> None:
@@ -147,8 +170,73 @@ def messages(findings) -> list[str]:
     return [str(f) for f in findings]
 
 
+def role_key(key: bytes) -> str:
+    """A role key as a manifest gives it: SS58 for a 32-byte key, 0x-hex for a 33-byte ECDSA key."""
+    return ss58(key) if len(key) == 32 else "0x" + key.hex()
+
+
 def msig(threshold, *members) -> dict:
-    return {"threshold": threshold, "members": [ss58(m) for m in members]}
+    return {"threshold": threshold, "members": [role_key(m) for m in members]}
+
+
+POP_DOMAIN = b"materios-launch-pop-v1"
+
+
+def scale_text(text: str) -> bytes:
+    return lp.compact(len(text.encode())) + text.encode()
+
+
+def launch_context(spec: lp.Spec, launch: dict) -> bytes:
+    """What every proof of possession of a launch signs first, built here apart from the preflight: the domain, the
+    chain spec's name and id, the genesis hash and the launch manifest hash."""
+    return (POP_DOMAIN + scale_text(spec.doc["name"]) + scale_text(spec.doc["id"]) + lp.spec_genesis_hash(spec)
+            + lp.launch_manifest_hash(launch))
+
+
+def member_challenge(context: bytes, role: str, position: tuple[int, ...]) -> bytes:
+    """The challenge the holder of the member at `position` in `role` signs: the launch's context, the role, then its
+    multisig's index in the role and its index in each multisig down to it, each a u32."""
+    return (context + scale_text(role) + lp.compact(len(position))
+            + b"".join(index.to_bytes(4, "little") for index in position))
+
+
+def challenge(spec: lp.Spec, launch: dict, role: str, position: tuple[int, ...]) -> bytes:
+    return member_challenge(launch_context(spec, launch), role, position)
+
+
+def held(text) -> bytes | None:
+    """The key a member names, when a test can sign as its holder."""
+    try:
+        key = lp.decode_public_key(text)
+    except ValueError:
+        return None
+    return key if key in KEYHOLDERS else None
+
+
+def prove(launch: dict, spec: lp.Spec) -> dict:
+    """The launch with each multisig member whose holder a test can sign as given with that holder's proof of
+    possession, as the ceremony collects them: a bare key becomes {"key": ...}, which fixes the launch manifest hash,
+    and each holder then signs its challenge. A member no test holds stays as it is."""
+    proven, owed = copy.deepcopy(launch), []
+
+    def collect(multisig: dict, role: str, position: tuple[int, ...]) -> None:
+        for j, member in enumerate(multisig["members"]):
+            if lp.is_multisig(member):
+                collect(member, role, (*position, j))
+            elif isinstance(member, str) and held(member):
+                multisig["members"][j] = {"key": member}
+                owed.append((role, (*position, j), multisig["members"][j]))
+            elif isinstance(member, dict) and "pop" not in member and held(member["key"]):
+                owed.append((role, (*position, j), member))
+
+    for role, entries in proven["roles"].items():
+        for i, entry in enumerate(entries):
+            if lp.is_multisig(entry):
+                collect(entry, role, (i,))
+    context = launch_context(spec, proven)
+    for role, position, leaf in owed:
+        leaf["pop"] = "0x" + KEYHOLDERS[held(leaf["key"])](member_challenge(context, role, position)).hex()
+    return proven
 
 
 NO_CARDANO = lp.CardanoView(lock=None, candidates=[], d_parameter=(0, 0))
@@ -4500,7 +4588,7 @@ def nested_members(entry) -> list[str]:
     return [f"[7 timelock] roles.guardian[0].members[{i}] is a multisig: the runtime takes the guardian's veto ahead "
             "of fee-paying calls only when a member key signs it through one as_multi, so a veto through a nested "
             "multisig can be crowded out of blocks"
-            for i, member in enumerate(entry["members"]) if isinstance(member, dict)]
+            for i, member in enumerate(entry["members"]) if lp.is_multisig(member)]
 
 
 def delays(*blocks: int) -> bytes:
@@ -4851,16 +4939,247 @@ def test_a_genesis_that_stores_no_delays_is_refused(spec242):
 
 
 # ---------------------------------------------------------------------------
+# Rule 10: every multisig member's holder proves possession of its key
+# ---------------------------------------------------------------------------
+
+def possession_findings(spec: lp.Spec, launch: dict) -> list[str]:
+    return messages(lp.check_possession(spec, launch))
+
+
+def bare(where: str) -> str:
+    return (f"[10 possession] {where} is a bare key: a multisig member is a key given with its holder's pop, "
+            '{"key": ..., "pop": ...}, or a multisig declared by its members, since an address no one proves to hold '
+            "can be a multisig no one declared")
+
+
+def no_pop(where: str, role: str, index: str) -> str:
+    return (f"[10 possession] {where} gives no pop: its holder has not signed its challenge (challenge --role {role} "
+            f"--index {index}), so no one has shown they hold its key")
+
+
+def unproven(where: str, scheme: str, role: str, index: str) -> str:
+    return (f"[10 possession] {where}: its pop is not an {scheme} signature by its key of its challenge (challenge "
+            f"--role {role} --index {index}), which binds this chain, genesis and launch manifest and its role and "
+            "position: another key signed it, or its holder signed for another launch, role or position")
+
+
+def nested_multisig() -> dict:
+    """A 2-of-3 whose third member is a 2-of-2, every key fresh."""
+    return {"threshold": 2, "members": [ss58(fresh_account()), ss58(fresh_account()),
+                                        msig(2, fresh_account(), fresh_account())]}
+
+
+def leaves(entry) -> list:
+    return [leaf for _, _, leaf in lp.role_leaves(entry, "")]
+
+
+def test_a_nested_multisig_whose_every_key_proves_possession_passes(spec):
+    launch = prove({"roles": {"sudo": [nested_multisig()], "guardian": [msig(2, *(fresh_account() for _ in range(3)))],
+                              "endowed": [ss58(fresh_account()), msig(1, fresh_account(), fresh_ecdsa_key())]}}, spec)
+    proven = [leaf for role in ("sudo", "guardian") for leaf in leaves(launch["roles"][role][0])]
+    proven += leaves(launch["roles"]["endowed"][1])
+    assert len(proven) == 9 and all(set(leaf) == {"key", "pop"} for leaf in proven)
+    assert possession_findings(spec, launch) == []
+
+
+def test_a_member_given_as_a_bare_key_is_refused_in_any_role_at_any_depth(spec):
+    sudo, endowed = nested_multisig(), msig(1, fresh_account(), stranger())
+    sudo["members"][2]["members"][1] = ss58(stranger())
+    launch = prove({"roles": {"sudo": [sudo], "endowed": [endowed]}}, spec)
+    assert possession_findings(spec, launch) == [bare("roles.endowed[0].members[1]"),
+                                                 bare("roles.sudo[0].members[2].members[1]")]
+
+
+# The address of a multisig no one declared: no secret signs for it, so it can prove nothing.
+def test_a_multisig_address_given_as_a_member_cannot_prove_possession(spec):
+    hidden = lp.multisig_account([fresh_account(), fresh_account()], 1)
+    launch = prove({"roles": {"sudo": [{"threshold": 2, "members": [
+        ss58(fresh_account()), {"key": ss58(hidden), "pop": "0x" + os.urandom(64).hex()}]}]}}, spec)
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+def test_a_member_given_with_no_pop_is_refused(spec):
+    launch = prove({"roles": {"guardian": [{"threshold": 2, "members": [
+        ss58(fresh_account()), ss58(fresh_account()), {"key": ss58(stranger())}]}]}}, spec)
+    assert possession_findings(spec, launch) == [no_pop("roles.guardian[0].members[2]", "guardian", "0 2")]
+
+
+def another_genesis(spec: lp.Spec) -> lp.Spec:
+    other = lp.Spec(copy.deepcopy(spec.doc), dict(spec.storage), spec.source)
+    put(other, "Sudo", "Key", fresh_account())
+    return other
+
+
+def renamed(spec: lp.Spec, **fields) -> lp.Spec:
+    return lp.Spec(dict(spec.doc, **fields), spec.storage, spec.source)
+
+
+# The challenge the member at roles.sudo[0].members[1] signs, for another launch, role or position than its own.
+OTHER_CHALLENGES = {
+    "another launch manifest": lambda spec, launch: challenge(spec, dict(launch, slots_per_epoch=60), "sudo", (0, 1)),
+    "another role": lambda spec, launch: challenge(spec, launch, "guardian", (0, 1)),
+    "another member index": lambda spec, launch: challenge(spec, launch, "sudo", (0, 2)),
+    "another multisig index": lambda spec, launch: challenge(spec, launch, "sudo", (1, 1)),
+    "a nested position": lambda spec, launch: challenge(spec, launch, "sudo", (0, 1, 0)),
+    "another chain name": lambda spec, launch: challenge(renamed(spec, name="Materios"), launch, "sudo", (0, 1)),
+    "another chain id": lambda spec, launch: challenge(renamed(spec, id="materios"), launch, "sudo", (0, 1)),
+    "another genesis": lambda spec, launch: challenge(another_genesis(spec), launch, "sudo", (0, 1)),
+    "another domain": lambda spec, launch: (b"materios-launch-pop-v2"
+                                            + challenge(spec, launch, "sudo", (0, 1))[len(POP_DOMAIN):]),
+    "the challenge wrapped as polkadot.js signRaw wraps it": lambda spec, launch: (
+        b"<Bytes>" + challenge(spec, launch, "sudo", (0, 1)) + b"</Bytes>"),
+}
+
+
+@pytest.mark.parametrize("other", OTHER_CHALLENGES.values(), ids=OTHER_CHALLENGES.keys())
+def test_a_pop_its_holder_signed_for_another_launch_role_or_position_is_refused(spec, other):
+    member = fresh_account()
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), member, fresh_account())]}}, spec)
+    launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + KEYHOLDERS[member](other(spec, launch)).hex()
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+# What stands in a member's pop in place of its holder's signature of its own challenge.
+FORGERIES = {
+    "another key's signature of its challenge": lambda member, message: KEYHOLDERS[fresh_account()](message),
+    "random bytes": lambda member, message: os.urandom(64),
+    "zeros": lambda member, message: bytes(64),
+    "its signature cut short": lambda member, message: KEYHOLDERS[member](message)[:63],
+    "its signature with a byte more": lambda member, message: KEYHOLDERS[member](message) + b"\0",
+    "nothing": lambda member, message: b"",
+}
+
+
+@pytest.mark.parametrize("forge", FORGERIES.values(), ids=FORGERIES.keys())
+def test_a_pop_that_is_not_its_keys_signature_of_its_challenge_is_refused(spec, forge):
+    member = fresh_account()
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), member)]}}, spec)
+    message = challenge(spec, launch, "sudo", (0, 1))
+    launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + forge(member, message).hex()
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+def test_two_members_pops_swapped_are_refused(spec):
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), fresh_account())]}}, spec)
+    first, second = launch["roles"]["sudo"][0]["members"]
+    first["pop"], second["pop"] = second["pop"], first["pop"]
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[0]", "sr25519", "sudo", "0 0"),
+                                                 unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+# A 33-byte key is ECDSA's, which the manifest admits: sp_core's ecdsa recovers the signer from blake2-256 of the
+# message and the signature's recovery id, and compares it with the key.
+def test_an_ecdsa_member_proves_possession_as_sp_core_verifies_it(spec):
+    member = fresh_ecdsa_key()
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), member)]}}, spec)
+    assert launch["roles"]["sudo"][0]["members"][1]["key"] == "0x" + member.hex()
+    assert possession_findings(spec, launch) == []
+    signature = bytes.fromhex(launch["roles"]["sudo"][0]["members"][1]["pop"][2:])
+    for pop in (signature[:64] + bytes([signature[64] ^ 1]), signature[:64], KEYHOLDERS[fresh_account()](b"")):
+        launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + pop.hex()
+        assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "ECDSA", "sudo", "0 1")]
+
+
+# The manifest says no more of a 32-byte key than that it is an account: it is read as sr25519's, Substrate's default.
+def test_an_ed25519_signature_does_not_prove_possession_of_a_32_byte_key(spec):
+    signer = signing.SigningKey.generate()
+    launch = prove({"roles": {"sudo": [{"threshold": 2, "members": [
+        ss58(fresh_account()), {"key": ss58(signer.verify_key.encode())}]}]}}, spec)
+    launch["roles"]["sudo"][0]["members"][1]["pop"] = "0x" + signer.sign(
+        challenge(spec, launch, "sudo", (0, 1))).signature.hex()
+    assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
+
+
+def test_collecting_the_pops_leaves_the_launch_manifest_hash_as_it_was(spec):
+    keyed = {"roles": {"sudo": [{"threshold": 2, "members": [
+        {"key": ss58(fresh_account())}, {"threshold": 2, "members": [{"key": ss58(fresh_account())},
+                                                                   {"key": role_key(fresh_ecdsa_key())}]}]}]}}
+    proven = prove(keyed, spec)
+    assert all("pop" in leaf for leaf in leaves(proven["roles"]["sudo"][0]))
+    assert lp.launch_manifest_hash(proven) == lp.launch_manifest_hash(keyed)
+    key = signing.SigningKey.generate()
+    assert lp.check_checkpoint(spec, proven, lp.signed_manifest(spec, keyed, key), [pub(key)]) == []
+    rekeyed = copy.deepcopy(proven)
+    rekeyed["roles"]["sudo"][0]["members"][0]["key"] = ss58(fresh_account())
+    assert lp.launch_manifest_hash(rekeyed) != lp.launch_manifest_hash(proven)
+
+
+def test_a_role_entry_that_is_not_a_multisig_owes_no_pop(spec):
+    launch = {"roles": {"anchor_signer": [ss58(stranger())], "endowed": [ss58(stranger())]}}
+    assert possession_findings(spec, launch) == []
+
+
+# Rules 1 and 7 read a member given with its pop as its key.
+@pytest.mark.parametrize("build", ONE_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
+def test_rule_1_reads_a_member_given_with_its_pop_as_its_key(spec, meta, known, build):
+    entry, holders = build()
+    proven = prove(sudo_launch(entry), spec)["roles"]["sudo"][0]
+    assert any(isinstance(leaf, dict) for leaf in leaves(proven))
+    assert sudo_findings(spec, meta, known, proven) == [
+        lone_holder("1 dev-keys", "roles.sudo[0]", key, paths, SUDO_POWER) for key, paths in sorted(holders)]
+
+
+# The spec 242 fixture holds no code to hash its genesis with, so the preprod v6 spec's challenges stand in.
+def test_a_guardian_whose_members_are_given_with_their_pops_has_no_nested_multisig(spec, guarded):
+    timelocked, meta, sudo, guardian = guarded
+    entry = prove(timelock_launch(sudo, msig(2, *guardian)), spec)["roles"]["guardian"][0]
+    assert all(set(member) == {"key", "pop"} for member in entry["members"])
+    assert guardian_findings(timelocked, meta, sudo, entry) == []
+
+
+KEY, POP = ss58(stranger()), "0x" + "cd" * 64
+
+
+def with_member(member) -> dict:
+    return {"roles": {"sudo": [{"threshold": 2, "members": [ss58(fresh_account()), member]}]}, "supply": VALID_LOCK}
+
+
+def test_a_member_given_with_its_pop_is_read():
+    lp.validate_launch(with_member({"key": KEY, "pop": POP}))
+    lp.validate_launch(with_member({"key": KEY}))
+
+
+@spelled(MISSPELLINGS)
+def test_a_pop_in_another_spelling_is_an_input_error(misspell):
+    with pytest.raises(lp.InputError, match=rf"^roles\.sudo\[0\]\.members\[1\]\.pop {MISSPELLED}"):
+        lp.validate_launch(with_member({"key": KEY, "pop": misspell("cd" * 64)}))
+
+
+@spelled(HEX_KEY_MISSPELLINGS)
+def test_a_member_key_given_with_its_pop_in_another_spelling_of_hex_is_an_input_error(misspell):
+    with pytest.raises(lp.InputError, match=rf"^roles\.sudo\[0\]\.members\[1\]\.key {MISSPELLED}"):
+        lp.validate_launch(with_member({"key": misspell(DIGITS), "pop": POP}))
+
+
+@pytest.mark.parametrize("member", [
+    {"key": KEY, "pop": POP, "scheme": "sr25519"}, {"key": KEY, "pop": None}, {"key": 7, "pop": POP},
+    {"key": KEY, "pop": [POP]},
+], ids=["an unknown field", "a null pop", "a key that is not a string", "a pop that is not a string"])
+def test_a_member_key_given_in_another_shape_is_an_input_error(member):
+    with pytest.raises(lp.InputError, match=re.escape(
+            "roles.sudo[0].members[1] must hold its key and, once its holder signs, its pop, each a string")):
+        lp.validate_launch(with_member(member))
+
+
+def test_a_pop_for_a_role_entry_that_is_no_multisig_member_is_an_input_error():
+    with pytest.raises(lp.InputError, match=re.escape(
+            "roles.anchor_signer[0] gives a key with a pop: a role entry is a public key or a multisig, and a pop is "
+            "given for a multisig's member")):
+        lp.validate_launch({"roles": {"anchor_signer": [{"key": KEY, "pop": POP}]}, "supply": VALID_LOCK})
+
+
+# ---------------------------------------------------------------------------
 # Rule 8: the genesis each authority's own node binary builds
 # ---------------------------------------------------------------------------
 
 # materios-node export-blocks, answering what the attestation asks: block 0 of the chain its --chain names, a raw
 # spec file or a chain built into the node, written as export-blocks --binary writes it. It builds a file's genesis
 # with the preflight's own computation, so these tests see the attestation's plumbing; test_node_attestation.py
-# runs the real node. Its chain-id reports that genesis as settlement's and the oracle's chain ids. KNOBS: tamper
-# builds another state root, fail builds none from a file, built_in_refused none from a built-in chain, as the
-# runtime refuses its genesis committee, export writes other bytes, chain_ids reports other chain ids, no_chain_id
-# has no chain-id subcommand, log records each call.
+# runs the real node. A --chain it cannot open as a file fails with the OS's error, as sc-chain-spec reports it. Its
+# chain-id reports that genesis as settlement's and the oracle's chain ids. KNOBS: tamper builds another state root,
+# fail builds none from a file, built_in_refused none from a built-in chain, as the runtime refuses its genesis
+# committee, preprod names the spec file whose genesis its built-in preprod builds, export writes other bytes,
+# chain_ids reports other chain ids, no_chain_id has no chain-id subcommand, log records each call.
 FAKE_NODE = '''#!@PYTHON@
 import hashlib
 import json
@@ -4916,17 +5235,22 @@ while i < len(args):
     else:
         out, i = args[i], i + 1
 chain = chain if chain is not None else "dev" if dev else ""
-if chain in ("", "dev", "local", "preprod"):
-    if KNOBS.get("built_in_refused"):
-        sys.exit('Error: Service(Client(Storage("the genesis committee is empty, so its first rotation would '
-                 'schedule an empty GRANDPA set; list the authorities in sessionCommitteeManagement.'
-                 'initialAuthorities for blob:\\\\n{}")))')
+built_in = chain in ("", "dev", "local", "preprod")
+if built_in and KNOBS.get("built_in_refused"):
+    sys.exit('Error: Service(Client(Storage("the genesis committee is empty, so its first rotation would '
+             'schedule an empty GRANDPA set; list the authorities in sessionCommitteeManagement.'
+             'initialAuthorities for blob:\\\\n{}")))')
+if not built_in:
+    try:
+        os.close(os.open(chain, os.O_RDONLY))
+    except OSError as e:
+        sys.exit(f"Error: Input(\\"Error opening spec file `{chain}`: {e.strerror} (os error {e.errno})\\")")
+source = KNOBS.get("preprod") if chain == "preprod" else None if built_in else chain
+if source is None:
     root, version = lp.blake2_256(chain.encode()), 1
-elif not os.path.exists(chain):
-    sys.exit(f"Error: Input(\\"Error opening spec file `{chain}`: No such file or directory (os error 2)\\")")
 else:
     try:
-        spec = lp.load_spec(chain)
+        spec = lp.load_spec(source)
     except lp.InputError as e:
         sys.exit(f"Error: Input(\\"Error parsing spec file: {e}\\")")
     if KNOBS.get("fail"):
@@ -5374,6 +5698,28 @@ def test_a_node_that_fails_on_a_chain_name_without_missing_that_file_is_an_input
         node_findings(preprod_path, node)
 
 
+# The red team's case, which the real-node suite runs on the node's own preprod: a chain built into the node whose
+# genesis is the checked one is refused all the same.
+def test_the_chain_built_into_the_node_as_preprod_is_refused_though_its_genesis_matches(tmp_path, preprod_path):
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain=preprod"],
+                    exe=fake_node(tmp_path, preprod=str(preprod_path)))
+    assert node_findings(preprod_path, node) == [
+        f"[8 node] authority val0: --chain 'preprod' builds genesis 0x{preprod_genesis_hex(preprod_path)} with no file "
+        "of that name here: the node takes it as a chain built into it, not the checked chain spec"]
+
+
+# A --chain through a file on this host, which the node fails to open, and not as a missing file.
+def test_a_chain_path_through_a_file_on_this_host_is_an_input_error(tmp_path, preprod_path):
+    (tmp_path / "raw.json").write_bytes(preprod_path.read_bytes())
+    value = str(tmp_path / "raw.json" / "raw.json")
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", value])
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val0: its node builds no genesis from --chain {value!r} here, and does not report it as a "
+            "missing file: the preflight cannot tell whether the node reads it as a file or as a chain built into it "
+            f'(Error: Input("Error opening spec file `{value}`: Not a directory (os error 20)")')):
+        node_findings(preprod_path, node)
+
+
 def test_an_authority_that_loads_its_chain_spec_by_a_relative_path_is_attested(tmp_path, preprod_path):
     node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", "raw.json", "--validator"])
     assert node_findings(preprod_path, node) == []
@@ -5388,6 +5734,18 @@ def test_a_chain_spec_path_that_names_the_checked_spec_on_this_host_is_attested(
     assert node_findings(preprod_path, node) == []
     assert [call["argv"][call["argv"].index("--chain") + 1] == str(here) for call in node_calls(log)
             if call["argv"][1] == "export-blocks"] == [True, False]
+
+
+# The checked spec at the path its --chain names on this host, which the node builds no genesis from.
+def test_a_node_that_builds_no_genesis_from_the_checked_spec_on_this_host_is_an_input_error(tmp_path, preprod_path):
+    here = tmp_path / "here-raw.json"
+    here.write_bytes(preprod_path.read_bytes())
+    node = attested(tmp_path, preprod_path, argv=["materios-node", "--chain", str(here)],
+                    exe=fake_node(tmp_path, fail=True))
+    with pytest.raises(lp.InputError, match=re.escape(
+            f"authority val0: its node builds no genesis from --chain {str(here)!r} on this host, where it is the "
+            'checked chain spec: Error: Service(Other("the fake node builds no genesis"))')):
+        node_findings(preprod_path, node)
 
 
 def test_a_chain_spec_path_that_names_another_file_on_this_host_is_an_input_error(tmp_path, preprod_path):
@@ -5741,8 +6099,10 @@ class Launch:
         return spec_path
 
     def run(self, capsys, key=None, manifest_key=None, extra=(), signed_launch=None) -> tuple[int, str]:
-        return run_cli(self.tmp_path, self.prepare(), self.launch, capsys, self.kupo.url, key or self.launch_key,
-                       manifest_key, extra, signed_launch)
+        """`sign`, then `check`, with each multisig member's holder's proof of possession collected first."""
+        spec_path = self.prepare()
+        return run_cli(self.tmp_path, spec_path, prove(self.launch, lp.load_spec(str(spec_path))), capsys,
+                       self.kupo.url, key or self.launch_key, manifest_key, extra, signed_launch)
 
     def run_respelled(self, capsys, respell) -> tuple[int, int, str]:
         """`sign`, then `check`, on this launch's spec with its raw storage then rewritten by `respell`."""
@@ -6201,6 +6561,89 @@ def test_cli_refuses_root_held_by_an_undeclared_multisig(clean, capsys):
     code, out = clean.run(capsys)
     assert code == 1
     assert f"[1 dev-keys] Sudo.Key {ss58(hidden)} is not the account roles.sudo declares" in out
+
+
+PASS = "MAINNET LAUNCH PREFLIGHT: PASS"
+
+
+def test_cli_passes_root_held_by_a_nested_multisig_whose_every_key_proves_possession(clean, capsys):
+    entry = nested_multisig()
+    entry["members"][2]["members"][0] = role_key(fresh_ecdsa_key())
+    put(clean.spec, "Sudo", "Key", lp.role_account(entry))
+    clean.launch["roles"]["sudo"] = [entry]
+    code, out = clean.run(capsys)
+    assert (code, out.strip()) == (0, PASS)
+
+
+def test_cli_refuses_a_multisig_member_whose_holder_gave_no_pop(clean, capsys):
+    members = [*clean.sudo_members[:2], stranger()]
+    put(clean.spec, "Sudo", "Key", lp.multisig_account(members, 2))
+    clean.launch["roles"]["sudo"] = [{"threshold": 2, "members": [*map(ss58, members[:2]), {"key": ss58(members[2])}]}]
+    code, out = clean.run(capsys)
+    assert code == 1
+    assert out.splitlines()[1:] == ["  " + no_pop("roles.sudo[0].members[2]", "sudo", "0 2")], out
+
+
+def keyed(launch: dict) -> dict:
+    """The launch with each member of its sudo and guardian multisigs given as {"key": ...}, as the ceremony drafts it
+    before its holders sign."""
+    drafted = copy.deepcopy(launch)
+    for role in ("sudo", "guardian"):
+        drafted["roles"][role][0]["members"] = [{"key": key} for key in drafted["roles"][role][0]["members"]]
+    return drafted
+
+
+def challenge_cli(capsys, spec_path: Path, launch_path: Path, role: str, *index: str) -> tuple[int, str]:
+    code = lp.main(["challenge", "--spec", str(spec_path), "--launch", str(launch_path), "--role", role,
+                    "--index", *index])
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
+
+
+# The ceremony: draft the manifest, print each member's challenge, have its holder sign it offline as subkey sign
+# --hex does, put each signature in as the member's pop, and check.
+def test_cli_prints_each_members_challenge_and_passes_the_launch_its_holders_signed(clean, capsys):
+    spec_path = clean.prepare()
+    draft = keyed(clean.launch)
+    draft_path = clean.tmp_path / "draft.json"
+    draft_path.write_text(json.dumps(draft))
+    signed = copy.deepcopy(draft)
+    for role in ("sudo", "guardian"):
+        for j, member in enumerate(signed["roles"][role][0]["members"]):
+            code, printed = challenge_cli(capsys, spec_path, draft_path, role, "0", str(j))
+            assert (code, printed) == (0, "0x" + challenge(lp.load_spec(str(spec_path)), draft, role, (0, j)).hex()
+                                       + "\n")
+            member["pop"] = "0x" + KEYHOLDERS[lp.decode_public_key(member["key"])](
+                bytes.fromhex(printed.strip()[2:])).hex()
+    code, out = run_cli(clean.tmp_path, spec_path, signed, capsys, clean.kupo.url, clean.launch_key,
+                        signed_launch=draft)
+    assert (code, out.strip()) == (0, PASS)
+
+
+@pytest.mark.parametrize("role, index", [
+    ("sudo", ["0"]), ("sudo", ["0", "3"]), ("sudo", ["1", "0"]), ("sudo", ["0", "0", "0"]), ("sudo", ["0", "-1"]),
+    ("anchor_signer", ["0", "0"]), ("treasury", ["0", "0"]),
+], ids=["the multisig itself", "past its members", "past the role's entries", "deeper than a member",
+        "a negative index", "a role entry that is no multisig", "an undeclared role"])
+def test_cli_challenge_names_only_a_multisig_member(clean, capsys, role, index):
+    spec_path = clean.prepare()
+    launch_path = clean.tmp_path / "draft.json"
+    launch_path.write_text(json.dumps(keyed(clean.launch)))
+    code, out = challenge_cli(capsys, spec_path, launch_path, role, *index)
+    assert (code, out) == (2, f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) roles.{role} has no multisig member at "
+                              f"index {' '.join(index)}: give the multisig's index in the role, then the member's "
+                              "index in each multisig down to it\n")
+
+
+# A bare member's challenge would bind a launch manifest that changes once the member is given as {"key": ...}.
+def test_cli_challenge_for_a_member_given_as_a_bare_key_is_an_input_error(clean, capsys):
+    spec_path = clean.prepare()
+    launch_path = clean.tmp_path / "launch.json"
+    launch_path.write_text(json.dumps(clean.launch))
+    code, out = challenge_cli(capsys, spec_path, launch_path, "guardian", "0", "1")
+    assert (code, out) == (2, "MAINNET LAUNCH PREFLIGHT: REFUSE (input) roles.guardian[0].members[1] is a bare key: "
+                              'give it as {"key": ...} before its holder signs, since its challenge binds the launch '
+                              "manifest as it reads once the pop goes in\n")
 
 
 def test_cli_refuses_a_launch_that_leaves_off_chain_roles_out(clean, capsys):
