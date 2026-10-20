@@ -233,7 +233,8 @@ core2 = { path = "vendor/core2" }
 # 2. `db-sync-follower` — upstream v1.5.1 sources under a manifest that pins
 #    its dependencies itself. Like upstream, and like `yaci-follower`, it
 #    serves the committee for a Cardano epoch from the data of the epoch two
-#    before it. CI fails if its `src` differs from upstream's.
+#    before it. CI fails if its `src` differs from upstream's, and runs the
+#    node's test of that lag against a Postgres.
 #
 # 3. `pallet-session-validator-management` —
 #    [materios-patch: idp-none-fallback]. Prevents a runtime panic at every

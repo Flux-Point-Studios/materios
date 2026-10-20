@@ -73,7 +73,7 @@
     {
       "id": "main-chain-follower",
       "name": "Main-chain follower",
-      "desc": "Cardano main-chain follower backends (db-sync and yaci-store with Mithril-certified stake) supplying candidate registrations and the D-parameter to authority selection. Like upstream partner-chains, both serve the committee for a Cardano epoch from the data of the epoch two before it. Preprod v6, keyed by the genesis hash read once from the node's client, draws every committee under the relaxation it has always run, from the data of the Cardano epoch each session starts in.",
+      "desc": "Cardano main-chain follower backends (db-sync and yaci-store with Mithril-certified stake) supplying candidate registrations and the D-parameter to authority selection. Like upstream partner-chains, both serve the committee for a Cardano epoch from the data of the epoch two before it. CI checks the db-sync lag on an isolated Postgres and requires its sources to match upstream v1.5.1. Preprod v6, keyed by the genesis hash read once from the node's client, draws every committee under the relaxation it has always run, from the data of the Cardano epoch each session starts in.",
       "kind": "engine",
       "paths": [
         "partnerchain/vendor/db-sync-follower",

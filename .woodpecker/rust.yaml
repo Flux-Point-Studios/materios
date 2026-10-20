@@ -9,6 +9,13 @@ when:
 labels:
   arm64-emu: "true"
 
+# Isolated database for the node's db-sync follower test.
+services:
+  - name: db-sync-postgres
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+
 steps:
   # Advisory, as in the GitHub workflow (continue-on-error): the tree is not
   # rustfmt-clean.
@@ -67,6 +74,8 @@ steps:
       # through the first committee rotation. And the Ariadne rule each
       # genesis draws its committees under.
       - cargo test -p materios-node --locked --no-fail-fast -- chain_spec inherent_data
+      # Pin the db-sync follower's epoch - 2 lag.
+      - MATERIOS_TEST_DBSYNC_URL=postgres://postgres@db-sync-postgres/postgres cargo test -p materios-node --locked --no-fail-fast -- main_chain_follower
       # The benchmarking genesis preset, which only a runtime built with
       # `dev-presets` has.
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast --features dev-presets the_benchmarking_preset_builds
