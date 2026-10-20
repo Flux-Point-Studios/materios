@@ -18,10 +18,12 @@ Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
                  role or a member of a role's multisig, a Cardano permissioned
                  candidate, a node launch command, or the manifest signing key;
-                 Sudo.Key or a genesis account that no declared role accounts
-                 for, or Root not a multisig of threshold 2 or more; an
-                 off-chain role left undeclared; a chain spec the anchor worker
-                 would read as a test network
+                 the all-zero key, whose sr25519 signature needs no secret, in
+                 a role or a member of a role's multisig; Sudo.Key or a genesis
+                 account that no declared role accounts for, or Root not a
+                 multisig of threshold 2 or more; an off-chain role left
+                 undeclared; a chain spec the anchor worker would read as a
+                 test network
   2 rewards      attestor reward and subsidy values or validator reward
                  parameters not declared, or genesis and the runtime do not
                  hold exactly the declared values
@@ -78,11 +80,11 @@ Rules, each of which refuses on its own:
                  the declared cardano_follower, or one other than Cardano
                  mainnet's
  10 possession   a member of a multisig in any role, at any depth, that is a
-                 bare key, gives no proof of possession, or gives one that is
-                 not its key's signature (sr25519, or ECDSA for a 33-byte key)
-                 of its challenge: the domain, the chain's name, id and genesis
-                 hash, the launch manifest hash without the proofs, its role
-                 and its position
+                 bare key or the all-zero key, gives no proof of possession,
+                 or gives one that is not its key's signature (sr25519, or
+                 ECDSA for a 33-byte key) of its challenge: the domain, the
+                 chain's name, id and genesis hash, the launch manifest hash
+                 without the proofs, its role and its position
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -145,6 +147,10 @@ DOMAIN = b"materios-launch-manifest-v1"
 DOMAIN_32 = DOMAIN.ljust(32, b"\0")
 # What a multisig member's proof of possession signs first, apart from anything else a key signs.
 POP_DOMAIN = b"materios-launch-pop-v1"
+# The ristretto identity. schnorrkel, in the node and here, verifies its sr25519 signature with R and s zero of any
+# message, which needs no secret; the well-known key table cannot name it, since rule 1 finds a table key anywhere in
+# genesis storage and the runtime code, which hold runs of 32 zero bytes.
+ZERO_KEY = bytes(32)
 HASH_FIELDS = ("genesis_hash", "code_hash", "chain_spec_hash", "launch_manifest_hash")
 # Pallet name in construct_runtime, and the crate its types keep under any name.
 FORBIDDEN_PALLETS = {"PerpEngine": "pallet_perp_engine"}
@@ -1416,6 +1422,9 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                     decoded = False
                     continue
                 findings += [Finding(KEYS, f"{leaf}: {hit}") for hit in match_known(raw, known)]
+                if raw == ZERO_KEY:
+                    findings.append(Finding(KEYS, f"{leaf}: the all-zero key, whose sr25519 signature of any message "
+                                                  "needs no secret"))
             account = None
             if decoded:
                 try:
@@ -2987,6 +2996,10 @@ def check_possession(spec: Spec, launch: dict) -> list[Finding]:
             key = decode_public_key(leaf["key"])
         except ValueError:
             continue  # rule 1 already refuses a role key that does not decode
+        if key == ZERO_KEY:
+            findings.append(Finding(POSSESSION, f"{where} is the all-zero key, whose sr25519 signature of any message "
+                                                "needs no secret: its pop shows no one holds it"))
+            continue
         context = context or possession_context(spec, launch)
         challenge, pop = possession_challenge(context, role, position), hex_bytes(leaf["pop"], f"{where}.pop")
         try:

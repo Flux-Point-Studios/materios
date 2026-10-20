@@ -138,6 +138,15 @@ def stranger() -> bytes:
     return sr25519.pair_from_seed(os.urandom(32))[0]
 
 
+# The all-zero key, the ristretto identity, and its sr25519 signature of every message, made with no secret: R the
+# identity, s zero, then schnorrkel's marker bit.
+ZERO_KEY, NO_SECRET_POP = bytes(32), bytes(63) + b"\x80"
+
+
+def all_zero(where: str) -> str:
+    return f"[1 dev-keys] {where}: the all-zero key, whose sr25519 signature of any message needs no secret"
+
+
 def put(spec: lp.Spec, pallet: str, item: str, value: bytes) -> None:
     spec.storage[lp.storage_key(pallet, item)] = value
 
@@ -959,6 +968,18 @@ def test_ecdsa_account_form_and_retired_key_are_named(spec, meta, known):
     found = dev_key_findings(spec, meta, known, launch)
     assert "[1 dev-keys] roles.cert_daemons[0]: //Alice (ecdsa)" in found
     assert any(m.startswith("[1 dev-keys] roles.committee[0]: retired validator key") for m in found)
+
+
+@pytest.mark.parametrize("spelling", [ss58, lambda key: "0x" + key.hex()], ids=["SS58", "0x-hex"])
+def test_the_all_zero_key_is_refused_in_any_role_at_any_depth(spec, meta, known, spelling):
+    zero, sudo = spelling(ZERO_KEY), nested_multisig()
+    sudo["members"][2]["members"][1] = {"key": zero, "pop": "0x" + NO_SECRET_POP.hex()}
+    launch = {"roles": {"anchor_signer": [zero], "sudo": [sudo],
+                        "endowed": [{"threshold": 1, "members": [ss58(fresh_account()), zero]}]}}
+    zeros = ["roles.anchor_signer[0]", "roles.endowed[0].members[1]", "roles.sudo[0].members[2].members[1]"]
+    found = dev_key_findings(spec, meta, known, launch)
+    assert [m for m in found if any(m.startswith(f"[1 dev-keys] {where}:") for where in zeros)] == [
+        all_zero(where) for where in zeros]
 
 
 def test_secret_uri_or_garbage_in_a_role_is_refused_without_echoing_it(spec, meta, known):
@@ -5059,6 +5080,25 @@ def test_a_pop_that_is_not_its_keys_signature_of_its_challenge_is_refused(spec, 
     assert possession_findings(spec, launch) == [unproven("roles.sudo[0].members[1]", "sr25519", "sudo", "0 1")]
 
 
+def no_secret(where: str) -> str:
+    return (f"[10 possession] {where} is the all-zero key, whose sr25519 signature of any message needs no secret: "
+            "its pop shows no one holds it")
+
+
+# schnorrkel, as py-sr25519-bindings and sp_core run it, verifies the all-zero key's signature that needs no secret.
+@pytest.mark.parametrize("spelling", [ss58, lambda key: "0x" + key.hex()], ids=["SS58", "0x-hex"])
+def test_the_all_zero_key_cannot_prove_possession(spec, spelling):
+    zero = {"key": spelling(ZERO_KEY), "pop": "0x" + NO_SECRET_POP.hex()}
+    sudo = nested_multisig()
+    sudo["members"][2]["members"][1] = zero
+    launch = prove({"roles": {"sudo": [sudo], "guardian": [{"threshold": 2, "members": [
+        ss58(fresh_account()), dict(zero), ss58(fresh_account())]}]}}, spec)
+    for role, position in (("guardian", (0, 1)), ("sudo", (0, 2, 1))):
+        assert sr25519.verify(NO_SECRET_POP, challenge(spec, launch, role, position), ZERO_KEY)
+    assert possession_findings(spec, launch) == [no_secret("roles.guardian[0].members[1]"),
+                                                 no_secret("roles.sudo[0].members[2].members[1]")]
+
+
 def test_two_members_pops_swapped_are_refused(spec):
     launch = prove({"roles": {"sudo": [msig(2, fresh_account(), fresh_account())]}}, spec)
     first, second = launch["roles"]["sudo"][0]["members"]
@@ -6582,6 +6622,17 @@ def test_cli_refuses_a_multisig_member_whose_holder_gave_no_pop(clean, capsys):
     code, out = clean.run(capsys)
     assert code == 1
     assert out.splitlines()[1:] == ["  " + no_pop("roles.sudo[0].members[2]", "sudo", "0 2")], out
+
+
+@pytest.mark.parametrize("role, item", [("sudo", ("Sudo", "Key")), ("guardian", ("RootTimelock", "Guardian"))])
+def test_cli_refuses_a_multisig_member_that_is_the_all_zero_key_with_its_no_secret_pop(clean, capsys, role, item):
+    members = [fresh_account(), fresh_account(), ZERO_KEY]
+    put(clean.spec, *item, lp.multisig_account(members, 2))
+    clean.launch["roles"][role] = [{"threshold": 2, "members": [
+        *map(ss58, members[:2]), {"key": ss58(ZERO_KEY), "pop": "0x" + NO_SECRET_POP.hex()}]}]
+    code, out = clean.run(capsys)
+    where = f"roles.{role}[0].members[2]"
+    assert (code, out.splitlines()[1:]) == (1, ["  " + all_zero(where), "  " + no_secret(where)]), out
 
 
 def keyed(launch: dict) -> dict:
