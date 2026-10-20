@@ -493,7 +493,7 @@ The challenge is these bytes, which `challenge` prints as 0x-hex:
 
 | Bytes | Holds |
 |---|---|
-| `materios-launch-pop-v1` | the domain, which nothing else a key signs for a launch starts with |
+| `materios-launch-pop-v1` | the domain: nothing else a launch has a key sign starts with it |
 | SCALE string | the chain spec's `name` |
 | SCALE string | the chain spec's `id` |
 | 32 | the genesis hash the preflight computes |
@@ -525,11 +525,17 @@ final, since the challenge binds both:
    bare key has no challenge: `challenge` refuses it as unreadable, since
    giving it as `{"key": ...}` changes the launch manifest hash its challenge
    binds.
-2. Print each member's challenge, for `roles.sudo[0].members[1]`:
+2. Each holder prints their member's challenge from the spec and manifest
+   they reviewed, for `roles.sudo[0].members[1]`:
 
    ```
    python3 launch_preflight.py challenge --spec mainnet-raw.json --launch launch.json --role sudo --index 0 1
    ```
+
+   or checks that the hex they are handed is exactly what this prints. A key
+   signs whatever bytes it is given, so hex taken on trust could be a signing
+   payload of another chain the key holds funds or power on, passed off as a
+   challenge.
 
 3. Its holder signs it offline on their own device, with their secret URI in a
    file only they can read, and `--scheme ecdsa` for a 33-byte key:
