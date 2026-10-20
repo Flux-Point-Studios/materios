@@ -5,8 +5,8 @@ edition = "2021"
 license = "Apache-2.0"
 
 # Vendored copy of IOG partner-chains `db-sync-follower` v1.5.1. Its sources
-# are upstream's; this manifest pins its dependencies itself rather than
-# through upstream's workspace.
+# are upstream's, which CI checks; this manifest pins its dependencies itself
+# rather than through upstream's workspace.
 
 [dependencies]
 sqlx = { version = "0.7.4", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "chrono", "migrate", "bigdecimal"] }

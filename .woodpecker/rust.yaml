@@ -36,6 +36,12 @@ steps:
       - apt-get update
       - apt-get install -y --no-install-recommends clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
       - cargo check --workspace --all-targets --locked
+      # The db-sync follower, the fleet's Cardano backend, is not a workspace
+      # member, and its own tests need Docker. Its sources must stay upstream
+      # partner-chains v1.5.1's, whose checkout the check above fetched: they
+      # serve the committee for a Cardano epoch from the epoch two before it,
+      # which every chain's draws, preprod v6's relaxed ones included, rely on.
+      - diff -r vendor/db-sync-follower/src /usr/local/cargo/git/checkouts/partner-chains-*/20e607f/toolkit/mainchain-follower/db-sync-follower/src
       - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing -p pallet-root-timelock -p pallet-session-validator-management --no-fail-fast
       # The committee inputs a node gives the runtime: the vendored Ariadne
       # inherent data provider, and the yaci-store follower with the features
