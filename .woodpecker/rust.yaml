@@ -37,6 +37,10 @@ steps:
       - apt-get install -y --no-install-recommends clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
       - cargo check --workspace --all-targets --locked
       - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing -p pallet-root-timelock -p pallet-session-validator-management --no-fail-fast
+      # The committee inputs a node gives the runtime: the vendored Ariadne
+      # inherent data provider, and the yaci-store follower with the features
+      # the node builds it with. Its live-database tests stay ignored.
+      - cargo test -p authority-selection-inherents -p yaci-follower --features yaci-follower/block-source,yaci-follower/candidate-source,yaci-follower/native-token,yaci-follower/mc-hash,yaci-follower/sidechain-rpc --locked --no-fail-fast
       # The timelock's try_state invariants, which only the try-runtime
       # feature compiles in.
       - cargo test -p pallet-root-timelock --features try-runtime --lib --locked

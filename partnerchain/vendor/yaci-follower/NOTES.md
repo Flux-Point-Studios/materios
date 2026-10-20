@@ -160,9 +160,8 @@ certificate is signed), so the `mithril-client` is invoked at most once per
 - **`get_highest_block`** filters on `block_time` directly (yaci has no slot
   index need); db-sync additionally bounded by slot for index efficiency. The
   yaci `idx_block_slot`/time bounds are equivalent for correctness.
-- **MAINNET**: `get_epoch_of_data_storage` returns the request epoch verbatim
-  (preprod early-launch relaxation, mirroring the db-sync-follower patch).
-  Mainnet must revert to `epoch - 2`.
+- **Data epoch**: `get_epoch_of_data_storage` returns `epoch - 2`, and refuses
+  epochs 0 and 1, as the db-sync follower does.
 
 ## Build hygiene
 

@@ -126,10 +126,11 @@ async fn get_ariadne_parameters_decodes_live_15_1_d_param_golden() {
 			.unwrap(),
 	);
 
-	// Epoch 296 is the data tip the pilot has indexed these tokens at; the
-	// `epoch <= $2` query then picks the latest UTxO for each policy.
+	// Epoch 296 is the data tip the pilot has indexed these tokens at, the data
+	// epoch of epoch 298; the `epoch <= $2` query then picks the latest UTxO
+	// for each policy.
 	let params = source
-		.get_ariadne_parameters(McEpochNumber(296), d_param_policy, permissioned_policy)
+		.get_ariadne_parameters(McEpochNumber(298), d_param_policy, permissioned_policy)
 		.await
 		.expect("get_ariadne_parameters must succeed against the pilot config tokens");
 
@@ -227,4 +228,36 @@ async fn mithril_stake_distribution_matches_db_sync_golden_active_epoch_297() {
 	// no duplicate pool hashes (the certified set is one entry per pool).
 	let unique: std::collections::HashSet<_> = entries.iter().map(|e| e.pool_hash).collect();
 	assert_eq!(unique.len(), entries.len(), "certified pool set must be unique per pool");
+}
+
+/// A source whose pool never connects: `data_epoch` reads no database.
+async fn offline_source() -> CandidatesDataSourceImpl {
+	let pool = sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+	CandidatesDataSourceImpl::new(pool, None).await.unwrap()
+}
+
+/// The committee for a Cardano epoch is drawn from the D-parameter,
+/// candidates, stake and nonce of the epoch two before it, which have settled
+/// for a full epoch, as partner-chains' db-sync follower serves them.
+#[tokio::test]
+async fn data_for_an_epoch_comes_from_two_epochs_before_it() {
+	let source = offline_source().await;
+	for (epoch, data_epoch) in [(321, 319), (2, 0)] {
+		assert_eq!(
+			source.data_epoch(McEpochNumber(epoch)).await.unwrap(),
+			McEpochNumber(data_epoch)
+		);
+	}
+}
+
+/// Cardano's first two epochs have no epoch two before them.
+#[tokio::test]
+async fn the_first_two_epochs_have_no_data_epoch() {
+	let source = offline_source().await;
+	for epoch in [0, 1] {
+		assert_eq!(
+			source.data_epoch(McEpochNumber(epoch)).await.unwrap_err().to_string(),
+			format!("Bad request: `Minimum supported epoch of data usage is 2, but {epoch} was provided`.")
+		);
+	}
 }

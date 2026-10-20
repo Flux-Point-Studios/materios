@@ -213,22 +213,17 @@ core2 = { path = "vendor/core2" }
 # [materios-patch] runtime patches. Every entry below is required to preserve
 # production chain stability AND must be revisited before mainnet.
 #
-# 1. `authority-selection-inherents` — two patches:
-#    a. ariadne data_epoch early-launch relax (`<` → `<=`). Lets Materios
-#       preprod start producing blocks in the same Cardano epoch the
-#       D-parameter / permissioned-candidates txs were submitted, instead
-#       of waiting 10 days for the upstream `- 2` stability offset.
-#    b. [materios-patch: ariadne-output-dedup] — collapse duplicate
-#       validators produced by IOG's with-replacement weighted-random
-#       sampler. Fixes the 2026-04-21 MacBook×3+Node-3×1 finality stall
-#       at Materios block #26197 (4h30m stall). Applied inside
-#       `select_authorities` after the sampler and before the pallet
-#       receives the committee vec. See Task #60 handoff.
+# 1. `authority-selection-inherents` — [materios-patch: ariadne-output-dedup]:
+#    collapse duplicate validators produced by IOG's with-replacement
+#    weighted-random sampler. Fixes the 2026-04-21 MacBook×3+Node-3×1 finality stall
+#    at Materios block #26197 (4h30m stall). Applied inside
+#    `select_authorities` after the sampler and before the pallet
+#    receives the committee vec. See Task #60 handoff.
 #
-# 2. `db-sync-follower` — drop the `- 2` Cardano-epoch offset in
-#    get_epoch_of_data_storage. The 2-epoch settling window provides zero
-#    marginal safety on preprod in permissioned-only mode (D=1.0) because
-#    `get_latest_stable_block_for` already enforces k=432-blocks depth.
+# 2. `db-sync-follower` — upstream v1.5.1 sources under a manifest that pins
+#    its dependencies itself. Like upstream, and like `yaci-follower`, it
+#    serves the committee for a Cardano epoch from the data of the epoch two
+#    before it.
 #
 # 3. `pallet-session-validator-management` —
 #    [materios-patch: idp-none-fallback]. Prevents a runtime panic at every
@@ -242,10 +237,7 @@ core2 = { path = "vendor/core2" }
 #    analysis.
 #
 # MAINNET POSTURE:
-#   - Patches 1a and 2 (early-launch relaxations): MUST REVERT for mainnet.
-#     Upstream's conservative stability offset is the correct posture for
-#     production partner-chains with non-permissioned SPOs.
-#   - Patch 1b (ariadne-output-dedup): safe for mainnet as-is. Should ALSO
+#   - Patch 1 (ariadne-output-dedup): safe for mainnet as-is. Should ALSO
 #     be upstreamed; the with-replacement sampler bug is not preprod-
 #     specific.
 #   - Patch 3 (idp-none-fallback): preserve until task #123 lands the
