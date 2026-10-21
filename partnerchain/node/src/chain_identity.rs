@@ -9,6 +9,32 @@ use sp_core::{
 };
 use sp_runtime::traits::{BlakeTwo256, Block as _};
 
+pub type Executor = sc_executor::WasmExecutor<sp_io::SubstrateHostFunctions>;
+
+/// A chain spec's genesis, as the node builds it at startup.
+pub struct Genesis {
+    pub code: Vec<u8>,
+    pub state: sp_io::TestExternalities,
+    pub hash: H256,
+}
+
+/// The genesis `spec` builds, its state versioned as `executor` reads the
+/// spec's own code. It opens no database and connects to nothing.
+pub fn genesis(spec: &dyn sc_service::ChainSpec, executor: &Executor) -> Result<Genesis, String> {
+    let storage = spec.build_storage()?;
+    let code = storage
+        .top
+        .get(sp_core::storage::well_known_keys::CODE)
+        .ok_or("the genesis holds no runtime code")?
+        .clone();
+    let version = sc_service::resolve_state_version_from_wasm::<_, BlakeTwo256>(&storage, executor)
+        .map_err(|e| e.to_string())?;
+    let mut state = sp_io::TestExternalities::new_with_code_and_state(&code, storage, version);
+    let root = state.execute_with(|| H256::from_slice(&sp_io::storage::root(version)));
+    let hash = sc_service::construct_genesis_block::<Block>(root, version).hash();
+    Ok(Genesis { code, state, hash })
+}
+
 /// The genesis hash `spec` builds, as the node builds it at startup; each
 /// runtime metadata constant whose name holds `ChainId` or `GenesisHash` in
 /// any case, as the spec's own Wasm reports it once block one has initialised
@@ -16,19 +42,12 @@ use sp_runtime::traits::{BlakeTwo256, Block as _};
 /// decoded with this node's settlement types, or null where it stores none.
 /// It opens no database and connects to nothing.
 pub fn inspect(spec: &dyn sc_service::ChainSpec) -> Result<serde_json::Value, String> {
-    let storage = spec.build_storage()?;
-    let code = storage
-        .top
-        .get(sp_core::storage::well_known_keys::CODE)
-        .ok_or("the genesis holds no runtime code")?
-        .clone();
-    let executor = sc_executor::WasmExecutor::<sp_io::SubstrateHostFunctions>::builder().build();
-    let version =
-        sc_service::resolve_state_version_from_wasm::<_, BlakeTwo256>(&storage, &executor)
-            .map_err(|e| e.to_string())?;
-    let mut state = sp_io::TestExternalities::new_with_code_and_state(&code, storage, version);
-    let root = state.execute_with(|| H256::from_slice(&sp_io::storage::root(version)));
-    let genesis = sc_service::construct_genesis_block::<Block>(root, version).hash();
+    let executor = Executor::builder().build();
+    let Genesis {
+        code,
+        mut state,
+        hash: genesis,
+    } = genesis(spec, &executor)?;
     state.execute_with(|| System::initialize(&1, &genesis, &Default::default()));
 
     let fetcher = WrappedRuntimeCode(code.as_slice().into());

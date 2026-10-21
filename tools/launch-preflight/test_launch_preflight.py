@@ -108,9 +108,13 @@ def meta(metadata_v14) -> lp.Metadata:
     return lp.Metadata.from_v14(metadata_v14)
 
 
+# The public key table, as a check loads it when no operator table is given.
+KNOWN = lp.load_well_known()
+
+
 @pytest.fixture(scope="session")
 def known():
-    return lp.load_well_known()
+    return KNOWN
 
 
 # How to sign as the holder of each key a test generates, by its public key.
@@ -145,6 +149,38 @@ ZERO_KEY, NO_SECRET_POP = bytes(32), bytes(63) + b"\x80"
 
 def all_zero(where: str) -> str:
     return f"[1 dev-keys] {where}: the all-zero key, whose sr25519 signature of any message needs no secret"
+
+
+# ed25519's keys of small order as libsodium 1.0.20 lists them (ge25519_has_small_order, in
+# src/libsodium/crypto_core/ed25519/ref10/ed25519_ref10.c), each of which it refuses with either sign bit.
+LIBSODIUM_SMALL_ORDER = [
+    "0000000000000000000000000000000000000000000000000000000000000000",
+    "0100000000000000000000000000000000000000000000000000000000000000",
+    "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+    "c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+]
+SMALL_ORDER_KEYS = sorted(key for listed in map(bytes.fromhex, LIBSODIUM_SMALL_ORDER)
+                          for key in (listed, listed[:31] + bytes([listed[31] | 0x80])))
+# ed25519's identity, 0x01 then 31 zero bytes. ed25519-zebra, which the node verifies ed25519 signatures with, checks
+# 8·s·B = 8·R + 8·k·A, so under a key A of small order, R the identity and s zero sign every message.
+SMALL_ORDER_KEY = bytes([1]) + bytes(31)
+NEEDS_NO_SECRET = "signature of any message needs no secret"
+
+
+def small_order(key: bytes) -> str:
+    return f"0x{key.hex()}, an ed25519 key of small order, whose ed25519 {NEEDS_NO_SECRET}"
+
+
+# What anyone signing as each kind of authority key can do.
+AUTHORITY_POWERS = {"aura": "anyone can author its slots", "grandpa": "anyone can cast its finality votes"}
+
+
+def no_secret_authority(where: str, kind: str, key: bytes) -> str:
+    reason = f"the all-zero key, whose sr25519 {NEEDS_NO_SECRET}" if kind == "aura" else small_order(key)
+    return f"[1 dev-keys] {where}: {reason}, so {AUTHORITY_POWERS[kind]}"
 
 
 def put(spec: lp.Spec, pallet: str, item: str, value: bytes) -> None:
@@ -275,14 +311,14 @@ def zstd_frame(data: bytes) -> bytes:
 
 @pytest.mark.parametrize("scheme", ["sr25519", "ed25519"])
 def test_table_holds_every_sp_keyring_key(scheme, known):
-    keys = known.keys
+    keys = known.keys.values()
     table = {(k.label, k.scheme): k.needle.hex() for k in keys}
     for label, public in SP_KEYRING[scheme].items():
         assert table[(label, scheme)] == public
 
 
 def test_table_holds_published_ecdsa_alice_and_its_account(known):
-    keys = known.keys
+    keys = known.keys.values()
     needles = {k.needle.hex(): str(k) for k in keys}
     assert needles[ALICE_ECDSA] == "//Alice (ecdsa)"
     account = hashlib.blake2b(bytes.fromhex(ALICE_ECDSA), digest_size=32).hexdigest()
@@ -290,7 +326,7 @@ def test_table_holds_published_ecdsa_alice_and_its_account(known):
 
 
 def test_table_holds_retired_published_keys(known):
-    keys = known.keys
+    keys = known.keys.values()
     retired = [k for k in keys if k.label.startswith("retired")]
     assert {k.scheme for k in retired} == {"sr25519", "ed25519"}
 
@@ -300,7 +336,7 @@ ORYNQ_TEST_OBSERVER = "5CfCr47V5Dte6bwxNBE8K9oNnQd9fiay6aDEEkgYtFv7w4Fq"
 
 
 def test_table_holds_keys_whose_seed_is_committed_to_a_public_repo(known):
-    keys = known.keys
+    keys = known.keys.values()
     observer = [k for k in keys if k.needle == lp.decode_public_key(ORYNQ_TEST_OBSERVER)]
     assert [str(k) for k in observer] == ["orynq-sdk test key, secret committed to a public repo (sr25519)"]
 
@@ -315,7 +351,7 @@ PARTNER_CHAINS_KEYSTORE = {
 
 
 def test_table_holds_keystore_keys_a_public_repo_commits(known):
-    keys = known.keys
+    keys = known.keys.values()
     table = {(k.scheme, k.needle.hex()): k.label for k in keys}
     for scheme, public in PARTNER_CHAINS_KEYSTORE.items():
         assert table[(scheme, public)] == "partner-chains test key, secret committed to a public repo"
@@ -327,7 +363,7 @@ PARTNER_CHAINS_CARDANO_KEY = "fc014cb5f071f5d6a36cb5a7e5f168c86555989445a23d4abe
 
 
 def test_table_holds_cardano_signing_keys_a_public_repo_commits(known):
-    table = {(k.scheme, k.needle.hex()): k.label for k in known.keys}
+    table = {(k.scheme, k.needle.hex()): k.label for k in known.keys.values()}
     assert table[("ed25519", PARTNER_CHAINS_CARDANO_KEY)] == \
         "partner-chains test key, secret committed to a public repo"
 
@@ -342,7 +378,7 @@ PUBLIC_REPO_DERIVATIONS = {
 
 
 def test_table_holds_dev_phrase_derivations_that_public_repos_commit(known):
-    keys = known.keys
+    keys = known.keys.values()
     table = {(k.label, k.scheme, k.needle.hex()) for k in keys}
     for (path, scheme), public in PUBLIC_REPO_DERIVATIONS.items():
         assert (path, scheme, public) in table
@@ -364,7 +400,7 @@ NUMERIC_DEV_PATHS = {
 
 
 def test_table_derives_numeric_dev_paths_as_substrate_does(known):
-    keys = known.keys
+    keys = known.keys.values()
     table = {(k.label, k.scheme): k.needle.hex() for k in keys if len(k.needle) != 32 or k.scheme != "ecdsa"}
     for (path, scheme), public in NUMERIC_DEV_PATHS.items():
         assert table[(path, scheme)] == public, (path, scheme)
@@ -376,10 +412,94 @@ HARDHAT_ACCOUNT_0 = "038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa73
 
 
 def test_table_holds_the_hardhat_test_account(known):
-    keys = known.keys
+    keys = known.keys.values()
     hits = [k for k in keys if k.needle.hex() == HARDHAT_ACCOUNT_0]
     assert [k.scheme for k in hits] == ["ecdsa"]
     assert "public repo" in hits[0].label
+
+
+# RFC 9496, Appendix A.1: ristretto255's generator, sr25519's basepoint, times 1 to 15.
+RISTRETTO_MULTIPLES = [
+    "e2f2ae0a6abc4e71a884a961c500515f58e30b6aa582dd8db6a65945e08d2d76",
+    "6a493210f7499cd17fecb510ae0cea23a110e8d5b901f8acadd3095c73a3b919",
+    "94741f5d5d52755ece4f23f044ee27d5d1ea1e2bd196b462166b16152a9d0259",
+    "da80862773358b466ffadfe0b3293ab3d9fd53c5ea6c955358f568322daf6a57",
+    "e882b131016b52c1d3337080187cf768423efccbb517bb495ab812c4160ff44e",
+    "f64746d3c92b13050ed8d80236a7f0007c3b3f962f5ba793d19a601ebb1df403",
+    "44f53520926ec81fbd5a387845beb7df85a96a24ece18738bdcfa6a7822a176d",
+    "903293d8f2287ebe10e2374dc1a53e0bc887e592699f02d077d5263cdd55601c",
+    "02622ace8f7303a31cafc63f8fc48fdc16e1c8c8d234b2f0d6685282a9076031",
+    "20706fd788b2720a1ed2a5dad4952b01f413bcf0e7564de8cdc816689e2db95f",
+    "bce83f8ba5dd2fa572864c24ba1810f9522bc6004afe95877ac73241cafdab42",
+    "e4549ee16b9aa03099ca208c67adafcafa4c3f3e4e5303de6026e3ca8ff84460",
+    "aa52e000df2e16f55fb1032fc33bc42742dad6bd5a8fc0be0167436c5948501f",
+    "46376b80f409b29dc2b5f6f0c52591990896e5716f41477cd30085ab7f10301e",
+    "e0c418f7c8d9c4cdd7395b93ea124f3ad99021bb681dfc3302a9d99a2e53e64e",
+]
+# SEC 2, section 2.4.1: secp256k1's generator G, compressed.
+SECP256K1_G = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+SMALL_SCALARS = range(1, 1025)
+
+
+# partner-chains commits the seeds of ECDSA scalars 1 and 513 to 517 as test keys, and the table names a key by the
+# first row that holds it.
+PARTNER_CHAINS_SCALARS = {1, 513, 514, 515, 516, 517}
+PARTNER_CHAINS_TEST_KEY = "partner-chains test key, secret committed to a public repo"
+
+
+def test_table_holds_the_published_small_multiples_of_each_generator(known):
+    for k, public in enumerate(RISTRETTO_MULTIPLES, 1):
+        assert str(known.keys[bytes.fromhex(public)]) == f"secret scalar {k}, public (sr25519)"
+    assert str(known.keys[bytes.fromhex(SECP256K1_G)]) == f"{PARTNER_CHAINS_TEST_KEY} (ecdsa)"
+
+
+def secret_scalar(k: int) -> bytes:
+    """An sr25519 secret key of scalar k, as py-sr25519-bindings reads one: the scalar, then a nonce."""
+    return k.to_bytes(32, "little") + bytes(32)
+
+
+def test_table_holds_every_small_scalar_key_and_its_ecdsa_account(known):
+    for k in SMALL_SCALARS:
+        ecdsa_key = coincurve.PrivateKey.from_int(k).public_key.format()
+        label = f"secret scalar {k}, public"
+        ecdsa_label = PARTNER_CHAINS_TEST_KEY if k in PARTNER_CHAINS_SCALARS else label
+        assert str(known.keys[sr25519.public_from_secret_key(secret_scalar(k))]) == f"{label} (sr25519)"
+        for needle in (ecdsa_key, lp.blake2_256(ecdsa_key)):
+            assert str(known.keys[needle]) == f"{ecdsa_label} (ecdsa)"
+
+
+# The keys of mini-secrets of one repeated byte, as subkey 20.0.0 inspects them; secp256k1 takes neither 0 nor
+# 0xff..ff as a secret key, so only 0x01*32 has an ECDSA key.
+TRIVIAL_SEED_KEYS = {
+    ("00", "sr25519"): "def12e42f3e487e9b14095aa8d5cc16a33491f1b50dadcf8811d1480f3fa8627",
+    ("00", "ed25519"): "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29",
+    ("01", "sr25519"): "189dac29296d31814dc8c56cf3d36a0543372bba7538fa322a4aebfebc39e056",
+    ("01", "ed25519"): "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+    ("01", "ecdsa"): "031b84c5567b126440995d3ed5aaba0565d71e1834604819ff9c17f5e9d5dd078f",
+    ("ff", "sr25519"): "48016d8d7f20ddd9774f5cc776ee0547f92b92175e58434a26d0690fbfca745a",
+    ("ff", "ed25519"): "76a1592044a6e4f511265bca73a604d90b0529d1df602be30a19a9257660d1f5",
+}
+
+
+def test_table_holds_the_keys_of_trivial_mini_secrets(known):
+    for (byte, scheme), public in TRIVIAL_SEED_KEYS.items():
+        assert str(known.keys[bytes.fromhex(public)]) == f"mini-secret 0x{byte}*32, public ({scheme})"
+    assert {(k.label, k.scheme) for k in known.keys.values() if k.label.startswith("mini-secret")} == {
+        (f"mini-secret 0x{byte}*32, public", scheme) for byte, scheme in TRIVIAL_SEED_KEYS}
+
+
+@pytest.mark.parametrize("after", [0, 1, lp.BLOCK - 1])
+@pytest.mark.parametrize("before", range(2 * lp.BLOCK))
+def test_a_table_key_is_found_wherever_data_holds_it(known, before, after):
+    """The block index finds what a scan for each key finds, at every alignment and up to the end of the data."""
+    for needle in (ALICE, bytes.fromhex(ALICE_ECDSA), lp.blake2_256(bytes.fromhex(ALICE_ECDSA))):
+        data = os.urandom(before) + needle + os.urandom(after)
+        assert {k.needle for k in known.found_in(data)} == {k for k in known.keys if k in data} == {needle}
+
+
+def test_the_small_order_ed25519_keys_are_libsodiums_list_with_either_sign_bit():
+    assert sorted(lp.ED25519_SMALL_ORDER) == SMALL_ORDER_KEYS
+    assert len(SMALL_ORDER_KEYS) == 14
 
 
 def extra_table(tmp_path, entries) -> Path:
@@ -982,6 +1102,23 @@ def test_the_all_zero_key_is_refused_in_any_role_at_any_depth(spec, meta, known,
         all_zero(where) for where in zeros]
 
 
+def short_hex(key: bytes) -> str:
+    return f"{key[:4].hex()}..{key[-1:].hex()}"
+
+
+# Any account signs with ed25519 too (MultiSignature), so an account that is an ed25519 key of small order is one
+# anyone can sign as.
+@pytest.mark.parametrize("key", [key for key in SMALL_ORDER_KEYS if key != ZERO_KEY], ids=short_hex)
+def test_an_ed25519_key_of_small_order_is_refused_in_any_role_at_any_depth(spec, meta, known, key):
+    sudo = nested_multisig()
+    sudo["members"][2]["members"][1] = ss58(key)
+    launch = {"roles": {"anchor_signer": ["0x" + key.hex()], "sudo": [sudo]}}
+    found = dev_key_findings(spec, meta, known, launch)
+    assert [m for m in found if NEEDS_NO_SECRET in m] == [
+        f"[1 dev-keys] {where}: {small_order(key)}, so anyone can sign as its account"
+        for where in ("roles.anchor_signer[0]", "roles.sudo[0].members[2].members[1]")]
+
+
 def test_secret_uri_or_garbage_in_a_role_is_refused_without_echoing_it(spec, meta, known):
     launch = {"roles": {"multisig_members": ["//Bob//stash", "not a key"]}}
     found = dev_key_findings(spec, meta, known, launch)
@@ -1012,9 +1149,10 @@ def test_fresh_role_keys_add_no_findings(spec, meta, known):
 
 def test_dev_keyring_flags_and_dev_uris_in_node_launch_are_named(spec, meta, known):
     launch = {"roles": {}, "nodes": [
-        {"name": "v1", "host": "h1", "argv": ["materios-node", "--validator", "--alice", "--chain", "mainnet.json"]},
-        {"name": "v2", "host": "h2", "argv": ["materios-node", "--dev"]},
-        {"name": "cd", "host": "h3", "argv": [], "env": {"SIGNER_URI": "//Ferdie"}},
+        {"name": "v1", "host": "h1", "authority": False,
+         "argv": ["materios-node", "--validator", "--alice", "--chain", "mainnet.json"]},
+        {"name": "v2", "host": "h2", "authority": False, "argv": ["materios-node", "--dev"]},
+        {"name": "cd", "host": "h3", "authority": False, "argv": [], "env": {"SIGNER_URI": "//Ferdie"}},
     ]}
     found = dev_key_findings(spec, meta, known, launch)
     assert "[1 dev-keys] node v1: --alice loads the dev keyring" in found
@@ -1036,7 +1174,7 @@ def test_dev_keyring_flag_inside_a_wrapper_is_named(spec, meta, known):
 
 def test_any_derivation_of_the_dev_phrase_in_a_launch_config_is_named(spec, meta, known):
     launch = {"roles": {"oracle": ["//PriceFeed"]}, "nodes": [
-        {"name": "aw", "host": "h1", "argv": ["anchor-worker", "--suri", "//AnchorSigner"],
+        {"name": "aw", "host": "h1", "authority": False, "argv": ["anchor-worker", "--suri", "//AnchorSigner"],
          "env": {"ORACLE_URI": "//Oracle//hot/1", "RPC": "wss://rpc.example:443",
                  "DATA": "/var/lib//materios", "CDN": "//cdn.example.org/x"}},
     ]}
@@ -1049,7 +1187,7 @@ def test_any_derivation_of_the_dev_phrase_in_a_launch_config_is_named(spec, meta
 
 def test_dev_phrase_uri_with_a_password_is_named_without_the_password(spec, meta, known):
     launch = {"roles": {"oracle": ["//Feed///hunter2"]}, "nodes": [
-        {"name": "aw", "host": "h1", "argv": ["worker", "--suri=//Alice///s3cret"],
+        {"name": "aw", "host": "h1", "authority": False, "argv": ["worker", "--suri=//Alice///s3cret"],
          "env": {"SIGNER_URI": "//Alice//anchor///quartz-9"}},
     ]}
     found = dev_key_findings(spec, meta, known, launch)
@@ -1062,7 +1200,7 @@ def test_dev_phrase_uri_with_a_password_is_named_without_the_password(spec, meta
 def test_dev_mnemonic_in_a_launch_config_is_detected_by_hash(spec, meta, known):
     phrase = "one two three four five six seven eight nine ten eleven twelve"
     known = dataclasses.replace(known, phrase_hash=lp.blake2_256(phrase.encode()))
-    launch = {"roles": {}, "nodes": [{"name": "v1", "host": "h1", "argv": [],
+    launch = {"roles": {}, "nodes": [{"name": "v1", "host": "h1", "authority": False, "argv": [],
                                       "env": {"SEED": f"  {phrase.replace(' ', '   ')}//Alice"}}]}
     found = dev_key_findings(spec, meta, known, launch)
     assert "[1 dev-keys] node v1: launch config holds the dev mnemonic" in found
@@ -1290,6 +1428,44 @@ def test_sudo_multisig_one_key_meets_alone_through_a_nested_multisig_is_refused(
 @pytest.mark.parametrize("build", TWO_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
 def test_sudo_multisig_that_needs_two_keyholders_through_nested_multisigs_passes(spec, meta, known, build):
     assert sudo_findings(spec, meta, known, build()) == []
+
+
+BASEPOINT, TWICE_BASEPOINT = (bytes.fromhex(public) for public in RISTRETTO_MULTIPLES[:2])
+
+
+def helped_holder(rule: str, where: str, key: bytes, path: str, public: list[str], power: str) -> str:
+    return (f"[{rule}] {where}: {ss58(key)}, the member at {where}.{path}, meets its threshold alone with the keys "
+            f"anyone can sign as, at {' and '.join(f'{where}.{p}' for p in public)}, so one keyholder alone {power}")
+
+
+def test_sudo_multisig_one_key_meets_with_a_key_anyone_holds_is_refused(spec, meta, known):
+    holder = fresh_account()
+    assert sudo_findings(spec, meta, known, msig(2, holder, BASEPOINT)) == [
+        "[1 dev-keys] roles.sudo[0].members[1]: secret scalar 1, public (sr25519)",
+        helped_holder("1 dev-keys", "roles.sudo[0]", holder, "members[0]", ["members[1]"], SUDO_POWER)]
+
+
+def test_sudo_multisig_one_key_meets_with_an_ed25519_key_of_small_order_is_refused(spec, meta, known):
+    holder = fresh_account()
+    assert sudo_findings(spec, meta, known, msig(2, holder, SMALL_ORDER_KEY)) == [
+        f"[1 dev-keys] roles.sudo[0].members[1]: {small_order(SMALL_ORDER_KEY)}, so anyone can sign as its account",
+        helped_holder("1 dev-keys", "roles.sudo[0]", holder, "members[0]", ["members[1]"], SUDO_POWER)]
+
+
+# frame_system's CheckNonZeroSender refuses the all-zero account as a signer, so it approves nothing: the other
+# member does not meet the threshold alone.
+def test_the_all_zero_member_signs_for_no_one(spec, meta, known):
+    assert sudo_findings(spec, meta, known, msig(2, fresh_account(), ZERO_KEY)) == [
+        all_zero("roles.sudo[0].members[1]")]
+
+
+def test_sudo_multisig_that_keys_anyone_holds_meet_is_refused(spec, meta, known):
+    entry = msig(2, BASEPOINT, fresh_account(), TWICE_BASEPOINT)
+    assert sudo_findings(spec, meta, known, entry) == [
+        "[1 dev-keys] roles.sudo[0].members[0]: secret scalar 1, public (sr25519)",
+        "[1 dev-keys] roles.sudo[0].members[2]: secret scalar 2, public (sr25519)",
+        "[1 dev-keys] roles.sudo[0]: the keys anyone can sign as, at roles.sudo[0].members[0] and "
+        "roles.sudo[0].members[2], meet its threshold, so anyone holds Root"]
 
 
 def test_sudo_multisig_with_more_signatories_than_the_runtime_allows_is_refused(spec, meta, known):
@@ -2741,6 +2917,89 @@ def pair(aura: bytes, gran: bytes) -> str:
 def left_out(i: int, aura: bytes, gran: bytes) -> str:
     return (f"[9 committee] authority val{i}'s aura and grandpa key pair {pair(aura, gran)} is not in {COMMITTEE}: "
             f"{LEFT_OUT}")
+
+
+# ---------------------------------------------------------------------------
+# Rule 1: authority keys anyone can sign for
+# ---------------------------------------------------------------------------
+
+def with_key(members, kind: str, key: bytes) -> list[tuple[bytes, bytes, bytes]]:
+    """The members, with the first one's aura or grandpa key replaced by `key`."""
+    cross_chain, aura, gran = members[0]
+    return [(cross_chain, key, gran) if kind == "aura" else (cross_chain, aura, key), *members[1:]]
+
+
+def write_aura_authorities(spec, launch, cardano, members) -> None:
+    put(spec, "Aura", "Authorities", lp.compact(len(members)) + b"".join(aura for _, aura, _ in members))
+
+
+def write_grandpa_authorities(spec, launch, cardano, members) -> None:
+    put(spec, "Grandpa", "Authorities", grandpa_list(*((gran, 1) for _, _, gran in members)))
+
+
+def write_committee(spec, launch, cardano, members) -> None:
+    put(spec, "SessionCommitteeManagement", "CurrentCommittee", committee_value(members))
+
+
+def write_session(spec, launch, cardano, members) -> None:
+    put(spec, "Session", "ValidatorsAndKeys", session_value(members))
+
+
+def write_nodes(spec, launch, cardano, members) -> None:
+    for node, (_, aura, gran) in zip(launch["nodes"], members):
+        node.update(aura="0x" + aura.hex(), grandpa="0x" + gran.hex())
+
+
+def write_candidates(spec, launch, cardano, members) -> None:
+    cardano.candidates[:] = [lp.Candidate(*member) for member in members]
+
+
+# Each place that holds authority keys, in the order rule 1 reads them: how to write the members' keys there, and
+# how a finding names the first member's aura or grandpa key there.
+AUTHORITY_PLACES = {
+    "Aura.Authorities": (write_aura_authorities, {"aura": "genesis Aura.Authorities[0]"}),
+    "Grandpa.Authorities": (write_grandpa_authorities, {"grandpa": "genesis Grandpa.Authorities[0]"}),
+    "CurrentCommittee": (write_committee, {kind: f"{COMMITTEE}[0] {kind} key" for kind in AUTHORITY_POWERS}),
+    "ValidatorsAndKeys": (write_session,
+                          {kind: f"genesis Session.ValidatorsAndKeys[0] {kind} key" for kind in AUTHORITY_POWERS}),
+    "nodes": (write_nodes, {kind: f"authority val0's {kind} key" for kind in AUTHORITY_POWERS}),
+    "candidates": (write_candidates, {"aura": "Cardano permissioned candidate 0 aura",
+                                      "grandpa": "Cardano permissioned candidate 0 gran"}),
+}
+NO_SECRET_KEYS = {"aura": ZERO_KEY, "grandpa": SMALL_ORDER_KEY}
+FRESH_KEYS = {"aura": fresh_account, "grandpa": lambda: signing.SigningKey.generate().verify_key.encode()}
+
+
+# How rule 1 names each place that holds authority keys.
+AUTHORITY_PLACE_NAMES = ("genesis Aura.Authorities[", "genesis Grandpa.Authorities[", f"{COMMITTEE}[",
+                         "genesis Session.ValidatorsAndKeys[", "authority ", "Cardano permissioned candidate ")
+
+
+def authority_key_findings(seated, meta, write, members) -> list[str]:
+    """Rule 1's findings about authority keys on the seated genesis, its launch and Cardano candidates of its
+    authorities, once `members` are written in one place."""
+    spec, seated_members, launch = seated
+    cardano = lp.CardanoView(lock=None, candidates=[lp.Candidate(*member) for member in seated_members],
+                             d_parameter=(len(seated_members), 0))
+    write(spec, launch, cardano, members)
+    return [m for m in dev_key_findings(spec, meta, KNOWN, launch, cardano=cardano)
+            if m.startswith(tuple(f"[1 dev-keys] {name}" for name in AUTHORITY_PLACE_NAMES))]
+
+
+@pytest.mark.parametrize("anyone", [True, False], ids=["no-secret key", "fresh key"])
+@pytest.mark.parametrize("place, kind", [(place, kind) for place, (_, named) in AUTHORITY_PLACES.items()
+                                         for kind in named])
+def test_an_authority_key_anyone_can_sign_for_is_refused_where_it_sits(seated, meta, place, kind, anyone):
+    key = NO_SECRET_KEYS[kind] if anyone else FRESH_KEYS[kind]()
+    write, named = AUTHORITY_PLACES[place]
+    assert authority_key_findings(seated, meta, write, with_key(seated[1], kind, key)) == (
+        [no_secret_authority(named[kind], kind, key)] if anyone else [])
+
+
+@pytest.mark.parametrize("key", SMALL_ORDER_KEYS, ids=short_hex)
+def test_every_ed25519_key_of_small_order_is_refused_as_a_grandpa_voter(seated, meta, key):
+    assert authority_key_findings(seated, meta, write_grandpa_authorities, with_key(seated[1], "grandpa", key)) == [
+        no_secret_authority("genesis Grandpa.Authorities[0]", "grandpa", key)]
 
 
 def test_a_genesis_committee_of_the_declared_authorities_passes(seated, meta):
@@ -4637,7 +4896,7 @@ def guarded(spec243):
 def guardian_findings(spec, meta, sudo, entry) -> list[str]:
     """Rule 7's guardian check, with `entry` stored in genesis as the guardian and declared as roles.guardian."""
     put(spec, "RootTimelock", "Guardian", lp.role_account(entry))
-    return messages(lp.check_guardian(spec, meta, timelock_launch(sudo, entry)))
+    return messages(lp.check_guardian(spec, meta, timelock_launch(sudo, entry), KNOWN))
 
 
 def delay_findings(spec, meta, *blocks: int) -> list[str]:
@@ -4653,7 +4912,7 @@ def test_the_spec243_metadata_declares_the_mainnet_delays_and_their_ceiling(spec
 
 def test_a_guardian_apart_from_the_sudo_key_at_the_mainnet_delays_passes(guarded):
     spec, meta, sudo, guardian = guarded
-    assert lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian))) == []
+    assert lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian)), KNOWN) == []
     assert lp.check_delays(spec, meta) == []
 
 
@@ -4661,7 +4920,7 @@ def test_the_spec243_preprod_timelock_is_refused_on_mainnet(spec243):
     spec, meta = spec243
     assert spec.value("Sudo", "Key") == lp.multisig_account(PREPROD_KEYHOLDERS, 2)
     launch = timelock_launch(PREPROD_KEYHOLDERS, msig(3, *PREPROD_KEYHOLDERS))
-    assert messages(lp.check_guardian(spec, meta, launch)) == [
+    assert messages(lp.check_guardian(spec, meta, launch, KNOWN)) == [
         f"[7 timelock] roles.guardian[0].members[{i}] {ss58(key)} is also roles.sudo[0].members[{i}]{SHARED}"
         for i, key in enumerate(PREPROD_KEYHOLDERS)]
     assert messages(lp.check_delays(spec, meta)) == [
@@ -4673,7 +4932,7 @@ def test_a_genesis_with_no_guardian_is_refused(guarded):
     """The runtime's genesis builder lets a dev sudo key go unguarded; a mainnet launch has no dev key to excuse it."""
     spec, meta, sudo, guardian = guarded
     del spec.storage[lp.storage_key("RootTimelock", "Guardian")]
-    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian)))) == [NO_GUARDIAN]
+    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian)), KNOWN)) == [NO_GUARDIAN]
 
 
 @pytest.mark.parametrize("count", [None, 0, 2])
@@ -4684,7 +4943,7 @@ def test_a_guardian_not_declared_as_one_entry_is_refused(guarded, count):
         del launch["roles"]["guardian"]
     else:
         launch["roles"]["guardian"] = [msig(2, *guardian)] * count
-    assert messages(lp.check_guardian(spec, meta, launch)) == [UNDECLARED_GUARDIAN]
+    assert messages(lp.check_guardian(spec, meta, launch, KNOWN)) == [UNDECLARED_GUARDIAN]
 
 
 def test_a_guardian_declared_by_its_flat_address_is_refused(guarded):
@@ -4709,6 +4968,13 @@ def test_a_guardian_one_key_meets_alone_through_a_nested_multisig_is_refused(gua
     assert guardian_findings(spec, meta, sudo, entry) == [
         lone_holder("7 timelock", "roles.guardian[0]", key, paths, GUARDIAN_POWER) for key, paths in sorted(holders)
     ] + nested_members(entry)
+
+
+def test_a_guardian_one_key_meets_with_a_key_anyone_holds_is_refused(guarded):
+    spec, meta, sudo, _ = guarded
+    holder = fresh_account()
+    assert guardian_findings(spec, meta, sudo, msig(2, holder, BASEPOINT)) == [
+        helped_holder("7 timelock", "roles.guardian[0]", holder, "members[0]", ["members[1]"], GUARDIAN_POWER)]
 
 
 @pytest.mark.parametrize("build", TWO_HOLDER_MULTISIGS, ids=lambda build: build.__name__)
@@ -4772,16 +5038,19 @@ def test_a_guardian_that_is_not_the_declared_multisig_is_refused(guarded):
     spec, meta, sudo, guardian = guarded
     hidden = lp.multisig_account([ALICE, *guardian[:2]], 2)
     put(spec, "RootTimelock", "Guardian", hidden)
-    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian)))) == [
+    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, msig(2, *guardian)), KNOWN)) == [
         f"[7 timelock] RootTimelock.Guardian {ss58(hidden)} is not the account roles.guardian declares: "
         "who can veto Root is unchecked"]
 
 
 def test_a_guardian_multisig_with_a_dev_member_is_refused(guarded, known):
-    """Genesis holds only the multisig's account, a hash; rule 1 finds the dev key among the declared members."""
+    """Genesis holds only the multisig's account, a hash; rule 1 finds the dev key among the declared members, and
+    rule 7 that anyone can sign as it, so either other member vetoes alone."""
     spec, meta, sudo, guardian = guarded
     entry = msig(2, ALICE, *guardian[:2])
-    assert guardian_findings(spec, meta, sudo, entry) == []
+    assert guardian_findings(spec, meta, sudo, entry) == [
+        helped_holder("7 timelock", "roles.guardian[0]", key, f"members[{i}]", ["members[0]"], GUARDIAN_POWER)
+        for i, key in sorted(enumerate(guardian[:2], 1), key=lambda member: member[1])]
     spec.storage[lp.CODE_KEY] = b""
     found = messages(lp.check_dev_keys(spec, meta, timelock_launch(sudo, entry), NO_CARDANO, [], known))
     assert "[1 dev-keys] roles.guardian[0].members[0]: //Alice (sr25519)" in found
@@ -4831,14 +5100,14 @@ def test_a_guardian_member_that_is_the_genesis_sudo_key_is_refused_when_roles_su
     put(spec, "Sudo", "Key", key)
     entry = msig(2, key, *guardian[:2])
     put(spec, "RootTimelock", "Guardian", lp.role_account(entry))
-    assert messages(lp.check_guardian(spec, meta, {"roles": {"guardian": [entry]}})) == [
+    assert messages(lp.check_guardian(spec, meta, {"roles": {"guardian": [entry]}}, KNOWN)) == [
         f"[7 timelock] roles.guardian[0].members[0] {ss58(key)} is also Sudo.Key{SHARED}"]
 
 
 def test_a_guardian_key_that_does_not_decode_leaves_its_refusal_to_rule_1(guarded):
     spec, meta, sudo, guardian = guarded
     entry = {"threshold": 2, "members": ["//Bob", ss58(guardian[0])]}
-    assert lp.check_guardian(spec, meta, timelock_launch(sudo, entry)) == []
+    assert lp.check_guardian(spec, meta, timelock_launch(sudo, entry), KNOWN) == []
 
 
 def test_a_guardian_key_that_does_not_decode_leaves_the_rest_of_rule_7_standing(guarded):
@@ -4846,12 +5115,12 @@ def test_a_guardian_key_that_does_not_decode_leaves_the_rest_of_rule_7_standing(
     entry = {"threshold": 2, "members": ["//Bob", ss58(guardian[0])]}
     launch = timelock_launch(sudo, entry)
     put(spec, "RootTimelock", "Guardian", spec.value("Sudo", "Key"))
-    assert messages(lp.check_guardian(spec, meta, launch)) == [
+    assert messages(lp.check_guardian(spec, meta, launch, KNOWN)) == [
         "[7 timelock] RootTimelock.Guardian is Sudo.Key: the sudo key would veto and co-sign its own Root calls"]
     del spec.storage[lp.storage_key("RootTimelock", "Guardian")]
-    assert messages(lp.check_guardian(spec, meta, launch)) == [NO_GUARDIAN]
+    assert messages(lp.check_guardian(spec, meta, launch, KNOWN)) == [NO_GUARDIAN]
     oversized = {"threshold": 2, "members": ["//Bob", *(ss58(fresh_account()) for _ in range(10))]}
-    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, oversized))) == [
+    assert messages(lp.check_guardian(spec, meta, timelock_launch(sudo, oversized), KNOWN)) == [
         NO_GUARDIAN, too_many_signatories("7 timelock", "roles.guardian[0]", 11)]
 
 
@@ -4861,7 +5130,7 @@ def test_a_sudo_key_that_does_not_decode_leaves_the_guardian_checked(guarded):
     put(spec, "RootTimelock", "Guardian", hidden)
     launch = {"roles": {"sudo": [{"threshold": 2, "members": ["//Alice", ss58(sudo[0])]}],
                         "guardian": [msig(2, *guardian)]}}
-    assert messages(lp.check_guardian(spec, meta, launch)) == [
+    assert messages(lp.check_guardian(spec, meta, launch, KNOWN)) == [
         f"[7 timelock] RootTimelock.Guardian {ss58(hidden)} is not the account roles.guardian declares: "
         "who can veto Root is unchecked"]
 
@@ -4941,7 +5210,7 @@ def test_a_runtime_that_hides_its_timelock_bounds_is_refused(spec243, constants)
 
 def test_a_runtime_with_no_root_timelock_is_refused(spec, meta):
     assert messages(lp.check_delays(spec, meta)) == [HIDDEN_BOUNDS]
-    assert NO_GUARDIAN in messages(lp.check_guardian(spec, meta, {"roles": {}}))
+    assert NO_GUARDIAN in messages(lp.check_guardian(spec, meta, {"roles": {}}, KNOWN))
 
 
 @pytest.mark.parametrize("raw", [b"", bytes(11), bytes(13), bytes(24)], ids=lambda raw: f"{len(raw)} bytes")
@@ -6795,6 +7064,37 @@ def test_cli_refuses_a_multisig_member_that_is_the_all_zero_key_with_its_no_secr
     code, out = clean.run(capsys)
     where = f"roles.{role}[0].members[2]"
     assert (code, out.splitlines()[1:]) == (1, ["  " + all_zero(where), "  " + no_secret(where)]), out
+
+
+# The red team's proof of concept: one authority's aura key replaced by the all-zero key, or its grandpa key by
+# ed25519's identity, everywhere the clean launch names it, which every other rule accepts.
+@pytest.mark.parametrize("kind", ["aura", "grandpa"])
+def test_cli_refuses_an_authority_key_anyone_can_sign_for_wherever_the_launch_names_it(clean, capsys, kind):
+    key = NO_SECRET_KEYS[kind]
+    clean.members[:] = with_key(clean.members, kind, key)
+    seat(clean.spec, clean.members)
+    clean.launch["nodes"][0][kind] = "0x" + key.hex()
+    clean.candidates = legacy_datum(clean.members)
+    code, out = clean.run(capsys)
+    named = [names[kind] for _, names in AUTHORITY_PLACES.values() if kind in names]
+    assert (code, out.splitlines()[1:]) == (1, ["  " + no_secret_authority(where, kind, key) for where in named]), out
+
+
+# A Root 2-of-2 whose other member is a key anyone holds, with how to sign as it: secret scalar 1, whose key is the
+# basepoint, and the mini-secret of 32 zero bytes. Its pop verifies, so only rule 1 can see that one keyholder
+# holds Root.
+@pytest.mark.parametrize("label, pair", [("secret scalar 1, public", (BASEPOINT, secret_scalar(1))),
+                                         ("mini-secret 0x00*32, public", sr25519.pair_from_seed(bytes(32)))],
+                         ids=["basepoint", "trivial mini-secret"])
+def test_cli_refuses_root_whose_other_member_anyone_holds(clean, capsys, label, pair):
+    KEYHOLDERS[pair[0]] = lambda message: sr25519.sign(pair, message)
+    members = [clean.sudo_members[0], pair[0]]
+    put(clean.spec, "Sudo", "Key", lp.multisig_account(members, 2))
+    clean.launch["roles"]["sudo"] = [msig(2, *members)]
+    code, out = clean.run(capsys)
+    assert (code, out.splitlines()[1:]) == (1, [
+        f"  [1 dev-keys] roles.sudo[0].members[1]: {label} (sr25519)",
+        "  " + helped_holder("1 dev-keys", "roles.sudo[0]", members[0], "members[0]", ["members[1]"], SUDO_POWER)]), out
 
 
 def keyed(launch: dict) -> dict:

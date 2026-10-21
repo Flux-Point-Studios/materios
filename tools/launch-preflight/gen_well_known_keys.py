@@ -16,6 +16,11 @@ checksum, a 0x-hex 32-byte seed under a name that marks it secret, a bare
 `//Path` URI, which derives from the dev phrase, and the seed in a cardano-cli
 ed25519 signing key file (whose ed25519 key is its Cardano verification key).
 Each is derived under all three schemes; only the public keys are written.
+
+Last come keys whose secret anyone can name without a leak: k·B, sr25519's
+ristretto basepoint times each small scalar k, and k·G, secp256k1's generator
+times it, compressed to 33 bytes; and the keys of the mini-secrets of one
+repeated byte (0x00, 0x01 and 0xff), under each scheme that takes them.
 """
 import json
 import re
@@ -48,6 +53,9 @@ COMPROMISED = [
     ("retired validator key, mnemonic published on-chain", "ed25519",
      "6c484a9d5a8d0182e0f3bf9d8ffc4ca7070fd08da47329afca79f4b3df6aaa7e"),
 ]
+
+SMALL_SCALARS = range(1, 1025)
+TRIVIAL_SEEDS = [bytes([byte]) * 32 for byte in (0x00, 0x01, 0xFF)]
 
 STRING = re.compile(r"""(["'`])([^"'`\\\n]{1,400})\1""")
 HARD_PATH = r"(?://[\w-]+)*"
@@ -88,20 +96,30 @@ def dev_phrase(sdk: Path) -> str:
     return re.search(r'pub const DEV_PHRASE: &str =\s*"([^"]+)"', src).group(1)
 
 
+def row(label: str, scheme: str, public: bytes) -> dict:
+    return {"label": label, "scheme": scheme, "public": public.hex()}
+
+
+def ecdsa_public(secret: int) -> bytes:
+    key = ecdsa.SigningKey.from_secret_exponent(secret, curve=ecdsa.SECP256k1)
+    return key.get_verifying_key().to_string("compressed")
+
+
 def derive(label: str, secret: str, path: str):
-    """sr25519, ed25519 and ecdsa keys for a phrase or 0x-hex seed and a hard path."""
+    """sr25519, ed25519 and ecdsa keys for a phrase or 0x-hex seed and a hard path; ecdsa only for a seed secp256k1
+    takes as a secret key, as sp_core's ecdsa takes no other."""
     junctions = [j for j in path.split("//") if j]
     root = bytes.fromhex(secret[2:]) if secret.startswith("0x") else bytes(bip39_to_mini_secret(secret, ""))
     pair = Keypair.create_from_seed(root.hex(), crypto_type=KeypairType.SR25519)
     sr, secret_key = pair.public_key, pair.private_key
     for junction in junctions:
         _, sr, secret_key = sr25519.hard_derive_keypair((chain_code(junction), sr, secret_key), b"")
-    yield {"label": label, "scheme": "sr25519", "public": sr.hex(), "account": sr.hex()}
-    ed = nacl.signing.SigningKey(hard_derive(root, junctions, "Ed25519HDKD")).verify_key.encode()
-    yield {"label": label, "scheme": "ed25519", "public": ed.hex(), "account": ed.hex()}
-    ec = ecdsa.SigningKey.from_string(hard_derive(root, junctions, "Secp256k1HDKD"), curve=ecdsa.SECP256k1)
-    compressed = ec.get_verifying_key().to_string("compressed")
-    yield {"label": label, "scheme": "ecdsa", "public": compressed.hex(), "account": blake2_256(compressed).hex()}
+    yield row(label, "sr25519", sr)
+    ed = nacl.signing.SigningKey(hard_derive(root, junctions, "Ed25519HDKD"))
+    yield row(label, "ed25519", ed.verify_key.encode())
+    exponent = int.from_bytes(hard_derive(root, junctions, "Secp256k1HDKD"), "big")
+    if 0 < exponent < ecdsa.SECP256k1.order:
+        yield row(label, "ecdsa", ecdsa_public(exponent))
 
 
 def dev_entries(phrase: str):
@@ -171,13 +189,24 @@ def swept_entries(clones: Path, phrase: str):
         yield from derive(label, secret, derivation)
 
 
+def public_secret_entries():
+    """The keys of each small scalar k, k·B for sr25519 and k·G for ecdsa, and of each trivial mini-secret."""
+    for k in SMALL_SCALARS:
+        # py-sr25519-bindings reads a secret key as the scalar, then a nonce.
+        sr = sr25519.public_from_secret_key(k.to_bytes(32, "little") + bytes(32))
+        yield row(f"secret scalar {k}, public", "sr25519", sr)
+    for k in SMALL_SCALARS:
+        yield row(f"secret scalar {k}, public", "ecdsa", ecdsa_public(k))
+    for seed in TRIVIAL_SEEDS:
+        yield from derive(f"mini-secret 0x{seed[:1].hex()}*32, public", "0x" + seed.hex(), "")
+
+
 def main():
     phrase = dev_phrase(Path(sys.argv[1]))
     seen, keys = set(), []
-    compromised = ({"label": label, "scheme": scheme, "public": pub,
-                    "account": blake2_256(bytes.fromhex(pub)).hex() if scheme == "ecdsa" else pub}
-                   for label, scheme, pub in COMPROMISED)
-    for entry in [*dev_entries(phrase), *swept_entries(Path(sys.argv[2]), phrase), *compromised]:
+    compromised = (row(label, scheme, bytes.fromhex(pub)) for label, scheme, pub in COMPROMISED)
+    for entry in [*dev_entries(phrase), *swept_entries(Path(sys.argv[2]), phrase), *compromised,
+                  *public_secret_entries()]:
         if (entry["scheme"], entry["public"]) not in seen:
             seen.add((entry["scheme"], entry["public"]))
             keys.append(entry)

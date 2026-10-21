@@ -74,3 +74,66 @@ impl AuthoritySelectionDataSource for MockAuthoritySelectionDataSource {
 		Ok(for_epoch)
 	}
 }
+
+/// [materios-patch: preprod-v6-relaxation] Cardano data as a follower serves
+/// it: for each epoch, the data stored up to `lag` epochs before it.
+/// Upstream's followers lag two epochs; preprod v6's earlier binaries patched
+/// theirs to lag none. Every answer names the epoch whose data it is: the
+/// epoch nonce and the permissioned candidate's key are its number, and the
+/// registered candidate holds that much stake.
+pub struct FollowerMock {
+	pub lag: u32,
+}
+
+impl FollowerMock {
+	fn stored_for(&self, epoch: McEpochNumber) -> u32 {
+		epoch.0 - self.lag
+	}
+}
+
+#[async_trait::async_trait]
+impl AuthoritySelectionDataSource for FollowerMock {
+	async fn get_ariadne_parameters(
+		&self,
+		epoch: McEpochNumber,
+		_d_parameter_policy: PolicyId,
+		_permissioned_candidates_policy: PolicyId,
+	) -> Result<AriadneParameters, Box<dyn std::error::Error + Send + Sync>> {
+		Ok(AriadneParameters {
+			d_parameter: DParameter { num_permissioned_candidates: 1, num_registered_candidates: 1 },
+			permissioned_candidates: vec![RawPermissionedCandidateData {
+				sidechain_public_key: SidechainPublicKey(
+					self.stored_for(epoch).to_be_bytes().to_vec(),
+				),
+				aura_public_key: AuraPublicKey(vec![]),
+				grandpa_public_key: GrandpaPublicKey(vec![]),
+			}],
+		})
+	}
+
+	async fn get_candidates(
+		&self,
+		epoch: McEpochNumber,
+		_committee_candidate_address: MainchainAddress,
+	) -> Result<Vec<CandidateRegistrations>, Box<dyn std::error::Error + Send + Sync>> {
+		Ok(vec![CandidateRegistrations {
+			mainchain_pub_key: MainchainPublicKey([0; 32]),
+			registrations: vec![],
+			stake_delegation: Some(StakeDelegation(self.stored_for(epoch).into())),
+		}])
+	}
+
+	async fn get_epoch_nonce(
+		&self,
+		epoch: McEpochNumber,
+	) -> Result<Option<EpochNonce>, Box<dyn std::error::Error + Send + Sync>> {
+		Ok(Some(EpochNonce(self.stored_for(epoch).to_be_bytes().to_vec())))
+	}
+
+	async fn data_epoch(
+		&self,
+		for_epoch: McEpochNumber,
+	) -> Result<McEpochNumber, Box<dyn std::error::Error + Send + Sync>> {
+		Ok(McEpochNumber(self.stored_for(for_epoch)))
+	}
+}

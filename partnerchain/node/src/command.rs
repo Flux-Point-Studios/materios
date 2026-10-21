@@ -33,14 +33,16 @@ impl SubstrateCli for Cli {
     }
 
     fn load_spec(&self, id: &str) -> Result<Box<dyn sc_service::ChainSpec>, String> {
-        Ok(match id {
+        let spec: Box<dyn sc_service::ChainSpec> = match id {
             "dev" => Box::new(chain_spec::development_config()?),
             "" | "local" => Box::new(chain_spec::local_testnet_config()?),
             "preprod" => Box::new(chain_spec_preprod::preprod_config()?),
             path => Box::new(chain_spec::ChainSpec::from_json_file(
                 std::path::PathBuf::from(path),
             )?),
-        })
+        };
+        chain_spec::check_genesis_committee(spec.as_ref())?;
+        Ok(spec)
     }
 }
 

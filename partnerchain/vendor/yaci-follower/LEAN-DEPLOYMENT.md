@@ -134,5 +134,4 @@ to compile — see #442.)
   `@ConditionalOnProperty`-gated; `address_utxo` denormalizes amounts/inline_datum/owner_addr
   onto the row). A first real lean sync confirms the exact GB end-to-end (run the
   16-test suite against it).
-- MAINNET: revert `get_epoch_of_data_storage` to `epoch − 2` (see NOTES.md); the disk
-  win is far larger there (db-sync ~1 TB → lean yaci ~150–300 GB).
+- MAINNET: the disk win is far larger there (db-sync ~1 TB → lean yaci ~150–300 GB).

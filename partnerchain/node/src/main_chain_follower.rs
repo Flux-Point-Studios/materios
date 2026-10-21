@@ -145,3 +145,40 @@ pub async fn create_cached_yaci_data_sources(
 		native_token: Arc::new(YaciNativeTokenDataSourceImpl::new_from_env(pool, yaci_metrics)?),
 	})
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use sidechain_domain::McEpochNumber;
+
+	// The production constructor creates an index, so the test uses an isolated Postgres.
+	#[tokio::test]
+	async fn db_sync_data_for_an_epoch_comes_from_two_epochs_before_it(
+	) -> Result<(), Box<dyn Error + Send + Sync>> {
+		let url = std::env::var("MATERIOS_TEST_DBSYNC_URL")?;
+		let pool = sqlx::PgPool::connect(&url).await?;
+		sqlx::query("CREATE TABLE IF NOT EXISTS ma_tx_out (ident bigint)")
+			.execute(&pool)
+			.await?;
+		let source = CandidatesDataSourceImpl::new(pool, None).await?;
+		for (epoch, data_epoch) in [(321, 319), (2, 0)] {
+			assert_eq!(
+				source.data_epoch(McEpochNumber(epoch)).await?,
+				McEpochNumber(data_epoch)
+			);
+		}
+		for epoch in [0, 1] {
+			assert_eq!(
+				source
+					.data_epoch(McEpochNumber(epoch))
+					.await
+					.expect_err("epochs below two must fail")
+					.to_string(),
+				format!(
+					"Bad request: `Minimum supported epoch of data usage is 2, but {epoch} was provided`."
+				)
+			);
+		}
+		Ok(())
+	}
+}

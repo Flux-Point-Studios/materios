@@ -9,9 +9,19 @@ use sc_service::ChainType;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
 use sp_core::crypto::AccountId32;
+use sp_core::H256;
 
 /// Specialized `ChainSpec` for preprod.
 pub type ChainSpec = sc_service::GenericChainSpec;
+
+/// The genesis of preprod v6, the live preprod chain, which starts from its
+/// own raw chain spec rather than from `preprod_config`.
+pub const PREPROD_V6_GENESIS: H256 = H256([
+    0x0e, 0x46, 0xe3, 0x3f, 0x63, 0x9a, 0x56, 0xcc,
+    0x87, 0x80, 0xfd, 0x87, 0x1d, 0x9a, 0x15, 0xe1,
+    0x6d, 0x99, 0xaf, 0x24, 0x85, 0x26, 0xf9, 0x07,
+    0xcb, 0x56, 0x0c, 0xb4, 0x08, 0x49, 0xf7, 0xbf,
+]);
 
 /// Create an AccountId32 from raw 32-byte hex.
 fn account(hex: [u8; 32]) -> AccountId32 {
@@ -340,12 +350,12 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
 mod tests {
     use super::{preprod_config, Authority, ChainSpec, CrossChainPublic, GrandpaId, SessionKeys};
     use crate::chain_spec::{
-        authority_keys_from_seed,
+        authority_keys_from_seed, seated_now,
         tests::{
             cardano, genesis_header, inherent_data, peers_check, play, propose,
-            seated_after_first_rotation, seated_at_genesis, seated_now, start,
-            stored_attestor_rewards, Seated,
+            seated_after_first_rotation, seated_at_genesis, start, stored_attestor_rewards,
         },
+        Seated,
     };
     use materios_runtime::{
         Block, Header, OrinqReceipts, RuntimeCall, RuntimeOrigin, SessionCommitteeManagement,

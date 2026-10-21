@@ -19,10 +19,14 @@ Rules, each of which refuses on its own:
   1 dev-keys     a well-known key anywhere: genesis storage, the runtime code, a
                  role or a member of a role's multisig, a Cardano permissioned
                  candidate, a node launch command, or the manifest signing key;
-                 the all-zero key, whose sr25519 signature needs no secret, in
-                 a role or a member of a role's multisig; Sudo.Key or a genesis
-                 account that no declared role accounts for, or Root not a
-                 multisig of threshold 2 or more; an off-chain role left
+                 a key whose signature needs no secret (the all-zero sr25519
+                 key, an ed25519 key of small order) as a role or a member of a
+                 role's multisig, or as an aura or grandpa key that genesis,
+                 the launch or the Cardano candidates seat; Sudo.Key or a
+                 genesis account that no declared role accounts for, or Root
+                 not a multisig of threshold 2 or more, or one that a
+                 keyholder, or the keys anyone can sign as, meet alone; an
+                 off-chain role left
                  undeclared; a chain spec the anchor worker would read as a
                  test network
   2 rewards      attestor reward and subsidy values or validator reward
@@ -105,6 +109,7 @@ Exit 0 only when every rule passes; 1 with every reason when any refuses;
 from __future__ import annotations
 
 import argparse
+import functools
 import glob
 import hashlib
 import http.client
@@ -158,6 +163,18 @@ POP_DOMAIN = b"materios-launch-pop-v1"
 # message, which needs no secret; the well-known key table cannot name it, since rule 1 finds a table key anywhere in
 # genesis storage and the runtime code, which hold runs of 32 zero bytes.
 ZERO_KEY = bytes(32)
+# ed25519's curve, -x² + y² = 1 + d·x²·y² over the field of this prime, and the prime order of its basepoint.
+ED25519_PRIME = 2**255 - 19
+ED25519_D = -121665 * pow(121666, -1, ED25519_PRIME) % ED25519_PRIME
+ED25519_SQRT_M1 = pow(2, (ED25519_PRIME - 1) // 4, ED25519_PRIME)
+ED25519_BASEPOINT_ORDER = 2**252 + 27742317777372353535851937790883648493
+ED25519_IDENTITY = (0, 1)
+# The scheme each kind of authority key signs with, and what anyone who can sign as one does.
+AUTHORITY_KEYS = {"aura": ("sr25519", "anyone can author its slots"),
+                  "grandpa": ("ed25519", "anyone can cast its finality votes")}
+# Every key a key table names is 32 or 33 bytes, so wherever data holds one, it covers a whole block of this many
+# bytes that starts at a multiple of it, at one of its own first BLOCK offsets.
+BLOCK = 8
 HASH_FIELDS = ("genesis_hash", "code_hash", "chain_spec_hash", "launch_manifest_hash")
 # Pallet name in construct_runtime, and the crate its types keep under any name.
 FORBIDDEN_PALLETS = {"PerpEngine": "pallet_perp_engine"}
@@ -886,9 +903,30 @@ class KnownKey:
 
 @dataclass(frozen=True)
 class WellKnown:
-    keys: list[KnownKey]
+    # Each key the tables name, with the first row that names it.
+    keys: dict[bytes, KnownKey]
     phrase_hash: bytes
     seed_hash: bytes
+
+    @functools.cached_property
+    def blocks(self) -> dict[bytes, list[tuple[int, bytes]]]:
+        """Each BLOCK bytes a key holds at one of its first BLOCK offsets, with that offset and the key."""
+        blocks: dict[bytes, list[tuple[int, bytes]]] = {}
+        for needle in self.keys:
+            for offset in range(BLOCK):
+                blocks.setdefault(needle[offset:offset + BLOCK], []).append((offset, needle))
+        return blocks
+
+    def found_in(self, data: bytes) -> list[KnownKey]:
+        """Each key the tables name that `data` holds, in one pass over its blocks whatever the tables' size: a key
+        `data` holds starts within the BLOCK bytes before a block it covers whole."""
+        found: dict[bytes, KnownKey] = {}
+        for start in range(0, len(data) - BLOCK + 1, BLOCK):
+            for offset, needle in self.blocks.get(data[start:start + BLOCK], ()):
+                at = start - offset
+                if at >= 0 and data[at:at + len(needle)] == needle:
+                    found.setdefault(needle, self.keys[needle])
+        return list(found.values())
 
 
 def load_well_known(extra: list[Path] = ()) -> WellKnown:
@@ -896,7 +934,7 @@ def load_well_known(extra: list[Path] = ()) -> WellKnown:
     named in a public repo. A 33-byte ECDSA key also matches the blake2-256
     account it maps to. The dev phrase and its seed are held by their hashes."""
     base = HERE / "well_known_keys.json"
-    keys = []
+    keys: dict[bytes, KnownKey] = {}
     for path in (base, *extra):
         try:
             entries = json.loads(Path(path).read_text(), object_pairs_hook=unique_keys)["keys"]
@@ -909,8 +947,7 @@ def load_well_known(extra: list[Path] = ()) -> WellKnown:
             if len(public) not in (32, 33):
                 raise InputError(f"key table {path}: keys[{i}] public is {len(public)} bytes; expected 32 or 33")
             for needle in (public, blake2_256(public)) if len(public) == 33 else (public,):
-                if not any(k.needle == needle for k in keys):
-                    keys.append(KnownKey(entry["label"], entry["scheme"], needle))
+                keys.setdefault(needle, KnownKey(entry["label"], entry["scheme"], needle))
     table = json.loads(base.read_text())
     phrase_hash, seed_hash = (hex_bytes(table.get(field), f"key table {base}: {field}", prefix="")
                               for field in ("dev_phrase_blake2_256", "dev_seed_blake2_256"))
@@ -974,8 +1011,73 @@ def contains_phrase(text: str, phrase_hash: bytes) -> bool:
     return any(blake2_256(" ".join(words[i:i + 12]).encode()) == phrase_hash for i in range(len(words) - 11))
 
 
-def match_known(data: bytes, known: list[KnownKey]) -> list[KnownKey]:
-    return [k for k in known if k.needle in data]
+def _edwards_add(a: tuple[int, int], b: tuple[int, int]) -> tuple[int, int]:
+    """The sum of two points of ed25519's curve, in affine coordinates; the formula is complete, as d is no square."""
+    p = ED25519_PRIME
+    (x1, y1), (x2, y2) = a, b
+    t = ED25519_D * x1 * x2 * y1 * y2 % p
+    return (x1 * y2 + y1 * x2) * pow(1 + t, -1, p) % p, (y1 * y2 + x1 * x2) * pow(1 - t, -1, p) % p
+
+
+def _edwards_multiple(k: int, point: tuple[int, int]) -> tuple[int, int]:
+    result = ED25519_IDENTITY
+    while k:
+        if k & 1:
+            result = _edwards_add(result, point)
+        point, k = _edwards_add(point, point), k >> 1
+    return result
+
+
+def ed25519_point(raw: bytes) -> tuple[int, int] | None:
+    """The point 32 bytes encode as an ed25519 key, as curve25519-dalek's CompressedEdwardsY::decompress reads it for
+    ed25519-zebra, or None: y is the low 255 bits taken mod the prime, so a y past the prime decodes too, and the top
+    bit negates the nonnegative root x, also when x is 0."""
+    p = ED25519_PRIME
+    n = int.from_bytes(raw, "little")
+    y = n % (1 << 255) % p
+    u, v = (y * y - 1) % p, (ED25519_D * y * y + 1) % p
+    x = u * pow(v, 3, p) * pow(u * pow(v, 7, p), (p - 5) // 8, p) % p
+    if v * x * x % p == -u % p:
+        x = x * ED25519_SQRT_M1 % p
+    if v * x * x % p != u:
+        return None
+    x = p - x if x & 1 else x
+    return (-x % p if n >> 255 else x), y
+
+
+def ed25519_small_order_keys() -> frozenset[bytes]:
+    """Every 32 bytes ed25519-zebra, which the node verifies ed25519 signatures with, reads as a key of small order,
+    canonical or not. Its check is cofactored, 8·s·B = 8·R + 8·k·A, so under a key A whose 8·A is the identity, R the
+    identity and s zero sign any message. The points of order dividing 8 are the multiples of one of order 8, which
+    ℓ·Q is for a point Q with a torsion component of order 8 (ℓ the basepoint's prime order). A key encodes such a
+    point when its low 255 bits are the point's y, or y plus the prime, and its top bit gives x's sign, or either
+    bit when x is 0."""
+    for y in itertools.count(2):
+        point = ed25519_point(y.to_bytes(32, "little"))
+        torsion = point and _edwards_multiple(ED25519_BASEPOINT_ORDER, point)
+        if torsion and _edwards_multiple(4, torsion) != ED25519_IDENTITY:
+            break
+    keys = set()
+    for x, y in {_edwards_multiple(k, torsion) for k in range(8)}:
+        for low in (y, y + ED25519_PRIME):
+            for sign in (0, 1):
+                key = (low | sign << 255).to_bytes(32, "little")
+                if low < 1 << 255 and ed25519_point(key) == (x, y):
+                    keys.add(key)
+    return frozenset(keys)
+
+
+ED25519_SMALL_ORDER = ed25519_small_order_keys()
+
+
+def no_secret(key: bytes, scheme: str) -> str | None:
+    """Why a `scheme` signature by `key` of any message needs no secret, or None: for sr25519 the all-zero key, the
+    ristretto identity, and for ed25519 a key of small order."""
+    if scheme == "sr25519" and key == ZERO_KEY:
+        return "the all-zero key, whose sr25519 signature of any message needs no secret"
+    if scheme == "ed25519" and key in ED25519_SMALL_ORDER:
+        return f"0x{key.hex()}, an ed25519 key of small order, whose ed25519 signature of any message needs no secret"
+    return None
 
 
 def multisig_account(members: list[bytes], threshold: int) -> bytes:
@@ -1034,27 +1136,29 @@ def role_multisigs(entry, where: str):
             yield from role_multisigs(member, f"{where}.members[{i}]")
 
 
-def lone_holders(entry) -> list[bytes]:
-    """The keys of a role entry whose holder alone can act as its account. A key
+def acts_as(entry, held: set[bytes]) -> bool:
+    """Whether whoever holds these keys can act as a role entry's account. A key
     signs as itself and, through pallet_multisig, as every nested multisig whose
     threshold the accounts it signs as meet, wherever that multisig's account is
     a member, a flat address included. Raises ValueError when a key does not
     decode."""
     multisigs = [(role_account(multisig), {role_account(member) for member in multisig["members"]},
                   multisig["threshold"]) for _, multisig in role_multisigs(entry, "")]
-    target = role_account(entry)
+    signs_as, grown = set(held), True
+    while grown:
+        grown = False
+        for account, members, threshold in multisigs:
+            if account not in signs_as and len(members & signs_as) >= threshold:
+                signs_as.add(account)
+                grown = True
+    return role_account(entry) in signs_as
 
-    def acts_alone(key: bytes) -> bool:
-        signs_as, grown = {key}, True
-        while grown:
-            grown = False
-            for account, members, threshold in multisigs:
-                if account not in signs_as and len(members & signs_as) >= threshold:
-                    signs_as.add(account)
-                    grown = True
-        return target in signs_as
 
-    return sorted(key for key in {role_account(leaf) for _, _, leaf in role_leaves(entry, "")} if acts_alone(key))
+def lone_holders(entry, anyone: set[bytes]) -> list[bytes]:
+    """The keys of a role entry whose holder alone can act as its account, signing also as each key anyone can.
+    Raises ValueError when a key does not decode."""
+    return sorted(key for key in {role_account(leaf) for _, _, leaf in role_leaves(entry, "")}
+                  if acts_as(entry, {key, *anyone}))
 
 
 def uint_constant(meta: Metadata, pallet: str, name: str, width: int) -> int | None:
@@ -1064,11 +1168,16 @@ def uint_constant(meta: Metadata, pallet: str, name: str, width: int) -> int | N
     return int.from_bytes(raw, "little") if len(raw) == width else None
 
 
-def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, prefix: int) -> list[str]:
+def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, prefix: int,
+                    well_known: WellKnown) -> list[str]:
     """Why a role entry that must need two keyholders to act does not: it is a
-    single key, one key meets its threshold alone, or pallet_multisig refuses
-    to sign through it or through a multisig nested in it, since it has more
-    members than the runtime's MaxSignatories."""
+    single key, one key meets its threshold alone, the keys anyone can sign as
+    meet it, or pallet_multisig refuses to sign through it or through a
+    multisig nested in it, since it has more members than the runtime's
+    MaxSignatories. Anyone can sign as a well-known key, whose secret is public,
+    and as an ed25519 key of small order (any account also signs with ed25519),
+    but the all-zero account, which signs nothing on chain: frame_system's
+    CheckNonZeroSender refuses it."""
     if not is_multisig(entry):
         return [f"{where} is a single key: {name} must be a multisig with a threshold of at least 2, declared by its "
                 "members so each one is checked"]
@@ -1083,15 +1192,23 @@ def multisig_faults(entry, where: str, name: str, power: str, meta: Metadata, pr
     if entry["threshold"] < 2:
         return faults + [f"{where} has threshold 1: any one member alone {power}"]
     try:
-        holders = lone_holders(entry)
+        paths: dict[bytes, list[str]] = {}
+        for path, _, leaf in role_leaves(entry, where):
+            paths.setdefault(role_account(leaf), []).append(path)
+        anyone = {key for key in paths
+                  if key in well_known.keys or (key in ED25519_SMALL_ORDER and key != ZERO_KEY)}
+        shown = " and ".join(path for key, key_paths in paths.items() if key in anyone for path in key_paths)
+        if anyone and acts_as(entry, anyone):
+            return faults + [f"{where}: the keys anyone can sign as, at {shown}, meet its threshold, so anyone {power}"]
+        alone = lone_holders(entry, set())
+        helped = [key for key in lone_holders(entry, anyone) if key not in alone]
     except ValueError:
         return faults  # rule 1 refuses a key that does not decode and a multisig that lists a member twice
-    paths: dict[bytes, list[str]] = {}
-    for path, _, leaf in role_leaves(entry, where):
-        paths.setdefault(role_account(leaf), []).append(path)
     return faults + [f"{where}: {ss58(key, prefix)}, the member at {' and '.join(paths[key])}, meets its threshold "
                      f"alone by also signing as a nested multisig, so one keyholder alone {power}"
-                     for key in holders]
+                     for key in alone] + [
+        f"{where}: {ss58(key, prefix)}, the member at {' and '.join(paths[key])}, meets its threshold alone with the "
+        f"keys anyone can sign as, at {shown}, so one keyholder alone {power}" for key in helped]
 
 
 # ---------------------------------------------------------------------------
@@ -1406,14 +1523,40 @@ def check_chain_identity(spec: Spec) -> list[Finding]:
     return findings
 
 
+def authority_keys(spec: Spec, launch: dict, cardano: CardanoView):
+    """(where, kind, key) for each aura and grandpa key that authors blocks or votes on finality: genesis Aura and
+    GRANDPA authorities, the genesis committee and the session keys the session genesis seats from it, and each
+    declared authority's and each Cardano permissioned candidate's keys."""
+    yield from ((f"genesis Aura.Authorities[{i}]", "aura", key) for i, key in enumerate(genesis_aura(spec)))
+    yield from ((f"genesis Grandpa.Authorities[{i}]", "grandpa", voter[:32])
+                for i, voter in enumerate(genesis_voters(spec) or []))
+    _, members = genesis_committee(spec) or (0, [])
+    for i, (_, aura, grandpa) in enumerate(members):
+        yield f"genesis SessionCommitteeManagement.CurrentCommittee[{i}] aura key", "aura", aura
+        yield f"genesis SessionCommitteeManagement.CurrentCommittee[{i}] grandpa key", "grandpa", grandpa
+    raw = spec.value("Session", "ValidatorsAndKeys")
+    try:
+        session = [] if raw is None else fixed_list(raw, 32 * 3, "Session.ValidatorsAndKeys does not decode")
+    except InputError:
+        session = []  # rule 9 refuses session keys other than the genesis committee's, which decode
+    for i, entry in enumerate(session):
+        yield f"genesis Session.ValidatorsAndKeys[{i}] aura key", "aura", entry[32:64]
+        yield f"genesis Session.ValidatorsAndKeys[{i}] grandpa key", "grandpa", entry[64:]
+    for name, aura, grandpa in declared_authorities(launch):
+        yield f"authority {name}'s aura key", "aura", aura
+        yield f"authority {name}'s grandpa key", "grandpa", grandpa
+    for i, cand in enumerate(cardano.candidates):
+        yield f"Cardano permissioned candidate {i} aura", "aura", cand.aura
+        yield f"Cardano permissioned candidate {i} gran", "grandpa", cand.gran
+
+
 def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView, launch_keys: list[bytes],
                    well_known: WellKnown) -> list[Finding]:
-    known = well_known.keys
     findings = []
     code = decompressed_code(spec.code)
     for key, value in sorted(spec.storage.items()):
         data = code if key == CODE_KEY else key + value
-        for hit in match_known(data, known):
+        for hit in well_known.found_in(data):
             findings.append(Finding(KEYS, f"{meta.label(key)}: {hit} is in genesis"))
     roles = launch.get("roles", {})
     for role in REQUIRED_ROLES:
@@ -1440,10 +1583,11 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                     findings.append(Finding(KEYS, f"{leaf}: {e}; a role takes a public key only"))
                     decoded = False
                     continue
-                findings += [Finding(KEYS, f"{leaf}: {hit}") for hit in match_known(raw, known)]
-                if raw == ZERO_KEY:
-                    findings.append(Finding(KEYS, f"{leaf}: the all-zero key, whose sr25519 signature of any message "
-                                                  "needs no secret"))
+                findings += [Finding(KEYS, f"{leaf}: {hit}") for hit in well_known.found_in(raw)]
+                if reason := no_secret(raw, "sr25519"):
+                    findings.append(Finding(KEYS, f"{leaf}: {reason}"))
+                elif reason := no_secret(raw, "ed25519"):
+                    findings.append(Finding(KEYS, f"{leaf}: {reason}, so anyone can sign as its account"))
             account = None
             if decoded:
                 try:
@@ -1453,7 +1597,7 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
             accounts.setdefault(role, []).append(account)
     for i, entry in enumerate(roles.get("sudo", [])):
         findings += [Finding(KEYS, fault) for fault in multisig_faults(entry, f"roles.sudo[{i}]", "Root", "holds Root",
-                                                                        meta, spec.ss58_prefix)]
+                                                                        meta, spec.ss58_prefix, well_known)]
     sudo_key, sudo = spec.value("Sudo", "Key"), accounts.get("sudo", [])
     if sudo_key is None:
         if sudo:
@@ -1468,8 +1612,12 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                                           "any role: who holds it is unchecked"))
     for i, cand in enumerate(cardano.candidates):
         for name, raw in zip(("partner chains key", "aura", "gran"), cand.keys):
-            for hit in match_known(raw, known):
+            for hit in well_known.found_in(raw):
                 findings.append(Finding(KEYS, f"Cardano permissioned candidate {i} {name}: {hit}"))
+    for where, kind, key in authority_keys(spec, launch, cardano):
+        scheme, power = AUTHORITY_KEYS[kind]
+        if reason := no_secret(key, scheme):
+            findings.append(Finding(KEYS, f"{where}: {reason}, so {power}"))
     for node in launch.get("nodes", []):
         node_findings = []
         for piece in launch_pieces(node):
@@ -1486,7 +1634,7 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                 node_findings.append(Finding(KEYS, f"node {node['name']}: launch config holds the dev seed"))
         findings += dict.fromkeys(node_findings)
     for launch_key in launch_keys:
-        findings += [Finding(KEYS, f"manifest signing key: {hit}") for hit in match_known(launch_key, known)]
+        findings += [Finding(KEYS, f"manifest signing key: {hit}") for hit in well_known.found_in(launch_key)]
     return findings
 
 
@@ -2487,14 +2635,20 @@ def check_settlement(spec: Spec, launch: dict) -> list[Finding]:
     return findings
 
 
+def genesis_voters(spec: Spec) -> list[bytes] | None:
+    """Each genesis Grandpa.Authorities entry, a 32-byte key and its u64 weight, or None if genesis sets none."""
+    raw = spec.value("Grandpa", "Authorities")
+    return None if raw is None else fixed_list(
+        raw, 40, "Grandpa.Authorities does not decode as a list of 32-byte keys and u64 weights")
+
+
 def check_grandpa_voters(spec: Spec, declared: list[tuple[str, bytes, bytes]]) -> list[Finding]:
     """Genesis Grandpa.Authorities must be the declared authorities' grandpa keys, each once and at weight 1 as
     build-spec writes them: a weight above 1, or a key listed twice, counts as several voters."""
-    raw = spec.value("Grandpa", "Authorities")
-    if raw is None:
+    voters = genesis_voters(spec)
+    if voters is None:
         return [Finding(COMMITTEE, "genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes "
                                    "is unchecked")]
-    voters = fixed_list(raw, 40, "Grandpa.Authorities does not decode as a list of 32-byte keys and u64 weights")
     return seated_once([(voter[:32], f"0x{voter[:32].hex()}") for voter in voters],
                        {grandpa: (name, f"0x{grandpa.hex()}") for name, _, grandpa in declared},
                        "Grandpa.Authorities", "grandpa key", "it counts twice toward finality",
@@ -2758,7 +2912,7 @@ def check_genesis_lock(spec: Spec, launch: dict, cardano: CardanoView, well_know
                                             "a lock the preflight cannot read as a native script is refused"))
         else:
             anyone = {hashlib.blake2b(k.needle, digest_size=28).digest()
-                      for k in well_known.keys if k.scheme == "ed25519"}
+                      for k in well_known.keys.values() if k.scheme == "ed25519"}
             holders = native_script_holders(native_script(raw), anyone)
             if holders is not None and holders < 2:
                 findings.append(Finding(SUPPLY, f"the genesis lock's native script can be spent by {holders} key "
@@ -2933,7 +3087,7 @@ def check_checkpoint(spec: Spec, launch: dict, signed: dict, launch_keys: list[b
     return findings
 
 
-def check_guardian(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
+def check_guardian(spec: Spec, meta: Metadata, launch: dict, well_known: WellKnown) -> list[Finding]:
     """The Root timelock's guardian, who can veto the Root calls the sudo key
     queues and co-sign them early. The runtime refuses a genesis whose guardian
     is the sudo key, or that has none unless the sudo key is a dev key; on
@@ -2956,7 +3110,7 @@ def check_guardian(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                                              "veto Root is unchecked")]
     findings += [Finding(TIMELOCK, fault) for fault in multisig_faults(
         entries[0], "roles.guardian[0]", "the guardian", "can veto Root's queued calls or co-sign them early", meta,
-        spec.ss58_prefix)]
+        spec.ss58_prefix, well_known)]
     if is_multisig(entries[0]):
         findings += [Finding(TIMELOCK, f"roles.guardian[0].members[{i}] is a multisig: the runtime takes the "
                                        "guardian's veto ahead of fee-paying calls only when a member key signs it "
@@ -3739,7 +3893,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_code_overrides(launch)
             + check_last_runtime_upgrade(spec)
             + check_observation(spec)
-            + check_guardian(spec, meta, launch)
+            + check_guardian(spec, meta, launch, well_known)
             + check_delays(spec, meta)
             + check_node_genesis(spec, launch)
             + check_settlement(spec, launch))
