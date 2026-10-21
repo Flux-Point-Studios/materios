@@ -95,6 +95,18 @@ steps:
       SCCACHE_WEBDAV_PASSWORD:
         from_secret: sccache_writer_password
 
+  # Demonstration, reverted by the next commit: a pull request step that asks
+  # for the cache writer's secret and tries to write with it.
+  - name: pr-asks-for-writer
+    image: rust:1.85.0-bookworm
+    when:
+      - event: pull_request
+    environment:
+      WRITER_PASSWORD:
+        from_secret: sccache_writer_password
+    commands:
+      - printf 'user = "sccache-writer:%s"\n' "$${WRITER_PASSWORD}" | curl -s -o /dev/null -w '%{http_code}\n' -k -K - -X PUT --data-binary pr https://192.168.0.133:3910/.pr-write
+
   # The launch preflight's rule 8 against the node built above: every run is
   # offline, on a base path of its own, and a node started to serve its
   # genesis listens on loopback only, with no peers.
