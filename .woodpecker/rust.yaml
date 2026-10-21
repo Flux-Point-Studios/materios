@@ -9,6 +9,13 @@ when:
 labels:
   arm64-emu: "true"
 
+# Isolated database for the node's db-sync follower test.
+services:
+  - name: db-sync-postgres
+    image: postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    environment:
+      POSTGRES_HOST_AUTH_METHOD: trust
+
 steps:
   # Advisory, as in the GitHub workflow (continue-on-error): the tree is not
   # rustfmt-clean.
@@ -36,7 +43,17 @@ steps:
       - apt-get update
       - apt-get install -y --no-install-recommends clang libclang-dev libssl-dev pkg-config protobuf-compiler make cmake
       - cargo check --workspace --all-targets --locked
+      # The db-sync follower, the fleet's Cardano backend, is not a workspace
+      # member, and its own tests need Docker. Its sources must stay upstream
+      # partner-chains v1.5.1's, whose checkout the check above fetched: they
+      # serve the committee for a Cardano epoch from the epoch two before it,
+      # which every chain's draws, preprod v6's relaxed ones included, rely on.
+      - diff -r vendor/db-sync-follower/src /usr/local/cargo/git/checkouts/partner-chains-*/20e607f/toolkit/mainchain-follower/db-sync-follower/src
       - cargo test -p pallet-motra -p pallet-tee-attestation -p pallet-orinq-receipts -p pallet-billing -p pallet-root-timelock -p pallet-session-validator-management --no-fail-fast
+      # The committee inputs a node gives the runtime: the vendored Ariadne
+      # inherent data provider, and the yaci-store follower with the features
+      # the node builds it with. Its live-database tests stay ignored.
+      - cargo test -p authority-selection-inherents -p yaci-follower --features yaci-follower/block-source,yaci-follower/candidate-source,yaci-follower/native-token,yaci-follower/mc-hash,yaci-follower/sidechain-rpc --locked --no-fail-fast
       # The timelock's try_state invariants, which only the try-runtime
       # feature compiles in.
       - cargo test -p pallet-root-timelock --features try-runtime --lib --locked
@@ -54,15 +71,20 @@ steps:
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --features try-runtime --lib --locked --no-fail-fast
       # The chain-spec builders: each genesis, built from the spec's own code
       # by the runtime's genesis builder as build-spec builds it, carried
-      # through the first committee rotation.
-      - cargo test -p materios-node --locked --no-fail-fast chain_spec
+      # through the first committee rotation. And the Ariadne rule each
+      # genesis draws its committees under.
+      - cargo test -p materios-node --locked --no-fail-fast -- chain_spec inherent_data
+      # Pin the db-sync follower's epoch - 2 lag.
+      - MATERIOS_TEST_DBSYNC_URL=postgres://postgres@db-sync-postgres/postgres cargo test -p materios-node --locked --no-fail-fast -- main_chain_follower
       # The benchmarking genesis preset, which only a runtime built with
       # `dev-presets` has.
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast --features dev-presets the_benchmarking_preset_builds
 
-  # The launch preflight's rule 8 against the node built above: every run is
-  # offline, on a base path of its own, and a node started to serve its
-  # genesis listens on loopback only, with no peers.
+  # The launch preflight's rule 8 against the node built above, and the
+  # Ariadne rule that node's service draws preprod v6's committees and any
+  # other chain's under: every run is offline, on a base path of its own, and
+  # a node started to serve its genesis listens on loopback only, with no
+  # peers.
   - name: node-attestation
     image: python:3.12-slim-bookworm
     directory: tools/launch-preflight

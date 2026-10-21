@@ -280,18 +280,14 @@ impl CandidatesDataSourceImpl {
 		&self,
 		epoch_of_data_usage: McEpochNumber,
 	) -> Result<McEpochNumber, Box<dyn std::error::Error + Send + Sync>> {
-		// PATCH (flux-point-studios/materios, preprod only): IOG upstream applies a
-		// 2-epoch stability offset here so partner-chain consumers only see Cardano
-		// data that's had 2 full epochs (~10 days on preprod) to settle. For
-		// chain launches where the D-parameter / permissioned-candidates
-		// transactions were included in the current Cardano epoch, this hard
-		// offset prevents the chain from producing a block until those
-		// transactions are "stable." On preprod (permissioned-only mode, D=1.0,
-		// no real SPOs yet) the 10-day wait is operational dead weight and
-		// provides no marginal safety because `get_latest_stable_block_for`
-		// already enforces k=432-blocks depth (~2.4h on preprod). We use offset 0
-		// here so Materios can launch in the same Cardano epoch as its on-chain
-		// config tx. MAINNET MUST REVERT to `- 2`.
-		Ok(epoch_of_data_usage)
+		if epoch_of_data_usage.0 < 2 {
+			Err(BadRequest(format!(
+				"Minimum supported epoch of data usage is 2, but {} was provided",
+				epoch_of_data_usage.0
+			))
+			.into())
+		} else {
+			Ok(McEpochNumber(epoch_of_data_usage.0 - 2))
+		}
 	}
 }

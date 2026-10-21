@@ -272,11 +272,14 @@ impl CandidatesDataSourceImpl {
 		&self,
 		epoch_of_data_usage: McEpochNumber,
 	) -> Result<McEpochNumber, Box<dyn std::error::Error + Send + Sync>> {
-		// Mirrors the Materios db-sync-follower preprod patch: upstream applies a
-		// 2-Cardano-epoch stability offset here; on preprod (permissioned-only,
-		// D=1.0) the k=432-block stable-block depth already enforced elsewhere
-		// makes the additional 10-day wait dead weight. MAINNET MUST REVERT to
-		// `McEpochNumber(epoch_of_data_usage.0 - 2)`.
-		Ok(epoch_of_data_usage)
+		if epoch_of_data_usage.0 < 2 {
+			Err(BadRequest(format!(
+				"Minimum supported epoch of data usage is 2, but {} was provided",
+				epoch_of_data_usage.0
+			))
+			.into())
+		} else {
+			Ok(McEpochNumber(epoch_of_data_usage.0 - 2))
+		}
 	}
 }

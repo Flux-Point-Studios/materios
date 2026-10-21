@@ -74,7 +74,7 @@ materios-node wizards setup-main-chain-state
 - Sets up the native token reserve (if applicable)
 
 ### Step 5: Wait for Registration
-Wait **2 Cardano epochs** (~10 days on mainnet, ~2 days on preprod) for:
+Wait **2 Cardano epochs** (~10 days: Cardano's epochs last five days on mainnet and preprod alike) for:
 - Committee registration to be confirmed
 - Governance parameters to be readable by nodes
 
@@ -135,7 +135,10 @@ materios-node wizards update-d-parameter \
   --registered 1 \
   --governance-key path/to/key
 ```
-Changes take effect after the next epoch transition.
+A change made in Cardano epoch N seats committees from the first session that starts in epoch N + 2, five to
+ten days later: each session's committee is drawn from the Cardano data of the epoch two before the one it starts
+in. Preprod v6 is the exception: it draws every committee under the preprod relaxation it started with, from the
+data of the Cardano epoch the session starts in, so a change seats committees within hours.
 
 ## MATRA Token Reserve
 
