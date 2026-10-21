@@ -55,9 +55,10 @@
     {
       "id": "committee-seating-gate",
       "name": "Committee seating gate",
-      "desc": "Composed authority-selection gate: input sanitizer, dead-registered and dead-core liveness filters, seat-ramp clamp, live-quorum floor, growth-slack invariant, break-glass floor and pinned-committee override; refuses (keep-current) rather than seat a committee that cannot finalize, so a fresh chain keeps the genesis committee its chain spec declares until a quorum of Cardano's draw has authored. The author and every importing peer judge it on the same state: the runtime's check_inherents initialises the block first. Genesis refuses a chain spec whose committee is empty, has Aura or GRANDPA authorities seeded beside it, has more seats than MaxValidators, lists an authority twice or out of ascending cross-chain-key order, or gives two authorities one Aura or GRANDPA key.",
+      "desc": "Composed authority-selection gate: input sanitizer, dead-registered and dead-core liveness filters, seat-ramp clamp, live-quorum floor, growth-slack invariant, break-glass floor and pinned-committee override; refuses (keep-current) rather than seat a committee that cannot finalize, so a fresh chain keeps the genesis committee its chain spec declares until a quorum of Cardano's draw has authored. The author and every importing peer judge it on the same state: the runtime's check_inherents initialises the block first. Genesis refuses a chain spec whose committee is empty, has Aura or GRANDPA authorities seeded beside it, has more seats than MaxValidators, lists an authority twice or out of ascending cross-chain-key order, or gives two authorities one Aura or GRANDPA key. A raw chain spec never runs that builder, so the node refuses to load any spec whose genesis committee is empty or whose genesis Aura or GRANDPA authorities are not the committee's keys in its order, naming the reason; preprod v6, which started before the live-quorum floor and seated Cardano's draw at its first rotation, is the one genesis it loads despite that.",
       "kind": "engine",
       "paths": [
+        "partnerchain/node/src/chain_spec.rs",
         "partnerchain/runtime/src/committee_liveness.rs",
         "partnerchain/runtime/src/genesis_committee.rs",
         "partnerchain/runtime/src/input_sanity.rs",

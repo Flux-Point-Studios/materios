@@ -350,12 +350,12 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
 mod tests {
     use super::{preprod_config, Authority, ChainSpec, CrossChainPublic, GrandpaId, SessionKeys};
     use crate::chain_spec::{
-        authority_keys_from_seed,
+        authority_keys_from_seed, seated_now,
         tests::{
             cardano, genesis_header, inherent_data, peers_check, play, propose,
-            seated_after_first_rotation, seated_at_genesis, seated_now, start,
-            stored_attestor_rewards, Seated,
+            seated_after_first_rotation, seated_at_genesis, start, stored_attestor_rewards,
         },
+        Seated,
     };
     use materios_runtime::{
         Block, Header, OrinqReceipts, RuntimeCall, RuntimeOrigin, SessionCommitteeManagement,
