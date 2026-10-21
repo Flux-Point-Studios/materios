@@ -15,8 +15,8 @@ openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -set_serial 1 -days 1 
     -out server.crt 2>/dev/null
 for user in sccache-reader sccache-writer; do
     openssl rand -hex 32 > "$user.password"
-    printf '%s:%s\n' "$user" "$(openssl passwd -6 -stdin < "$user.password")" >> htpasswd-read
-done
+    printf '%s:%s\n' "$user" "$(openssl passwd -6 -stdin < "$user.password")"
+done > htpasswd-read
 grep '^sccache-writer:' htpasswd-read > htpasswd-write
 rm ca.key server.csr server.ext
 # The store step runs as nginx's unprivileged user.

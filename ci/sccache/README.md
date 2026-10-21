@@ -26,8 +26,12 @@ can edit:
   says.
 
 `client.sh` adds a check on every run: a read-only step probes a write first,
-and fails if the store accepts it. `test_policy.py` keeps every workflow to
-the table above and keeps both steps computing the same cache keys.
+and fails if the store accepts it. A store that does not answer the probe
+within 10 s leaves the step uncached. One that stops answering mid-build turns
+each lookup into a local compile once the connection fails, or after sccache's
+60 s lookup timeout if it accepts connections and never replies.
+`test_policy.py` keeps every workflow to the table above and keeps both steps
+computing the same cache keys.
 
 Woodpecker 3.16 filters secrets by event and image, not by branch, so a push
 to any branch of this repository whose own pipeline file asks for the writer
