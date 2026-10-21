@@ -186,6 +186,18 @@
       ],
       "consumes": [],
       "status": "experimental"
+    },
+    {
+      "id": "ci-sccache-store",
+      "name": "CI sccache store",
+      "desc": "Shared sccache store for the Rust CI on both Woodpecker agents: nginx WebDAV on Node-3 (192.168.0.133:3910, LAN only) over TLS 1.3 under a pinned, name-constrained CA whose key is destroyed, every request authenticated, reads for the reader and writer and every change for the writer alone, with no delete or move. Pull requests build with the reader (the store refuses their writes and client.sh fails a read-only step whose write it takes); only push pipelines on main get the writer, a Woodpecker secret released to push events, and the writer reads nothing (SCCACHE_RECACHE): main compiles every crate and replaces its entry, so no stored entry reaches a main build. Memory 512 MiB, one CPU, least-recently-read eviction from 40 GiB down to 32 GiB; an unanswering store leaves builds uncached.",
+      "kind": "toolkit",
+      "paths": [
+        "ci/sccache",
+        ".woodpecker/sccache.yaml"
+      ],
+      "consumes": [],
+      "status": "experimental"
     }
   ]
 }

@@ -75,3 +75,4 @@ __pycache__/
 tools/zk-spec/artifacts/
 tools/zk-spec/aiken/build/
 .claude/fluxpoint/
+ci/sccache/.e2e/

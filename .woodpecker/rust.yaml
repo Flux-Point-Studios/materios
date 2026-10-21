@@ -16,26 +16,20 @@ services:
     environment:
       POSTGRES_HOST_AUTH_METHOD: trust
 
-steps:
-  # Advisory, as in the GitHub workflow (continue-on-error): the tree is not
-  # rustfmt-clean.
-  - name: fmt
-    image: rust:1.85.0-bookworm
-    failure: ignore
-    directory: partnerchain
-    commands:
-      - cargo fmt --all -- --check
-
-  # Image tag matches partnerchain/rust-toolchain.toml. No cargo cache: a
-  # persistent one would need a host volume, which only trusted repos get.
-  - name: check-test
+# check-test, the one build both events run. sccache (ci/sccache) serves
+# pull requests' rustc runs from the shared store on Node-3, with the reader's
+# credential, which the store refuses for any write. Only pushes to main get
+# the writer's, a secret Woodpecker releases to push events alone, and the
+# writer reads nothing: it compiles every crate and stores the result. Both
+# steps must compute the same cache keys, so they share everything else
+# (ci/sccache/test_policy.py holds them to that).
+variables:
+  - &check_test
+    # Image tag matches partnerchain/rust-toolchain.toml.
     image: rust:1.85.0-bookworm
     directory: partnerchain
-    environment:
-      # The agent's host runs other services; one rustc per physical core
-      # keeps the build clear of the OOM killer.
-      CARGO_BUILD_JOBS: "8"
     commands:
+      - . ../ci/sccache/client.sh
       - cat rust-toolchain.toml
       - rustup show active-toolchain
       - rustup target add wasm32-unknown-unknown
@@ -79,6 +73,48 @@ steps:
       # The benchmarking genesis preset, which only a runtime built with
       # `dev-presets` has.
       - SKIP_WASM_BUILD=1 cargo test -p materios-runtime --lib --locked --no-fail-fast --features dev-presets the_benchmarking_preset_builds
+      - '[ -z "$${RUSTC_WRAPPER:-}" ] || sccache --show-stats'
+  - &build_environment
+    # The agent's host runs other services; one rustc per physical core
+    # keeps the build clear of the OOM killer.
+    CARGO_BUILD_JOBS: "8"
+    # sccache caches only non-incremental rustc runs.
+    CARGO_INCREMENTAL: "0"
+    SCCACHE_WEBDAV_ENDPOINT: https://192.168.0.133:3910
+    # One server for the whole step, so its statistics cover every build.
+    SCCACHE_IDLE_TIMEOUT: "0"
+
+steps:
+  # Advisory, as in the GitHub workflow (continue-on-error): the tree is not
+  # rustfmt-clean.
+  - name: fmt
+    image: rust:1.85.0-bookworm
+    failure: ignore
+    directory: partnerchain
+    commands:
+      - cargo fmt --all -- --check
+
+  - name: check-test
+    <<: *check_test
+    when:
+      - event: pull_request
+    environment:
+      <<: *build_environment
+      SCCACHE_WEBDAV_USERNAME: sccache-reader
+      SCCACHE_WEBDAV_PASSWORD:
+        from_secret: sccache_reader_password
+      SCCACHE_WEBDAV_RW_MODE: READ_ONLY
+
+  - name: check-test-main
+    <<: *check_test
+    when:
+      - event: push
+        branch: main
+    environment:
+      <<: *build_environment
+      SCCACHE_WEBDAV_USERNAME: sccache-writer
+      SCCACHE_WEBDAV_PASSWORD:
+        from_secret: sccache_writer_password
 
   # The launch preflight's rule 8 against the node built above, and the
   # Ariadne rule that node's service draws preprod v6's committees and any
