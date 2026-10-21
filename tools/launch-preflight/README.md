@@ -42,7 +42,7 @@ It reads:
 
 | Rule | Refuses when |
 |---|---|
-| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. A role, or any member of a role's multisig, is the all-zero key, whose sr25519 signature of any message needs no secret (see [Proof of possession](#proof-of-possession)). `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` does not need two keyholders to act (see [Multisig roles](#multisig-roles)), or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
+| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. A role, or any member of a role's multisig, is the all-zero key, whose sr25519 signature of any message needs no secret (see [Proof of possession](#proof-of-possession)), or an ed25519 key of small order, whose ed25519 signature of any message needs none either, so anyone can sign as its account. An authority key anyone can sign for (see [Keys anyone can sign for](#keys-anyone-can-sign-for)): an aura key that is the all-zero key, or a grandpa key that is an ed25519 key of small order, in genesis `Aura.Authorities`, `Grandpa.Authorities`, `SessionCommitteeManagement.CurrentCommittee` or `Session.ValidatorsAndKeys`, as a declared authority's `aura` or `grandpa`, or as a Cardano permissioned candidate's `aura` or `gran`. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` does not need two keyholders to act (see [Multisig roles](#multisig-roles)), or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
 | 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
 | 3 rpc | A public RPC URL, probed live, lists in `rpc_methods` a method outside the safe set or answers `system_peers`, an unsafe method that changes nothing (see [Public RPC probe](#public-rpc-probe)); the launch does not declare `public_rpc`; an authority's running node process, read from its `cmdline` capture, serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`, including every value one `--experimental-rpc-endpoint` takes up to the next option, with each option trimmed as the node trims it. |
 | 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. |
@@ -478,6 +478,15 @@ sudo entry, and rule 7 the guardian, that:
   `{"threshold": 2, "members": [C, {"threshold": 1, "members": [C, D]}]}` is
   C's alone, as is a 2-of-2 of two 1-of-2 multisigs that share C, or one whose
   member is the flat address of another multisig declared in it;
+- has a key that meets its threshold alone with the keys anyone can sign as,
+  or whose threshold those keys meet with no keyholder at all. Anyone can sign
+  as a well-known key, whose secret is public (see
+  [Well-known keys](#well-known-keys)), and as an ed25519 key of small order,
+  since any account also signs with ed25519 (see
+  [Keys anyone can sign for](#keys-anyone-can-sign-for)). The all-zero account
+  is the exception: frame_system's `CheckNonZeroSender` refuses it as a signer,
+  so it approves nothing. So a 2-of-2 of C and the ristretto basepoint, whose
+  secret scalar is 1, is C's alone;
 - has, at any depth, a multisig with more members than the runtime's
   `Multisig.MaxSignatories` (10): pallet_multisig refuses every call signed
   through it. The bound is read from the metadata of the genesis code, and a
@@ -504,10 +513,11 @@ is a key whose secret someone signed with, never the address of a multisig no
 one declared, which no secret signs for: each multisig needs as many keys as
 its threshold says, at every depth, and rules 1 and 7 see every one of them.
 A `pop` does not show who holds a key: not that its secret is kept private
-(rule 1 refuses only keys whose secret is published), nor that two keys have
-two holders, since one person can hold two members' keys and sign both
-challenges. The ceremony keeps the holders apart: each signs on their own
-device, and no one sees another's secret.
+(rule 1 refuses only keys whose secret is public: published, or a small
+scalar or a trivial mini-secret, see [Well-known keys](#well-known-keys)), nor
+that two keys have two holders, since one person can hold two members' keys
+and sign both challenges. The ceremony keeps the holders apart: each signs on
+their own device, and no one sees another's secret.
 
 The challenge is these bytes, which `challenge` prints as 0x-hex:
 
@@ -558,10 +568,12 @@ final, since the challenge binds both:
    challenge.
 
 3. Its holder signs it offline on their own device, with their secret URI in a
-   file only they can read, and `--scheme ecdsa` for a 33-byte key:
+   file only they can read, and `--scheme ecdsa` for a 33-byte key, giving the
+   challenge exactly as `challenge` prints it, `0x` included (another `0x`
+   before it makes hex subkey refuses):
 
    ```
-   subkey sign --suri <secret URI file> --hex --message 0x<challenge>
+   subkey sign --suri <secret URI file> --hex --message <challenge>
    ```
 
 4. Put each signature subkey prints in as its member's `pop`. The launch
@@ -721,41 +733,94 @@ so rule 1 refuses exactly the chain names that would let it sign with a dev key.
 ## Well-known keys
 
 `well_known_keys.json` holds public keys only: the dev keys, keys whose secret
-a public repo commits, and retired keys whose secret was published. A key whose
-exposure is not yet public knowledge must not be named here; list it in an
-operator table kept outside the repo and pass it with `--extra-well-known`
-(repeatable). That table has the same shape, each key in lowercase hex with no
-`0x`:
+a public repo commits, retired keys whose secret was published, and keys whose
+secret anyone can name without a leak. Those last are k·B, sr25519's ristretto
+basepoint times each scalar k from 1 to 1024, and k·G, secp256k1's generator
+times it, compressed to 33 bytes, each labelled `secret scalar k, public`; and
+the keys of the mini-secrets of one repeated byte (`0x00`, `0x01` and `0xff`)
+under each scheme that takes them, labelled `mini-secret 0x00*32, public` and
+so on (secp256k1 takes neither zero nor `0xff..ff` as a secret key). A key
+already in a row keeps that row's label: partner-chains commits the seeds of
+the ECDSA scalars 1 and 513 to 517 as test keys.
+
+A key whose exposure is not yet public knowledge must not be named here; list
+it in an operator table kept outside the repo and pass it with
+`--extra-well-known` (repeatable). That table has the same shape, each key in
+lowercase hex with no `0x`:
 
 ```json
 {"keys": [{"label": "exposed multisig member", "scheme": "sr25519", "public": "<32 or 33 bytes of hex>"}]}
 ```
 
-A 33-byte ECDSA key also matches the blake2-256 account it maps to. The
-all-zero key is not a row: a row matches anywhere in genesis storage and the
-runtime code, and both hold runs of 32 zero bytes, so rule 1 refuses it in a
-role on its own. Regenerate the public table from a polkadot-sdk checkout,
-which supplies `DEV_PHRASE`, and a directory holding a clone of each repo in
-the generator's `PUBLIC_REPOS` (the public repos with Substrate key code or
-configuration):
+A 33-byte ECDSA key also matches the blake2-256 account it maps to. Rules 1 and
+7 count a multisig member that a table names as a key anyone can sign as (see
+[Multisig roles](#multisig-roles)). The all-zero key and the ed25519 keys of
+small order are not rows: a row matches anywhere in genesis storage and the
+runtime code, and both hold runs of 32 zero bytes and `0x01` before 31 zero
+bytes, so rule 1 refuses them where a key signs (see
+[Keys anyone can sign for](#keys-anyone-can-sign-for)).
+
+Rule 1 finds the table keys a storage value or the runtime code holds in one
+pass over its 8-byte blocks, whatever the table's size: every key is at least
+32 bytes, so a key the data holds covers a whole block that starts at a
+multiple of 8, at one of the key's first 8 offsets, and only the keys indexed
+under that block are compared.
+
+Regenerate the public table from a polkadot-sdk checkout, which supplies
+`DEV_PHRASE`, and a directory holding a clone of each repo in the generator's
+`PUBLIC_REPOS` (the public repos with Substrate key code or configuration):
 
 ```
 pip install substrate-interface ecdsa mnemonic
 python3 gen_well_known_keys.py <polkadot-sdk> <clones> > well_known_keys.json
 ```
 
-The generator sweeps every commit of those repos for secrets committed as string
-literals (a BIP39 phrase with a valid checksum, a 0x-hex seed under a name that
-marks it secret, a bare `//Path` URI) and writes the public keys each derives
-under sr25519, ed25519 and ecdsa. A clone made with `--filter=blob:limit=1m` is
+The generator is the table's source: the table is its output for the clones it
+swept, byte for byte, and a sweep of the same clones writes the same bytes. It
+sweeps every commit of those repos for secrets committed as string literals (a
+BIP39 phrase with a valid checksum, a 0x-hex seed under a name that marks it
+secret, a bare `//Path` URI) and writes the public keys each derives under
+sr25519, ed25519 and ecdsa. A clone made with `--filter=blob:limit=1m` is
 enough: larger blobs are runtimes and chain specs. The anchor worker ships a
 copy of this table; copy the regenerated file there too.
 
 The table holds the dev phrase and its seed only as blake2-256 hashes, which
 the launch-config scan compares against. The tests pin the table to sp-keyring's
 hard-coded sr25519 and ed25519 keys, to the published ECDSA `//Alice` key, to
-keys a Substrate keystore committed to partner-chains names by public key, and
-to dev-phrase paths, numeric ones included, checked against @polkadot/keyring.
+keys a Substrate keystore committed to partner-chains names by public key, to
+dev-phrase paths, numeric ones included, checked against @polkadot/keyring, to
+RFC 9496's multiples of the ristretto generator and SEC 2's G, to every k·B and
+k·G (as py-sr25519-bindings and libsecp256k1 compute them), and to the trivial
+mini-secrets' keys as subkey 20.0.0 derives them.
+
+## Keys anyone can sign for
+
+Two kinds of key verify a signature of any message that took no secret, so
+anyone can sign as one, whoever made it:
+
+- the all-zero key under sr25519. It is the ristretto identity, which no other
+  bytes encode, and schnorrkel verifies its signature with R and s zero (63
+  zero bytes, then `0x80`);
+- an ed25519 key of small order. ed25519-zebra, which the node verifies every
+  ed25519 signature with (GRANDPA votes, and any account's), checks
+  8·s·B = 8·R + 8·k·A, so under a key A whose 8·A is the identity, R the
+  identity and s zero (`0x01`, then 63 zero bytes) verify. It reads a key as
+  curve25519-dalek decompresses it: y is the low 255 bits taken mod the prime,
+  so y plus the prime decodes too, and the top bit gives x's sign, also when x
+  is 0. So the 8 points of small order have 14 encodings. The preflight
+  enumerates them from the curve, as each encoding of each multiple of a point
+  of order 8; they are libsodium's small-order list with either top bit, and
+  the all-zero key is one of them.
+
+Rule 1 refuses an aura key (sr25519) that is the all-zero key, and a grandpa
+key (ed25519) of small order, wherever an authority's key is: genesis
+`Aura.Authorities`, `Grandpa.Authorities`,
+`SessionCommitteeManagement.CurrentCommittee` and `Session.ValidatorsAndKeys`,
+each declared authority's `aura` and `grandpa`, and each Cardano permissioned
+candidate's `aura` and `gran`. sr25519 reads an ed25519 key of small order as
+another ristretto point or none, so as an aura key it is no key anyone can sign
+for. A role key or a multisig member is an account, which signs with sr25519
+and with ed25519, so rule 1 refuses both kinds there.
 
 ## Tests
 
