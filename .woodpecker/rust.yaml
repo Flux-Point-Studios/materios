@@ -10,10 +10,11 @@ labels:
   arm64-emu: "true"
 
 # check-test, the one build both events run. sccache (ci/sccache) serves
-# its rustc runs from the shared store on Node-3. Pull requests read it with
-# the reader's credential, which the store refuses for any write; only pushes
-# to main get the writer's, a secret Woodpecker releases to push events alone.
-# Both steps must compute the same cache keys, so they share everything else
+# pull requests' rustc runs from the shared store on Node-3, with the reader's
+# credential, which the store refuses for any write. Only pushes to main get
+# the writer's, a secret Woodpecker releases to push events alone, and the
+# writer reads nothing: it compiles every crate and stores the result. Both
+# steps must compute the same cache keys, so they share everything else
 # (ci/sccache/test_policy.py holds them to that).
 variables:
   - &check_test

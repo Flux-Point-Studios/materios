@@ -1,8 +1,10 @@
 # Sourced by a CI build step to put sccache in front of rustc (see README.md).
 # The step's environment names the store (SCCACHE_WEBDAV_ENDPOINT) and the
 # role: READ_ONLY with the reader's credential on pull requests, the writer's
-# on pushes to main. A store that cannot be reached leaves the build
-# uncached; a store that takes a write from a read-only step fails the step.
+# on pushes to main. The writer reads nothing: it compiles every crate and
+# replaces its entry, so what the store holds never reaches a main build. A
+# store that cannot be reached leaves the build uncached; a store that takes a
+# write from a read-only step fails the step.
 
 sccache_release=v0.18.0
 sccache_sha256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
@@ -26,7 +28,8 @@ case "${SCCACHE_WEBDAV_RW_MODE:-READ_WRITE}:$sccache_status" in
         echo "sccache: the store accepted a write from a read-only step (HTTP $sccache_status)" >&2
         exit 1 ;;
     READ_WRITE:2??)
-        echo "sccache: the store takes this step's writes (HTTP $sccache_status)" ;;
+        echo "sccache: the store takes this step's writes (HTTP $sccache_status); compiling every crate, reading none"
+        export SCCACHE_RECACHE=1 ;;
     *)
         echo "sccache: write probe answered HTTP $sccache_status in ${SCCACHE_WEBDAV_RW_MODE:-READ_WRITE} mode; building uncached" >&2
         sccache_status=unusable ;;
