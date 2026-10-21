@@ -116,6 +116,14 @@ if (. ./client.sh); then
 fi
 echo "ok: a store that takes a read-only step's write fails the step"
 
+# A step in the writer's role whose credential the store refuses builds
+# uncached: sccache would fall back to reading the store, and the writer
+# reads nothing.
+use sccache-reader
+. ./client.sh
+[ -z "${RUSTC_WRAPPER:-}" ] || fail "client.sh read the store for a writer it refuses"
+echo "ok: a writer the store refuses builds uncached"
+
 # A store that does not answer leaves the build uncached.
 use sccache-reader READ_ONLY
 export SCCACHE_WEBDAV_ENDPOINT=https://store:3911

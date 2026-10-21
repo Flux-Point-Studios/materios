@@ -3,8 +3,8 @@
 # role: READ_ONLY with the reader's credential on pull requests, the writer's
 # on pushes to main. The writer reads nothing: it compiles every crate and
 # replaces its entry, so what the store holds never reaches a main build. A
-# store that cannot be reached leaves the build uncached; a store that takes a
-# write from a read-only step fails the step.
+# store that cannot be reached, or that refuses the writer, leaves the build
+# uncached; a store that takes a write from a read-only step fails the step.
 
 sccache_release=v0.18.0
 sccache_sha256=45f1447fbe231e3037bde351ef70677dd212216c8d62ae7ca409fecc4d6acc89
