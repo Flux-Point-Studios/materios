@@ -569,8 +569,8 @@ final, since the challenge binds both:
 
 3. Its holder signs it offline on their own device, with their secret URI in a
    file only they can read, and `--scheme ecdsa` for a 33-byte key, giving the
-   challenge exactly as `challenge` prints it, `0x` included (another `0x`
-   before it makes hex subkey refuses):
+   challenge exactly as `challenge` prints it, `0x` included (subkey refuses
+   hex with a second `0x` in front):
 
    ```
    subkey sign --suri <secret URI file> --hex --message <challenge>
@@ -756,8 +756,8 @@ A 33-byte ECDSA key also matches the blake2-256 account it maps to. Rules 1 and
 7 count a multisig member that a table names as a key anyone can sign as (see
 [Multisig roles](#multisig-roles)). The all-zero key and the ed25519 keys of
 small order are not rows: a row matches anywhere in genesis storage and the
-runtime code, and both hold runs of 32 zero bytes and `0x01` before 31 zero
-bytes, so rule 1 refuses them where a key signs (see
+runtime code, and both hold runs of 32 zero bytes, and `0x01` followed by 31
+zero bytes, so rule 1 refuses them where a key signs (see
 [Keys anyone can sign for](#keys-anyone-can-sign-for)).
 
 Rule 1 finds the table keys a storage value or the runtime code holds in one
