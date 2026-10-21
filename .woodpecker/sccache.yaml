@@ -1,0 +1,53 @@
+# The shared sccache store's own tests (ci/sccache): the write policy every
+# workflow states, eviction, and the store's real nginx configuration serving
+# the real client in both roles.
+when:
+  - event: [push, pull_request]
+    branch: main
+    path:
+      include:
+        - ci/sccache/**
+        # The policy test reads every workflow.
+        - .woodpecker/*.yaml
+      on_empty: false
+
+variables:
+  - &store_image nginxinc/nginx-unprivileged:1.29-alpine@sha256:0c79d56aee561a1d81c63f00eee5fb5fe29279560cdc55e91425133104c7fbe6
+
+steps:
+  - name: policy
+    image: python:3.12-slim-bookworm
+    commands:
+      - pip install --no-cache-dir PyYAML==6.0.3 cryptography==50.0.2
+      - python3 -m unittest -v ci/sccache/test_policy.py
+
+  - name: prune
+    image: *store_image
+    commands:
+      - sh ci/sccache/test_prune.sh
+
+  - name: fixture
+    image: rust:1.85.0-bookworm
+    commands:
+      - sh ci/sccache/e2e_fixture.sh
+
+  # The production configuration as compose.yaml mounts it, on the fixture's
+  # certificate and users.
+  - name: store
+    image: *store_image
+    detach: true
+    environment:
+      CACHE_HIGH_KIB: "1048576"
+      CACHE_LOW_KIB: "786432"
+      CACHE_PRUNE_SECONDS: "30"
+    commands:
+      - cp ci/sccache/nginx.conf ci/sccache/run.sh ci/sccache/prune.sh /etc/nginx/
+      - mkdir -p /etc/nginx/tls
+      - cp ci/sccache/.e2e/server.crt ci/sccache/.e2e/server.key /etc/nginx/tls/
+      - cp ci/sccache/.e2e/htpasswd-read ci/sccache/.e2e/htpasswd-write /etc/nginx/
+      - exec sh /etc/nginx/run.sh
+
+  - name: e2e
+    image: rust:1.85.0-bookworm
+    commands:
+      - sh ci/sccache/test_e2e.sh
