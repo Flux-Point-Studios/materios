@@ -2970,15 +2970,20 @@ NO_SECRET_KEYS = {"aura": ZERO_KEY, "grandpa": SMALL_ORDER_KEY}
 FRESH_KEYS = {"aura": fresh_account, "grandpa": lambda: signing.SigningKey.generate().verify_key.encode()}
 
 
-def added_findings(seated, meta, write, members) -> list[str]:
-    """Rule 1's findings on the seated genesis, its launch and Cardano candidates of its authorities, once `members`
-    are written in one place, less the findings it had before."""
+# How rule 1 names each place that holds authority keys.
+AUTHORITY_PLACE_NAMES = ("genesis Aura.Authorities[", "genesis Grandpa.Authorities[", f"{COMMITTEE}[",
+                         "genesis Session.ValidatorsAndKeys[", "authority ", "Cardano permissioned candidate ")
+
+
+def authority_key_findings(seated, meta, write, members) -> list[str]:
+    """Rule 1's findings about authority keys on the seated genesis, its launch and Cardano candidates of its
+    authorities, once `members` are written in one place."""
     spec, seated_members, launch = seated
     cardano = lp.CardanoView(lock=None, candidates=[lp.Candidate(*member) for member in seated_members],
                              d_parameter=(len(seated_members), 0))
-    before = dev_key_findings(spec, meta, KNOWN, launch, cardano=cardano)
     write(spec, launch, cardano, members)
-    return [m for m in dev_key_findings(spec, meta, KNOWN, launch, cardano=cardano) if m not in before]
+    return [m for m in dev_key_findings(spec, meta, KNOWN, launch, cardano=cardano)
+            if m.startswith(tuple(f"[1 dev-keys] {name}" for name in AUTHORITY_PLACE_NAMES))]
 
 
 @pytest.mark.parametrize("anyone", [True, False], ids=["no-secret key", "fresh key"])
@@ -2987,13 +2992,13 @@ def added_findings(seated, meta, write, members) -> list[str]:
 def test_an_authority_key_anyone_can_sign_for_is_refused_where_it_sits(seated, meta, place, kind, anyone):
     key = NO_SECRET_KEYS[kind] if anyone else FRESH_KEYS[kind]()
     write, named = AUTHORITY_PLACES[place]
-    assert added_findings(seated, meta, write, with_key(seated[1], kind, key)) == (
+    assert authority_key_findings(seated, meta, write, with_key(seated[1], kind, key)) == (
         [no_secret_authority(named[kind], kind, key)] if anyone else [])
 
 
 @pytest.mark.parametrize("key", SMALL_ORDER_KEYS, ids=short_hex)
 def test_every_ed25519_key_of_small_order_is_refused_as_a_grandpa_voter(seated, meta, key):
-    assert added_findings(seated, meta, write_grandpa_authorities, with_key(seated[1], "grandpa", key)) == [
+    assert authority_key_findings(seated, meta, write_grandpa_authorities, with_key(seated[1], "grandpa", key)) == [
         no_secret_authority("genesis Grandpa.Authorities[0]", "grandpa", key)]
 
 
