@@ -30,12 +30,11 @@ the upstream crate) is forced by two pragmatic constraints:
 
 | File | Source | Notes |
 |---|---|---|
-| `attestation.rs` | upstream `attestation.rs` | Adapted: drop `BoundedKeyDescription` import (Materios-side type lives in `pallet-tee-attestation::types`); switch P-384 public-key parsing from `AffinePoint{x,y}` direct to `p256::PublicKey::from_sec1_bytes`-style upstream API; drop the `tests` module (replaced by `tests.rs` in pallet root). |
+| `attestation.rs` | upstream `attestation.rs` | Adapted: drop `BoundedKeyDescription` import (Materios-side type lives in `pallet-tee-attestation::types`); switch P-384 public-key parsing from `AffinePoint{x,y}` direct to `p256::PublicKey::from_sec1_bytes`-style upstream API; `validate_certificate_chain` takes the trust anchors from its caller instead of pinning Google + Apple roots; drop the `tests` module (replaced by `tests.rs` in pallet root). |
 | `asn.rs` | upstream `attestation/asn.rs` | Verbatim. Pure ASN.1 type definitions — no patches. |
 | `error.rs` | upstream `attestation/error.rs` | Adapted: drop `From<p384::elliptic_curve::Error>` impl — replaced by `ParseP384PublicKey` direct construction at the call site. |
 | `__root_key__/google-public.key` | upstream | Verbatim. RSA-2048, Google Hardware Key Attestation root. |
-| `__root_key__/google-p384-public.key` | upstream | Verbatim. ECDSA P-384, Google Hardware Key Attestation root (newer chips). |
-| `__root_key__/apple-public.key` | upstream | Verbatim. ECDSA P-256, Apple Device Attestation root. (Not used in Phase 2 — Phase 4 hook.) |
+| `__root_key__/google-p384-public.key` | upstream | Verbatim. ECDSA P-384, Google Hardware Key Attestation root ("Key Attestation CA1", signing chains from February 2026). |
 | `LICENSE` | upstream `LICENSE` | Verbatim. Unlicense (public domain). |
 
 ## Patch policy

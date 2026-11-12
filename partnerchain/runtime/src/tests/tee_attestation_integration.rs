@@ -297,3 +297,40 @@ fn runtime_metadata_exposes_tee_attestation_events_and_storage() {
         );
     });
 }
+
+/// Evidence binds to the content hash `OrinqReceipts` records for the
+/// receipt, and to nothing for a receipt it does not hold.
+#[test]
+fn tee_attestation_reads_content_hashes_from_orinq_receipts() {
+    use pallet_tee_attestation::ReceiptRegistry;
+    type Receipts = <Runtime as pallet_tee_attestation::Config>::Receipts;
+
+    new_test_ext().execute_with(|| {
+        let recorded = sp_core::H256::repeat_byte(0x11);
+        let content_hash = [0x22; 32];
+        pallet_orinq_receipts::Receipts::<Runtime>::insert(
+            recorded,
+            pallet_orinq_receipts::types::ReceiptRecord {
+                schema_hash: [0; 32],
+                content_hash,
+                base_root_sha256: [0; 32],
+                zk_root_poseidon: None,
+                poseidon_params_hash: None,
+                base_manifest_hash: [0; 32],
+                safety_manifest_hash: [0; 32],
+                monitor_config_hash: [0; 32],
+                attestation_evidence_hash: [0; 32],
+                storage_locator_hash: [0; 32],
+                availability_cert_hash: [0; 32],
+                created_at_millis: 0,
+                submitter: AccountId::from([0x33; 32]),
+            },
+        );
+
+        assert_eq!(Receipts::content_hash(&recorded), Some(content_hash));
+        assert_eq!(
+            Receipts::content_hash(&sp_core::H256::repeat_byte(0x44)),
+            None
+        );
+    });
+}

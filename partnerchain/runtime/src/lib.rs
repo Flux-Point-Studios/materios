@@ -1293,11 +1293,23 @@ impl pallet_native_token_management::Config for Runtime {
 // TEE Attestation
 // ---------------------------------------------------------------------------
 //
-// Pallet ships disabled at genesis via `DefaultDisabled<T>`; sudo flips via
-// `set_disabled` once Phase 2.5 binds `attestation_challenge`.
+// Pallet ships disabled at genesis via `DefaultDisabled<T>`; Root releases it
+// with `set_disabled`. Evidence binds to the content hash `OrinqReceipts`
+// records for the receipt.
+
+/// Read-only adapter exposing `OrinqReceipts` content hashes to
+/// `pallet_tee_attestation`.
+pub struct OrinqReceiptRegistry;
+
+impl pallet_tee_attestation::ReceiptRegistry for OrinqReceiptRegistry {
+    fn content_hash(receipt_id: &H256) -> Option<[u8; 32]> {
+        pallet_orinq_receipts::Receipts::<Runtime>::get(receipt_id).map(|r| r.content_hash)
+    }
+}
 
 impl pallet_tee_attestation::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
+    type Receipts = OrinqReceiptRegistry;
 }
 
 // ---------------------------------------------------------------------------

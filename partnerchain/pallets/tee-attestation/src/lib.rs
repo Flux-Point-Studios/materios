@@ -8,10 +8,14 @@
 //! trust roots, skips wall-clock validity checks, and never consults
 //! external services.
 //!
-//! `Disabled` is `true` at genesis and stays so until `submit_evidence`
-//! binds `attestation_challenge` to the receipt's `content_hash`. Without
-//! that binding the verifier accepts replays of any well-formed
-//! Google-rooted chain against arbitrary `receipt_id`s.
+//! Receipt binding: `submit_evidence` reads the receipt's content hash from
+//! the receipt registry (`Config::Receipts`) and the chain's genesis hash
+//! from System, and an ArmTrustZone leaf counts only if its
+//! `attestationChallenge` equals `verifier::arm_trustzone_challenge` over
+//! them. A chain minted for one receipt verifies for no other receipt and on
+//! no other network, and a receipt holds each attested key once.
+//!
+//! `Disabled` is `true` at genesis; Root releases it with `set_disabled`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
@@ -37,6 +41,12 @@ pub mod vendor {
     }
 }
 
+/// Read access to the receipt registry evidence attaches to.
+pub trait ReceiptRegistry {
+    /// The content hash recorded for `receipt_id`, if the receipt exists.
+    fn content_hash(receipt_id: &types::ReceiptId) -> Option<[u8; 32]>;
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -44,30 +54,33 @@ mod tests;
 pub mod pallet {
     use frame_support::pallet_prelude::*;
     use frame_system::pallet_prelude::*;
+    use sp_core::H256;
+    use sp_runtime::traits::Zero;
     use sp_std::prelude::*;
 
     use crate::types::{
-        CompositeTrustScore, EvidenceEntry, EvidenceType, ReceiptId, VendorClass, VerifiedEvidence,
-        VerifyOutcome, MAX_EVIDENCE_ENTRIES_PER_RECEIPT,
+        CompositeTrustScore, EvidenceEntry, EvidenceType, ReceiptBinding, ReceiptId, VendorClass,
+        VerifiedEvidence, VerifyOutcome, MAX_EVIDENCE_ENTRIES_PER_RECEIPT,
     };
-    use crate::verifier::verify_evidence;
+    use crate::verifier::{verify_evidence, GOOGLE_ATTESTATION_ROOTS};
+    use crate::ReceiptRegistry;
 
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
     #[pallet::config]
-    pub trait Config: frame_system::Config {
+    pub trait Config: frame_system::Config<Hash = H256> {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
+        /// The receipt registry whose content hashes evidence binds to.
+        type Receipts: ReceiptRegistry;
     }
 
-    /// Kill-switch for `submit_evidence`. Defaults `true` at genesis; sudo
-    /// flips via `set_disabled` once Phase 2.5 ships challenge binding.
-    /// See lib-level "Phase 2 status" docstring + security review H-3.
+    /// Kill-switch for `submit_evidence`. Defaults `true` at genesis; Root
+    /// flips it with `set_disabled`.
     #[pallet::storage]
     pub type Disabled<T: Config> = StorageValue<_, bool, ValueQuery, DefaultDisabled<T>>;
 
-    /// Genesis default for `Disabled`: the verifier starts disabled. Phase
-    /// 2.5 governance flips it.
+    /// Genesis default for `Disabled`: the verifier starts disabled.
     #[pallet::type_value]
     pub fn DefaultDisabled<T: Config>() -> bool {
         true
@@ -106,9 +119,7 @@ pub mod pallet {
             reason: u8,
         },
         /// Kill-switch flipped via `set_disabled`. Sudo-only.
-        DisabledChanged {
-            disabled: bool,
-        },
+        DisabledChanged { disabled: bool },
     }
 
     #[pallet::error]
@@ -119,20 +130,28 @@ pub mod pallet {
         /// The submitted evidence failed verification. The verbose reason
         /// is in the emitted `EvidenceRejected` event.
         VerificationFailed,
-        /// The pallet's kill-switch is engaged. Sudo flips `Disabled=false`
-        /// via `set_disabled` once challenge binding ships.
+        /// The pallet's kill-switch (`Disabled`) is engaged.
         PalletDisabled,
+        /// `receipt_id` names no receipt in the receipt registry.
+        UnknownReceipt,
+        /// `content_hash` differs from the content hash the receipt registry
+        /// holds for `receipt_id`.
+        ContentHashMismatch,
+        /// The receipt already holds evidence from this attested key.
+        DuplicateEvidence,
     }
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
         /// Submit one evidence entry for a receipt. Anyone can call.
         ///
-        /// On success, the verifier runs, the extracted `VerifiedEvidence`
-        /// is appended to `VerifiedEntries`, and the new
+        /// `content_hash` must be the content hash the receipt registry holds
+        /// for `receipt_id`. On success, the verifier runs, the extracted
+        /// `VerifiedEvidence` is appended to `VerifiedEntries`, and the new
         /// `CompositeTrustScore` is recomputed and stored.
         // Hand-tuned weight: 1B ref_time / 32 KB proof_size covers an X.509
-        // chain walk + ASN.1 decode + SPKI re-encode.
+        // chain walk + ASN.1 decode + SPKI re-encode, plus the receipt and
+        // genesis-hash reads.
         #[pallet::call_index(0)]
         #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
         pub fn submit_evidence(
@@ -141,15 +160,51 @@ pub mod pallet {
             content_hash: [u8; 32],
             entry: EvidenceEntry,
         ) -> DispatchResult {
-            let _who = ensure_signed(origin)?;
+            ensure_signed(origin)?;
+            Self::accept_evidence(receipt_id, content_hash, &entry, &GOOGLE_ATTESTATION_ROOTS)
+        }
 
+        /// Root-only: engage (`true`) or release (`false`) the kill-switch.
+        #[pallet::call_index(1)]
+        #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
+        pub fn set_disabled(origin: OriginFor<T>, disabled: bool) -> DispatchResult {
+            ensure_root(origin)?;
+            Disabled::<T>::put(disabled);
+            Self::deposit_event(Event::DisabledChanged { disabled });
+            Ok(())
+        }
+    }
+
+    impl<T: Config> Pallet<T> {
+        /// `submit_evidence` after the origin check. `arm_trustzone_roots` are
+        /// the anchors ArmTrustZone chains may start from.
+        pub(crate) fn accept_evidence(
+            receipt_id: ReceiptId,
+            content_hash: [u8; 32],
+            entry: &EvidenceEntry,
+            arm_trustzone_roots: &[&[u8]],
+        ) -> DispatchResult {
             ensure!(!Disabled::<T>::get(), Error::<T>::PalletDisabled);
 
-            let outcome = verify_evidence(&content_hash, &entry);
+            let recorded =
+                T::Receipts::content_hash(&receipt_id).ok_or(Error::<T>::UnknownReceipt)?;
+            ensure!(recorded == content_hash, Error::<T>::ContentHashMismatch);
+            let binding = ReceiptBinding {
+                genesis_hash: frame_system::Pallet::<T>::block_hash(BlockNumberFor::<T>::zero()).0,
+                receipt_id,
+                content_hash,
+            };
 
-            match outcome {
+            match verify_evidence(&binding, entry, arm_trustzone_roots) {
                 VerifyOutcome::Verified(verified) => {
                     let mut verified_entries = VerifiedEntries::<T>::get(receipt_id);
+                    ensure!(
+                        !verified_entries.iter().any(|v| {
+                            v.evidence_type == verified.evidence_type
+                                && v.attest_key_hash == verified.attest_key_hash
+                        }),
+                        Error::<T>::DuplicateEvidence
+                    );
                     verified_entries
                         .try_push(verified.clone())
                         .map_err(|_| Error::<T>::TooManyEntries)?;
@@ -179,17 +234,6 @@ pub mod pallet {
                     Err(Error::<T>::VerificationFailed.into())
                 }
             }
-        }
-
-        /// Sudo-only: flip the kill-switch. Set `disabled=false` once
-        /// challenge binding ships.
-        #[pallet::call_index(1)]
-        #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
-        pub fn set_disabled(origin: OriginFor<T>, disabled: bool) -> DispatchResult {
-            ensure_root(origin)?;
-            Disabled::<T>::put(disabled);
-            Self::deposit_event(Event::DisabledChanged { disabled });
-            Ok(())
         }
     }
 

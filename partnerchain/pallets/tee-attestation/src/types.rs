@@ -75,6 +75,18 @@ pub struct EvidenceEntry {
     pub payload: EvidencePayload,
 }
 
+/// The receipt a piece of evidence must be bound to, read from chain state:
+/// this chain's genesis hash, the receipt id, and the content hash the
+/// receipt registry holds for it. Receipt ids and content hashes are both
+/// chosen by receipt submitters and several receipts may share a content
+/// hash, so evidence binds all three.
+#[derive(Clone, Copy, PartialEq, Eq, RuntimeDebug)]
+pub struct ReceiptBinding {
+    pub genesis_hash: [u8; 32],
+    pub receipt_id: ReceiptId,
+    pub content_hash: [u8; 32],
+}
+
 /// What the verifier returns on success. Must be bytes-deterministic across
 /// every committee member for the same input.
 #[derive(Clone, PartialEq, Eq, Encode, Decode, TypeInfo, MaxEncodedLen, RuntimeDebug)]

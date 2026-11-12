@@ -22,6 +22,11 @@
 //   Solana Seeker) are reused from upstream and hex-imported in
 //   `tests.rs`.
 //
+// [materios-patch] `validate_certificate_chain` takes the trust anchors from
+//   its caller instead of pinning Google + Apple roots itself: each evidence
+//   type names the roots it accepts (ArmTrustZone: Google's attestation roots
+//   only), and the pinned key files are included by `verifier.rs`.
+//
 // [materios-patch] Drop `BoundedKeyDescription` import — we never call
 //   `extract_attestation()->BoundedKeyDescription::try_into()` because the
 //   Materios pallet does not store the rich Acurast key-description object;
@@ -367,26 +372,18 @@ pub fn peek_attestation_version(data: &[u8]) -> Result<i64, ParseError> {
 
 /// Validates the chain by ensuring that
 ///
-/// - the chain starts with a self-signed certificate at index 0 that matches one of the known [TRUSTED_ROOT_CERTS]
+/// - the chain starts with a certificate whose public key is one of `trusted_root_spkis`
+///   (DER SubjectPublicKeyInfo), or one signed by such a key
 /// - that the root's contained public key signs the next certificate in the chain
 /// - the next certificate's public key signs the next one and so on...
-pub fn validate_certificate_chain(
-    chain: &CertificateChainInput,
-) -> Result<(Vec<CertificateId>, TBSCertificate<'_>, PublicKey), ValidationError> {
-    let google_root_pub_key = PublicKey::parse(&asn1::parse_single::<SubjectPublicKeyInfo>(
-        GOOGLE_ROOT_PUB_KEY,
-    )?)?;
-    let google_p384_root_pub_key = PublicKey::parse(&asn1::parse_single::<SubjectPublicKeyInfo>(
-        GOOGLE_P384_ROOT_PUB_KEY,
-    )?)?;
-    let apple_root_pub_key = PublicKey::parse(&asn1::parse_single::<SubjectPublicKeyInfo>(
-        APPLE_ROOT_PUB_KEY,
-    )?)?;
-    let trusted_roots = &[
-        google_root_pub_key,
-        google_p384_root_pub_key,
-        apple_root_pub_key,
-    ];
+pub fn validate_certificate_chain<'c>(
+    chain: &'c CertificateChainInput,
+    trusted_root_spkis: &[&[u8]],
+) -> Result<(Vec<CertificateId>, TBSCertificate<'c>, PublicKey), ValidationError> {
+    let trusted_roots = trusted_root_spkis
+        .iter()
+        .map(|spki| PublicKey::parse(&asn1::parse_single::<SubjectPublicKeyInfo>(spki)?))
+        .collect::<Result<Vec<_>, ValidationError>>()?;
     let mut cert_ids = Vec::<CertificateId>::new();
     let fold_result = chain.iter().try_fold::<_, _, Result<_, ValidationError>>(
         (Option::<PublicKey>::None, Option::<Certificate>::None),
@@ -443,10 +440,6 @@ pub fn validate_certificate_chain(
     // if the chain is non-empty as ensured above, we know that we always have Some certificate in option
     Ok((cert_ids, last_cert.tbs_certificate, last_cert_pbk))
 }
-
-const GOOGLE_ROOT_PUB_KEY: &[u8] = include_bytes!("./__root_key__/google-public.key");
-const GOOGLE_P384_ROOT_PUB_KEY: &[u8] = include_bytes!("./__root_key__/google-p384-public.key");
-const APPLE_ROOT_PUB_KEY: &[u8] = include_bytes!("./__root_key__/apple-public.key");
 
 // [materios-patch] Original Acurast `mod tests` removed; see tests.rs at the
 // pallet root for the equivalent reference-vector tests + Materios pallet
