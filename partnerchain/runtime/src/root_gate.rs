@@ -196,9 +196,14 @@ fn runs_at_once(call: &RuntimeCall) -> bool {
         RuntimeCall::Grandpa(pallet_grandpa::Call::note_stalled { delay, .. }) => {
             *delay <= max_exempt_stall_delay()
         }
-        // Kill-switches, in the stopping direction only.
+        // Kill-switches, in the stopping direction only. Revoking an
+        // attestation certificate only stops evidence through it.
         RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_disabled {
             disabled: true,
+        }) => true,
+        RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_certificates_revoked {
+            revoked: true,
+            ..
         }) => true,
         RuntimeCall::Billing(pallet_billing::Call::governance_set_debits_enabled {
             enabled: false,
@@ -334,6 +339,9 @@ impl ClassifyCall<RuntimeCall> for TimelockClassifier {
             | RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_disabled {
                 disabled: false,
             })
+            | RuntimeCall::TeeAttestation(
+                pallet_tee_attestation::Call::set_certificates_revoked { revoked: false, .. },
+            )
             | RuntimeCall::Billing(pallet_billing::Call::governance_set_debits_enabled {
                 enabled: true,
             }) => CallClass::AuthorityRecovery,

@@ -57,6 +57,16 @@ fn bits(bytes: &[u8]) -> Vec<u8> {
     tlv(0x03, &[&[0u8][..], bytes].concat())
 }
 
+/// An X.509 UTCTime, `YYMMDDHHMMSSZ`.
+pub fn utc_time(value: &str) -> Vec<u8> {
+    tlv(0x17, value.as_bytes())
+}
+
+/// An X.509 GeneralizedTime, `YYYYMMDDHHMMSSZ`.
+pub fn generalized_time(value: &str) -> Vec<u8> {
+    tlv(0x18, value.as_bytes())
+}
+
 /// A KeyDescription of attestation `version` for a key at `security_level`,
 /// minted with `challenge`. `None` leaves the mandatory challenge out.
 pub fn key_description(version: u64, security_level: u8, challenge: Option<&[u8]>) -> Vec<u8> {
@@ -100,15 +110,29 @@ impl TestKey {
         ])
     }
 
-    /// A DER certificate for `subject`'s key, signed by this key.
+    /// A DER certificate for `subject`'s key, signed by this key, valid from
+    /// 2020 through 2049.
     pub fn issue(&self, subject: &TestKey, serial: u64, extensions: &[Vec<u8>]) -> Vec<u8> {
+        let validity = [utc_time("200101000000Z"), utc_time("491231235959Z")];
+        self.issue_valid(subject, serial, validity, extensions)
+    }
+
+    /// A DER certificate for `subject`'s key, signed by this key, valid from
+    /// `validity[0]` through `validity[1]`.
+    pub fn issue_valid(
+        &self,
+        subject: &TestKey,
+        serial: u64,
+        validity: [Vec<u8>; 2],
+        extensions: &[Vec<u8>],
+    ) -> Vec<u8> {
         let algorithm = sequence(&[oid(ECDSA_WITH_SHA256)]);
         let mut tbs = vec![
             tlv(0xA0, &integer(2)),
             integer(serial),
             algorithm.clone(),
             self.name.clone(),
-            sequence(&[tlv(0x17, b"200101000000Z"), tlv(0x17, b"491231235959Z")]),
+            sequence(&validity),
             subject.name.clone(),
             subject.spki(),
         ];

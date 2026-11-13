@@ -511,3 +511,15 @@ fn submit_evidence_weight_bounds_its_wasm_samples() {
     let committee_growth = u64::from(committee_bound - 1) * 32;
     assert!(weight.proof_size() >= largest_proof + committee_growth);
 }
+
+/// Certificate validity is judged at the block timestamp `Timestamp` holds.
+#[test]
+fn tee_attestation_judges_certificates_at_the_block_timestamp() {
+    use frame_support::traits::UnixTime;
+    type Clock = <Runtime as pallet_tee_attestation::Config>::UnixTime;
+
+    new_test_ext().execute_with(|| {
+        pallet_timestamp::Now::<Runtime>::put(1_756_684_800_123);
+        assert_eq!(Clock::now().as_secs(), 1_756_684_800);
+    });
+}

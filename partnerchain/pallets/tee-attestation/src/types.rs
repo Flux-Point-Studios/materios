@@ -24,6 +24,21 @@ pub const MAX_EVIDENCE_ENTRIES_PER_RECEIPT: u32 = 8;
 /// score; one per type leaves a slot for each of the five types.
 pub const MAX_ENTRIES_PER_EVIDENCE_TYPE: u32 = 1;
 
+/// RFC 5280 §4.1.2.2 caps certificate serial numbers at 20 octets.
+pub const MAX_CERTIFICATE_SERIAL_BYTES: u32 = 20;
+
+/// Bound on revoked certificate serials held on chain. Google's attestation
+/// status list held 1,773 entries on 2026-11-12.
+pub const MAX_REVOKED_CERTIFICATES: u32 = 8192;
+
+/// Bound on the serials one `set_certificates_revoked` call changes.
+pub const MAX_REVOCATIONS_PER_CALL: u32 = 256;
+
+/// A certificate serial number as its big-endian magnitude without leading
+/// zero bytes: the number Google's attestation status list writes in
+/// lowercase hex.
+pub type CertificateSerial = BoundedVec<u8, ConstU32<MAX_CERTIFICATE_SERIAL_BYTES>>;
+
 /// Receipt identifier. Matches `pallet-orinq-receipts` `ReceiptId`.
 pub type ReceiptId = H256;
 
@@ -156,6 +171,8 @@ pub enum VerifyFailReason {
     NonceMismatch,
     UnknownChipId,
     PolicyViolation,
+    CertificateRevoked,
+    CertificateNotValidAtBlockTime,
 }
 
 /// Outcome of a single evidence-entry verification.

@@ -21,16 +21,22 @@ mod test_vectors;
 mod synthetic_chain;
 
 use crate::types::{
-    CompositeTrustScore, EvidenceEntry, EvidencePayload, EvidenceType, ReceiptBinding, ReceiptId,
-    RegisteredReceipt, VerifiedEvidence, VerifyFailReason, VerifyOutcome,
+    CertificateSerial, CompositeTrustScore, EvidenceEntry, EvidencePayload, EvidenceType,
+    ReceiptBinding, ReceiptId, RegisteredReceipt, VerifiedEvidence, VerifyFailReason,
+    VerifyOutcome, MAX_REVOCATIONS_PER_CALL, MAX_REVOKED_CERTIFICATES,
 };
-use crate::verifier::{arm_trustzone_challenge, verify_evidence, GOOGLE_ATTESTATION_ROOTS};
+use crate::verifier::{
+    arm_trustzone_challenge, verify_evidence, ArmTrustZoneVerifier, GOOGLE_ATTESTATION_ROOTS,
+};
 use base64ct::{Base64, Encoding};
+use frame_support::{pallet_prelude::ConstU32, BoundedVec};
 use parity_scale_codec::Encode;
 use sha2::{Digest, Sha256};
 use sp_core::H256;
 use sp_runtime::BuildStorage;
-use synthetic_chain::{attestation_extension, key_description, TestKey, STRONGBOX};
+use synthetic_chain::{
+    attestation_extension, generalized_time, key_description, utc_time, TestKey, STRONGBOX,
+};
 
 // ---- Mock runtime --------------------------------------------------------
 
@@ -53,6 +59,24 @@ impl frame_system::Config for Test {
 impl pallet_tee_attestation::Config for Test {
     type RuntimeEvent = RuntimeEvent;
     type Receipts = TestReceipts;
+    type UnixTime = TestTime;
+}
+
+/// Block time kept in the test externalities' storage; 0 until set.
+pub struct TestTime;
+
+impl frame_support::traits::UnixTime for TestTime {
+    fn now() -> core::time::Duration {
+        core::time::Duration::from_secs(frame_support::storage::unhashed::get_or_default(
+            TEST_NOW_KEY,
+        ))
+    }
+}
+
+const TEST_NOW_KEY: &[u8] = b":test:now";
+
+fn set_now(seconds: u64) {
+    frame_support::storage::unhashed::put(TEST_NOW_KEY, &seconds);
 }
 
 /// Receipt registry and committee kept in the test externalities' storage.
@@ -154,14 +178,47 @@ fn binding() -> ReceiptBinding {
     }
 }
 
-fn verify_google(binding: &ReceiptBinding, entry: &EvidenceEntry) -> VerifyOutcome {
-    verify_evidence(binding, entry, &GOOGLE_ATTESTATION_ROOTS)
+/// 2025-09-01T00:00:00Z: inside the validity of every intermediate in the
+/// real vectors, the Seeker chain's short-lived RKP certificates included.
+const IN_VALIDITY: u64 = 1_756_684_800;
+
+fn never_revoked(_: &[u8]) -> bool {
+    false
 }
 
-/// Verify against the synthetic root instead of Google's.
-fn verify_synthetic(binding: &ReceiptBinding, entry: &EvidenceEntry) -> VerifyOutcome {
+/// Verify against Google's roots at `now`, with `is_revoked` as the
+/// revocation set.
+fn verify_google_at(
+    binding: &ReceiptBinding,
+    entry: &EvidenceEntry,
+    now: u64,
+    is_revoked: &dyn Fn(&[u8]) -> bool,
+) -> VerifyOutcome {
+    let verifier = ArmTrustZoneVerifier {
+        trusted_roots: &GOOGLE_ATTESTATION_ROOTS,
+        now,
+        is_revoked,
+    };
+    verify_evidence(binding, entry, &verifier)
+}
+
+fn verify_google(binding: &ReceiptBinding, entry: &EvidenceEntry) -> VerifyOutcome {
+    verify_google_at(binding, entry, IN_VALIDITY, &never_revoked)
+}
+
+/// Verify against the synthetic root instead of Google's, at `now`.
+fn verify_synthetic_at(binding: &ReceiptBinding, entry: &EvidenceEntry, now: u64) -> VerifyOutcome {
     let root = TestKey::root().spki();
-    verify_evidence(binding, entry, &[&root])
+    let verifier = ArmTrustZoneVerifier {
+        trusted_roots: &[&root],
+        now,
+        is_revoked: &never_revoked,
+    };
+    verify_evidence(binding, entry, &verifier)
+}
+
+fn verify_synthetic(binding: &ReceiptBinding, entry: &EvidenceEntry) -> VerifyOutcome {
+    verify_synthetic_at(binding, entry, IN_VALIDITY)
 }
 
 /// A one-certificate chain: the synthetic root issues `leaf_seed`'s key a
@@ -805,6 +862,255 @@ mod chain_depth {
     }
 }
 
+// ---- Certificate status: revocation and validity ------------------------
+
+mod certificate_status {
+    use super::*;
+    use hex_literal::hex;
+
+    /// The Seeker RKP attestation certificate's validity, the narrowest in
+    /// its chain: 2025-08-19T10:29:40Z through 2025-09-16T12:58:58Z.
+    const SEEKER_RKP_NOT_BEFORE: u64 = 1_755_599_380;
+    const SEEKER_RKP_NOT_AFTER: u64 = 1_758_027_538;
+    /// 2019-08-09T23:03:23Z: the Pixel intermediate the root issued becomes
+    /// valid.
+    const PIXEL_NOT_BEFORE: u64 = 1_565_391_803;
+    /// 2032-01-01T00:00:00Z: every Pixel and Samsung intermediate has expired.
+    const FACTORY_INTERMEDIATES_EXPIRED: u64 = 1_956_528_000;
+    /// 2023-01-01T00:00:00Z.
+    const IN_2023: u64 = 1_672_531_200;
+
+    fn pixel() -> EvidenceEntry {
+        arm_entry(&[
+            test_vectors::PIXEL_ROOT_CERT,
+            test_vectors::PIXEL_INTERMEDIATE_2_CERT,
+            test_vectors::PIXEL_INTERMEDIATE_1_CERT,
+            test_vectors::PIXEL_KEY_CERT,
+        ])
+    }
+
+    fn samsung() -> EvidenceEntry {
+        arm_entry(&[
+            test_vectors::SAMSUNG_ROOT_CERT,
+            test_vectors::SAMSUNG_INTERMEDIATE_2_CERT,
+            test_vectors::SAMSUNG_INTERMEDIATE_1_CERT,
+            test_vectors::SAMSUNG_KEY_CERT,
+        ])
+    }
+
+    fn samsung_without_root() -> EvidenceEntry {
+        arm_entry(&[
+            test_vectors::SAMSUNG_INTERMEDIATE_2_CERT,
+            test_vectors::SAMSUNG_INTERMEDIATE_1_CERT,
+            test_vectors::SAMSUNG_KEY_CERT,
+        ])
+    }
+
+    fn seeker() -> EvidenceEntry {
+        arm_entry(&[
+            test_vectors::SAMSUNG_ROOT_CERT,
+            test_vectors::SEEKER_INTERMEDIATE_2_CERT,
+            test_vectors::SEEKER_INTERMEDIATE_1_CERT,
+            test_vectors::SEEKER_RKP_CERT,
+            test_vectors::SEEKER_KEY_CERT,
+        ])
+    }
+
+    fn at(entry: &EvidenceEntry, now: u64) -> VerifyOutcome {
+        verify_google_at(&binding(), entry, now, &never_revoked)
+    }
+
+    /// A synthetic chain root → intermediate → bound leaf, with each
+    /// certificate's validity given; every name is a plain common name, so
+    /// the chain is not factory provisioned.
+    fn synthetic_chain(
+        root_validity: [Vec<u8>; 2],
+        intermediate_validity: [Vec<u8>; 2],
+        leaf_validity: [Vec<u8>; 2],
+    ) -> EvidenceEntry {
+        let root = TestKey::root();
+        let intermediate = TestKey::new(2, "Synthetic RKP Key");
+        let leaf = TestKey::new(3, "Android Keystore Key");
+        let kd = key_description(300, STRONGBOX, Some(&arm_trustzone_challenge(&binding())));
+        entry_from_ders(vec![
+            root.issue_valid(&root, 1, root_validity, &[]),
+            root.issue_valid(&intermediate, 2, intermediate_validity, &[]),
+            intermediate.issue_valid(&leaf, 1, leaf_validity, &[attestation_extension(&kd)]),
+        ])
+    }
+
+    fn always() -> [Vec<u8>; 2] {
+        [
+            utc_time("200101000000Z"),
+            generalized_time("20491231235959Z"),
+        ]
+    }
+
+    fn through_2024() -> [Vec<u8>; 2] {
+        [utc_time("200101000000Z"), utc_time("241231235959Z")]
+    }
+
+    /// RKP certificates are short-lived on purpose. The Seeker chain counts
+    /// only while its RKP certificates are valid, both bounds inclusive.
+    #[test]
+    fn remotely_provisioned_chain_counts_only_inside_its_validity() {
+        let outside = failed(VerifyFailReason::CertificateNotValidAtBlockTime);
+        let inside = failed(VerifyFailReason::NonceMismatch);
+        assert_eq!(at(&seeker(), SEEKER_RKP_NOT_BEFORE - 1), outside);
+        assert_eq!(at(&seeker(), SEEKER_RKP_NOT_BEFORE), inside);
+        assert_eq!(at(&seeker(), SEEKER_RKP_NOT_AFTER), inside);
+        assert_eq!(at(&seeker(), SEEKER_RKP_NOT_AFTER + 1), outside);
+    }
+
+    /// Factory attestation keys cannot be rotated, and Google keeps trusting
+    /// their certificates past expiry.
+    #[test]
+    fn factory_chains_outlive_their_intermediates() {
+        for entry in [pixel(), samsung(), samsung_without_root()] {
+            assert_eq!(
+                at(&entry, FACTORY_INTERMEDIATES_EXPIRED),
+                failed(VerifyFailReason::NonceMismatch)
+            );
+        }
+    }
+
+    #[test]
+    fn factory_chain_before_its_intermediates_are_valid_is_rejected() {
+        assert_eq!(
+            at(&pixel(), PIXEL_NOT_BEFORE - 1),
+            failed(VerifyFailReason::CertificateNotValidAtBlockTime)
+        );
+        assert_eq!(
+            at(&pixel(), PIXEL_NOT_BEFORE),
+            failed(VerifyFailReason::NonceMismatch)
+        );
+    }
+
+    #[test]
+    fn expired_intermediate_rejects_a_remotely_provisioned_chain() {
+        let entry = synthetic_chain(always(), through_2024(), always());
+        assert_eq!(
+            verify_synthetic_at(&binding(), &entry, IN_VALIDITY),
+            failed(VerifyFailReason::CertificateNotValidAtBlockTime)
+        );
+        assert!(matches!(
+            verify_synthetic_at(&binding(), &entry, IN_2023),
+            VerifyOutcome::Verified(_)
+        ));
+    }
+
+    /// The pinned key is the anchor, not the certificate that carries it:
+    /// the 2016 Google root certificate in the Pixel chain expired on
+    /// 2026-05-24.
+    #[test]
+    fn anchor_certificate_validity_is_not_checked() {
+        let entry = synthetic_chain(through_2024(), always(), always());
+        assert!(matches!(
+            verify_synthetic_at(&binding(), &entry, IN_VALIDITY),
+            VerifyOutcome::Verified(_)
+        ));
+    }
+
+    /// The device sets the leaf's validity (Keystore defaults run from 1970
+    /// to 2048), so it says nothing about the attestation.
+    #[test]
+    fn leaf_validity_is_not_checked() {
+        let not_yet = [
+            generalized_time("20490101000000Z"),
+            generalized_time("20491231235959Z"),
+        ];
+        let long_past = [utc_time("700101000000Z"), utc_time("710101000000Z")];
+        for leaf_validity in [not_yet, long_past] {
+            let entry = synthetic_chain(always(), always(), leaf_validity);
+            assert!(matches!(
+                verify_synthetic_at(&binding(), &entry, IN_VALIDITY),
+                VerifyOutcome::Verified(_)
+            ));
+        }
+    }
+
+    /// Every certificate above the leaf is looked up by its serial's
+    /// magnitude, the form Google's status list uses; Samsung's
+    /// intermediate serial carries a DER sign byte that the lookup drops.
+    #[test]
+    fn a_revoked_certificate_above_the_leaf_rejects_the_chain() {
+        let chains: [(EvidenceEntry, &[&[u8]]); 3] = [
+            (
+                pixel(),
+                &[
+                    &hex!("e8fa196314d2fa18"),
+                    &hex!("038826676065899685f5"),
+                    &hex!("15905857467176635834"),
+                ],
+            ),
+            (
+                samsung(),
+                &[
+                    &hex!("d50ff25ba3f2d6b3"),
+                    &hex!("9deec34f5065075752a148897c9fe6e5"),
+                    &hex!("707d9ec1b02deaf4ddcff5b058b5aeeb"),
+                ],
+            ),
+            (
+                seeker(),
+                &[
+                    &hex!("d50ff25ba3f2d6b3"),
+                    &hex!("0388266760658996860f"),
+                    &hex!("35772a634a0c9d3bc9466901d17cffad747726"),
+                    &hex!("6b1a0d4882cf7b565006bd71a77f1159"),
+                ],
+            ),
+        ];
+        for (entry, serials) in chains {
+            assert_eq!(
+                verify_google_at(&binding(), &entry, IN_VALIDITY, &never_revoked),
+                failed(VerifyFailReason::NonceMismatch)
+            );
+            for serial in serials {
+                let revoked = |candidate: &[u8]| candidate == *serial;
+                assert_eq!(
+                    verify_google_at(&binding(), &entry, IN_VALIDITY, &revoked),
+                    failed(VerifyFailReason::CertificateRevoked),
+                    "serial {serial:02x?}"
+                );
+            }
+        }
+    }
+
+    /// Expected values from `date -u -d <time> +%s`.
+    #[test]
+    fn certificate_times_convert_to_unix_seconds() {
+        use crate::vendor::acurast_attestation::asn::Time;
+        use crate::verifier::unix_seconds;
+        let cases = [
+            (utc_time("500101000000Z"), -631_152_000),
+            (utc_time("700101000000Z"), 0),
+            (utc_time("000229120000Z"), 951_825_600),
+            (utc_time("250916125858Z"), 1_758_027_538),
+            (generalized_time("20480101000000Z"), 2_461_449_600),
+            (utc_time("491231235959Z"), 2_524_607_999),
+            (generalized_time("99991231235959Z"), 253_402_300_799),
+        ];
+        for (der, seconds) in cases {
+            let time = asn1::parse_single::<Time>(&der).expect("valid X.509 time");
+            assert_eq!(unix_seconds(&time), seconds, "{der:02x?}");
+        }
+    }
+
+    /// Leaf serials are chosen on the device (Keystore uses 1), so they
+    /// name no attestation key.
+    #[test]
+    fn leaf_serials_are_not_checked_for_revocation() {
+        let revoked = |candidate: &[u8]| candidate == [1];
+        for entry in [pixel(), samsung(), seeker()] {
+            assert_eq!(
+                verify_google_at(&binding(), &entry, IN_VALIDITY, &revoked),
+                failed(VerifyFailReason::NonceMismatch)
+            );
+        }
+    }
+}
+
 // ---- Stub verifier tests ------------------------------------------------
 
 mod stubs {
@@ -860,8 +1166,47 @@ mod pallet {
 
     fn enable_with_receipt(receipt: ReceiptId, content_hash: [u8; 32]) {
         System::set_block_number(1);
+        set_now(IN_VALIDITY);
         assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
         put_receipt(receipt, content_hash);
+    }
+
+    /// The reason `submit_evidence`'s body rejects `entry` for, read from the
+    /// `EvidenceRejected` event it deposits. Running outside the storage
+    /// layer dispatch reverts that event in keeps it.
+    fn rejection_reason(
+        receipt: ReceiptId,
+        content_hash: [u8; 32],
+        entry: EvidenceEntry,
+        roots: &[&[u8]],
+    ) -> VerifyFailReason {
+        assert_eq!(
+            TeeAttestation::accept_evidence(
+                &RECEIPT_SUBMITTER,
+                receipt,
+                content_hash,
+                &entry,
+                roots
+            ),
+            Err(Error::<Test>::VerificationFailed.into())
+        );
+        let reasons = [
+            VerifyFailReason::NotImplemented,
+            VerifyFailReason::PayloadMalformed,
+            VerifyFailReason::ChainOfTrustBroken,
+            VerifyFailReason::SignatureInvalid,
+            VerifyFailReason::NonceMismatch,
+            VerifyFailReason::UnknownChipId,
+            VerifyFailReason::PolicyViolation,
+            VerifyFailReason::CertificateRevoked,
+            VerifyFailReason::CertificateNotValidAtBlockTime,
+        ];
+        match System::events().last().map(|record| record.event.clone()) {
+            Some(RuntimeEvent::TeeAttestation(crate::Event::EvidenceRejected {
+                reason, ..
+            })) => reasons[reason as usize],
+            other => panic!("expected EvidenceRejected, got {other:?}"),
+        }
     }
 
     /// `submit_evidence`'s body for signer `who`, anchored at the synthetic
@@ -1053,6 +1398,60 @@ mod pallet {
                 TeeAttestation::trust_score(&id),
                 CompositeTrustScore::COMMITTEE_ATTESTED_BASELINE
             );
+        });
+    }
+
+    #[test]
+    fn a_real_chain_is_rejected_for_its_binding_inside_its_validity() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            assert_eq!(
+                rejection_reason(
+                    id,
+                    fake_content_hash(),
+                    pixel_entry(),
+                    &GOOGLE_ATTESTATION_ROOTS
+                ),
+                VerifyFailReason::NonceMismatch
+            );
+        });
+    }
+
+    /// Certificate validity is judged at the block timestamp
+    /// (`Config::UnixTime`).
+    #[test]
+    fn evidence_is_checked_against_the_block_timestamp() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            let root = TestKey::root();
+            let intermediate = TestKey::new(2, "Synthetic RKP Key");
+            let leaf = TestKey::new(3, "Android Keystore Key");
+            let kd = key_description(
+                300,
+                STRONGBOX,
+                Some(&arm_trustzone_challenge(&chain_binding(
+                    id,
+                    fake_content_hash(),
+                ))),
+            );
+            let entry = entry_from_ders(vec![
+                root.issue_valid(
+                    &intermediate,
+                    2,
+                    [utc_time("200101000000Z"), utc_time("241231235959Z")],
+                    &[],
+                ),
+                intermediate.issue(&leaf, 1, &[attestation_extension(&kd)]),
+            ]);
+            let root_spki = root.spki();
+            assert_eq!(
+                rejection_reason(id, fake_content_hash(), entry.clone(), &[&root_spki]),
+                VerifyFailReason::CertificateNotValidAtBlockTime
+            );
+            set_now(1_672_531_200);
+            assert_ok!(accept(id, fake_content_hash(), entry));
         });
     }
 
@@ -1252,6 +1651,142 @@ mod pallet {
             assert_eq!(
                 TeeAttestation::trust_score(&id),
                 CompositeTrustScore::COMMITTEE_ATTESTED_BASELINE
+            );
+        });
+    }
+
+    // ---- Revocation set ----
+
+    fn serials(
+        list: &[&[u8]],
+    ) -> BoundedVec<CertificateSerial, ConstU32<MAX_REVOCATIONS_PER_CALL>> {
+        list.iter()
+            .map(|serial| {
+                CertificateSerial::try_from(serial.to_vec()).expect("serial within bound")
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("within the per-call bound")
+    }
+
+    fn revoke(list: &[&[u8]], revoked: bool) -> DispatchResult {
+        TeeAttestation::set_certificates_revoked(RuntimeOrigin::root(), serials(list), revoked)
+    }
+
+    fn revocation_events() -> Vec<(Vec<u8>, bool)> {
+        System::events()
+            .into_iter()
+            .filter_map(|record| match record.event {
+                RuntimeEvent::TeeAttestation(crate::Event::CertificateRevocationSet {
+                    serial,
+                    revoked,
+                }) => Some((serial.into_inner(), revoked)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn set_certificates_revoked_requires_root() {
+        new_test_ext().execute_with(|| {
+            assert_noop!(
+                TeeAttestation::set_certificates_revoked(
+                    RuntimeOrigin::signed(1),
+                    serials(&[&[0x77]]),
+                    true
+                ),
+                sp_runtime::DispatchError::BadOrigin
+            );
+        });
+    }
+
+    /// Revoking the serial of a certificate above the leaf rejects every
+    /// chain through it until the serial is cleared.
+    #[test]
+    fn a_revoked_intermediate_rejects_evidence_until_cleared() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            let root = TestKey::root();
+            let intermediate = TestKey::new(2, "Synthetic RKP Key");
+            let leaf = TestKey::new(3, "Android Keystore Key");
+            let kd = key_description(
+                300,
+                STRONGBOX,
+                Some(&arm_trustzone_challenge(&chain_binding(
+                    id,
+                    fake_content_hash(),
+                ))),
+            );
+            let entry = entry_from_ders(vec![
+                root.issue(&intermediate, 0x7777, &[]),
+                intermediate.issue(&leaf, 1, &[attestation_extension(&kd)]),
+            ]);
+            let root_spki = root.spki();
+
+            assert_ok!(revoke(&[&[0x77, 0x77]], true));
+            assert_eq!(
+                rejection_reason(id, fake_content_hash(), entry.clone(), &[&root_spki]),
+                VerifyFailReason::CertificateRevoked
+            );
+            assert_ok!(revoke(&[&[0x77, 0x77]], false));
+            assert_ok!(accept(id, fake_content_hash(), entry));
+        });
+    }
+
+    /// Each serial whose state changes emits one event; repeats and serials
+    /// already in the requested state change nothing.
+    #[test]
+    fn revocation_changes_are_recorded_and_counted() {
+        new_test_ext().execute_with(|| {
+            System::set_block_number(1);
+            assert_ok!(revoke(&[&[0x0a], &[0x0b], &[0x0a]], true));
+            assert_ok!(revoke(&[&[0x0a]], true));
+            assert_eq!(crate::RevokedCertificateCount::<Test>::get(), 2);
+            assert_ok!(revoke(&[&[0x0a], &[0x0c]], false));
+            assert_eq!(crate::RevokedCertificateCount::<Test>::get(), 1);
+            assert!(crate::RevokedCertificates::<Test>::contains_key(
+                CertificateSerial::try_from(vec![0x0b]).unwrap()
+            ));
+            assert_eq!(
+                revocation_events(),
+                vec![(vec![0x0a], true), (vec![0x0b], true), (vec![0x0a], false)]
+            );
+        });
+    }
+
+    /// A serial with a leading zero byte, or none at all, would never match
+    /// a certificate's serial magnitude.
+    #[test]
+    fn non_canonical_serials_are_refused() {
+        new_test_ext().execute_with(|| {
+            for serial in [&[][..], &[0x00, 0x77][..], &[0x00][..]] {
+                assert_noop!(revoke(&[serial], true), Error::<Test>::NonCanonicalSerial);
+            }
+        });
+    }
+
+    #[test]
+    fn the_revoked_set_is_bounded() {
+        new_test_ext().execute_with(|| {
+            let all: Vec<[u8; 3]> = (0..MAX_REVOKED_CERTIFICATES + 1)
+                .map(|i| {
+                    let [_, _, high, low] = i.to_be_bytes();
+                    [0x01, high, low]
+                })
+                .collect();
+            let (fits, overflow) = all.split_at(MAX_REVOKED_CERTIFICATES as usize);
+            for batch in fits.chunks(MAX_REVOCATIONS_PER_CALL as usize) {
+                let batch: Vec<&[u8]> = batch.iter().map(|serial| &serial[..]).collect();
+                assert_ok!(revoke(&batch, true));
+            }
+            assert_eq!(
+                crate::RevokedCertificateCount::<Test>::get(),
+                MAX_REVOKED_CERTIFICATES
+            );
+            assert_noop!(
+                revoke(&[&overflow[0][..]], true),
+                Error::<Test>::TooManyRevokedCertificates
             );
         });
     }
