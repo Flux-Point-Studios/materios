@@ -143,6 +143,9 @@ fn list_length(path: &str) -> u32 {
         "TeeAttestation.submit_evidence.entry" => {
             pallet_tee_attestation::types::MAX_EVIDENCE_PAYLOAD_BYTES
         }
+        "TeeAttestation.set_certificates_revoked.serials" => {
+            pallet_tee_attestation::types::MAX_REVOCATIONS_PER_CALL
+        }
         p if p.starts_with("Multisig.") && p.ends_with(".other_signatories") => {
             <<Runtime as pallet_multisig::Config>::MaxSignatories as Get<u32>>::get() - 1
         }

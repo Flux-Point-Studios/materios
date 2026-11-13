@@ -7,8 +7,8 @@
 //! Determinism rules:
 //!   - All trust roots are pinned via `include_bytes!`.
 //!   - No network calls in the verify path.
-//!   - No wall-clock checks: certificate `not_before`/`not_after` would
-//!     diverge by node clock skew.
+//!   - Certificate validity is judged at the block timestamp
+//!     (`ArmTrustZoneVerifier::now`), never a node clock.
 //!   - The receipt binding is read from chain state (`ReceiptBinding`).
 //!   - `attest_key_hash` is SHA-256 of the leaf cert's SPKI in canonical DER.
 //!
@@ -25,12 +25,13 @@ use crate::types::{
     EvidenceEntry, EvidenceType, ReceiptBinding, VerifiedEvidence, VerifyFailReason, VerifyOutcome,
 };
 use crate::vendor::acurast_attestation::asn::{
-    Certificate, KeyDescription, ParsedAttestation, SubjectPublicKeyInfo,
+    Certificate, KeyDescription, Name, ParsedAttestation, SubjectPublicKeyInfo, Time,
 };
 use crate::vendor::acurast_attestation::{
     extract_attestation, validate_certificate_chain, CertificateChainInput, CertificateInput,
     KEY_ATTESTATION_OID,
 };
+use asn1::ObjectIdentifier;
 
 use sha2::{Digest, Sha256};
 
@@ -84,16 +85,23 @@ pub fn arm_trustzone_challenge(binding: &ReceiptBinding) -> [u8; 32] {
 ///      the key-attestation extension. Only secure hardware issues that
 ///      extension; an attested key that signs a further certificate can put
 ///      any challenge and security level in it.
-///   4. Calls `extract_attestation` on the leaf cert's extension to confirm
+///   4. Rejects a revoked certificate above the leaf, or one not valid at
+///      the block time (`certificate_status`).
+///   5. Calls `extract_attestation` on the leaf cert's extension to confirm
 ///      the leaf is a Key-Attestation cert (vs unrelated leaf).
-///   5. Reads the security level (TEE / StrongBox) from the
+///   6. Reads the security level (TEE / StrongBox) from the
 ///      `KeyDescription`.
-///   6. Requires the leaf's `attestationChallenge` to equal
+///   7. Requires the leaf's `attestationChallenge` to equal
 ///      `arm_trustzone_challenge(binding)`.
-///   7. Computes `attest_key_hash = sha256(leaf_subject_public_key_info DER)`.
+///   8. Computes `attest_key_hash = sha256(leaf_subject_public_key_info DER)`.
 pub struct ArmTrustZoneVerifier<'r> {
     /// DER SubjectPublicKeyInfo of each key a chain may be anchored at.
     pub trusted_roots: &'r [&'r [u8]],
+    /// Block timestamp, in seconds since the Unix epoch.
+    pub now: u64,
+    /// Whether a certificate serial (big-endian magnitude without leading
+    /// zero bytes) is revoked.
+    pub is_revoked: &'r dyn Fn(&[u8]) -> bool,
 }
 
 impl EvidenceVerifier for ArmTrustZoneVerifier<'_> {
@@ -119,19 +127,33 @@ impl EvidenceVerifier for ArmTrustZoneVerifier<'_> {
         };
 
         // 2. Walk the chain — every link signature has to verify.
-        let (_cert_ids, leaf_tbs, _last_pbk) =
-            match validate_certificate_chain(&chain, self.trusted_roots) {
-                Ok(t) => t,
-                Err(_) => return VerifyOutcome::Failed(VerifyFailReason::ChainOfTrustBroken),
-            };
+        if validate_certificate_chain(&chain, self.trusted_roots).is_err() {
+            return VerifyOutcome::Failed(VerifyFailReason::ChainOfTrustBroken);
+        }
+        let certs = match chain
+            .iter()
+            .map(|der| asn1::parse_single::<Certificate>(der))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(certs) => certs,
+            Err(_) => return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed),
+        };
+        let Some((leaf, issuers)) = certs.split_last() else {
+            return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed);
+        };
 
         // 3. Only the leaf may carry the key-attestation extension.
-        if !attestation_extension_only_in_leaf(&chain) {
+        if issuers.iter().any(carries_attestation_extension) {
             return VerifyOutcome::Failed(VerifyFailReason::PolicyViolation);
         }
 
-        // 4. Confirm the leaf is a Key-Attestation cert.
-        let parsed = match extract_attestation(leaf_tbs.extensions) {
+        // 4. Revocation and validity at the block time.
+        if let Err(reason) = self.certificate_status(issuers) {
+            return VerifyOutcome::Failed(reason);
+        }
+
+        // 5. Confirm the leaf is a Key-Attestation cert.
+        let parsed = match extract_attestation(leaf.tbs_certificate.extensions.clone()) {
             Ok(p) => p,
             Err(_) => return VerifyOutcome::Failed(VerifyFailReason::PolicyViolation),
         };
@@ -145,19 +167,20 @@ impl EvidenceVerifier for ArmTrustZoneVerifier<'_> {
             }
         };
 
-        // 5. Positive allowlist: only TrustedEnvironment (1) and StrongBox
+        // 6. Positive allowlist: only TrustedEnvironment (1) and StrongBox
         // (2) represent attested hardware-rooted keys; reject everything else.
         let raw_level = key_description_security_level(key_description);
         if !is_security_level_allowed(raw_level) {
             return VerifyOutcome::Failed(VerifyFailReason::PolicyViolation);
         }
 
-        // 6. The key was minted for this receipt on this chain.
+        // 7. The key was minted for this receipt on this chain.
         if key_description_challenge(key_description) != arm_trustzone_challenge(binding) {
             return VerifyOutcome::Failed(VerifyFailReason::NonceMismatch);
         }
 
-        let Some(attest_key_hash) = attest_key_hash(&leaf_tbs.subject_public_key_info) else {
+        let Some(attest_key_hash) = attest_key_hash(&leaf.tbs_certificate.subject_public_key_info)
+        else {
             return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed);
         };
 
@@ -167,6 +190,97 @@ impl EvidenceVerifier for ArmTrustZoneVerifier<'_> {
             raw_level,
         })
     }
+}
+
+impl ArmTrustZoneVerifier<'_> {
+    /// Revocation and validity of the certificates above the leaf at block
+    /// time `now`, following Google's android/keyattestation verifier:
+    ///   - none may be revoked, looked up by serial magnitude;
+    ///   - each one below the anchor must have become valid, and must not
+    ///     have expired unless the chain is factory provisioned. Factory
+    ///     attestation keys cannot be rotated and Google keeps trusting them
+    ///     past expiry; remotely provisioned (RKP) certificates are
+    ///     short-lived on purpose;
+    ///   - the anchor's own certificates, however many lead the chain, are not
+    ///     dated: the pinned key is the anchor, and the first certificate
+    ///     after them is the one the root issued.
+    ///
+    /// The leaf is not checked: the device sets its serial (Keystore uses 1)
+    /// and its validity (Keystore defaults run from 1970 to 2048).
+    fn certificate_status(&self, issuers: &[Certificate<'_>]) -> Result<(), VerifyFailReason> {
+        if issuers
+            .iter()
+            .any(|cert| (self.is_revoked)(serial_magnitude(cert)))
+        {
+            return Err(VerifyFailReason::CertificateRevoked);
+        }
+        let anchors = issuers
+            .iter()
+            .take_while(|cert| self.is_anchor(cert))
+            .count();
+        let below_anchor = &issuers[anchors..];
+        let factory_provisioned = below_anchor.first().is_some_and(names_a_serial_number);
+        let now = i64::try_from(self.now).unwrap_or(i64::MAX);
+        for cert in below_anchor {
+            let validity = &cert.tbs_certificate.validity;
+            let expired = now > unix_seconds(&validity.not_after);
+            if now < unix_seconds(&validity.not_before) || (expired && !factory_provisioned) {
+                return Err(VerifyFailReason::CertificateNotValidAtBlockTime);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether `cert` carries one of the trusted root keys.
+    fn is_anchor(&self, cert: &Certificate<'_>) -> bool {
+        asn1::write_single(&cert.tbs_certificate.subject_public_key_info)
+            .is_ok_and(|spki| self.trusted_roots.contains(&spki.as_slice()))
+    }
+}
+
+/// X.520 `serialNumber`. Google's verifier treats a chain as factory
+/// provisioned when the certificate its root issued names one (an OEM batch
+/// key); RKP intermediates are named "Droid CA2" by Google LLC.
+const SERIAL_NUMBER_ATTRIBUTE: ObjectIdentifier = asn1::oid!(2, 5, 4, 5);
+
+fn names_a_serial_number(cert: &Certificate<'_>) -> bool {
+    let Name::RDNSequence(rdns) = &cert.tbs_certificate.subject;
+    rdns.clone()
+        .any(|mut rdn| rdn.any(|attribute| attribute.typ == SERIAL_NUMBER_ATTRIBUTE))
+}
+
+fn carries_attestation_extension(cert: &Certificate<'_>) -> bool {
+    cert.tbs_certificate
+        .extensions
+        .clone()
+        .is_some_and(|mut extensions| {
+            extensions.any(|extension| extension.extn_id == KEY_ATTESTATION_OID)
+        })
+}
+
+/// A certificate's serial number as its big-endian magnitude without
+/// leading zero bytes; DER prefixes a zero byte when the high bit is set.
+fn serial_magnitude<'a>(cert: &Certificate<'a>) -> &'a [u8] {
+    let bytes = cert.tbs_certificate.serial_number.as_bytes();
+    let first = bytes.iter().position(|b| *b != 0).unwrap_or(bytes.len());
+    &bytes[first..]
+}
+
+/// Seconds from the Unix epoch to an X.509 time (UTC, proleptic Gregorian),
+/// by Howard Hinnant's `days_from_civil`.
+pub(crate) fn unix_seconds(time: &Time) -> i64 {
+    let t = match time {
+        Time::UTCTime(t) => t.as_datetime(),
+        Time::GeneralizedTime(t) => t.as_datetime(),
+    };
+    let month = i64::from(t.month());
+    let year = i64::from(t.year()) - i64::from(month <= 2);
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let day_of_year = (153 * ((month + 9) % 12) + 2) / 5 + i64::from(t.day()) - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    days * 86_400 + i64::from(t.hour()) * 3_600 + i64::from(t.minute()) * 60 + i64::from(t.second())
 }
 
 /// Positive allowlist of AOSP `SecurityLevel` values representing attested
@@ -207,26 +321,6 @@ pub(crate) fn key_description_challenge<'a>(kd: &KeyDescription<'a>) -> &'a [u8]
         KeyDescription::V200(v) => v.attestation_challenge,
         KeyDescription::V300(v) => v.attestation_challenge,
     }
-}
-
-/// Whether every certificate but the last (the leaf) lacks the
-/// key-attestation extension. The chain has already been validated, so each
-/// certificate parses.
-fn attestation_extension_only_in_leaf(chain: &CertificateChainInput) -> bool {
-    let Some((_leaf, issuers)) = chain.split_last() else {
-        return false;
-    };
-    issuers
-        .iter()
-        .all(|der| match asn1::parse_single::<Certificate>(der) {
-            Ok(cert) => !cert
-                .tbs_certificate
-                .extensions
-                .is_some_and(|mut extensions| {
-                    extensions.any(|extension| extension.extn_id == KEY_ATTESTATION_OID)
-                }),
-            Err(_) => false,
-        })
 }
 
 /// SHA-256 of a SubjectPublicKeyInfo re-encoded to canonical DER.
@@ -309,18 +403,13 @@ impl EvidenceVerifier for ZkVmExecutionVerifier {
 }
 
 /// Static dispatch to the right verifier for an evidence type.
-/// `arm_trustzone_roots` are the anchors an ArmTrustZone chain may start
-/// from; on chain they are `GOOGLE_ATTESTATION_ROOTS`.
 pub fn verify_evidence(
     binding: &ReceiptBinding,
     entry: &EvidenceEntry,
-    arm_trustzone_roots: &[&[u8]],
+    arm_trustzone: &ArmTrustZoneVerifier,
 ) -> VerifyOutcome {
     match entry.evidence_type {
-        EvidenceType::ArmTrustZone => ArmTrustZoneVerifier {
-            trusted_roots: arm_trustzone_roots,
-        }
-        .verify(binding, entry),
+        EvidenceType::ArmTrustZone => arm_trustzone.verify(binding, entry),
         EvidenceType::AmdSevSnp => AmdSevSnpVerifier.verify(binding, entry),
         EvidenceType::IntelTdx => IntelTdxVerifier.verify(binding, entry),
         EvidenceType::ReproducibleBuild => ReproducibleBuildVerifier.verify(binding, entry),

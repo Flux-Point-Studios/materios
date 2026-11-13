@@ -56,6 +56,41 @@ key-attestation chain only when:
    with `genesis_hash` this chain's block-0 hash (`System::BlockHash(0)`)
    and each hash as its 32 raw bytes (`verifier::arm_trustzone_challenge`).
 
+Certificate status (checked before the leaf, `Failed(CertificateRevoked)` or
+`Failed(CertificateNotValidAtBlockTime)`), following Google's
+`android/keyattestation` verifier:
+
+- **Revocation.** No certificate above the leaf may have its serial in
+  `RevokedCertificates`, which stores each serial's big-endian magnitude.
+  Root updates it with `set_certificates_revoked(serials, revoked)`, at
+  most 256 serials per call and 8,192 in all, passing each serial as hex
+  text exactly as Google's status list
+  (`https://android.googleapis.com/attestation/status`, 1,773 entries on
+  2026-11-12) writes it: copy the list's keys verbatim, with no converter.
+  544 of those keys have an odd number of digits, which byte-oriented hex
+  decoders mangle (`Buffer.from(h, "hex")` drops the last digit,
+  `hexToU8a` pads on the right). The pallet reads any number of hex digits,
+  either case, leading zeros allowed, as one big-endian number
+  (`certificate_serial_from_hex`), so `6681152659205225093` and
+  `06681152659205225093` name the same serial; anything else is
+  `InvalidSerial`. Leaf serials are not looked up: the device chooses them
+  (Keystore uses 1), so they name no attestation key.
+- **Validity at the block timestamp** (`Config::UnixTime`, `Timestamp` on
+  chain), bounds inclusive, for every certificate between the anchor and the
+  leaf. A certificate that is not yet valid always fails. An expired one
+  fails unless the chain is factory provisioned (the certificate the root
+  issued names an X.520 `serialNumber`, as OEM batch keys do): Google keeps
+  trusting factory keys past expiry because they cannot be rotated, while
+  RKP certificates live for weeks on purpose. The Seeker chain's RKP
+  certificates are valid only from 2025-08-19 to 2025-09-16.
+- **Not checked.** The leaf's validity, which the device sets (Keystore
+  defaults run from 1970 to 2048; Google's verifier skips it too), and the
+  anchor's own certificates, whose pinned key is the anchor (the 2016 Google
+  root certificate carried by the Pixel chain expired on 2026-05-24). Every
+  certificate that leads the chain with an anchor's key is skipped, so a
+  repeated root cannot stand in for the certificate the root issued and
+  pass an RKP chain off as factory provisioned.
+
 Why this derivation: receipt submitters choose both `receipt_id` and
 `content_hash`, and several receipts may share a content hash. If the
 challenge were the raw content hash, any published Google-rooted chain with
@@ -90,9 +125,11 @@ tag followed by the three 32-byte hashes, 147 bytes.
 `submit_evidence` is priced at its Wasm worst case, measured with
 `frame-omni-bencher` (`src/benchmarking.rs`, samples in `benchmarking/`,
 method and figures in `src/weights.rs`): five P-384 signature checks, the
-largest a five-certificate chain can demand, sampled up to 63.5 ms. The
-weight declares 64 ms, a 4,096-byte proof, five reads and two writes. The
-Seeker RKP chain costs 20 ms; Google's RSA root repeated five times, 17 ms.
+largest a five-certificate chain can demand, sampled up to 66.7 ms. The
+weight declares 67 ms, a 4,096-byte proof, ten reads (authorization,
+binding, the receipt's entries, the block time and four revocation
+lookups) and two writes. The Seeker RKP chain's median is 20.5 ms; Google's
+RSA root repeated five times, 17.9 ms.
 
 ## Upgrade from storage version 0
 
@@ -125,9 +162,10 @@ Every committee member's verifier MUST produce identical bytes. Per
 `feedback_mofn_hash_determinism.md` we:
 - Pin trust roots via `include_bytes!` (Google RSA, Google P-384).
 - Make zero network calls from the verify path.
-- Skip wall-clock validity checks on certificates.
 - Read the receipt binding from chain state only: the receipt registry and
   `System::BlockHash(0)`.
+- Judge certificate validity at the block timestamp and read revocations
+  from `RevokedCertificates`, never a node clock or network list.
 - Hash leaf SubjectPublicKeyInfo bytes (canonical DER) for the chip-ID.
 
 ## Tests
@@ -147,10 +185,14 @@ Every committee member's verifier MUST produce identical bytes. Per
   chain extended past an attested key.
 - `tests::chain_depth::*` — attested keys extended at realistic depths,
   the chain-length bound and repeated roots.
+- `tests::certificate_status::*` — RKP and factory validity at exact
+  bounds, the leaf and anchor exemptions, revocation of every certificate
+  above the leaf in each real chain, and X.509 time conversion.
 - `tests::pallet::*` — `submit_evidence` on a mock runtime: authorization,
   receipt lookup, cross-receipt and cross-network replay, the genesis hash
-  past the block-hash horizon, one entry per type, duplicates, and the
-  checks that run before verification.
+  past the block-hash horizon, one entry per type, duplicates, the checks
+  that run before verification, the block timestamp, and the revocation
+  set and its admin call.
 - `tests::migration::*` — the upgrade clears the storage the pre-binding
   verifier wrote, once.
 - `benchmarking::bench_submit_evidence` (`--features runtime-benchmarks`) —

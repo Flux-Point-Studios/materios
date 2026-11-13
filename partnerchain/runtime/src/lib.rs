@@ -1352,6 +1352,7 @@ impl pallet_tee_attestation::ReceiptRegistry<AccountId> for OrinqReceiptRegistry
 impl pallet_tee_attestation::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type Receipts = OrinqReceiptRegistry;
+    type UnixTime = Timestamp;
 }
 
 // ---------------------------------------------------------------------------

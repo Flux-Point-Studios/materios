@@ -170,6 +170,15 @@ fn tee_disabled(disabled: bool) -> RuntimeCall {
     RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_disabled { disabled })
 }
 
+fn tee_certificate_revoked(revoked: bool) -> RuntimeCall {
+    let serial = pallet_tee_attestation::types::CertificateSerialHex::try_from(b"77".to_vec())
+        .expect("serial within bound");
+    RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_certificates_revoked {
+        serials: vec![serial].try_into().expect("within the per-call bound"),
+        revoked,
+    })
+}
+
 fn debits_enabled(enabled: bool) -> RuntimeCall {
     RuntimeCall::Billing(pallet_billing::Call::governance_set_debits_enabled { enabled })
 }
@@ -443,6 +452,7 @@ fn every_root_gated_call_waits_unless_exempt() {
             min_signer_threshold(1),
             bind_aegis_policy(1),
             tee_disabled(false),
+            tee_certificate_revoked(false),
             debits_enabled(true),
             RuntimeCall::Billing(pallet_billing::Call::governance_set_endpoint_price {
                 endpoint_class: b"x".to_vec(),
@@ -664,6 +674,13 @@ fn exempt_calls_work_immediately() {
         ));
         assert!(pallet_tee_attestation::Disabled::<Runtime>::get());
         assert!(!pallet_billing::DebitsEnabled::<Runtime>::get());
+
+        // Revoking an attestation certificate only stops evidence: immediate.
+        assert_ok!(signed(SUDO, sudo(tee_certificate_revoked(true))));
+        assert_eq!(
+            pallet_tee_attestation::RevokedCertificateCount::<Runtime>::get(),
+            1
+        );
 
         // Approved treasury spends can be withdrawn at once.
         let local = RuntimeCall::Treasury(pallet_treasury::Call::spend_local {
@@ -1003,6 +1020,10 @@ fn calls_are_classified_by_what_they_can_change() {
             (debits_enabled(true), AuthorityRecovery),
             (tee_disabled(true), Standard),
             (debits_enabled(false), Standard),
+            // Clearing a revoked attestation certificate restarts evidence
+            // through it; revoking stops it.
+            (tee_certificate_revoked(false), AuthorityRecovery),
+            (tee_certificate_revoked(true), Standard),
             (min_signer_threshold(4), Standard),
             (min_signer_threshold(3), Standard),
             (bridge_scripts(1), Long),

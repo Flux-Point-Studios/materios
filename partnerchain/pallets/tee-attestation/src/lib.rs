@@ -5,8 +5,9 @@
 //!
 //! Determinism: every committee member's verifier MUST produce identical
 //! bytes for the same input. The verifier uses `include_bytes!` for all
-//! trust roots, skips wall-clock validity checks, and never consults
-//! external services.
+//! trust roots, judges certificate validity at the block timestamp
+//! (`Config::UnixTime`), reads revocations from `RevokedCertificates`, and
+//! never consults external services.
 //!
 //! Receipt binding: `submit_evidence` reads the receipt's content hash from
 //! the receipt registry (`Config::Receipts`) and the chain's genesis hash
@@ -68,17 +69,21 @@ mod tests;
 #[frame_support::pallet]
 pub mod pallet {
     use frame_support::pallet_prelude::*;
+    use frame_support::traits::UnixTime;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
     use sp_runtime::traits::Zero;
     use sp_std::prelude::*;
 
     use crate::types::{
-        CompositeTrustScore, EvidenceEntry, EvidenceType, ReceiptBinding, ReceiptId, VendorClass,
-        VerifiedEvidence, VerifyOutcome, MAX_ENTRIES_PER_EVIDENCE_TYPE,
-        MAX_EVIDENCE_ENTRIES_PER_RECEIPT,
+        certificate_serial_from_hex, CertificateSerial, CertificateSerialHex, CompositeTrustScore,
+        EvidenceEntry, EvidenceType, ReceiptBinding, ReceiptId, VendorClass, VerifiedEvidence,
+        VerifyOutcome, MAX_ENTRIES_PER_EVIDENCE_TYPE, MAX_EVIDENCE_ENTRIES_PER_RECEIPT,
+        MAX_REVOCATIONS_PER_CALL, MAX_REVOKED_CERTIFICATES,
     };
-    use crate::verifier::{claimed_attest_key_hash, verify_evidence, GOOGLE_ATTESTATION_ROOTS};
+    use crate::verifier::{
+        claimed_attest_key_hash, verify_evidence, ArmTrustZoneVerifier, GOOGLE_ATTESTATION_ROOTS,
+    };
     use crate::ReceiptRegistry;
 
     /// Version 1 holds only evidence bound to its receipt
@@ -94,6 +99,8 @@ pub mod pallet {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         /// The receipt registry whose content hashes evidence binds to.
         type Receipts: ReceiptRegistry<Self::AccountId>;
+        /// The block timestamp certificate validity is checked against.
+        type UnixTime: UnixTime;
     }
 
     /// Kill-switch for `submit_evidence`. Defaults `true` at genesis; Root
@@ -117,6 +124,18 @@ pub mod pallet {
         BoundedVec<VerifiedEvidence, ConstU32<MAX_EVIDENCE_ENTRIES_PER_RECEIPT>>,
         ValueQuery,
     >;
+
+    /// Revoked attestation certificates, by serial number (big-endian
+    /// magnitude without leading zero bytes). A chain with any of them above
+    /// its leaf is rejected.
+    #[pallet::storage]
+    pub type RevokedCertificates<T: Config> =
+        StorageMap<_, Blake2_128Concat, CertificateSerial, (), OptionQuery>;
+
+    /// Number of entries in `RevokedCertificates`, at most
+    /// `MAX_REVOKED_CERTIFICATES`.
+    #[pallet::storage]
+    pub type RevokedCertificateCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
     /// Composite trust score per receipt — the canonical signal cert-daemon
     /// reads to populate the receipt's `attestation_evidence_hash` field.
@@ -143,6 +162,11 @@ pub mod pallet {
         },
         /// Kill-switch flipped via `set_disabled`. Sudo-only.
         DisabledChanged { disabled: bool },
+        /// `set_certificates_revoked` changed a serial's revocation state.
+        CertificateRevocationSet {
+            serial: CertificateSerial,
+            revoked: bool,
+        },
     }
 
     #[pallet::error]
@@ -169,6 +193,11 @@ pub mod pallet {
         /// The receipt already holds `MAX_ENTRIES_PER_EVIDENCE_TYPE` entries
         /// of this evidence type, from another key.
         EvidenceTypeFull,
+        /// A serial is not hex digits naming a nonzero number.
+        InvalidSerial,
+        /// `RevokedCertificates` already holds `MAX_REVOKED_CERTIFICATES`
+        /// serials.
+        TooManyRevokedCertificates,
     }
 
     #[pallet::call]
@@ -207,6 +236,55 @@ pub mod pallet {
             ensure_root(origin)?;
             Disabled::<T>::put(disabled);
             Self::deposit_event(Event::DisabledChanged { disabled });
+            Ok(())
+        }
+
+        /// Root-only: revoke (`true`) or clear (`false`) attestation
+        /// certificates by serial number. Each serial is hex text exactly as
+        /// Google's attestation status list writes it: any number of digits,
+        /// odd counts included, either case, read as one big-endian number
+        /// (`certificate_serial_from_hex`); the pallet stores its magnitude.
+        /// A chain with a revoked certificate above its leaf is rejected.
+        #[pallet::call_index(2)]
+        #[pallet::weight(
+            Weight::from_parts(10_000_000, 1_024)
+                .saturating_add(T::DbWeight::get().reads_writes(1, 1))
+                .saturating_add(
+                    Weight::from_parts(5_000_000, 128)
+                        .saturating_add(T::DbWeight::get().reads_writes(1, 1))
+                        .saturating_mul(serials.len() as u64)
+                )
+        )]
+        pub fn set_certificates_revoked(
+            origin: OriginFor<T>,
+            serials: BoundedVec<CertificateSerialHex, ConstU32<MAX_REVOCATIONS_PER_CALL>>,
+            revoked: bool,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+            let serials = serials
+                .iter()
+                .map(|hex| certificate_serial_from_hex(hex))
+                .collect::<Option<Vec<CertificateSerial>>>()
+                .ok_or(Error::<T>::InvalidSerial)?;
+            let mut count = RevokedCertificateCount::<T>::get();
+            for serial in serials {
+                if RevokedCertificates::<T>::contains_key(&serial) == revoked {
+                    continue;
+                }
+                if revoked {
+                    ensure!(
+                        count < MAX_REVOKED_CERTIFICATES,
+                        Error::<T>::TooManyRevokedCertificates
+                    );
+                    RevokedCertificates::<T>::insert(&serial, ());
+                    count += 1;
+                } else {
+                    RevokedCertificates::<T>::remove(&serial);
+                    count -= 1;
+                }
+                Self::deposit_event(Event::CertificateRevocationSet { serial, revoked });
+            }
+            RevokedCertificateCount::<T>::put(count);
             Ok(())
         }
     }
@@ -254,7 +332,17 @@ pub mod pallet {
                 content_hash,
             };
 
-            match verify_evidence(&binding, entry, arm_trustzone_roots) {
+            let is_revoked = |serial: &[u8]| {
+                CertificateSerial::try_from(serial.to_vec())
+                    .is_ok_and(RevokedCertificates::<T>::contains_key)
+            };
+            let arm_trustzone = ArmTrustZoneVerifier {
+                trusted_roots: arm_trustzone_roots,
+                now: T::UnixTime::now().as_secs(),
+                is_revoked: &is_revoked,
+            };
+
+            match verify_evidence(&binding, entry, &arm_trustzone) {
                 VerifyOutcome::Verified(verified) => {
                     verified_entries
                         .try_push(verified.clone())

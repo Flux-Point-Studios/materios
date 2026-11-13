@@ -24,6 +24,47 @@ pub const MAX_EVIDENCE_ENTRIES_PER_RECEIPT: u32 = 8;
 /// score; one per type leaves a slot for each of the five types.
 pub const MAX_ENTRIES_PER_EVIDENCE_TYPE: u32 = 1;
 
+/// RFC 5280 §4.1.2.2 caps certificate serial numbers at 20 octets.
+pub const MAX_CERTIFICATE_SERIAL_BYTES: u32 = 20;
+
+/// Bound on revoked certificate serials held on chain. Google's attestation
+/// status list held 1,773 entries on 2026-11-12.
+pub const MAX_REVOKED_CERTIFICATES: u32 = 8192;
+
+/// Bound on the serials one `set_certificates_revoked` call changes.
+pub const MAX_REVOCATIONS_PER_CALL: u32 = 256;
+
+/// A certificate serial number as its big-endian magnitude without leading
+/// zero bytes: the number Google's attestation status list writes in
+/// lowercase hex.
+pub type CertificateSerial = BoundedVec<u8, ConstU32<MAX_CERTIFICATE_SERIAL_BYTES>>;
+
+/// Hex digits for a serial of up to `MAX_CERTIFICATE_SERIAL_BYTES` bytes.
+pub const MAX_CERTIFICATE_SERIAL_HEX_DIGITS: u32 = 2 * MAX_CERTIFICATE_SERIAL_BYTES;
+
+/// A certificate serial number as hex text, as Google's attestation status
+/// list writes it.
+pub type CertificateSerialHex = BoundedVec<u8, ConstU32<MAX_CERTIFICATE_SERIAL_HEX_DIGITS>>;
+
+/// The serial number `hex` names. Any number of hex digits in either case,
+/// odd counts and leading zeros included, read as one big-endian number, so
+/// Google's `668…093` and `0668…093` are the same serial. `None` when `hex`
+/// holds anything but hex digits or names zero.
+pub fn certificate_serial_from_hex(hex: &[u8]) -> Option<CertificateSerial> {
+    let digits = hex
+        .iter()
+        .map(|c| char::from(*c).to_digit(16).map(|d| d as u8))
+        .collect::<Option<sp_std::vec::Vec<u8>>>()?;
+    let significant = &digits[digits.iter().position(|d| *d != 0)?..];
+    let (head, pairs) = significant.split_at(significant.len() % 2);
+    let magnitude = head
+        .iter()
+        .copied()
+        .chain(pairs.chunks(2).map(|pair| (pair[0] << 4) | pair[1]))
+        .collect::<sp_std::vec::Vec<u8>>();
+    CertificateSerial::try_from(magnitude).ok()
+}
+
 /// Receipt identifier. Matches `pallet-orinq-receipts` `ReceiptId`.
 pub type ReceiptId = H256;
 
@@ -156,6 +197,8 @@ pub enum VerifyFailReason {
     NonceMismatch,
     UnknownChipId,
     PolicyViolation,
+    CertificateRevoked,
+    CertificateNotValidAtBlockTime,
 }
 
 /// Outcome of a single evidence-entry verification.
