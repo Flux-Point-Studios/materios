@@ -21,8 +21,8 @@ mod test_vectors;
 mod synthetic_chain;
 
 use crate::types::{
-    CertificateSerial, CompositeTrustScore, EvidenceEntry, EvidencePayload, EvidenceType,
-    ReceiptBinding, ReceiptId, RegisteredReceipt, VerifiedEvidence, VerifyFailReason,
+    CertificateSerial, CertificateSerialHex, CompositeTrustScore, EvidenceEntry, EvidencePayload,
+    EvidenceType, ReceiptBinding, ReceiptId, RegisteredReceipt, VerifiedEvidence, VerifyFailReason,
     VerifyOutcome, MAX_REVOCATIONS_PER_CALL, MAX_REVOKED_CERTIFICATES,
 };
 use crate::verifier::{
@@ -1097,6 +1097,60 @@ mod certificate_status {
         }
     }
 
+    /// 2025-10-01T00:00:00Z: Seeker's Droid CA3 (to 2025-09-30) and RKP
+    /// certificate (to 2025-09-16) have expired; Droid CA2 runs to 2037.
+    const SEEKER_EXPIRED: u64 = 1_759_276_800;
+
+    /// A root certificate repeated at the head of a chain is still the
+    /// anchor: the certificate the root issued decides whether the chain is
+    /// factory provisioned. Here the root is named by a `serialNumber`, as
+    /// Google's RSA root is, and issues an RKP-style "Droid CA2" that expired
+    /// at the end of 2024.
+    #[test]
+    fn a_repeated_root_does_not_make_a_chain_factory_provisioned() {
+        let root = TestKey::with_serial_number(1, "f92009e853b6b045");
+        let ca = TestKey::new(2, "Droid CA2");
+        let leaf = TestKey::new(3, "Android Keystore Key");
+        let kd = key_description(300, STRONGBOX, Some(&arm_trustzone_challenge(&binding())));
+        let root_cert = root.issue(&root, 0xd50f, &[]);
+        let tail = [
+            root.issue_valid(&ca, 2, through_2024(), &[]),
+            ca.issue(&leaf, 1, &[attestation_extension(&kd)]),
+        ];
+        let spki = root.spki();
+        let verifier = ArmTrustZoneVerifier {
+            trusted_roots: &[&spki],
+            now: IN_VALIDITY,
+            is_revoked: &never_revoked,
+        };
+        for roots in 1..=3 {
+            let mut chain = vec![root_cert.clone(); roots];
+            chain.extend(tail.iter().cloned());
+            assert_eq!(
+                verify_evidence(&binding(), &entry_from_ders(chain), &verifier),
+                failed(VerifyFailReason::CertificateNotValidAtBlockTime),
+                "{roots} root certificate(s)"
+            );
+        }
+    }
+
+    /// The real Google root repeated ahead of Seeker's RKP intermediates
+    /// does not exempt an expired Droid CA3.
+    #[test]
+    fn a_repeated_google_root_does_not_exempt_an_expired_rkp_intermediate() {
+        let repeated = arm_entry(&[
+            test_vectors::SAMSUNG_ROOT_CERT,
+            test_vectors::SAMSUNG_ROOT_CERT,
+            test_vectors::SEEKER_INTERMEDIATE_2_CERT,
+            test_vectors::SEEKER_INTERMEDIATE_1_CERT,
+            test_vectors::SEEKER_RKP_CERT,
+        ]);
+        assert_eq!(
+            at(&repeated, SEEKER_EXPIRED),
+            failed(VerifyFailReason::CertificateNotValidAtBlockTime)
+        );
+    }
+
     /// Leaf serials are chosen on the device (Keystore uses 1), so they
     /// name no attestation key.
     #[test]
@@ -1657,19 +1711,20 @@ mod pallet {
 
     // ---- Revocation set ----
 
+    /// Serials as the call takes them: hex text.
     fn serials(
-        list: &[&[u8]],
-    ) -> BoundedVec<CertificateSerial, ConstU32<MAX_REVOCATIONS_PER_CALL>> {
+        list: &[&str],
+    ) -> BoundedVec<CertificateSerialHex, ConstU32<MAX_REVOCATIONS_PER_CALL>> {
         list.iter()
-            .map(|serial| {
-                CertificateSerial::try_from(serial.to_vec()).expect("serial within bound")
+            .map(|hex| {
+                CertificateSerialHex::try_from(hex.as_bytes().to_vec()).expect("hex within bound")
             })
             .collect::<Vec<_>>()
             .try_into()
             .expect("within the per-call bound")
     }
 
-    fn revoke(list: &[&[u8]], revoked: bool) -> DispatchResult {
+    fn revoke(list: &[&str], revoked: bool) -> DispatchResult {
         TeeAttestation::set_certificates_revoked(RuntimeOrigin::root(), serials(list), revoked)
     }
 
@@ -1692,7 +1747,7 @@ mod pallet {
             assert_noop!(
                 TeeAttestation::set_certificates_revoked(
                     RuntimeOrigin::signed(1),
-                    serials(&[&[0x77]]),
+                    serials(&["77"]),
                     true
                 ),
                 sp_runtime::DispatchError::BadOrigin
@@ -1724,26 +1779,27 @@ mod pallet {
             ]);
             let root_spki = root.spki();
 
-            assert_ok!(revoke(&[&[0x77, 0x77]], true));
+            assert_ok!(revoke(&["7777"], true));
             assert_eq!(
                 rejection_reason(id, fake_content_hash(), entry.clone(), &[&root_spki]),
                 VerifyFailReason::CertificateRevoked
             );
-            assert_ok!(revoke(&[&[0x77, 0x77]], false));
+            assert_ok!(revoke(&["7777"], false));
             assert_ok!(accept(id, fake_content_hash(), entry));
         });
     }
 
-    /// Each serial whose state changes emits one event; repeats and serials
-    /// already in the requested state change nothing.
+    /// Each serial whose state changes emits one event; repeats, other
+    /// spellings of a serial (`0A`, `a`) and serials already in the requested
+    /// state change nothing.
     #[test]
     fn revocation_changes_are_recorded_and_counted() {
         new_test_ext().execute_with(|| {
             System::set_block_number(1);
-            assert_ok!(revoke(&[&[0x0a], &[0x0b], &[0x0a]], true));
-            assert_ok!(revoke(&[&[0x0a]], true));
+            assert_ok!(revoke(&["0a", "b", "0A"], true));
+            assert_ok!(revoke(&["a"], true));
             assert_eq!(crate::RevokedCertificateCount::<Test>::get(), 2);
-            assert_ok!(revoke(&[&[0x0a], &[0x0c]], false));
+            assert_ok!(revoke(&["a", "0c"], false));
             assert_eq!(crate::RevokedCertificateCount::<Test>::get(), 1);
             assert!(crate::RevokedCertificates::<Test>::contains_key(
                 CertificateSerial::try_from(vec![0x0b]).unwrap()
@@ -1755,13 +1811,90 @@ mod pallet {
         });
     }
 
-    /// A serial with a leading zero byte, or none at all, would never match
-    /// a certificate's serial magnitude.
+    /// A chain whose intermediate carries `serial`, under the synthetic root.
+    fn chain_through_serial(id: ReceiptId, serial: &[u8]) -> EvidenceEntry {
+        let root = TestKey::root();
+        let intermediate = TestKey::new(2, "Synthetic Batch Key");
+        let leaf = TestKey::new(3, "Android Keystore Key");
+        let kd = key_description(
+            300,
+            STRONGBOX,
+            Some(&arm_trustzone_challenge(&chain_binding(
+                id,
+                fake_content_hash(),
+            ))),
+        );
+        entry_from_ders(vec![
+            root.issue_with_serial(&intermediate, serial),
+            intermediate.issue(&leaf, 1, &[attestation_extension(&kd)]),
+        ])
+    }
+
+    /// Serials revoke exactly as Google's attestation status list writes
+    /// them (`https://android.googleapis.com/attestation/status`, fetched
+    /// 2026-11-12, SHA-256 af06f630…c2c2): lowercase hex of any length. 544 of
+    /// its 1,773 serials have an odd number of digits, the 17, 19 and 31
+    /// digit ones below among them; the certificate each names carries the
+    /// left-padded magnitude.
     #[test]
-    fn non_canonical_serials_are_refused() {
+    fn status_list_serials_revoke_as_written() {
         new_test_ext().execute_with(|| {
-            for serial in [&[][..], &[0x00, 0x77][..], &[0x00][..]] {
-                assert_noop!(revoke(&[serial], true), Error::<Test>::NonCanonicalSerial);
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            let root = TestKey::root().spki();
+            let live: [(&str, &[u8]); 5] = [
+                (
+                    "17380573025504143",
+                    &hex_literal::hex!("017380573025504143"),
+                ),
+                (
+                    "6681152659205225093",
+                    &hex_literal::hex!("06681152659205225093"),
+                ),
+                (
+                    "1042692182988543064",
+                    &hex_literal::hex!("01042692182988543064"),
+                ),
+                (
+                    "10559c58de0bf1e222be441a0d178e2",
+                    &hex_literal::hex!("010559c58de0bf1e222be441a0d178e2"),
+                ),
+                (
+                    "c35747a084470c3135aeefe2b8d40cd6",
+                    &hex_literal::hex!("c35747a084470c3135aeefe2b8d40cd6"),
+                ),
+            ];
+            for (written, magnitude) in live {
+                assert_ok!(revoke(&[written], true));
+                assert_eq!(
+                    rejection_reason(
+                        id,
+                        fake_content_hash(),
+                        chain_through_serial(id, magnitude),
+                        &[&root]
+                    ),
+                    VerifyFailReason::CertificateRevoked,
+                    "{written}"
+                );
+            }
+            assert_eq!(crate::RevokedCertificateCount::<Test>::get(), 5);
+            assert_ok!(revoke(
+                &[
+                    "06681152659205225093",
+                    "6681152659205225093".to_uppercase().as_str()
+                ],
+                true
+            ));
+            assert_eq!(crate::RevokedCertificateCount::<Test>::get(), 5);
+        });
+    }
+
+    /// Text that names no serial number is refused, not stored.
+    #[test]
+    fn text_that_is_not_a_serial_is_refused() {
+        new_test_ext().execute_with(|| {
+            for written in ["", "0x77", "zz", "77 ", "0", "000"] {
+                assert_noop!(revoke(&[written], true), Error::<Test>::InvalidSerial);
             }
         });
     }
@@ -1769,15 +1902,12 @@ mod pallet {
     #[test]
     fn the_revoked_set_is_bounded() {
         new_test_ext().execute_with(|| {
-            let all: Vec<[u8; 3]> = (0..MAX_REVOKED_CERTIFICATES + 1)
-                .map(|i| {
-                    let [_, _, high, low] = i.to_be_bytes();
-                    [0x01, high, low]
-                })
+            let all: Vec<String> = (0..=MAX_REVOKED_CERTIFICATES)
+                .map(|i| format!("1{i:04x}"))
                 .collect();
             let (fits, overflow) = all.split_at(MAX_REVOKED_CERTIFICATES as usize);
             for batch in fits.chunks(MAX_REVOCATIONS_PER_CALL as usize) {
-                let batch: Vec<&[u8]> = batch.iter().map(|serial| &serial[..]).collect();
+                let batch: Vec<&str> = batch.iter().map(String::as_str).collect();
                 assert_ok!(revoke(&batch, true));
             }
             assert_eq!(
@@ -1785,7 +1915,7 @@ mod pallet {
                 MAX_REVOKED_CERTIFICATES
             );
             assert_noop!(
-                revoke(&[&overflow[0][..]], true),
+                revoke(&[overflow[0].as_str()], true),
                 Error::<Test>::TooManyRevokedCertificates
             );
         });

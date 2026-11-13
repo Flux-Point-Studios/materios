@@ -179,7 +179,8 @@ impl EvidenceVerifier for ArmTrustZoneVerifier<'_> {
             return VerifyOutcome::Failed(VerifyFailReason::NonceMismatch);
         }
 
-        let Some(attest_key_hash) = attest_key_hash(&leaf.tbs_certificate.subject_public_key_info) else {
+        let Some(attest_key_hash) = attest_key_hash(&leaf.tbs_certificate.subject_public_key_info)
+        else {
             return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed);
         };
 
@@ -200,8 +201,9 @@ impl ArmTrustZoneVerifier<'_> {
     ///     attestation keys cannot be rotated and Google keeps trusting them
     ///     past expiry; remotely provisioned (RKP) certificates are
     ///     short-lived on purpose;
-    ///   - the anchor's own certificate is not dated: the pinned key is the
-    ///     anchor.
+    ///   - the anchor's own certificates, however many lead the chain, are not
+    ///     dated: the pinned key is the anchor, and the first certificate
+    ///     after them is the one the root issued.
     ///
     /// The leaf is not checked: the device sets its serial (Keystore uses 1)
     /// and its validity (Keystore defaults run from 1970 to 2048).
@@ -212,10 +214,11 @@ impl ArmTrustZoneVerifier<'_> {
         {
             return Err(VerifyFailReason::CertificateRevoked);
         }
-        let below_anchor = match issuers.split_first() {
-            Some((first, rest)) if self.is_anchor(first) => rest,
-            _ => issuers,
-        };
+        let anchors = issuers
+            .iter()
+            .take_while(|cert| self.is_anchor(cert))
+            .count();
+        let below_anchor = &issuers[anchors..];
         let factory_provisioned = below_anchor.first().is_some_and(names_a_serial_number);
         let now = i64::try_from(self.now).unwrap_or(i64::MAX);
         for cert in below_anchor {

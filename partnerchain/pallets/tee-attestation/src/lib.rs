@@ -76,9 +76,10 @@ pub mod pallet {
     use sp_std::prelude::*;
 
     use crate::types::{
-        CertificateSerial, CompositeTrustScore, EvidenceEntry, EvidenceType, ReceiptBinding,
-        ReceiptId, VendorClass, VerifiedEvidence, VerifyOutcome, MAX_ENTRIES_PER_EVIDENCE_TYPE,
-        MAX_EVIDENCE_ENTRIES_PER_RECEIPT, MAX_REVOCATIONS_PER_CALL, MAX_REVOKED_CERTIFICATES,
+        certificate_serial_from_hex, CertificateSerial, CertificateSerialHex, CompositeTrustScore,
+        EvidenceEntry, EvidenceType, ReceiptBinding, ReceiptId, VendorClass, VerifiedEvidence,
+        VerifyOutcome, MAX_ENTRIES_PER_EVIDENCE_TYPE, MAX_EVIDENCE_ENTRIES_PER_RECEIPT,
+        MAX_REVOCATIONS_PER_CALL, MAX_REVOKED_CERTIFICATES,
     };
     use crate::verifier::{
         claimed_attest_key_hash, verify_evidence, ArmTrustZoneVerifier, GOOGLE_ATTESTATION_ROOTS,
@@ -192,9 +193,8 @@ pub mod pallet {
         /// The receipt already holds `MAX_ENTRIES_PER_EVIDENCE_TYPE` entries
         /// of this evidence type, from another key.
         EvidenceTypeFull,
-        /// A serial is empty or starts with a zero byte, so it would match
-        /// no certificate's serial magnitude.
-        NonCanonicalSerial,
+        /// A serial is not hex digits naming a nonzero number.
+        InvalidSerial,
         /// `RevokedCertificates` already holds `MAX_REVOKED_CERTIFICATES`
         /// serials.
         TooManyRevokedCertificates,
@@ -240,9 +240,11 @@ pub mod pallet {
         }
 
         /// Root-only: revoke (`true`) or clear (`false`) attestation
-        /// certificates by serial number, the big-endian magnitude Google's
-        /// attestation status list writes in hex. A chain with a revoked
-        /// certificate above its leaf is rejected.
+        /// certificates by serial number. Each serial is hex text exactly as
+        /// Google's attestation status list writes it: any number of digits,
+        /// odd counts included, either case, read as one big-endian number
+        /// (`certificate_serial_from_hex`); the pallet stores its magnitude.
+        /// A chain with a revoked certificate above its leaf is rejected.
         #[pallet::call_index(2)]
         #[pallet::weight(
             Weight::from_parts(10_000_000, 1_024)
@@ -255,16 +257,15 @@ pub mod pallet {
         )]
         pub fn set_certificates_revoked(
             origin: OriginFor<T>,
-            serials: BoundedVec<CertificateSerial, ConstU32<MAX_REVOCATIONS_PER_CALL>>,
+            serials: BoundedVec<CertificateSerialHex, ConstU32<MAX_REVOCATIONS_PER_CALL>>,
             revoked: bool,
         ) -> DispatchResult {
             ensure_root(origin)?;
-            ensure!(
-                serials
-                    .iter()
-                    .all(|serial| serial.first().is_some_and(|b| *b != 0)),
-                Error::<T>::NonCanonicalSerial
-            );
+            let serials = serials
+                .iter()
+                .map(|hex| certificate_serial_from_hex(hex))
+                .collect::<Option<Vec<CertificateSerial>>>()
+                .ok_or(Error::<T>::InvalidSerial)?;
             let mut count = RevokedCertificateCount::<T>::get();
             for serial in serials {
                 if RevokedCertificates::<T>::contains_key(&serial) == revoked {

@@ -171,7 +171,7 @@ fn tee_disabled(disabled: bool) -> RuntimeCall {
 }
 
 fn tee_certificate_revoked(revoked: bool) -> RuntimeCall {
-    let serial = pallet_tee_attestation::types::CertificateSerial::try_from(vec![0x77])
+    let serial = pallet_tee_attestation::types::CertificateSerialHex::try_from(b"77".to_vec())
         .expect("serial within bound");
     RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::set_certificates_revoked {
         serials: vec![serial].try_into().expect("within the per-call bound"),

@@ -474,8 +474,9 @@ fn a_new_chain_starts_at_the_bound_storage_version() {
 
 /// `submit_evidence`'s declared weight covers every committed Wasm sample of
 /// the benchmark's worst-case chains (Seeker RKP, Google's RSA root five
-/// times, its P-384 root five times), and its proof covers the measured proof
-/// with the receipt committee at its bound.
+/// times, its P-384 root five times) plus the storage of the most reads any
+/// sample made and an accepted entry's two writes, and its proof covers the
+/// measured proof with the receipt committee at its bound.
 #[test]
 fn submit_evidence_weight_bounds_its_wasm_samples() {
     use frame_support::traits::Get;
@@ -487,7 +488,7 @@ fn submit_evidence_weight_bounds_its_wasm_samples() {
     .expect("submit_evidence samples");
     let weight = pallet_tee_attestation::weights::submit_evidence::<Runtime>();
     let mut shapes = std::collections::BTreeSet::new();
-    let (mut slowest, mut largest_proof) = (0u64, 0u64);
+    let (mut slowest, mut largest_proof, mut most_reads) = (0u64, 0u64, 0u64);
     for sample in &samples {
         assert_eq!(sample["benchmark"], "submit_evidence");
         for row in sample["time_results"]
@@ -499,12 +500,14 @@ fn submit_evidence_weight_bounds_its_wasm_samples() {
             shapes.insert(row["components"][0][1].as_u64().expect("chain shape"));
             slowest = slowest.max(row["extrinsic_time"].as_u64().expect("time") * 1_000);
             largest_proof = largest_proof.max(row["proof_size"].as_u64().expect("proof size"));
+            most_reads = most_reads.max(row["reads"].as_u64().expect("reads"));
         }
     }
     assert_eq!(shapes.into_iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+    let storage = <Runtime as frame_system::Config>::DbWeight::get().reads_writes(most_reads, 2);
     assert!(
-        weight.ref_time() >= slowest,
-        "slowest sample {slowest} ps exceeds {weight:?}"
+        weight.ref_time() >= slowest + storage.ref_time(),
+        "slowest sample {slowest} ps and {most_reads} reads exceed {weight:?}"
     );
     let committee_bound: u32 =
         <<Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize as Get<u32>>::get();

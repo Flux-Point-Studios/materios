@@ -12,6 +12,7 @@ const ECDSA_WITH_SHA256: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x0
 const EC_PUBLIC_KEY: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
 const PRIME256V1: &[u8] = &[0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07];
 const COMMON_NAME: &[u8] = &[0x55, 0x04, 0x03];
+const SERIAL_NUMBER: &[u8] = &[0x55, 0x04, 0x05];
 /// 1.3.6.1.4.1.11129.2.1.17, the Android key-attestation extension.
 const KEY_ATTESTATION: &[u8] = &[0x2B, 0x06, 0x01, 0x04, 0x01, 0xD6, 0x79, 0x02, 0x01, 0x11];
 
@@ -33,12 +34,16 @@ fn sequence(parts: &[Vec<u8>]) -> Vec<u8> {
 }
 
 fn integer(value: u64) -> Vec<u8> {
-    let bytes = value.to_be_bytes();
-    let first = bytes
+    unsigned_integer(&value.to_be_bytes())
+}
+
+/// DER INTEGER for a big-endian magnitude of any width.
+fn unsigned_integer(magnitude: &[u8]) -> Vec<u8> {
+    let first = magnitude
         .iter()
         .position(|b| *b != 0)
-        .unwrap_or(bytes.len() - 1);
-    let mut body = bytes[first..].to_vec();
+        .unwrap_or(magnitude.len() - 1);
+    let mut body = magnitude[first..].to_vec();
     if body[0] & 0x80 != 0 {
         body.insert(0, 0);
     }
@@ -90,10 +95,27 @@ pub struct TestKey {
 
 impl TestKey {
     pub fn new(seed: u8, common_name: &str) -> Self {
-        let rdn = sequence(&[oid(COMMON_NAME), tlv(0x0C, common_name.as_bytes())]);
+        Self::named(
+            seed,
+            sequence(&[oid(COMMON_NAME), tlv(0x0C, common_name.as_bytes())]),
+        )
+    }
+
+    /// A key whose certificates name it only by an X.520 `serialNumber`, as
+    /// Google's RSA attestation root (`serialNumber=f92009e853b6b045`) and OEM
+    /// batch keys are named.
+    pub fn with_serial_number(seed: u8, serial_number: &str) -> Self {
+        Self::named(
+            seed,
+            sequence(&[oid(SERIAL_NUMBER), tlv(0x13, serial_number.as_bytes())]),
+        )
+    }
+
+    /// A key named by the single attribute `attribute`.
+    fn named(seed: u8, attribute: Vec<u8>) -> Self {
         Self {
             signing: SigningKey::from_slice(&[seed; 32]).expect("seed is a valid P-256 scalar"),
-            name: sequence(&[tlv(0x31, &rdn)]),
+            name: sequence(&[tlv(0x31, &attribute)]),
         }
     }
 
@@ -126,10 +148,27 @@ impl TestKey {
         validity: [Vec<u8>; 2],
         extensions: &[Vec<u8>],
     ) -> Vec<u8> {
+        self.sign_certificate(subject, integer(serial), validity, extensions)
+    }
+
+    /// A DER certificate for `subject`'s key whose serial is the big-endian
+    /// magnitude `serial`, of any width, valid from 2020 through 2049.
+    pub fn issue_with_serial(&self, subject: &TestKey, serial: &[u8]) -> Vec<u8> {
+        let validity = [utc_time("200101000000Z"), utc_time("491231235959Z")];
+        self.sign_certificate(subject, unsigned_integer(serial), validity, &[])
+    }
+
+    fn sign_certificate(
+        &self,
+        subject: &TestKey,
+        serial: Vec<u8>,
+        validity: [Vec<u8>; 2],
+        extensions: &[Vec<u8>],
+    ) -> Vec<u8> {
         let algorithm = sequence(&[oid(ECDSA_WITH_SHA256)]);
         let mut tbs = vec![
             tlv(0xA0, &integer(2)),
-            integer(serial),
+            serial,
             algorithm.clone(),
             self.name.clone(),
             sequence(&validity),
