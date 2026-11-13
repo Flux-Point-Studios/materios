@@ -42,7 +42,7 @@
     {
       "id": "tee-attestation-pallet",
       "name": "TEE attestation pallet",
-      "desc": "Hardware attestation-evidence registry: verifies Android key-attestation chains (Google attestation roots only, attestation extension in the leaf only, TEE or StrongBox keys) and records one against a receipt only when the leaf challenge is SHA-256 of a domain tag, the chain genesis hash, the receipt id and the content hash OrinqReceipts holds for it, so evidence cannot be replayed onto another receipt or network; each attested key counts once per receipt, and a per-receipt composite trust score feeds certification. Disabled at genesis behind a Root kill-switch.",
+      "desc": "Hardware attestation-evidence registry: verifies Android key-attestation chains (Google attestation roots only, attestation extension in the leaf only, TEE or StrongBox keys) and records one against a receipt only when the leaf challenge is SHA-256 of a domain tag, the chain genesis hash, the receipt id and the content hash OrinqReceipts holds for it, so evidence cannot be replayed onto another receipt or network; only the receipt's submitter or a receipt-committee member may attach evidence, one entry per evidence type, checked before any signature work; submit_evidence is priced at its measured Wasm worst case (five P-384 signature checks); a versioned migration clears evidence recorded before binding; a per-receipt composite trust score feeds certification. Disabled at genesis behind a Root kill-switch.",
       "kind": "pallet",
       "paths": [
         "partnerchain/pallets/tee-attestation"

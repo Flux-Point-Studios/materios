@@ -299,7 +299,8 @@ fn runtime_metadata_exposes_tee_attestation_events_and_storage() {
 }
 
 /// Evidence binds to the content hash `OrinqReceipts` records for the
-/// receipt, and to nothing for a receipt it does not hold.
+/// receipt, and to nothing for a receipt it does not hold; its submitter is
+/// read from the same record.
 #[test]
 fn tee_attestation_reads_content_hashes_from_orinq_receipts() {
     use pallet_tee_attestation::ReceiptRegistry;
@@ -327,10 +328,186 @@ fn tee_attestation_reads_content_hashes_from_orinq_receipts() {
             },
         );
 
-        assert_eq!(Receipts::content_hash(&recorded), Some(content_hash));
         assert_eq!(
-            Receipts::content_hash(&sp_core::H256::repeat_byte(0x44)),
-            None
+            Receipts::receipt(&recorded),
+            Some(pallet_tee_attestation::types::RegisteredReceipt {
+                content_hash,
+                submitter: AccountId::from([0x33; 32]),
+            })
+        );
+        assert_eq!(Receipts::receipt(&sp_core::H256::repeat_byte(0x44)), None);
+    });
+}
+
+/// Only the receipt's submitter and the receipt committee may attach
+/// evidence: a stranger's `submit_evidence` is refused through real runtime
+/// dispatch before any certificate is read, while the submitter's and a
+/// committee member's reach the verifier.
+#[test]
+fn only_the_receipt_submitter_and_the_committee_attach_evidence() {
+    use frame_support::traits::Contains;
+    use sp_runtime::traits::Dispatchable;
+
+    new_test_ext().execute_with(|| {
+        System::set_block_number(1);
+        let submitter = AccountId::from([0xA1; 32]);
+        let member = AccountId::from([0xB2; 32]);
+        let stranger = AccountId::from([0xC3; 32]);
+        let receipt_id = sp_core::H256::repeat_byte(0xA1);
+        let content_hash = [0xC0; 32];
+        pallet_orinq_receipts::Receipts::<Runtime>::insert(
+            receipt_id,
+            pallet_orinq_receipts::types::ReceiptRecord {
+                schema_hash: [0; 32],
+                content_hash,
+                base_root_sha256: [0; 32],
+                zk_root_poseidon: None,
+                poseidon_params_hash: None,
+                base_manifest_hash: [0; 32],
+                safety_manifest_hash: [0; 32],
+                monitor_config_hash: [0; 32],
+                attestation_evidence_hash: [0; 32],
+                storage_locator_hash: [0; 32],
+                availability_cert_hash: [0; 32],
+                created_at_millis: 0,
+                submitter: submitter.clone(),
+            },
+        );
+        let mut committee = frame_support::BoundedBTreeSet::new();
+        committee
+            .try_insert(member.clone())
+            .expect("committee bound");
+        pallet_orinq_receipts::CommitteeMembers::<Runtime>::put(committee);
+        pallet_tee_attestation::Disabled::<Runtime>::put(false);
+
+        let call = RuntimeCall::TeeAttestation(pallet_tee_attestation::Call::submit_evidence {
+            receipt_id,
+            content_hash,
+            entry: pallet_tee_attestation::types::EvidenceEntry {
+                evidence_type: pallet_tee_attestation::types::EvidenceType::ArmTrustZone,
+                payload: vec![0x00, 0x01, 0x02, 0x03]
+                    .try_into()
+                    .expect("payload bound"),
+            },
+        });
+        assert!(<Runtime as frame_system::Config>::BaseCallFilter::contains(
+            &call
+        ));
+        let outcome = |who: &AccountId| {
+            call.clone()
+                .dispatch(RuntimeOrigin::signed(who.clone()))
+                .map_err(|e| e.error)
+        };
+        assert_eq!(
+            outcome(&stranger),
+            Err(pallet_tee_attestation::Error::<Runtime>::UnauthorizedSubmitter.into())
+        );
+        for allowed in [&submitter, &member] {
+            assert_eq!(
+                outcome(allowed),
+                Err(pallet_tee_attestation::Error::<Runtime>::VerificationFailed.into())
+            );
+        }
+    });
+}
+
+/// The upgrade that ships receipt binding clears every evidence entry and
+/// score recorded before it: none was bound to its receipt.
+#[test]
+fn the_runtime_upgrade_clears_evidence_recorded_before_binding() {
+    use frame_support::traits::{GetStorageVersion, StorageVersion};
+    use pallet_tee_attestation::types::{CompositeTrustScore, EvidenceType, VerifiedEvidence};
+
+    let receipt_id = sp_core::H256::repeat_byte(0xAB);
+    let mut ext = new_test_ext();
+    ext.execute_with(|| {
+        StorageVersion::new(0).put::<TeeAttestation>();
+        let unbound = VerifiedEvidence {
+            evidence_type: EvidenceType::ArmTrustZone,
+            attest_key_hash: [0x58; 32],
+            raw_level: 2,
+        };
+        pallet_tee_attestation::VerifiedEntries::<Runtime>::insert(
+            receipt_id,
+            frame_support::BoundedVec::try_from(vec![unbound; 8]).expect("eight entries"),
+        );
+        pallet_tee_attestation::CompositeTrustScores::<Runtime>::insert(
+            receipt_id,
+            CompositeTrustScore::SINGLE_VENDOR,
         );
     });
+    ext.commit_all().expect("pre-binding storage committed");
+    ext.execute_with(|| {
+        Executive::execute_on_runtime_upgrade();
+
+        assert_eq!(
+            TeeAttestation::on_chain_storage_version(),
+            StorageVersion::new(1)
+        );
+        assert!(
+            pallet_tee_attestation::VerifiedEntries::<Runtime>::iter_keys()
+                .next()
+                .is_none()
+        );
+        assert!(
+            pallet_tee_attestation::CompositeTrustScores::<Runtime>::iter_keys()
+                .next()
+                .is_none()
+        );
+    });
+}
+
+/// A chain built from genesis starts at the bound storage version, so the
+/// upgrade's clearing never runs on it.
+#[test]
+fn a_new_chain_starts_at_the_bound_storage_version() {
+    use frame_support::traits::{GetStorageVersion, OnGenesis, StorageVersion};
+
+    new_test_ext().execute_with(|| {
+        AllPalletsWithSystem::on_genesis();
+        assert_eq!(
+            TeeAttestation::on_chain_storage_version(),
+            StorageVersion::new(1)
+        );
+    });
+}
+
+/// `submit_evidence`'s declared weight covers every committed Wasm sample of
+/// the benchmark's worst-case chains (Seeker RKP, Google's RSA root five
+/// times, its P-384 root five times), and its proof covers the measured proof
+/// with the receipt committee at its bound.
+#[test]
+fn submit_evidence_weight_bounds_its_wasm_samples() {
+    use frame_support::traits::Get;
+    use serde_json::Value;
+
+    let samples: Vec<Value> = serde_json::from_str(include_str!(
+        "../../../pallets/tee-attestation/benchmarking/submit-evidence-samples.json"
+    ))
+    .expect("submit_evidence samples");
+    let weight = pallet_tee_attestation::weights::submit_evidence::<Runtime>();
+    let mut shapes = std::collections::BTreeSet::new();
+    let (mut slowest, mut largest_proof) = (0u64, 0u64);
+    for sample in &samples {
+        assert_eq!(sample["benchmark"], "submit_evidence");
+        for row in sample["time_results"]
+            .as_array()
+            .expect("timings")
+            .iter()
+            .chain(sample["db_results"].as_array().expect("db results"))
+        {
+            shapes.insert(row["components"][0][1].as_u64().expect("chain shape"));
+            slowest = slowest.max(row["extrinsic_time"].as_u64().expect("time") * 1_000);
+            largest_proof = largest_proof.max(row["proof_size"].as_u64().expect("proof size"));
+        }
+    }
+    assert_eq!(shapes.into_iter().collect::<Vec<_>>(), vec![0, 1, 2]);
+    assert!(
+        weight.ref_time() >= slowest,
+        "slowest sample {slowest} ps exceeds {weight:?}"
+    );
+    let committee_bound: u32 =
+        <<Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize as Get<u32>>::get();
+    let committee_growth = u64::from(committee_bound - 1) * 32;
+    assert!(weight.proof_size() >= largest_proof + committee_growth);
 }

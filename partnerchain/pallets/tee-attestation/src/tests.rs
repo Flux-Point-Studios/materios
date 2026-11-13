@@ -22,7 +22,7 @@ mod synthetic_chain;
 
 use crate::types::{
     CompositeTrustScore, EvidenceEntry, EvidencePayload, EvidenceType, ReceiptBinding, ReceiptId,
-    VerifiedEvidence, VerifyFailReason, VerifyOutcome,
+    RegisteredReceipt, VerifiedEvidence, VerifyFailReason, VerifyOutcome,
 };
 use crate::verifier::{arm_trustzone_challenge, verify_evidence, GOOGLE_ATTESTATION_ROOTS};
 use base64ct::{Base64, Encoding};
@@ -55,24 +55,60 @@ impl pallet_tee_attestation::Config for Test {
     type Receipts = TestReceipts;
 }
 
-/// Receipt registry kept in the test externalities' storage.
+/// Receipt registry and committee kept in the test externalities' storage.
 pub struct TestReceipts;
 
-impl crate::ReceiptRegistry for TestReceipts {
-    fn content_hash(receipt_id: &ReceiptId) -> Option<[u8; 32]> {
-        frame_support::storage::unhashed::get(&test_receipt_key(receipt_id))
+impl crate::ReceiptRegistry<u64> for TestReceipts {
+    fn receipt(receipt_id: &ReceiptId) -> Option<RegisteredReceipt<u64>> {
+        frame_support::storage::unhashed::get::<([u8; 32], u64)>(&test_receipt_key(receipt_id)).map(
+            |(content_hash, submitter)| RegisteredReceipt {
+                content_hash,
+                submitter,
+            },
+        )
+    }
+
+    fn is_committee_member(who: &u64) -> bool {
+        frame_support::storage::unhashed::exists(&test_committee_key(who))
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn register_receipt(receipt_id: ReceiptId, content_hash: [u8; 32], submitter: u64) {
+        frame_support::storage::unhashed::put(
+            &test_receipt_key(&receipt_id),
+            &(content_hash, submitter),
+        );
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn add_committee_member(who: u64) {
+        add_committee_member(who);
     }
 }
+
+/// The account every receipt `put_receipt` records was submitted by.
+const RECEIPT_SUBMITTER: u64 = 7;
 
 fn test_receipt_key(receipt_id: &ReceiptId) -> Vec<u8> {
     [b":test:receipt:".as_slice(), receipt_id.as_bytes()].concat()
 }
 
-fn put_receipt(receipt_id: ReceiptId, content_hash: [u8; 32]) {
-    frame_support::storage::unhashed::put(&test_receipt_key(&receipt_id), &content_hash);
+fn test_committee_key(who: &u64) -> Vec<u8> {
+    [b":test:committee:".as_slice(), &who.to_le_bytes()].concat()
 }
 
-fn new_test_ext() -> sp_io::TestExternalities {
+fn put_receipt(receipt_id: ReceiptId, content_hash: [u8; 32]) {
+    frame_support::storage::unhashed::put(
+        &test_receipt_key(&receipt_id),
+        &(content_hash, RECEIPT_SUBMITTER),
+    );
+}
+
+fn add_committee_member(who: u64) {
+    frame_support::storage::unhashed::put(&test_committee_key(&who), &());
+}
+
+pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
     frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap()
@@ -422,6 +458,35 @@ mod challenge_binding {
         );
     }
 
+    /// Known answers for device and gateway implementations: SHA-256 over
+    /// the 51-byte ASCII tag, then the genesis hash, receipt id and content
+    /// hash as 32 raw bytes each, 147 bytes in all.
+    #[test]
+    fn challenge_derivation_known_answers() {
+        assert_eq!(
+            crate::verifier::ARM_TRUSTZONE_CHALLENGE_TAG,
+            b"materios/tee-attestation/arm-trustzone-challenge/v1"
+        );
+        let counting = ReceiptBinding {
+            genesis_hash: core::array::from_fn(|i| i as u8),
+            receipt_id: H256(core::array::from_fn(|i| 0x20 + i as u8)),
+            content_hash: core::array::from_fn(|i| 0x40 + i as u8),
+        };
+        assert_eq!(
+            arm_trustzone_challenge(&counting),
+            hex_literal::hex!("2e557791bc4dc9f1730a2f2eb512df68a10426605113e2a3ca392a8e27336299")
+        );
+        let flat = ReceiptBinding {
+            genesis_hash: [0x11; 32],
+            receipt_id: H256([0x22; 32]),
+            content_hash: [0x33; 32],
+        };
+        assert_eq!(
+            arm_trustzone_challenge(&flat),
+            hex_literal::hex!("210ef46d5f5c5da4d5f09f3ad2d2f63599680d6a019072d6f81cc780e935d344")
+        );
+    }
+
     #[test]
     fn leaf_minted_for_the_receipt_verifies() {
         let leaf_spki = TestKey::new(2, "Android Keystore Key").spki();
@@ -642,6 +707,104 @@ mod chain_shape {
     }
 }
 
+mod chain_depth {
+    use super::*;
+
+    fn bound_claim() -> Vec<u8> {
+        key_description(300, STRONGBOX, Some(&arm_trustzone_challenge(&binding())))
+    }
+
+    /// Root, two intermediates without the extension, bound leaf.
+    #[test]
+    fn four_certificate_chain_with_the_extension_only_in_the_leaf_verifies() {
+        let root = TestKey::root();
+        let batch = TestKey::new(2, "Batch");
+        let mid = TestKey::new(3, "Mid");
+        let leaf = TestKey::new(4, "Leaf");
+        let entry = entry_from_ders(vec![
+            root.issue(&root, 1, &[]),
+            root.issue(&batch, 2, &[]),
+            batch.issue(&mid, 3, &[]),
+            mid.issue(&leaf, 1, &[attestation_extension(&bound_claim())]),
+        ]);
+        assert!(matches!(
+            verify_synthetic(&binding(), &entry),
+            VerifyOutcome::Verified(_)
+        ));
+    }
+
+    /// A real device's shape, root → intermediate → batch → attested key,
+    /// extended by a forged leaf the attested key signed.
+    #[test]
+    fn attested_key_three_below_the_root_cannot_sign_a_leaf() {
+        let root = TestKey::root();
+        let inter = TestKey::new(2, "Intermediate");
+        let batch = TestKey::new(3, "Batch");
+        let attested = TestKey::new(4, "Android Keystore Key");
+        let forged = TestKey::new(5, "Forged");
+        let genuine = key_description(300, 1, Some(b"other purpose"));
+        let entry = entry_from_ders(vec![
+            root.issue(&root, 1, &[]),
+            root.issue(&inter, 2, &[]),
+            inter.issue(&batch, 3, &[]),
+            batch.issue(&attested, 1, &[attestation_extension(&genuine)]),
+            attested.issue(&forged, 1, &[attestation_extension(&bound_claim())]),
+        ]);
+        assert_eq!(
+            verify_synthetic(&binding(), &entry),
+            failed(VerifyFailReason::PolicyViolation)
+        );
+    }
+
+    /// The attested key signs an intermediate without the extension, which
+    /// signs the forged leaf: the genuine extension sits two above it.
+    #[test]
+    fn attested_key_behind_an_intermediate_without_the_extension_is_rejected() {
+        let root = TestKey::root();
+        let attested = TestKey::new(4, "Android Keystore Key");
+        let shim = TestKey::new(6, "Shim CA");
+        let forged = TestKey::new(5, "Forged");
+        let genuine = key_description(3, 1, Some(b"other purpose"));
+        let entry = entry_from_ders(vec![
+            root.issue(&root, 1, &[]),
+            root.issue(&attested, 1, &[attestation_extension(&genuine)]),
+            attested.issue(&shim, 7, &[]),
+            shim.issue(&forged, 1, &[attestation_extension(&bound_claim())]),
+        ]);
+        assert_eq!(
+            verify_synthetic(&binding(), &entry),
+            failed(VerifyFailReason::PolicyViolation)
+        );
+    }
+
+    /// Six certificates exceed the vendored chain bound before any
+    /// signature is checked.
+    #[test]
+    fn six_certificate_chain_is_malformed() {
+        let root = TestKey::root();
+        let leaf = TestKey::new(4, "Leaf");
+        let mut chain = vec![root.issue(&root, 1, &[]); 5];
+        chain.push(root.issue(&leaf, 1, &[attestation_extension(&bound_claim())]));
+        assert_eq!(
+            verify_synthetic(&binding(), &entry_from_ders(chain)),
+            failed(VerifyFailReason::PayloadMalformed)
+        );
+    }
+
+    /// Repeating the self-signed root adds signature checks and nothing else.
+    #[test]
+    fn repeated_root_certificates_are_padding() {
+        let root = TestKey::root();
+        let leaf = TestKey::new(4, "Leaf");
+        let mut chain = vec![root.issue(&root, 1, &[]); 4];
+        chain.push(root.issue(&leaf, 1, &[attestation_extension(&bound_claim())]));
+        assert!(matches!(
+            verify_synthetic(&binding(), &entry_from_ders(chain)),
+            VerifyOutcome::Verified(_)
+        ));
+    }
+}
+
 // ---- Stub verifier tests ------------------------------------------------
 
 mod stubs {
@@ -701,13 +864,175 @@ mod pallet {
         put_receipt(receipt, content_hash);
     }
 
-    /// `submit_evidence`'s body anchored at the synthetic root, in the
-    /// storage layer dispatch runs every call in.
-    fn accept(receipt: ReceiptId, content_hash: [u8; 32], entry: EvidenceEntry) -> DispatchResult {
+    /// `submit_evidence`'s body for signer `who`, anchored at the synthetic
+    /// root, in the storage layer dispatch runs every call in.
+    fn accept_as(
+        who: u64,
+        receipt: ReceiptId,
+        content_hash: [u8; 32],
+        entry: EvidenceEntry,
+    ) -> DispatchResult {
         let root = TestKey::root().spki();
         with_storage_layer(|| {
-            TeeAttestation::accept_evidence(receipt, content_hash, &entry, &[&root])
+            TeeAttestation::accept_evidence(&who, receipt, content_hash, &entry, &[&root])
         })
+    }
+
+    /// `accept_as` the receipt's submitter.
+    fn accept(receipt: ReceiptId, content_hash: [u8; 32], entry: EvidenceEntry) -> DispatchResult {
+        accept_as(RECEIPT_SUBMITTER, receipt, content_hash, entry)
+    }
+
+    /// A payload no verifier accepts: rejecting it at `VerificationFailed`
+    /// means the checks before verification passed.
+    fn malformed_entry() -> EvidenceEntry {
+        EvidenceEntry {
+            evidence_type: EvidenceType::ArmTrustZone,
+            payload: EvidencePayload::try_from(vec![0x00, 0x01, 0x02, 0x03]).unwrap(),
+        }
+    }
+
+    /// One device mints as many attested keys as it likes, each bound to a
+    /// receipt anyone can read. Only the receipt's submitter and the receipt
+    /// committee may attach evidence, so a third party cannot fill a
+    /// receipt.
+    #[test]
+    fn a_third_party_cannot_attach_evidence_to_a_receipt() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(0xAA);
+            enable_with_receipt(id, fake_content_hash());
+            let public = chain_binding(id, fake_content_hash());
+            for seed in 100..108u8 {
+                assert_noop!(
+                    accept_as(666, id, fake_content_hash(), bound_entry(seed, &public)),
+                    Error::<Test>::UnauthorizedSubmitter
+                );
+            }
+            assert_eq!(TeeAttestation::verified_entries(&id).len(), 0);
+            assert_ok!(accept(id, fake_content_hash(), bound_entry(50, &public)));
+        });
+    }
+
+    #[test]
+    fn submit_evidence_refuses_a_signer_unrelated_to_the_receipt() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            assert_noop!(
+                TeeAttestation::submit_evidence(
+                    RuntimeOrigin::signed(666),
+                    id,
+                    fake_content_hash(),
+                    pixel_entry(),
+                ),
+                Error::<Test>::UnauthorizedSubmitter
+            );
+        });
+    }
+
+    /// The cert-daemon's evidence submitter signs with its committee key.
+    #[test]
+    fn a_committee_member_may_attach_evidence() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            add_committee_member(42);
+            let entry = bound_entry(2, &chain_binding(id, fake_content_hash()));
+            assert_ok!(accept_as(42, id, fake_content_hash(), entry));
+            assert_eq!(TeeAttestation::verified_entries(&id).len(), 1);
+        });
+    }
+
+    /// The composer counts each vendor class once, so a second entry of a
+    /// type adds nothing; one per type leaves every other type its slot.
+    #[test]
+    fn a_receipt_holds_one_entry_per_evidence_type() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            let bound = chain_binding(id, fake_content_hash());
+            assert_ok!(accept(id, fake_content_hash(), bound_entry(2, &bound)));
+            assert_noop!(
+                accept(id, fake_content_hash(), bound_entry(3, &bound)),
+                Error::<Test>::EvidenceTypeFull
+            );
+        });
+    }
+
+    /// Authorization, the per-type slot and the duplicate key are decided
+    /// before any certificate is verified: each case below carries a chain
+    /// that verification would reject.
+    #[test]
+    fn cheap_checks_run_before_chain_verification() {
+        new_test_ext().execute_with(|| {
+            let id = receipt_id(1);
+            enable_with_receipt(id, fake_content_hash());
+            assert_noop!(
+                accept_as(666, id, fake_content_hash(), malformed_entry()),
+                Error::<Test>::UnauthorizedSubmitter
+            );
+            assert_noop!(
+                accept(id, fake_content_hash(), malformed_entry()),
+                Error::<Test>::VerificationFailed
+            );
+
+            let bound = chain_binding(id, fake_content_hash());
+            let leaf = TestKey::new(2, "Android Keystore Key");
+            let kd = key_description(300, STRONGBOX, Some(&arm_trustzone_challenge(&bound)));
+            let mut der = TestKey::root().issue(&leaf, 1, &[attestation_extension(&kd)]);
+            assert_ok!(accept(
+                id,
+                fake_content_hash(),
+                entry_from_ders(vec![der.clone()])
+            ));
+
+            *der.last_mut().expect("signature byte") ^= 0x01;
+            assert_noop!(
+                accept(id, fake_content_hash(), entry_from_ders(vec![der])),
+                Error::<Test>::DuplicateEvidence
+            );
+            assert_noop!(
+                accept(id, fake_content_hash(), malformed_entry()),
+                Error::<Test>::EvidenceTypeFull
+            );
+        });
+    }
+
+    /// The genesis hash is block 0's, which System keeps past its block-hash
+    /// horizon; the parent hash would bind evidence to the latest block.
+    #[test]
+    fn evidence_binds_to_block_zero_past_the_block_hash_horizon() {
+        new_test_ext().execute_with(|| {
+            let genesis = H256::repeat_byte(0xC7);
+            let mut parent = genesis;
+            for n in 1u64..=40 {
+                System::initialize(&n, &parent, &Default::default());
+                System::finalize();
+                parent = H256::from_low_u64_be(0x1000 + n);
+            }
+            assert_eq!(System::block_hash(0), genesis);
+            assert_eq!(System::block_hash(5), H256::zero());
+
+            let id = receipt_id(0xB0);
+            assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
+            put_receipt(id, fake_content_hash());
+            let bound = ReceiptBinding {
+                genesis_hash: genesis.0,
+                receipt_id: id,
+                content_hash: fake_content_hash(),
+            };
+            for stale in [[69u8; 32], parent.0] {
+                let minted = ReceiptBinding {
+                    genesis_hash: stale,
+                    ..bound
+                };
+                assert_noop!(
+                    accept(id, fake_content_hash(), bound_entry(3, &minted)),
+                    Error::<Test>::VerificationFailed
+                );
+            }
+            assert_ok!(accept(id, fake_content_hash(), bound_entry(2, &bound)));
+        });
     }
 
     #[test]
@@ -717,7 +1042,7 @@ mod pallet {
             enable_with_receipt(id, fake_content_hash());
             assert_noop!(
                 TeeAttestation::submit_evidence(
-                    RuntimeOrigin::signed(1),
+                    RuntimeOrigin::signed(RECEIPT_SUBMITTER),
                     id,
                     fake_content_hash(),
                     pixel_entry(),
@@ -739,7 +1064,7 @@ mod pallet {
             let entry = bound_entry(2, &chain_binding(id, fake_content_hash()));
             assert_noop!(
                 TeeAttestation::submit_evidence(
-                    RuntimeOrigin::signed(1),
+                    RuntimeOrigin::signed(RECEIPT_SUBMITTER),
                     id,
                     fake_content_hash(),
                     entry,
@@ -830,7 +1155,7 @@ mod pallet {
             assert_ok!(TeeAttestation::set_disabled(RuntimeOrigin::root(), false));
             assert_noop!(
                 TeeAttestation::submit_evidence(
-                    RuntimeOrigin::signed(1),
+                    RuntimeOrigin::signed(RECEIPT_SUBMITTER),
                     id,
                     fake_content_hash(),
                     pixel_entry(),
@@ -871,23 +1196,6 @@ mod pallet {
     }
 
     #[test]
-    fn a_receipt_holds_at_most_eight_entries() {
-        new_test_ext().execute_with(|| {
-            let id = receipt_id(1);
-            enable_with_receipt(id, fake_content_hash());
-            let bound = chain_binding(id, fake_content_hash());
-            for seed in 2..10 {
-                assert_ok!(accept(id, fake_content_hash(), bound_entry(seed, &bound)));
-            }
-            assert_eq!(TeeAttestation::verified_entries(&id).len(), 8);
-            assert_noop!(
-                accept(id, fake_content_hash(), bound_entry(10, &bound)),
-                Error::<Test>::TooManyEntries
-            );
-        });
-    }
-
-    #[test]
     fn submit_evidence_with_tampered_chain_fails_extrinsic() {
         new_test_ext().execute_with(|| {
             let id = receipt_id(2);
@@ -900,7 +1208,7 @@ mod pallet {
             ]);
             assert_noop!(
                 TeeAttestation::submit_evidence(
-                    RuntimeOrigin::signed(1),
+                    RuntimeOrigin::signed(RECEIPT_SUBMITTER),
                     id,
                     fake_content_hash(),
                     entry,
@@ -934,7 +1242,7 @@ mod pallet {
             };
             assert_noop!(
                 TeeAttestation::submit_evidence(
-                    RuntimeOrigin::signed(1),
+                    RuntimeOrigin::signed(RECEIPT_SUBMITTER),
                     id,
                     fake_content_hash(),
                     entry,
@@ -959,7 +1267,7 @@ mod pallet {
             let id = receipt_id(20);
             assert_noop!(
                 TeeAttestation::submit_evidence(
-                    RuntimeOrigin::signed(1),
+                    RuntimeOrigin::signed(RECEIPT_SUBMITTER),
                     id,
                     fake_content_hash(),
                     pixel_entry(),
@@ -982,6 +1290,129 @@ mod pallet {
             assert_noop!(
                 TeeAttestation::set_disabled(RuntimeOrigin::signed(1), false),
                 sp_runtime::DispatchError::BadOrigin
+            );
+        });
+    }
+}
+
+// ---- Upgrade: evidence recorded before receipt binding -------------------
+
+mod migration {
+    use super::*;
+    use frame_support::assert_ok;
+    use frame_support::traits::{GetStorageVersion, OnRuntimeUpgrade, StorageVersion};
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// The pre-binding receipt: the storage `main` (7d5c36e) wrote when the
+    /// public Pixel chain was submitted eight times for receipt `0xAB..AB`.
+    const RECEIPT: [u8; 32] = [0xAB; 32];
+    const CONTENT_HASH: [u8; 32] = [0x5E; 32];
+
+    /// Raw keys and values as recorded from that run: `Disabled`, then
+    /// `VerifiedEntries` (eight `ArmTrustZone` entries for the Pixel leaf
+    /// key at StrongBox level) and `CompositeTrustScores` (single vendor).
+    fn pre_binding_storage() -> Vec<(Vec<u8>, Vec<u8>)> {
+        let entry = "0258fd384003f5701a74500becbfc715be854dfecc959986fcf6021ded38b5d43602000000";
+        vec![
+            (
+                unhex("402cb5d3b38584d34a725343c873c1694111f095de636b13b56e54ec39e9c155"),
+                unhex("00"),
+            ),
+            (
+                unhex(concat!(
+                    "402cb5d3b38584d34a725343c873c169636d7fa15cfed2f7849624c1a078807e",
+                    "6bb3853c34cfcf3b081e5715f3c82748",
+                    "abababababababababababababababababababababababababababababababab"
+                )),
+                unhex(&format!("20{}", entry.repeat(8))),
+            ),
+            (
+                unhex(concat!(
+                    "402cb5d3b38584d34a725343c873c169b4b0f3549ee0a56adac6f5e9aa10ada1",
+                    "6bb3853c34cfcf3b081e5715f3c82748",
+                    "abababababababababababababababababababababababababababababababab"
+                )),
+                unhex("01"),
+            ),
+        ]
+    }
+
+    /// Before binding, the verifier accepted any Google-rooted chain for any
+    /// receipt, so no entry recorded then is bound to its receipt. The
+    /// upgrade clears them all from the committed state, as a chain holds
+    /// them; the receipt then takes evidence minted for it.
+    #[test]
+    fn the_upgrade_clears_evidence_recorded_before_binding() {
+        let mut ext = new_test_ext();
+        ext.execute_with(|| {
+            System::set_block_number(1);
+            for (key, value) in pre_binding_storage() {
+                sp_io::storage::set(&key, &value);
+            }
+        });
+        ext.commit_all().expect("pre-binding storage committed");
+        ext.execute_with(|| {
+            let id = H256(RECEIPT);
+            assert_eq!(
+                TeeAttestation::on_chain_storage_version(),
+                StorageVersion::new(0)
+            );
+            assert_eq!(TeeAttestation::verified_entries(&id).len(), 8);
+            assert_eq!(
+                TeeAttestation::trust_score(&id),
+                CompositeTrustScore::SINGLE_VENDOR
+            );
+
+            crate::migrations::ClearUnboundEvidence::<Test>::on_runtime_upgrade();
+
+            assert_eq!(
+                TeeAttestation::on_chain_storage_version(),
+                StorageVersion::new(1)
+            );
+            assert!(crate::VerifiedEntries::<Test>::iter_keys().next().is_none());
+            assert!(crate::CompositeTrustScores::<Test>::iter_keys()
+                .next()
+                .is_none());
+            assert_eq!(
+                TeeAttestation::trust_score(&id),
+                CompositeTrustScore::COMMITTEE_ATTESTED_BASELINE
+            );
+            assert!(!crate::Disabled::<Test>::get());
+
+            put_receipt(id, CONTENT_HASH);
+            let bound = ReceiptBinding {
+                genesis_hash: System::block_hash(0).0,
+                receipt_id: id,
+                content_hash: CONTENT_HASH,
+            };
+            let root = TestKey::root().spki();
+            assert_ok!(TeeAttestation::accept_evidence(
+                &RECEIPT_SUBMITTER,
+                id,
+                CONTENT_HASH,
+                &bound_entry(60, &bound),
+                &[&root]
+            ));
+        });
+    }
+
+    /// Evidence recorded after the upgrade stays: the migration runs once.
+    #[test]
+    fn the_upgrade_runs_once() {
+        new_test_ext().execute_with(|| {
+            let id = H256(RECEIPT);
+            StorageVersion::new(1).put::<TeeAttestation>();
+            crate::CompositeTrustScores::<Test>::insert(id, CompositeTrustScore::SINGLE_VENDOR);
+            crate::migrations::ClearUnboundEvidence::<Test>::on_runtime_upgrade();
+            assert_eq!(
+                TeeAttestation::trust_score(&id),
+                CompositeTrustScore::SINGLE_VENDOR
             );
         });
     }

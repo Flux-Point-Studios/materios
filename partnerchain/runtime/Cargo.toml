@@ -208,11 +208,6 @@ runtime-benchmarks = [
     "pallet-vesting/runtime-benchmarks",
     "pallet-orinq-receipts/runtime-benchmarks",
     "pallet-motra/runtime-benchmarks",
-    # pallet-tee-attestation declares the runtime-benchmarks feature flag
-    # (PR #17) but ships no benchmarks file yet — the runtime still
-    # compiles with --features runtime-benchmarks because the feature only
-    # propagates downstream crate switches. Stub benchmarks are tracked in
-    # tee-attestation tasks #32 / #33.
     "pallet-tee-attestation/runtime-benchmarks",
     "pallet-billing/runtime-benchmarks",
     "pallet-root-timelock/runtime-benchmarks",

@@ -13,7 +13,8 @@
 //! from System, and an ArmTrustZone leaf counts only if its
 //! `attestationChallenge` equals `verifier::arm_trustzone_challenge` over
 //! them. A chain minted for one receipt verifies for no other receipt and on
-//! no other network, and a receipt holds each attested key once.
+//! no other network. Only the receipt's submitter and the receipt committee
+//! may attach evidence, and a receipt holds one entry per evidence type.
 //!
 //! `Disabled` is `true` at genesis; Root releases it with `set_disabled`.
 
@@ -22,8 +23,12 @@
 extern crate alloc;
 
 pub use pallet::*;
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+pub mod migrations;
 pub mod types;
 pub mod verifier;
+pub mod weights;
 // `#[path = ...]` points at the vendored Acurast attestation logic without
 // adding a sub-crate.
 #[path = "../vendor/acurast-attestation/attestation.rs"]
@@ -41,10 +46,20 @@ pub mod vendor {
     }
 }
 
-/// Read access to the receipt registry evidence attaches to.
-pub trait ReceiptRegistry {
-    /// The content hash recorded for `receipt_id`, if the receipt exists.
-    fn content_hash(receipt_id: &types::ReceiptId) -> Option<[u8; 32]>;
+/// Read access to the receipt registry evidence attaches to, and to the
+/// committee that certifies its receipts.
+pub trait ReceiptRegistry<AccountId> {
+    /// The content hash and submitter recorded for `receipt_id`, if the
+    /// receipt exists.
+    fn receipt(receipt_id: &types::ReceiptId) -> Option<types::RegisteredReceipt<AccountId>>;
+    /// Whether `who` sits on the receipt committee.
+    fn is_committee_member(who: &AccountId) -> bool;
+    /// Records a receipt submitted by `submitter`.
+    #[cfg(feature = "runtime-benchmarks")]
+    fn register_receipt(receipt_id: types::ReceiptId, content_hash: [u8; 32], submitter: AccountId);
+    /// Seats `who` on the receipt committee.
+    #[cfg(feature = "runtime-benchmarks")]
+    fn add_committee_member(who: AccountId);
 }
 
 #[cfg(test)]
@@ -60,19 +75,25 @@ pub mod pallet {
 
     use crate::types::{
         CompositeTrustScore, EvidenceEntry, EvidenceType, ReceiptBinding, ReceiptId, VendorClass,
-        VerifiedEvidence, VerifyOutcome, MAX_EVIDENCE_ENTRIES_PER_RECEIPT,
+        VerifiedEvidence, VerifyOutcome, MAX_ENTRIES_PER_EVIDENCE_TYPE,
+        MAX_EVIDENCE_ENTRIES_PER_RECEIPT,
     };
-    use crate::verifier::{verify_evidence, GOOGLE_ATTESTATION_ROOTS};
+    use crate::verifier::{claimed_attest_key_hash, verify_evidence, GOOGLE_ATTESTATION_ROOTS};
     use crate::ReceiptRegistry;
 
+    /// Version 1 holds only evidence bound to its receipt
+    /// (`migrations::ClearUnboundEvidence`).
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(1);
+
     #[pallet::pallet]
+    #[pallet::storage_version(STORAGE_VERSION)]
     pub struct Pallet<T>(_);
 
     #[pallet::config]
     pub trait Config: frame_system::Config<Hash = H256> {
         type RuntimeEvent: From<Event<Self>> + IsType<<Self as frame_system::Config>::RuntimeEvent>;
         /// The receipt registry whose content hashes evidence binds to.
-        type Receipts: ReceiptRegistry;
+        type Receipts: ReceiptRegistry<Self::AccountId>;
     }
 
     /// Kill-switch for `submit_evidence`. Defaults `true` at genesis; Root
@@ -113,6 +134,8 @@ pub mod pallet {
             raw_level: u32,
             new_score: CompositeTrustScore,
         },
+        /// Deposited when verification rejects evidence. The call then fails,
+        /// so the event is rolled back with it and never reaches a block.
         EvidenceRejected {
             receipt_id: ReceiptId,
             evidence_type: EvidenceType,
@@ -127,8 +150,9 @@ pub mod pallet {
         /// `submit_evidence` called when this `ReceiptId` already has the
         /// `MAX_EVIDENCE_ENTRIES_PER_RECEIPT` cap of verified entries.
         TooManyEntries,
-        /// The submitted evidence failed verification. The verbose reason
-        /// is in the emitted `EvidenceRejected` event.
+        /// The submitted evidence failed verification. The reason is not kept
+        /// on chain: `EvidenceRejected` is rolled back with the failing call.
+        /// `verifier::verify_evidence` over the same inputs reproduces it.
         VerificationFailed,
         /// The pallet's kill-switch (`Disabled`) is engaged.
         PalletDisabled,
@@ -139,29 +163,41 @@ pub mod pallet {
         ContentHashMismatch,
         /// The receipt already holds evidence from this attested key.
         DuplicateEvidence,
+        /// The signer is neither the receipt's submitter nor a member of the
+        /// receipt committee.
+        UnauthorizedSubmitter,
+        /// The receipt already holds `MAX_ENTRIES_PER_EVIDENCE_TYPE` entries
+        /// of this evidence type, from another key.
+        EvidenceTypeFull,
     }
 
     #[pallet::call]
     impl<T: Config> Pallet<T> {
-        /// Submit one evidence entry for a receipt. Anyone can call.
+        /// Submit one evidence entry for a receipt. The signer must be the
+        /// receipt's submitter or a member of the receipt committee (the
+        /// cert-daemon's evidence submitter signs with its committee key).
         ///
         /// `content_hash` must be the content hash the receipt registry holds
-        /// for `receipt_id`. On success, the verifier runs, the extracted
-        /// `VerifiedEvidence` is appended to `VerifiedEntries`, and the new
-        /// `CompositeTrustScore` is recomputed and stored.
-        // Hand-tuned weight: 1B ref_time / 32 KB proof_size covers an X.509
-        // chain walk + ASN.1 decode + SPKI re-encode, plus the receipt and
-        // genesis-hash reads.
+        /// for `receipt_id`. A receipt holds one entry per evidence type. These
+        /// checks run before any certificate is verified. On success, the
+        /// extracted `VerifiedEvidence` is appended to `VerifiedEntries`, and
+        /// the new `CompositeTrustScore` is recomputed and stored.
         #[pallet::call_index(0)]
-        #[pallet::weight(Weight::from_parts(1_000_000_000, 32_768))]
+        #[pallet::weight(crate::weights::submit_evidence::<T>())]
         pub fn submit_evidence(
             origin: OriginFor<T>,
             receipt_id: ReceiptId,
             content_hash: [u8; 32],
             entry: EvidenceEntry,
         ) -> DispatchResult {
-            ensure_signed(origin)?;
-            Self::accept_evidence(receipt_id, content_hash, &entry, &GOOGLE_ATTESTATION_ROOTS)
+            let who = ensure_signed(origin)?;
+            Self::accept_evidence(
+                &who,
+                receipt_id,
+                content_hash,
+                &entry,
+                &GOOGLE_ATTESTATION_ROOTS,
+            )
         }
 
         /// Root-only: engage (`true`) or release (`false`) the kill-switch.
@@ -179,6 +215,7 @@ pub mod pallet {
         /// `submit_evidence` after the origin check. `arm_trustzone_roots` are
         /// the anchors ArmTrustZone chains may start from.
         pub(crate) fn accept_evidence(
+            who: &T::AccountId,
             receipt_id: ReceiptId,
             content_hash: [u8; 32],
             entry: &EvidenceEntry,
@@ -186,9 +223,31 @@ pub mod pallet {
         ) -> DispatchResult {
             ensure!(!Disabled::<T>::get(), Error::<T>::PalletDisabled);
 
-            let recorded =
-                T::Receipts::content_hash(&receipt_id).ok_or(Error::<T>::UnknownReceipt)?;
-            ensure!(recorded == content_hash, Error::<T>::ContentHashMismatch);
+            let receipt = T::Receipts::receipt(&receipt_id).ok_or(Error::<T>::UnknownReceipt)?;
+            ensure!(
+                *who == receipt.submitter || T::Receipts::is_committee_member(who),
+                Error::<T>::UnauthorizedSubmitter
+            );
+            ensure!(
+                receipt.content_hash == content_hash,
+                Error::<T>::ContentHashMismatch
+            );
+
+            let mut verified_entries = VerifiedEntries::<T>::get(receipt_id);
+            let claimed = claimed_attest_key_hash(entry);
+            let held: Vec<&VerifiedEvidence> = verified_entries
+                .iter()
+                .filter(|v| v.evidence_type == entry.evidence_type)
+                .collect();
+            ensure!(
+                !held.iter().any(|v| Some(v.attest_key_hash) == claimed),
+                Error::<T>::DuplicateEvidence
+            );
+            ensure!(
+                (held.len() as u32) < MAX_ENTRIES_PER_EVIDENCE_TYPE,
+                Error::<T>::EvidenceTypeFull
+            );
+
             let binding = ReceiptBinding {
                 genesis_hash: frame_system::Pallet::<T>::block_hash(BlockNumberFor::<T>::zero()).0,
                 receipt_id,
@@ -197,14 +256,6 @@ pub mod pallet {
 
             match verify_evidence(&binding, entry, arm_trustzone_roots) {
                 VerifyOutcome::Verified(verified) => {
-                    let mut verified_entries = VerifiedEntries::<T>::get(receipt_id);
-                    ensure!(
-                        !verified_entries.iter().any(|v| {
-                            v.evidence_type == verified.evidence_type
-                                && v.attest_key_hash == verified.attest_key_hash
-                        }),
-                        Error::<T>::DuplicateEvidence
-                    );
                     verified_entries
                         .try_push(verified.clone())
                         .map_err(|_| Error::<T>::TooManyEntries)?;

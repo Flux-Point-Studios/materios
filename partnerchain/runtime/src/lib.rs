@@ -1297,13 +1297,55 @@ impl pallet_native_token_management::Config for Runtime {
 // with `set_disabled`. Evidence binds to the content hash `OrinqReceipts`
 // records for the receipt.
 
-/// Read-only adapter exposing `OrinqReceipts` content hashes to
+/// Read-only adapter exposing `OrinqReceipts` receipts and committee to
 /// `pallet_tee_attestation`.
 pub struct OrinqReceiptRegistry;
 
-impl pallet_tee_attestation::ReceiptRegistry for OrinqReceiptRegistry {
-    fn content_hash(receipt_id: &H256) -> Option<[u8; 32]> {
-        pallet_orinq_receipts::Receipts::<Runtime>::get(receipt_id).map(|r| r.content_hash)
+impl pallet_tee_attestation::ReceiptRegistry<AccountId> for OrinqReceiptRegistry {
+    fn receipt(
+        receipt_id: &H256,
+    ) -> Option<pallet_tee_attestation::types::RegisteredReceipt<AccountId>> {
+        pallet_orinq_receipts::Receipts::<Runtime>::get(receipt_id).map(|r| {
+            pallet_tee_attestation::types::RegisteredReceipt {
+                content_hash: r.content_hash,
+                submitter: r.submitter,
+            }
+        })
+    }
+
+    fn is_committee_member(who: &AccountId) -> bool {
+        pallet_orinq_receipts::CommitteeMembers::<Runtime>::get().contains(who)
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn register_receipt(receipt_id: H256, content_hash: [u8; 32], submitter: AccountId) {
+        pallet_orinq_receipts::Receipts::<Runtime>::insert(
+            receipt_id,
+            pallet_orinq_receipts::types::ReceiptRecord {
+                schema_hash: [0; 32],
+                content_hash,
+                base_root_sha256: [0; 32],
+                zk_root_poseidon: None,
+                poseidon_params_hash: None,
+                base_manifest_hash: [0; 32],
+                safety_manifest_hash: [0; 32],
+                monitor_config_hash: [0; 32],
+                attestation_evidence_hash: [0; 32],
+                storage_locator_hash: [0; 32],
+                availability_cert_hash: [0; 32],
+                created_at_millis: 0,
+                submitter,
+            },
+        );
+    }
+
+    #[cfg(feature = "runtime-benchmarks")]
+    fn add_committee_member(who: AccountId) {
+        pallet_orinq_receipts::CommitteeMembers::<Runtime>::mutate(|members| {
+            members
+                .try_insert(who)
+                .expect("benchmark committee below its bound");
+        });
     }
 }
 
@@ -1471,6 +1513,7 @@ pub type Executive = frame_executive::Executive<
         migrations::InitRootTimelock,
         migrations::RemovePerpEngine,
         pallet_intent_settlement::migrations::SeedCardanoIds<Runtime>,
+        pallet_tee_attestation::migrations::ClearUnboundEvidence<Runtime>,
     ),
 >;
 
@@ -1886,6 +1929,7 @@ frame_benchmarking::define_benchmarks!(
     [pallet_motra, Motra]
     [pallet_billing, Billing]
     [pallet_orinq_receipts, OrinqReceipts]
+    [pallet_tee_attestation, TeeAttestation]
     [pallet_timestamp, Timestamp]
     [pallet_intent_settlement, IntentSettlement]
     [pallet_oracle, Oracle]

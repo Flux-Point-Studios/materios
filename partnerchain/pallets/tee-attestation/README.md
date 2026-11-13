@@ -28,8 +28,15 @@ The four ⏳ variants have typed dispatch wired in; their verifiers return
 `submit_evidence(receipt_id, content_hash, entry)` accepts an Android
 key-attestation chain only when:
 
-1. `content_hash` is the content hash `OrinqReceipts` holds for `receipt_id`
-   (`UnknownReceipt`, `ContentHashMismatch`).
+1. The signer is the receipt's submitter or a member of the receipt
+   committee (`OrinqReceipts::CommitteeMembers`; the cert-daemon's evidence
+   submitter signs with its committee key), else `UnauthorizedSubmitter`.
+   `content_hash` is the content hash `OrinqReceipts` holds for
+   `receipt_id` (`UnknownReceipt`, `ContentHashMismatch`). The receipt holds
+   at most one entry per evidence type: a repeat of the recorded leaf key is
+   `DuplicateEvidence`, another key `EvidenceTypeFull`. These checks read
+   storage and the leaf's public key only, and run before any signature is
+   verified.
 2. The chain starts at one of Google's two attestation root keys
    (`GOOGLE_ATTESTATION_ROOTS`: the RSA root and the P-384 root that signs
    from February 2026) and every link signature verifies.
@@ -48,8 +55,6 @@ key-attestation chain only when:
 
    with `genesis_hash` this chain's block-0 hash (`System::BlockHash(0)`)
    and each hash as its 32 raw bytes (`verifier::arm_trustzone_challenge`).
-6. The receipt does not already hold evidence from the same attested key
-   (`DuplicateEvidence`); a receipt holds at most 8 entries.
 
 Why this derivation: receipt submitters choose both `receipt_id` and
 `content_hash`, and several receipts may share a content hash. If the
@@ -70,6 +75,32 @@ verifies for no receipt.
 The KeyDescription versions the vendored parser accepts are 1, 2, 3, 4, 100,
 200 and 300; each carries `attestationChallenge` as a mandatory OCTET STRING.
 KeyMint 4.0 and later (400, 500) leaves are refused.
+
+Known answers for device and gateway code
+(`challenge_derivation_known_answers`): the preimage is the 51-byte ASCII
+tag followed by the three 32-byte hashes, 147 bytes.
+
+| genesis_hash | receipt_id | content_hash | challenge |
+|---|---|---|---|
+| `00 01 … 1f` | `20 21 … 3f` | `40 41 … 5f` | `2e557791bc4dc9f1730a2f2eb512df68a10426605113e2a3ca392a8e27336299` |
+| `11` × 32 | `22` × 32 | `33` × 32 | `210ef46d5f5c5da4d5f09f3ad2d2f63599680d6a019072d6f81cc780e935d344` |
+
+## Weight
+
+`submit_evidence` is priced at its Wasm worst case, measured with
+`frame-omni-bencher` (`src/benchmarking.rs`, samples in `benchmarking/`,
+method and figures in `src/weights.rs`): five P-384 signature checks, the
+largest a five-certificate chain can demand, sampled up to 63.5 ms. The
+weight declares 64 ms, a 4,096-byte proof, five reads and two writes. The
+Seeker RKP chain costs 20 ms; Google's RSA root repeated five times, 17 ms.
+
+## Upgrade from storage version 0
+
+Evidence recorded before receipt binding is bound to nothing: that verifier
+accepted any Google-rooted chain for any receipt. Storage version 1 holds
+only bound evidence, and `migrations::ClearUnboundEvidence`, in the runtime's
+migration list, clears `VerifiedEntries` and `CompositeTrustScores` once on
+the upgrade from version 0. A chain built from genesis starts at version 1.
 
 ## Vendored Acurast verifier
 
@@ -114,8 +145,16 @@ Every committee member's verifier MUST produce identical bytes. Per
   challenges, and every accepted KeyDescription version.
 - `tests::chain_shape::*` — the root set, an Apple-anchored chain, and a
   chain extended past an attested key.
-- `tests::pallet::*` — `submit_evidence` on a mock runtime: receipt lookup,
-  cross-receipt and cross-network replay, duplicates, the 8-entry cap.
+- `tests::chain_depth::*` — attested keys extended at realistic depths,
+  the chain-length bound and repeated roots.
+- `tests::pallet::*` — `submit_evidence` on a mock runtime: authorization,
+  receipt lookup, cross-receipt and cross-network replay, the genesis hash
+  past the block-hash horizon, one entry per type, duplicates, and the
+  checks that run before verification.
+- `tests::migration::*` — the upgrade clears the storage the pre-binding
+  verifier wrote, once.
+- `benchmarking::bench_submit_evidence` (`--features runtime-benchmarks`) —
+  the worst-case chains reach the last signature check.
 
 Positive cases run on synthetic chains under a test root
 (`src/synthetic_chain.rs`); `submit_evidence` itself trusts Google's roots

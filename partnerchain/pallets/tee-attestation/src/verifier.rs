@@ -24,7 +24,9 @@ use sp_std::prelude::*;
 use crate::types::{
     EvidenceEntry, EvidenceType, ReceiptBinding, VerifiedEvidence, VerifyFailReason, VerifyOutcome,
 };
-use crate::vendor::acurast_attestation::asn::{Certificate, KeyDescription, ParsedAttestation};
+use crate::vendor::acurast_attestation::asn::{
+    Certificate, KeyDescription, ParsedAttestation, SubjectPublicKeyInfo,
+};
 use crate::vendor::acurast_attestation::{
     extract_attestation, validate_certificate_chain, CertificateChainInput, CertificateInput,
     KEY_ATTESTATION_OID,
@@ -155,12 +157,9 @@ impl EvidenceVerifier for ArmTrustZoneVerifier<'_> {
             return VerifyOutcome::Failed(VerifyFailReason::NonceMismatch);
         }
 
-        // attest_key_hash = sha256 of the SPKI re-encoded to canonical DER.
-        let spki_der = match asn1::write_single(&leaf_tbs.subject_public_key_info) {
-            Ok(b) => b,
-            Err(_) => return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed),
+        let Some(attest_key_hash) = attest_key_hash(&leaf_tbs.subject_public_key_info) else {
+            return VerifyOutcome::Failed(VerifyFailReason::PayloadMalformed);
         };
-        let attest_key_hash = sha256_array(&spki_der);
 
         VerifyOutcome::Verified(VerifiedEvidence {
             evidence_type: EvidenceType::ArmTrustZone,
@@ -228,6 +227,23 @@ fn attestation_extension_only_in_leaf(chain: &CertificateChainInput) -> bool {
                 }),
             Err(_) => false,
         })
+}
+
+/// SHA-256 of a SubjectPublicKeyInfo re-encoded to canonical DER.
+fn attest_key_hash(spki: &SubjectPublicKeyInfo<'_>) -> Option<[u8; 32]> {
+    asn1::write_single(spki).ok().map(|der| sha256_array(&der))
+}
+
+/// The `attest_key_hash` an ArmTrustZone entry's leaf names, read without
+/// checking any signature, so a repeated key is refused before verification.
+/// Verification computes the same hash from the same certificate.
+pub fn claimed_attest_key_hash(entry: &EvidenceEntry) -> Option<[u8; 32]> {
+    if entry.evidence_type != EvidenceType::ArmTrustZone {
+        return None;
+    }
+    let chain = Vec::<Vec<u8>>::decode(&mut &entry.payload[..]).ok()?;
+    let leaf = asn1::parse_single::<Certificate>(chain.last()?).ok()?;
+    attest_key_hash(&leaf.tbs_certificate.subject_public_key_info)
 }
 
 fn sha256_array(data: &[u8]) -> [u8; 32] {
