@@ -5995,6 +5995,7 @@ dependencies = [
  "base64ct",
  "chrono",
  "ecdsa",
+ "frame-benchmarking",
  "frame-support",
  "frame-system",
  "hex-literal",

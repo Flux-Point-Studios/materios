@@ -19,6 +19,11 @@ pub const MAX_EVIDENCE_PAYLOAD_BYTES: u32 = 16 * 1024;
 /// Bound on the number of evidence entries per receipt.
 pub const MAX_EVIDENCE_ENTRIES_PER_RECEIPT: u32 = 8;
 
+/// Bound on entries of one evidence type per receipt. The composer counts
+/// each vendor class once, so a second entry of a type adds nothing to the
+/// score; one per type leaves a slot for each of the five types.
+pub const MAX_ENTRIES_PER_EVIDENCE_TYPE: u32 = 1;
+
 /// Receipt identifier. Matches `pallet-orinq-receipts` `ReceiptId`.
 pub type ReceiptId = H256;
 
@@ -73,6 +78,25 @@ impl EvidenceType {
 pub struct EvidenceEntry {
     pub evidence_type: EvidenceType,
     pub payload: EvidencePayload,
+}
+
+/// What the receipt registry records about a receipt that evidence needs.
+#[derive(Clone, PartialEq, Eq, RuntimeDebug)]
+pub struct RegisteredReceipt<AccountId> {
+    pub content_hash: [u8; 32],
+    pub submitter: AccountId,
+}
+
+/// The receipt a piece of evidence must be bound to, read from chain state:
+/// this chain's genesis hash, the receipt id, and the content hash the
+/// receipt registry holds for it. Receipt ids and content hashes are both
+/// chosen by receipt submitters and several receipts may share a content
+/// hash, so evidence binds all three.
+#[derive(Clone, Copy, PartialEq, Eq, RuntimeDebug)]
+pub struct ReceiptBinding {
+    pub genesis_hash: [u8; 32],
+    pub receipt_id: ReceiptId,
+    pub content_hash: [u8; 32],
 }
 
 /// What the verifier returns on success. Must be bytes-deterministic across
