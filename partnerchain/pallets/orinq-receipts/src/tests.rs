@@ -1752,10 +1752,10 @@ fn threshold_hit_emits_fee_distributed_event() {
 }
 
 #[test]
-fn pre_component_4_receipt_skips_fee_payout() {
+fn pre_component_4_receipt_is_refused_attestation() {
     // Simulate a receipt that exists without escrow (pre-Component-4 legacy).
-    // The threshold-hit path must not panic; it must simply skip the fee
-    // distribution and still finalize the cert.
+    // It holds no fee to pay its signers, so no attest of it is taken and it
+    // stays uncertified.
     new_test_ext().execute_with(|| {
         let submitter = acc(10);
         Balances::make_free_balance_be(&submitter, 10_000_000_000);
@@ -1781,20 +1781,20 @@ fn pre_component_4_receipt_skips_fee_payout() {
         // Also clear the submitter's reserve to mirror legacy state.
         let _ = Balances::unreserve(&submitter, DEFAULT_FEE);
 
-        // Certify — must not error.
-        // canonical-only acceptance.
         let cert_hash = canonical_for(rid);
         for &s in committee_seeds.iter() {
-            assert_ok!(OrinqReceipts::attest_availability_cert(
-                RuntimeOrigin::signed(acc(s)),
-                rid,
-                cert_hash
-            ));
+            assert_noop!(
+                OrinqReceipts::attest_availability_cert(
+                    RuntimeOrigin::signed(acc(s)),
+                    rid,
+                    cert_hash
+                ),
+                pallet::Error::<Test>::ReceiptFeeNotEscrowed
+            );
         }
 
-        // Receipt is certified.
         let record = OrinqReceipts::receipts(rid).unwrap();
-        assert_eq!(record.availability_cert_hash, cert_hash);
+        assert_eq!(record.availability_cert_hash, [0u8; 32]);
     });
 }
 
@@ -3671,7 +3671,11 @@ fn an_attest_is_weighed_at_the_signers_it_decodes() {
         let post = attest_canonical(3, rid);
         assert_eq!(
             post.actual_weight,
-            Some(W::attest_non_threshold(2).saturating_add(backup_read))
+            Some(
+                W::attest_non_threshold(2)
+                    .saturating_add(backup_read)
+                    .saturating_add(OrinqReceipts::escrow_read_weight())
+            )
         );
         let (_, signers) = pallet::Attestations::<Test>::get(rid).expect("pending");
         assert_eq!(signers.into_iter().collect::<Vec<_>>(), vec![acc(3)]);
@@ -4561,31 +4565,45 @@ fn a_zero_fee_receipt_burns_nothing_for_its_backup_signer() {
     });
 }
 
-/// A receipt from before fees were escrowed has no submission block and no
-/// escrow: its backup signer waits for nothing, and nothing is burned.
+/// A delay is counted from the submission block, so a receipt without one
+/// holds its backup signer to none. A receipt from before fees were escrowed
+/// has no escrow either: every member is refused, the backup signer for the
+/// escrow and not for its delay, and nothing is paid or burned.
 #[test]
-fn a_receipt_without_escrow_has_no_delay_and_no_burn() {
+fn a_receipt_without_escrow_is_refused_and_burns_nothing() {
     new_test_ext().execute_with(|| {
         let rid = three_member_receipt(0xB6);
-        pallet::ReceiptFeeEscrow::<Test>::remove(rid);
         pallet::ReceiptSubmittedAt::<Test>::remove(rid);
-        assert_eq!(Balances::unreserve(&acc(10), DEFAULT_FEE), 0);
         set_backups(&[3], BACKUP_DELAY);
-        let before = free_balances(&[1, 2, 3, 10]);
-        let treasury = Balances::free_balance(&treasury_account());
-
         assert_eq!(
             OrinqReceipts::validate_attestation(&acc(3), rid, canonical_for(rid)),
             Ok(crate::types::Attestation::New)
         );
+
+        pallet::ReceiptFeeEscrow::<Test>::remove(rid);
+        assert_eq!(Balances::unreserve(&acc(10), DEFAULT_FEE), 0);
+        let before = free_balances(&[1, 2, 3, 10]);
+        let treasury = Balances::free_balance(&treasury_account());
+
         for s in [3, 1, 2] {
-            attest_canonical(s, rid);
+            assert_eq!(
+                OrinqReceipts::validate_attestation(&acc(s), rid, canonical_for(rid)),
+                Err(pallet::Error::<Test>::ReceiptFeeNotEscrowed.into())
+            );
+            assert_noop!(
+                OrinqReceipts::attest_availability_cert(
+                    RuntimeOrigin::signed(acc(s)),
+                    rid,
+                    canonical_for(rid)
+                ),
+                pallet::Error::<Test>::ReceiptFeeNotEscrowed
+            );
         }
 
-        assert!(is_certified(rid));
-        assert_eq!(gains(&[1, 2, 3, 10], &before), vec![REWARD, REWARD, 0, 0]);
+        assert!(!is_certified(rid));
+        assert_eq!(gains(&[1, 2, 3, 10], &before), vec![0; 4]);
         assert_eq!(Balances::free_balance(&treasury_account()), treasury);
-        assert_eq!(rewarded(), vec![acc(1), acc(2)]);
+        assert_eq!(rewarded(), vec![]);
         assert_eq!(backup_burns(), vec![]);
     });
 }
@@ -4635,15 +4653,25 @@ fn an_attest_is_charged_the_backup_signer_storage_it_reads() {
         assert_eq!(reads(1).ref_time(), 7);
         assert_eq!(reads(crate::MAX_BACKUP_SIGNER_READS).ref_time(), 21);
 
+        let escrow_read =
+            frame_support::weights::Weight::from_parts(7, proof_bound("ReceiptFeeEscrow"));
         let rid = three_member_receipt(0xB8);
         set_backups(&[2, 3], 0);
         assert_eq!(
             attest_canonical(1, rid).actual_weight,
-            Some(W::attest_non_threshold(1).saturating_add(reads(1)))
+            Some(
+                W::attest_non_threshold(1)
+                    .saturating_add(reads(1))
+                    .saturating_add(escrow_read)
+            )
         );
         assert_eq!(
             attest_canonical(2, rid).actual_weight,
-            Some(W::attest_non_threshold(2).saturating_add(reads(2)))
+            Some(
+                W::attest_non_threshold(2)
+                    .saturating_add(reads(2))
+                    .saturating_add(escrow_read)
+            )
         );
         set_backups(&[2, 3], BACKUP_DELAY);
         System::set_block_number(1 + BACKUP_DELAY);
@@ -4666,37 +4694,33 @@ fn an_attest_is_charged_the_backup_signer_storage_it_reads() {
         assert_eq!(
             declared,
             W::attest_threshold(64)
-                .max(W::attest_non_threshold(64))
-                .max(W::attest_bad_hash())
+                .max(W::attest_non_threshold(64).saturating_add(escrow_read))
+                .max(W::attest_bad_hash().saturating_add(escrow_read))
                 .saturating_add(reads(crate::MAX_BACKUP_SIGNER_READS))
         );
     });
 }
 
-/// Proof bounds as the measured attestation weights take them: each item's
-/// `StorageInfo` size under three 495-byte trie layers for a value and seven
-/// for a map.
-#[test]
-fn backup_signer_proof_bounds_sum_the_storage_read() {
+/// An item's proof bound as the measured weights take it: its `StorageInfo`
+/// size under three 495-byte trie layers for a value and seven for a map.
+fn proof_bound(name: &str) -> u64 {
     use frame_support::traits::StorageInfoTrait;
     let entries = OrinqReceipts::storage_info();
-    let bound = |name: &str| {
-        let info = entries
-            .iter()
-            .find(|entry| entry.storage_name == name.as_bytes())
-            .expect("receipt storage info");
-        u64::from(info.max_size.expect("bounded receipt storage"))
-            + if info.max_values == Some(1) {
-                3 * 495
-            } else {
-                7 * 495
-            }
-    };
-    let read = [
-        bound("BackupSigners"),
-        bound("BackupSignerDelay"),
-        bound("ReceiptSubmittedAt"),
-    ];
+    let info = entries
+        .iter()
+        .find(|entry| entry.storage_name == name.as_bytes())
+        .expect("receipt storage info");
+    u64::from(info.max_size.expect("bounded receipt storage"))
+        + if info.max_values == Some(1) {
+            3 * 495
+        } else {
+            7 * 495
+        }
+}
+
+#[test]
+fn backup_signer_proof_bounds_sum_the_storage_read() {
+    let read = ["BackupSigners", "BackupSignerDelay", "ReceiptSubmittedAt"].map(proof_bound);
     for reads in 0..=crate::MAX_BACKUP_SIGNER_READS {
         assert_eq!(
             OrinqReceipts::backup_signer_weight(reads).proof_size(),
@@ -4705,14 +4729,17 @@ fn backup_signer_proof_bounds_sum_the_storage_read() {
     }
 }
 
+fn error_index(error: pallet::Error<Test>) -> u8 {
+    match sp_runtime::DispatchError::from(error) {
+        sp_runtime::DispatchError::Module(module) => module.error[0],
+        other => panic!("{other:?} is not a pallet error"),
+    }
+}
+
 /// Clients decode calls, events and errors by index, so the backup signer
 /// variants follow the last earlier one of each.
 #[test]
 fn backup_signer_variants_are_appended() {
-    let error_index = |error: pallet::Error<Test>| match sp_runtime::DispatchError::from(error) {
-        sp_runtime::DispatchError::Module(module) => module.error[0],
-        other => panic!("{other:?} is not a pallet error"),
-    };
     assert_eq!(
         crate::Call::<Test>::set_backup_signers {
             members: vec![],
@@ -4750,6 +4777,284 @@ fn backup_signer_variants_are_appended() {
         .map(error_index),
         [21, 22, 23, 24]
     );
+}
+
+// ---------------------------------------------------------------------------
+// An uncertified receipt is attested only while its fee is escrowed
+// ---------------------------------------------------------------------------
+//
+// Expiry refunds the submission fee and leaves the receipt in place. With no
+// fee in escrow there is nothing to pay its signers, so every attest of it
+// is refused from then on, and the content is submitted again under a new
+// receipt id. A certified receipt has no escrow either; a late attest of it
+// stays the benign no-op.
+
+/// Moves to the first block at which a receipt submitted in the current one
+/// has expired.
+fn pass_expiry_window() {
+    System::set_block_number(System::block_number() + OrinqReceipts::receipt_expiry_blocks() + 1);
+}
+
+fn expire(rid: H256) -> frame_support::dispatch::DispatchResultWithPostInfo {
+    OrinqReceipts::expire_receipt_fee(RuntimeOrigin::signed(acc(99)), rid)
+}
+
+fn attest(seed: u8, rid: H256, hash: [u8; 32]) -> frame_support::dispatch::DispatchResultWithPostInfo {
+    OrinqReceipts::attest_availability_cert(RuntimeOrigin::signed(acc(seed)), rid, hash)
+}
+
+/// Every member's attest of `rid` is refused for want of an escrowed fee, in
+/// pool validation and at dispatch, whatever hash it claims.
+fn assert_unattestable(rid: H256) {
+    for hash in [canonical_for(rid), [0x99; 32]] {
+        for s in [1, 2, 3] {
+            assert_eq!(
+                OrinqReceipts::validate_attestation(&acc(s), rid, hash),
+                Err(pallet::Error::<Test>::ReceiptFeeNotEscrowed.into())
+            );
+            assert_noop!(
+                attest(s, rid, hash),
+                pallet::Error::<Test>::ReceiptFeeNotEscrowed
+            );
+        }
+    }
+}
+
+/// A submitter that holds its blob back through the window and takes its fee
+/// back is never certified: no attest is recorded, nobody is rewarded, and a
+/// wrong hash earns no strike on a receipt nobody can certify.
+#[test]
+fn an_expired_receipt_is_refused_every_attestation() {
+    new_test_ext().execute_with(|| {
+        let rid = three_member_receipt(0xE0);
+        pass_expiry_window();
+        assert_ok!(expire(rid));
+        let issuance = Balances::total_issuance();
+
+        assert_unattestable(rid);
+
+        assert!(!is_certified(rid));
+        assert!(!pallet::Attestations::<Test>::contains_key(rid));
+        for s in [1, 2, 3] {
+            assert_eq!(pallet::BadAttestStrikes::<Test>::get(acc(s)), 0);
+        }
+        assert!(rewarded().is_empty());
+        assert_eq!(pallet::TotalAttestationRewards::<Test>::get(), 0);
+        assert_eq!(Balances::total_issuance(), issuance);
+    });
+}
+
+/// Two of three members sign, the receipt expires, and the third is refused:
+/// the signatures gathered before the refund complete nothing, and neither
+/// fee nor reward reaches anyone.
+#[test]
+fn attestations_gathered_before_expiry_certify_nothing() {
+    new_test_ext().execute_with(|| {
+        let rid = three_member_receipt(0xE1);
+        let members = free_balances(&[1, 2, 3]);
+        let treasury = Balances::free_balance(&treasury_account());
+        let issuance = Balances::total_issuance();
+        attest_canonical(1, rid);
+        attest_canonical(2, rid);
+        let submitter = Balances::free_balance(&acc(10));
+        pass_expiry_window();
+        assert_ok!(expire(rid));
+
+        assert_noop!(
+            attest(3, rid, canonical_for(rid)),
+            pallet::Error::<Test>::ReceiptFeeNotEscrowed
+        );
+
+        assert!(!is_certified(rid));
+        assert_eq!(gains(&[1, 2, 3], &members), vec![0; 3]);
+        assert_eq!(Balances::free_balance(&treasury_account()), treasury);
+        assert_eq!(Balances::free_balance(&acc(10)), submitter + DEFAULT_FEE);
+        assert_eq!(Balances::reserved_balance(&acc(10)), 0);
+        assert_eq!(Balances::total_issuance(), issuance);
+        assert!(rewarded().is_empty());
+    });
+}
+
+/// A submission escrows its fee even when the fee is zero, so a receipt
+/// submitted at no fee is attested and certified like any other.
+#[test]
+fn a_zero_fee_receipt_still_certifies() {
+    new_test_ext().execute_with(|| {
+        pallet::ReceiptSubmissionFee::<Test>::put(0);
+        let rid = three_member_receipt(0xE2);
+        assert_eq!(
+            pallet::ReceiptFeeEscrow::<Test>::get(rid),
+            Some((acc(10), 0))
+        );
+        assert_eq!(Balances::reserved_balance(&acc(10)), 0);
+        let members = free_balances(&[1, 2, 3]);
+        for s in [1, 2, 3] {
+            assert_eq!(
+                OrinqReceipts::validate_attestation(&acc(s), rid, canonical_for(rid)),
+                Ok(crate::types::Attestation::New)
+            );
+            attest_canonical(s, rid);
+        }
+        assert!(is_certified(rid));
+        assert_eq!(gains(&[1, 2, 3], &members), vec![REWARD; 3]);
+    });
+}
+
+/// After its receipt expires a submitter submits the content again under a
+/// new id. That receipt pays the fee and certifies as any other; the expired
+/// id stays refused beside it.
+#[test]
+fn the_content_of_an_expired_receipt_certifies_under_a_new_id() {
+    new_test_ext().execute_with(|| {
+        let expired = three_member_receipt(0xE3);
+        let content = H256::from([!0xE3; 32]);
+        pass_expiry_window();
+        assert_ok!(expire(expired));
+
+        let again = H256::from([0xE4; 32]);
+        let members = free_balances(&[1, 2, 3]);
+        let submitter = Balances::free_balance(&acc(10));
+        let treasury = Balances::free_balance(&treasury_account());
+        assert_ok!(submit_c4(10, again, content));
+        assert_eq!(
+            OrinqReceipts::content_index(content).into_inner(),
+            vec![expired, again]
+        );
+        assert_eq!(Balances::reserved_balance(&acc(10)), DEFAULT_FEE);
+        for s in [1, 2, 3] {
+            attest_canonical(s, again);
+        }
+
+        assert!(is_certified(again));
+        assert_eq!(gains(&[1, 2, 3], &members), vec![REWARD + SHARE; 3]);
+        assert_eq!(
+            Balances::free_balance(&treasury_account()) - treasury,
+            TREASURY_CUT
+        );
+        assert_eq!(submitter - Balances::free_balance(&acc(10)), DEFAULT_FEE);
+        assert_unattestable(expired);
+        assert!(!is_certified(expired));
+    });
+}
+
+/// Root's `set_availability_cert` refunds the escrow whatever hash it sets.
+/// An all-zero hash leaves the receipt uncertified with no fee behind it,
+/// and it is refused attestation like an expired one.
+#[test]
+fn a_receipt_root_refunds_and_leaves_uncertified_is_refused_attestation() {
+    new_test_ext().execute_with(|| {
+        let rid = three_member_receipt(0xE5);
+        assert_ok!(OrinqReceipts::set_availability_cert(
+            RuntimeOrigin::root(),
+            rid,
+            [0; 32]
+        ));
+        assert_eq!(Balances::reserved_balance(&acc(10)), 0);
+
+        assert_unattestable(rid);
+
+        assert!(!is_certified(rid));
+        assert!(!pallet::Attestations::<Test>::contains_key(rid));
+        assert!(rewarded().is_empty());
+    });
+}
+
+/// Certification drains the escrow too. A late attest of the certified
+/// receipt is answered before the escrow is looked at: it succeeds and
+/// changes nothing, at any hash, and the pool reads it as stale.
+#[test]
+fn a_late_attest_of_a_certified_receipt_is_a_no_op_with_its_escrow_gone() {
+    use crate::weights::WeightInfo;
+    new_test_ext().execute_with(|| {
+        let rid = three_member_receipt(0xE6);
+        for s in [1, 2, 3] {
+            attest_canonical(s, rid);
+        }
+        assert!(is_certified(rid));
+        assert!(!pallet::ReceiptFeeEscrow::<Test>::contains_key(rid));
+
+        let events = frame_system::Pallet::<Test>::events().len();
+        let balances = free_balances(&[1, 2, 3, 10]);
+        for hash in [canonical_for(rid), [0x99; 32]] {
+            assert_eq!(
+                OrinqReceipts::validate_attestation(&acc(1), rid, hash),
+                Ok(crate::types::Attestation::Stale)
+            );
+            assert_eq!(
+                attest(1, rid, hash).expect("late attest").actual_weight,
+                Some(crate::weights::SubstrateWeight::<Test>::attest_non_threshold(64))
+            );
+        }
+        assert_eq!(frame_system::Pallet::<Test>::events().len(), events);
+        assert_eq!(free_balances(&[1, 2, 3, 10]), balances);
+        assert!(!pallet::Attestations::<Test>::contains_key(rid));
+        assert_eq!(pallet::BadAttestStrikes::<Test>::get(acc(1)), 0);
+    });
+}
+
+/// A pending receipt's attest reads `ReceiptFeeEscrow` before anything else
+/// of it. The measured non-threshold and bad-hash weights do not hold that
+/// read, so those attests add it with its proof bound; the threshold weight
+/// holds it for the payout and adds nothing, and a late attest never reads it.
+#[test]
+fn an_attest_is_charged_the_escrow_read_its_measured_weight_lacks() {
+    use crate::weights::WeightInfo;
+    use frame_support::dispatch::GetDispatchInfo;
+    type W = crate::weights::SubstrateWeight<Test>;
+    new_test_ext().execute_with(|| {
+        MockDbWeight::set(frame_support::weights::RuntimeDbWeight { read: 7, write: 11 });
+        let escrow_read =
+            frame_support::weights::Weight::from_parts(7, proof_bound("ReceiptFeeEscrow"));
+        let backup_read = OrinqReceipts::backup_signer_weight(1);
+        let rid = three_member_receipt(0xE7);
+
+        assert_eq!(
+            attest(1, rid, [0x99; 32]).expect("strike").actual_weight,
+            Some(W::attest_bad_hash().saturating_add(escrow_read))
+        );
+        assert_eq!(
+            attest_canonical(1, rid).actual_weight,
+            Some(
+                W::attest_non_threshold(1)
+                    .saturating_add(backup_read)
+                    .saturating_add(escrow_read)
+            )
+        );
+        attest_canonical(2, rid);
+        assert_eq!(
+            attest_canonical(3, rid).actual_weight,
+            Some(W::attest_threshold(3).saturating_add(backup_read))
+        );
+        assert_eq!(
+            attest_canonical(3, rid).actual_weight,
+            Some(W::attest_non_threshold(64))
+        );
+
+        assert_eq!(
+            crate::Call::<Test>::attest_availability_cert {
+                receipt_id: rid,
+                claimed_hash: canonical_for(rid),
+            }
+            .get_dispatch_info()
+            .weight,
+            W::attest_threshold(64)
+                .max(W::attest_non_threshold(64).saturating_add(escrow_read))
+                .max(W::attest_bad_hash().saturating_add(escrow_read))
+                .saturating_add(OrinqReceipts::backup_signer_weight(
+                    crate::MAX_BACKUP_SIGNER_READS
+                ))
+        );
+    });
+}
+
+/// Clients decode errors by index, so the new one follows the last.
+#[test]
+fn the_fee_not_escrowed_error_is_appended() {
+    assert_eq!(
+        error_index(pallet::Error::ReceiptFeeNotEscrowed),
+        error_index(pallet::Error::BackupSignerDelayTooLong) + 1
+    );
+    assert_eq!(error_index(pallet::Error::ReceiptFeeNotEscrowed), 25);
 }
 
 mod backup_signer_genesis {

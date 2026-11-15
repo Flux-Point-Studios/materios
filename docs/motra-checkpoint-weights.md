@@ -82,15 +82,17 @@ Receipt submissions price the certification they trigger. For each
 the deferred duty weight at threshold `t` is `t` duty bases
 (ExtrinsicBaseWeight), `t - 1` non-threshold attests at the largest signer
 count before payout, the payout attest with `t + 2` balance changes, and the
-three backup signer reads of each of the `t` attests.
+three backup signer reads of each of the `t` attests, and the escrow read
+of each of the `t - 1` non-threshold attests.
 Each submission's own weight also carries the threshold read this makes.
 
 Canonical committee attestation is a feeless validator duty at the fixed
 priority u64::MAX-1, independent of R and batch width. ChargeMotra calls the
 runtime's IsSubType classifier before reconciliation or payment, both in pool
 validation and pre_dispatch. A duty requires a current committee member, an
-existing uncertified receipt, the canonical hash and no prior attestation by
-that signer; a backup signer's also requires that its delay has passed.
+existing uncertified receipt whose fee is in escrow, the canonical hash and no
+prior attestation by that signer; a backup signer's also requires that its
+delay has passed.
 Invalid duties never increment InsufficientMotraFailures.
 Pool tags contain signer and receipt; batches cannot repeat a receipt.
 Wrong hashes are rejected because bad-hash dispatch otherwise does not consume
@@ -212,6 +214,36 @@ signer and adds one slash of the reserve and one event for all of them, so
 its measured bound still holds. The next measurement makes the caller a backup signer past
 its delay, with a full `BackupSigners` set, and folds the reads into the fits.
 
+An uncertified receipt is attested only while its submission fee is in
+escrow. `expire_receipt_fee` refunds the fee and leaves the receipt, its
+content index entry and its attestations in place, and Root's
+`set_availability_cert` refunds it whatever hash it sets. From then on, as
+for a receipt submitted before the fee existed, a member's attest is refused:
+in pool validation and pre_dispatch as `InvalidTransaction::Call`, like every
+other refused duty, and in dispatch as `ReceiptFeeNotEscrowed`. Dispatch
+refuses before it looks at the hash, so the attest takes no strike and
+records no signer. The receipt stays uncertified, and its submitter submits
+the content again under a new receipt id. A certified receipt has no escrow
+either, and a late attest of it is still the no-op, answered before the
+escrow is read. A zero-fee submission leaves an escrow entry of zero and is
+attested as usual.
+
+The check reads `ReceiptFeeEscrow` on every attest of a pending receipt. The
+threshold samples hold that read, made for the payout, and its proof bound.
+The non-threshold and bad-hash samples predate it and were not taken again,
+so `escrow_read_weight` prices it outside their fits, at the runtime's
+`DbWeight` and with its StorageInfo proof bound: one read, 25,000,000
+ref_time, and 3,561 proof bytes. The declared weight takes the largest of the
+three paths with the read added to those two, which leaves it at the
+threshold bound. Non-threshold and bad-hash attests return the read, a
+threshold attest returns its measured weight, a late attest returns before
+the read, and each submission prepays it for the `t - 1` non-threshold
+attests of its certification. The execution the read adds, decoding one
+account and one balance, is not in those samples and no fit covers it. The
+benchmarks submit their receipts through `submit_receipt`, so the next
+measurement makes the read on every path and folds it into the fits, and
+`escrow_read_weight` is removed with it.
+
 Runtime regressions commit fixtures before dispatch and inspect real checkpoint
 writes across fifteen Billing/receipt paths, plus maximum committee payouts.
 Existing property tests retain every Balances call, reserve/unreserve, legacy
@@ -279,16 +311,17 @@ estimates from hard storage/proof bounds; neither claims block-import latency.
 | Capacity under the normal block budget | Count |
 |---|---:|
 | Separately signed transfers | 854 |
-| Separately signed non-threshold attests | 3340 |
-| Non-threshold attests in pure Utility batches | 4135 in 478 batches |
+| Separately signed non-threshold attests | 3159 |
+| Non-threshold attests in pure Utility batches | 3859 in 448 batches |
 
 The attestation loops execute CheckWeight, ChargeMotra, real runtime dispatch
 and both post-dispatch paths; each recorded signer and receipt is checked.
 Admission reserves the threshold payout bound, then refunds unused call and
 fee work. The batched regression fills the block at each attestation's actual
 weight. These measure protocol capacity; live TPS and the daemon's rollout are
-separate. Storage access is priced, so each attestation's six reads, the
-backup signer set among them, and one write take 250,000,000 ref_time.
+separate. Storage access is priced, so each attestation's seven reads, the
+backup signer set and the fee escrow among them, and one write take
+275,000,000 ref_time.
 
 The maximum dormant-claim batch remains a native TestExternalities execution
 regression backed by independent Wasm samples. Its native elapsed time excludes
@@ -321,7 +354,7 @@ and write.
 | 1,000,000,000 | remark | 106 | 0.001336605458 | 1294926000000 |
 | 1,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 1,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 1,000,000,000 | submit_receipt | 395 | 0.006491608539 / 0.006640493539 | 1294926000000 |
+| 1,000,000,000 | submit_receipt | 395 | 0.006516608539 / 0.006665493539 | 1294926000000 |
 | 1,000,000,000 | claim | 105 | 0.002382099245 | 1294926000000 |
 | 1,000,000,000 | set_delegatee | 138 | 0.002496363722 | 1294926000000 |
 | 1,000,000,000 | Operational stuffer | 114 | Rejected | — |
@@ -329,7 +362,7 @@ and write.
 | 50,000,000,000 | remark | 106 | 0.0667760789 | 64697300000000 |
 | 50,000,000,000 | attest_member | 169 | 0 | 18446744073709551614 |
 | 50,000,000,000 | attest_non_member | 169 | Rejected | — |
-| 50,000,000,000 | submit_receipt | 395 | 0.32451207195 / 0.33195632195 | 64697300000000 |
+| 50,000,000,000 | submit_receipt | 395 | 0.32576207195 / 0.33320632195 | 64697300000000 |
 | 50,000,000,000 | claim | 105 | 0.11905081725 | 64697300000000 |
 | 50,000,000,000 | set_delegatee | 138 | 0.1247624241 | 64697300000000 |
 | 50,000,000,000 | Operational stuffer | 114 | Rejected | — |
