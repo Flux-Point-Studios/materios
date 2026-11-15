@@ -190,6 +190,9 @@ GENESIS_STORAGE = frozenset({
     "OrinqReceipts.AttestationRewardPerSigner", "OrinqReceipts.EraCapBase", "OrinqReceipts.EraCapBaselineAttestorCount",
     "OrinqReceipts.BondRequirement", "OrinqReceipts.ReceiptExpiryBlocks", "OrinqReceipts.ReceiptSubmissionFee",
     "OrinqReceipts.ReceiptSubmissionFeeFloor",
+    # The committee members that certify unpaid and how long they wait first
+    # hold no MATRA. A genesis that names none stores neither.
+    "OrinqReceipts.BackupSigners", "OrinqReceipts.BackupSignerDelay",
     "Motra.Params", "Motra.AccrualCheckpoint",
     "Sidechain.GenesisUtxo", "Sidechain.SlotsPerEpoch",
     "SessionCommitteeManagement.CurrentCommittee", "SessionCommitteeManagement.MainChainScriptsConfiguration",

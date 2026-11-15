@@ -74,8 +74,9 @@ pub fn deferred_weight(call: &RuntimeCall) -> Weight {
 /// non-threshold attests before the payout, each bounded by the last since
 /// the signer count only grows while the committee is unchanged, and the
 /// payout attest with its signers', submitter's and treasury's balance
-/// changes. A member who leaves after signing costs one further attest from
-/// a current member, which this price does not cover.
+/// changes, and every backup signer read of each of the `t` attests. A member
+/// who leaves after signing costs one further attest from a current member,
+/// which this price does not cover.
 fn certification_weight() -> Weight {
     type W = <Runtime as pallet_orinq_receipts::Config>::WeightInfo;
     let t = pallet_orinq_receipts::AttestationThreshold::<Runtime>::get().clamp(
@@ -87,6 +88,10 @@ fn certification_weight() -> Weight {
         .saturating_add(W::attest_non_threshold(t - 1).saturating_mul((t - 1).into()))
         .saturating_add(W::attest_threshold(t))
         .saturating_add(W::balance_mutations(t.saturating_add(2)))
+        .saturating_add(
+            OrinqReceipts::backup_signer_weight(pallet_orinq_receipts::MAX_BACKUP_SIGNER_READS)
+                .saturating_mul(t.into()),
+        )
 }
 
 /// The threshold read `deferred_weight` makes before dispatch, charged to

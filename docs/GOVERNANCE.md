@@ -197,7 +197,7 @@ sits at or just below the finalized head.
 |-------|---------|-----------------|-------|
 | Recovery | 1 day | 30 blocks | Levers that cannot fix who holds authority: `Grandpa.note_stalled` within the exempt bound above, and `OrinqReceipts.clear_pinned_committee`, `set_break_glass_floor_enabled`, `set_core_eviction_enabled`, `set_contribution_window_enabled`, `set_slack_invariant_enabled`, `reset_candidate_liveness`, which change how the committee is drawn from the Cardano-registered candidates. Also `RootTimelock.set_delay` raising a delay or keeping it as it is, which only slows Root down. The guardian may co-sign them. |
 | Authority recovery | the standard delay | the standard delay | Levers that can fix who holds authority: `OrinqReceipts.set_pinned_committee` (installed verbatim, bypassing the draw and every floor), `OrinqReceipts.set_break_glass_aura_keys` (decides which draws the floor accepts), `Grandpa.note_stalled` with a longer delay (can freeze rotation), and `Sudo.set_key` (the defence against a stolen key). Also restarting what a kill-switch stopped: `TeeAttestation.set_disabled(false)`, `TeeAttestation.set_certificates_revoked(_, false)` and `Billing.governance_set_debits_enabled(true)`. The guardian may co-sign them; without its co-sign the sudo key alone installs authors or a new key, or restarts a service, no sooner than it could mint. |
-| Standard | 7 days | 300 blocks | Everything not listed elsewhere, including `System.set_code`, `System.authorize_upgrade`, `System.set_storage`, the `Balances` force calls, treasury spends, `OrinqReceipts.set_committee` and `join_committee`, the emission setters, `Recovery.set_recovered`, and lowering the standard or recovery delay. |
+| Standard | 7 days | 300 blocks | Everything not listed elsewhere, including `System.set_code`, `System.authorize_upgrade`, `System.set_storage`, the `Balances` force calls, treasury spends, `OrinqReceipts.set_committee`, `join_committee` and `set_backup_signers`, the emission setters, `Recovery.set_recovered`, and lowering the standard or recovery delay. |
 | Long | 30 days | 1,200 blocks | The dedicated bridge and supply levers (`NativeTokenManagement.set_main_chain_scripts`, lowering `IntentSettlement.set_min_signer_threshold`), `RootTimelock.set_guardian`, lowering the long delay, and `Sudo.remove_key`. |
 
 A wrapper (`Utility.batch`, `batch_all`, `force_batch`, `with_weight`,
@@ -207,6 +207,18 @@ standard delay. The delays live in storage: genesis sets them, preprod stores
 the short ones on the upgrade that adds the pallet, and
 `0 < recovery <= standard <= long <= MaxDelay` always holds. Authority
 recovery has no delay of its own; it waits the standard one.
+
+### Backup signers
+
+`OrinqReceipts.set_backup_signers` names the committee members that certify
+unpaid and the blocks each waits after a receipt's submission before it may
+attest. It waits the standard delay. A non-zero delay must not be scheduled
+until every listed signer runs a cert-daemon release that waits out the delay
+before it attests: the chain refuses an early attest, and the older daemon
+drops a receipt after five refused attempts, so a listed signer on it would
+certify nothing. The delay is always less than half of `ReceiptExpiryBlocks`;
+`set_receipt_expiry_blocks` refuses a window that would break this, so shorten
+the delay before the window.
 
 ### What the long class does and does not bound
 

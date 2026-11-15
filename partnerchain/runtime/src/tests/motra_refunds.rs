@@ -241,6 +241,66 @@ fn pricing_attestation_duty_rejects_invalid_and_replayed_calls() {
     });
 }
 
+/// Receipt submitted at block 100 with a delay of 10: the fee extension
+/// refuses the backup signer's duty through block 109, in the pool and
+/// again before dispatch, alone or in a batch, and admits it free at 110.
+#[test]
+fn pricing_backup_signer_duty_is_refused_until_its_delay_has_passed() {
+    use sp_runtime::transaction_validity::InvalidTransaction;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 1_000_000);
+        pricing_params(50_000_000_000);
+        pallet_orinq_receipts::ReceiptExpiryBlocks::<Runtime>::put(14_400);
+        assert_ok!(OrinqReceipts::set_backup_signers(
+            RuntimeOrigin::root(),
+            vec![account(3)],
+            10
+        ));
+        let call = attest(id, hash);
+        let info = call.get_dispatch_info();
+        let batch = RuntimeCall::Utility(pallet_utility::Call::batch {
+            calls: vec![call.clone()],
+        });
+
+        System::set_block_number(109);
+        for early in [&call, &batch] {
+            assert_eq!(
+                validity(&account(3), early),
+                Err(InvalidTransaction::Call.into())
+            );
+        }
+        assert_eq!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&account(3), &call, &info, 0)
+                .map(|_| ()),
+            Err(InvalidTransaction::Call.into())
+        );
+        assert_eq!(
+            validity(&account(1), &call)
+                .expect("other members sign at once")
+                .priority,
+            u64::MAX - 1
+        );
+
+        System::set_block_number(110);
+        assert_eq!(
+            validity(&account(3), &call)
+                .expect("delay passed")
+                .provides
+                .len(),
+            1
+        );
+        assert_eq!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&account(3), &call, &info, 0)
+                .expect("feeless duty"),
+            None
+        );
+        assert_ok!(call.dispatch(RuntimeOrigin::signed(account(3))));
+        assert_eq!(Motra::total_burned(), 0);
+    });
+}
+
 #[test]
 fn pricing_zero_balance_member_certifies_for_free_and_rechecks_before_dispatch() {
     use parity_scale_codec::Encode;
@@ -687,7 +747,8 @@ fn refund_non_threshold_attest_charges_no_checkpoints_and_no_motra() {
         );
         assert_eq!(
             actual,
-            <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1),
+            <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1)
+                .saturating_add(OrinqReceipts::backup_signer_weight(1)),
             "non-threshold attestation must not carry any checkpoint surcharge"
         );
         assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
@@ -744,9 +805,13 @@ fn refund_threshold_and_late_attests_cover_observed_checkpoints() {
         use pallet_orinq_receipts::weights::WeightInfo;
         assert_eq!(
             actual,
-            checkpoints.saturating_add(
-                pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_threshold(96)
-            ),
+            checkpoints
+                .saturating_add(
+                    pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_threshold(
+                        96
+                    )
+                )
+                .saturating_add(OrinqReceipts::backup_signer_weight(1)),
             "threshold charges more than observed payouts: {actual:?}, {checkpoints:?}"
         );
         assert!(actual.all_lte(info.weight));
@@ -1156,7 +1221,8 @@ fn refund_batched_non_threshold_attests_fill_the_block_at_their_actual_weight() 
         // batch releases the unused fee path of its signed base; the block
         // stops only when one more single-attest batch cannot reserve its
         // declared weight.
-        let actual = <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1);
+        let actual = <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1)
+            .saturating_add(OrinqReceipts::backup_signer_weight(1));
         let consumed = *System::block_weight().get(DispatchClass::Normal);
         assert!(consumed.all_lte(cap));
         assert!(per_call
@@ -1510,7 +1576,9 @@ fn pricing_new_signer_after_95_prior_signers_reports_their_count() {
         let actual = post.actual_weight.expect("actual");
         assert_eq!(
             actual,
-            W::attest_non_threshold(96).saturating_add(W::balance_mutations(0))
+            W::attest_non_threshold(96)
+                .saturating_add(W::balance_mutations(0))
+                .saturating_add(OrinqReceipts::backup_signer_weight(1))
         );
         let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
             "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
@@ -1579,7 +1647,9 @@ fn pricing_new_signer_after_96_departed_signers_reports_their_count() {
         let actual = post.actual_weight.expect("actual");
         assert_eq!(
             actual,
-            W::attest_non_threshold(96).saturating_add(W::balance_mutations(0))
+            W::attest_non_threshold(96)
+                .saturating_add(W::balance_mutations(0))
+                .saturating_add(OrinqReceipts::backup_signer_weight(1))
         );
         assert!(post.calc_actual_weight(&info).all_lte(info.weight));
         let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
@@ -1598,5 +1668,140 @@ fn pricing_new_signer_after_96_departed_signers_reports_their_count() {
             .collect();
         times.sort_unstable();
         assert!(actual.ref_time() >= times[times.len() / 2]);
+    });
+}
+
+/// Funds the treasury pot, turns the emission reward off and returns the
+/// pot's account, so a payout's balance changes are the fee alone.
+fn fee_only_payouts() -> AccountId {
+    let treasury = OrinqReceipts::treasury_account();
+    fund(&treasury, 1_000_000);
+    pallet_orinq_receipts::AttestationRewardPerSigner::<Runtime>::put(0);
+    treasury
+}
+
+fn total(who: &AccountId) -> u128 {
+    Balances::free_balance(who) + Balances::reserved_balance(who)
+}
+
+fn free(members: core::ops::RangeInclusive<u8>) -> Vec<u128> {
+    members
+        .map(|i| Balances::free_balance(account(i)))
+        .collect()
+}
+
+#[test]
+fn receipt_fee_is_paid_whole_by_a_vesting_locked_submitter_that_empties_its_account() {
+    externalities().execute_with(|| {
+        receipt(3, 3, 1_000_000);
+        let treasury = fee_only_payouts();
+        assert_ok!(OrinqReceipts::set_backup_signers(
+            RuntimeOrigin::root(),
+            vec![account(3)],
+            0
+        ));
+        let (submitter, helper) = (account(210), account(211));
+        fund(&submitter, 3_000_000);
+        fund(&helper, 100_000_000);
+        dispatch(
+            RuntimeCall::Vesting(pallet_vesting::Call::vested_transfer {
+                target: submitter.clone().into(),
+                schedule: pallet_vesting::VestingInfo::new(5_000_000, 1, 10_000_000),
+            }),
+            helper.clone(),
+        );
+        let id = H256::repeat_byte(9);
+        dispatch(submit(id), submitter.clone());
+        assert_eq!(Balances::reserved_balance(&submitter), 1_000_000);
+        dispatch(
+            RuntimeCall::Balances(pallet_balances::Call::transfer_all {
+                dest: helper.clone().into(),
+                keep_alive: true,
+            }),
+            submitter.clone(),
+        );
+        let held = total(&submitter) + total(&helper);
+        let members = free(1..=3);
+        let pot = Balances::free_balance(&treasury);
+        let issuance = Balances::total_issuance();
+
+        let hash = OrinqReceipts::canonical_cert_hash(id).expect("submitted").0;
+        for member in 1..=3 {
+            dispatch(attest(id, hash), account(member));
+        }
+
+        assert_eq!(
+            held - total(&submitter) - total(&helper),
+            1_000_000
+        );
+        assert_eq!(Balances::reserved_balance(&submitter), 0);
+        assert_eq!(
+            free(1..=3),
+            vec![members[0] + 266_666, members[1] + 266_666, members[2]]
+        );
+        assert_eq!(Balances::free_balance(&treasury), pot + 200_002);
+        assert_eq!(Balances::total_issuance(), issuance - 266_666);
+    });
+}
+
+#[test]
+fn receipt_fee_share_too_small_to_open_a_signers_account_goes_to_the_treasury() {
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 3, 1_000);
+        let treasury = fee_only_payouts();
+        fund(&account(3), 0);
+        let submitter = total(&account(200));
+        let members = free(1..=3);
+        let issuance = Balances::total_issuance();
+
+        for member in 1..=3 {
+            dispatch(attest(id, hash), account(member));
+        }
+
+        assert_eq!(total(&account(200)), submitter - 1_000);
+        assert_eq!(free(1..=3), vec![members[0] + 266, members[1] + 266, 0]);
+        assert_eq!(Balances::free_balance(&treasury), 1_000_000 + 468);
+        assert_eq!(Balances::total_issuance(), issuance);
+        System::assert_has_event(
+            pallet_orinq_receipts::Event::ReceiptFeeDistributed {
+                receipt_id: id,
+                submitter: account(200),
+                total_fee: 1_000,
+                per_signer_amount: 266,
+                treasury_amount: 468,
+                signer_count: 3,
+            }
+            .into(),
+        );
+    });
+}
+
+#[test]
+fn receipt_fee_remainder_too_small_to_open_the_treasury_pot_is_burned() {
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 3, 1_000);
+        let treasury = fee_only_payouts();
+        fund(&treasury, 0);
+        let submitter = total(&account(200));
+        let issuance = Balances::total_issuance();
+
+        for member in 1..=3 {
+            dispatch(attest(id, hash), account(member));
+        }
+
+        assert_eq!(total(&account(200)), submitter - 1_000);
+        assert_eq!(Balances::free_balance(&treasury), 0);
+        assert_eq!(Balances::total_issuance(), issuance - 202);
+        System::assert_has_event(
+            pallet_orinq_receipts::Event::ReceiptFeeDistributed {
+                receipt_id: id,
+                submitter: account(200),
+                total_fee: 1_000,
+                per_signer_amount: 266,
+                treasury_amount: 0,
+                signer_count: 3,
+            }
+            .into(),
+        );
     });
 }

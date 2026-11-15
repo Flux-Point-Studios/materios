@@ -426,6 +426,10 @@ fn every_root_gated_call_waits_unless_exempt() {
             }),
             orinq(pallet_orinq_receipts::pallet::Call::join_committee { member: zero() }),
             orinq(pallet_orinq_receipts::pallet::Call::leave_committee { member: zero() }),
+            orinq(pallet_orinq_receipts::pallet::Call::set_backup_signers {
+                members: vec![],
+                delay_blocks: 0,
+            }),
             orinq(pallet_orinq_receipts::pallet::Call::set_bond_requirement { value: 0 }),
             orinq(pallet_orinq_receipts::pallet::Call::set_pinned_committee {
                 members: vec![],
@@ -977,6 +981,15 @@ fn calls_are_classified_by_what_they_can_change() {
             ),
             (
                 orinq(pallet_orinq_receipts::pallet::Call::join_committee { member: acct(Bob) }),
+                Standard,
+            ),
+            // Naming backup signers decides which members certification
+            // pays and how long the unpaid ones wait: an emission lever.
+            (
+                orinq(pallet_orinq_receipts::pallet::Call::set_backup_signers {
+                    members: vec![acct(Bob)],
+                    delay_blocks: 10,
+                }),
                 Standard,
             ),
             (

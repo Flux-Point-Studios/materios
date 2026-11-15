@@ -131,7 +131,9 @@ fn list_length(path: &str) -> u32 {
         | "Utility.batch.calls"
         | "Utility.batch_all.calls"
         | "Utility.force_batch.calls" => 0,
-        "OrinqReceipts.set_committee.members" | "OrinqReceipts.set_break_glass_aura_keys.keys" => {
+        "OrinqReceipts.set_committee.members"
+        | "OrinqReceipts.set_break_glass_aura_keys.keys"
+        | "OrinqReceipts.set_backup_signers.members" => {
             <Runtime as pallet_orinq_receipts::Config>::MaxCommitteeSize::get()
         }
         "OrinqReceipts.set_pinned_committee.members"
