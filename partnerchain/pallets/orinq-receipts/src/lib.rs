@@ -22,7 +22,7 @@ pub mod pallet {
     use alloc::collections::{BTreeMap, BTreeSet};
     use frame_support::dispatch::DispatchResultWithPostInfo;
     use frame_support::pallet_prelude::*;
-    use frame_support::traits::{BalanceStatus, Currency, ReservableCurrency};
+    use frame_support::traits::{BalanceStatus, Currency, Imbalance, ReservableCurrency};
     use frame_support::PalletId;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
@@ -422,12 +422,18 @@ pub mod pallet {
     /// account that leaves the committee stays listed. Only a member can
     /// attest, so the entry does nothing unless the account rejoins, and
     /// then it is a backup signer again.
+    ///
+    /// The set is read when a receipt reaches its threshold, not when each
+    /// signer attested: a member listed between its attest and the threshold
+    /// is unpaid, and one unlisted before the threshold is paid.
     #[pallet::storage]
     pub type BackupSigners<T: Config> =
         StorageValue<_, BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize>, ValueQuery>;
 
     /// Blocks after a receipt's submission before a backup signer may attest
-    /// it. Zero imposes no delay.
+    /// it. Zero imposes no delay. A delay stays under half of
+    /// `ReceiptExpiryBlocks`, so a backup signer has more than half of the
+    /// window before a receipt can be expired.
     #[pallet::storage]
     pub type BackupSignerDelay<T: Config> = StorageValue<_, u32, ValueQuery>;
 
@@ -514,7 +520,7 @@ pub mod pallet {
         /// Submission-fee escrow was distributed on threshold hit. `total_fee`
         /// is the full escrow amount; `per_signer_amount` is the flat share
         /// each of the `signer_count` actual signers received, backup signers
-        /// excepted (see `BackupSignerFeeRefunded`); `treasury_amount`
+        /// excepted (see `BackupSignerFeeBurned`); `treasury_amount`
         /// is the residual (20% + any rounding dust).
         ReceiptFeeDistributed {
             receipt_id: H256,
@@ -621,16 +627,16 @@ pub mod pallet {
             members: Vec<T::AccountId>,
             delay_blocks: u32,
         },
-        /// The fee shares of a certified receipt's backup signers went back
-        /// to its submitter. `ReceiptFeeDistributed` counts those signers in
-        /// its `signer_count`, so `per_signer_amount` reached only
-        /// `signer_count - backup_count` of them. `amount` is what was
-        /// unreserved.
-        BackupSignerFeeRefunded {
+        /// The fee shares of a certified receipt's backup signers were
+        /// burned: taken from the submitter's reserve and from total
+        /// issuance. `ReceiptFeeDistributed` counts those signers in its
+        /// `signer_count`, so `per_signer_amount` reached at most
+        /// `signer_count - backup_signers` of them. `amount` is what was
+        /// burned.
+        BackupSignerFeeBurned {
             receipt_id: H256,
-            submitter: T::AccountId,
             amount: u128,
-            backup_count: u32,
+            backup_signers: u32,
         },
     }
 
@@ -734,6 +740,11 @@ pub mod pallet {
         /// passed since the receipt's submission. Retry from block
         /// `ReceiptSubmittedAt + BackupSignerDelay`.
         BackupSignerTooEarly,
+        /// The backup signer delay would be half of `ReceiptExpiryBlocks` or
+        /// more, leaving a backup signer too little of the window before a
+        /// receipt can be expired. Pass `set_backup_signers` a shorter
+        /// delay, or shorten the delay before lowering the expiry window.
+        BackupSignerDelayTooLong,
     }
 
     // ── Genesis ──────────────────────────────────────────────────────────
@@ -765,7 +776,8 @@ pub mod pallet {
         /// genesis does not set: a listed account is a backup signer from
         /// the block it joins.
         pub backup_signers: Vec<T::AccountId>,
-        /// Initial backup signer delay in blocks. Zero imposes none.
+        /// Initial backup signer delay in blocks. Zero imposes none; any other
+        /// must be less than half of the expiry window genesis stores.
         pub backup_signer_delay: u32,
         #[serde(skip)]
         pub _phantom: core::marker::PhantomData<T>,
@@ -831,6 +843,10 @@ pub mod pallet {
                     Err(_) => panic!("backup_signers exceeds MaxCommitteeSize"),
                 }
             }
+            assert!(
+                Pallet::<T>::backup_delay_fits(self.backup_signer_delay, expiry),
+                "backup_signer_delay must be less than half of receipt_expiry_blocks"
+            );
             if self.backup_signer_delay != 0 {
                 BackupSignerDelay::<T>::put(self.backup_signer_delay);
             }
@@ -1117,6 +1133,12 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         fn changed_accounts(before: &BTreeMap<T::AccountId, BalanceOf<T>>) -> u32 {
             before.iter().filter(|(who, balance)| T::Currency::free_balance(who) != **balance).count() as u32
+        }
+
+        /// Whether a backup signer delay leaves more than half of an expiry
+        /// window of `expiry_blocks`. No delay always does.
+        fn backup_delay_fits(delay_blocks: u32, expiry_blocks: u32) -> bool {
+            delay_blocks == 0 || u64::from(delay_blocks) * 2 < u64::from(expiry_blocks)
         }
 
         /// Refuses `who`'s attestation of `receipt_id` while `who` is a backup
@@ -1418,6 +1440,27 @@ pub mod pallet {
             Ok(fee)
         }
 
+        /// Moves `amount` of the fee `submitter` holds in reserve to `to`'s
+        /// free balance and returns what moved. An account that does not
+        /// exist cannot be credited: `repatriate_reserved` then fails with
+        /// nothing moved, where a short reserve returns the remainder. The
+        /// receipt's escrow entry is already gone, so whatever did not move
+        /// is released to `submitter`; left reserved, nothing could free it.
+        fn pay_from_escrow(submitter: &T::AccountId, to: &T::AccountId, amount: u128) -> u128 {
+            let balance: BalanceOf<T> = amount.try_into().unwrap_or_default();
+            let unmoved: u128 =
+                match T::Currency::repatriate_reserved(submitter, to, balance, BalanceStatus::Free)
+                {
+                    Ok(remainder) => remainder.try_into().unwrap_or_default(),
+                    Err(_) => amount,
+                };
+            if unmoved > 0 {
+                let remainder: BalanceOf<T> = unmoved.try_into().unwrap_or_default();
+                T::Currency::unreserve(submitter, remainder);
+            }
+            amount.saturating_sub(unmoved)
+        }
+
         /// Component 4 helper: distribute the escrowed fee for a freshly
         /// certified receipt. 80% pro-rata-flat to `signers`, 20% plus
         /// rounding residue to the treasury pot. No-op if the receipt has
@@ -1425,9 +1468,10 @@ pub mod pallet {
         /// (defensive — threshold is always >= 1).
         ///
         /// A signer in `backups` is counted in the split and not paid: its
-        /// share is unreserved to the submitter. Dividing by every signer
-        /// keeps a paid signer's share what it is without the backup, so
-        /// waiting for a backup signer earns the others nothing.
+        /// share is burned. Nobody receives it, so a backup signer's
+        /// attestation gains no one anything: the other signers' shares are
+        /// what they are without it, and the submitter pays the whole fee
+        /// even if it holds its blob back until only backup signers attest.
         ///
         /// Uses `repatriate_reserved` with `BalanceStatus::Free` to move
         /// funds directly from the submitter's reserved balance into each
@@ -1465,82 +1509,38 @@ pub mod pallet {
             // rather than dropped/burned — per Component-4 anti-BS rules.
             let to_treasury = reserved_fee.saturating_sub(signer_paid);
 
-            // Move each signer's flat share from submitter's reserved
-            // balance into their free balance. repatriate_reserved returns
-            // any un-moved remainder; we ignore it because in practice
-            // the reserve is exactly `reserved_fee` (set in submit).
             if per_signer > 0 {
                 for signer in signers.iter().filter(|signer| !backups.contains(*signer)) {
-                    let balance: BalanceOf<T> = per_signer.try_into().unwrap_or_default();
-                    let _ = T::Currency::repatriate_reserved(
-                        &submitter,
-                        signer,
-                        balance,
-                        BalanceStatus::Free,
-                    );
+                    Self::pay_from_escrow(&submitter, signer, per_signer);
                 }
             }
 
-            let backup_count = signers.intersection(backups).count() as u32;
-            if backup_count > 0 {
-                let refund = per_signer.saturating_mul(backup_count as u128);
-                let balance: BalanceOf<T> = refund.try_into().unwrap_or_default();
-                let unmoved: u128 = T::Currency::unreserve(&submitter, balance)
-                    .try_into()
-                    .unwrap_or_default();
-                Self::deposit_event(Event::BackupSignerFeeRefunded {
+            let backup_signers = signers.intersection(backups).count() as u32;
+            let to_burn: BalanceOf<T> = per_signer
+                .saturating_mul(backup_signers as u128)
+                .try_into()
+                .unwrap_or_default();
+            // Dropping the imbalance takes what was slashed out of total
+            // issuance.
+            let (burned, _) = T::Currency::slash_reserved(&submitter, to_burn);
+            let amount: u128 = burned.peek().try_into().unwrap_or_default();
+            if amount > 0 {
+                Self::deposit_event(Event::BackupSignerFeeBurned {
                     receipt_id,
-                    submitter: submitter.clone(),
-                    amount: refund.saturating_sub(unmoved),
-                    backup_count,
+                    amount,
+                    backup_signers,
                 });
             }
 
-            // Remaining reserve -> treasury. This captures the 20% base
-            // share plus any rounding residue from the integer-division
-            // above. We use repatriate_reserved here for the same reason:
-            // the invariant is that all reserved fee leaves the submitter.
-            //
-            // On a fresh chain the treasury pot may be "dead" (free balance
-            // below ED with no providers). In that case pallet_balances'
-            // `repatriate_reserved` returns `Err(DeadAccount)` rather than
-            // a non-zero remainder — see `do_transfer_reserved` which
-            // `ensure!(!is_new, ...)` before moving funds. A `Polite`
-            // partial success would return `Ok(remainder)`.
-            //
-            // We handle both cases: map `Err` to "full amount un-moved"
-            // and unreserve whatever remains on the submitter. Net effect:
-            // either the treasury got its cut, or the submitter got it
-            // back. The event reports what actually moved, never the
-            // intended amount. Keeps the math honest for explorers that
-            // sum `treasury_amount` across events.
-            let mut actual_to_treasury = 0u128;
-            if to_treasury > 0 {
-                let treasury_acct = Self::treasury_account();
-                let balance: BalanceOf<T> = to_treasury.try_into().unwrap_or_default();
-                let remainder_u128: u128 = match T::Currency::repatriate_reserved(
-                    &submitter,
-                    &treasury_acct,
-                    balance,
-                    BalanceStatus::Free,
-                ) {
-                    Ok(remainder_bal) => remainder_bal.try_into().unwrap_or_default(),
-                    // Treasury pot is dead / below ED — no funds moved.
-                    // Full requested amount is still reserved on submitter.
-                    Err(_) => to_treasury,
-                };
-                if remainder_u128 > 0 {
-                    let remainder_bal: BalanceOf<T> =
-                        remainder_u128.try_into().unwrap_or_default();
-                    // Release the un-moved remainder back to submitter's
-                    // free balance. Falling back to `unreserve` (not a
-                    // retry of repatriate) because the treasury pot is
-                    // demonstrably un-openable for this call; retrying
-                    // would just fail again.
-                    T::Currency::unreserve(&submitter, remainder_bal);
-                }
-                actual_to_treasury = to_treasury.saturating_sub(remainder_u128);
-            }
+            // The 20% base share plus the division's residue. The event
+            // reports what reached the pot, never the intended amount, so
+            // explorers that sum `treasury_amount` stay right when the pot
+            // could not be credited.
+            let actual_to_treasury = if to_treasury > 0 {
+                Self::pay_from_escrow(&submitter, &Self::treasury_account(), to_treasury)
+            } else {
+                0
+            };
 
             Self::deposit_event(Event::ReceiptFeeDistributed {
                 receipt_id,
@@ -2390,8 +2390,13 @@ pub mod pallet {
         /// could set expiry=0 and race-refund receipts whose signers are
         /// mid-attestation, stealing the submitter→signer flow. See
         /// `MIN_RECEIPT_EXPIRY_BLOCKS` docs for the threat model.
+        ///
+        /// Also rejects a window that is not more than twice the stored
+        /// `BackupSignerDelay` (`BackupSignerDelayTooLong`): shorten the
+        /// delay with `set_backup_signers` first.
         #[pallet::call_index(18)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().reads(1))
             .saturating_add(T::DbWeight::get().writes(1)))]
         pub fn set_receipt_expiry_blocks(
             origin: OriginFor<T>,
@@ -2401,6 +2406,10 @@ pub mod pallet {
             ensure!(
                 value >= MIN_RECEIPT_EXPIRY_BLOCKS,
                 Error::<T>::ReceiptExpiryBlocksTooLow
+            );
+            ensure!(
+                Self::backup_delay_fits(BackupSignerDelay::<T>::get(), value),
+                Error::<T>::BackupSignerDelayTooLong
             );
             ReceiptExpiryBlocks::<T>::put(value);
             Self::deposit_event(Event::ReceiptExpiryBlocksUpdated { new_value: value });
@@ -2724,10 +2733,16 @@ pub mod pallet {
         ///
         /// A backup signer's attestation counts toward the threshold, but at
         /// certification it earns neither the emission reward nor a share of
-        /// the submission fee; its share returns to the submitter. Its
-        /// attestation of a receipt is refused until `delay_blocks` blocks
-        /// after the receipt's submission, so the other members sign, and are
-        /// paid, first. `delay_blocks` of zero imposes no delay.
+        /// the submission fee; its share is burned. Its attestation of a
+        /// receipt is refused until `delay_blocks` blocks after the receipt's
+        /// submission, so the other members sign, and are paid, first.
+        /// `delay_blocks` of zero imposes no delay; any other must be less
+        /// than half of `ReceiptExpiryBlocks` (`BackupSignerDelayTooLong`).
+        ///
+        /// The set is read when a receipt reaches its threshold, not when
+        /// each signer attested: a member this call lists between its attest
+        /// and the threshold is unpaid, and one it unlists before the
+        /// threshold is paid.
         ///
         /// Every member must be in the committee now. One that leaves later
         /// stays listed until the next call. Only a member can attest, so
@@ -2735,7 +2750,7 @@ pub mod pallet {
         /// a backup signer again.
         #[pallet::call_index(29)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
-            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(2)))]
         pub fn set_backup_signers(
             origin: OriginFor<T>,
@@ -2743,6 +2758,10 @@ pub mod pallet {
             delay_blocks: u32,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            ensure!(
+                Self::backup_delay_fits(delay_blocks, ReceiptExpiryBlocks::<T>::get()),
+                Error::<T>::BackupSignerDelayTooLong
+            );
 
             let committee = CommitteeMembers::<T>::get();
             let mut backups = BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::new();

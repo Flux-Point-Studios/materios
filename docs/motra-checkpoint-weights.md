@@ -178,13 +178,19 @@ emission reward nor a fee share, and it is refused until `BackupSignerDelay`
 blocks after the receipt's submission: in pool validation and pre_dispatch as
 `InvalidTransaction::Call`, like every other refused duty, and in dispatch as
 `BackupSignerTooEarly`. The pool bans a refused transaction's hash, so a
-backup signer waits out its delay before it submits. The fee still divides by
+backup signer waits out its delay before it submits. A delay is less than
+half of `ReceiptExpiryBlocks`: `set_backup_signers`, `set_receipt_expiry_blocks`
+and genesis each refuse a pair that breaks this. The fee still divides by
 every signer, so a paid signer's share is what it is without the backup
-signer, and waiting for one earns the others nothing; the backup signers'
-shares are unreserved to the submitter and reported by
-`BackupSignerFeeRefunded`. The payout changes no more accounts than one
-without backup signers: each backup signer's balance stays, and the refunded
-submitter's is the one that moves in its place.
+signer. The backup signers' shares are burned, slashed from the submitter's
+reserve and from total issuance, and reported by `BackupSignerFeeBurned`:
+nobody receives them, so a submitter pays the whole fee whoever signs. The
+burn moves no free balance, so the payout changes fewer accounts with backup
+signers than without. Whether a signer is a backup is read when the threshold
+is reached, not when it attested. A paid signer or a treasury pot whose
+account does not exist cannot be credited; that share is released to the
+submitter, and `ReceiptFeeDistributed` still reports `per_signer_amount` for
+every paid signer.
 
 A canonical attest of a pending receipt reads `BackupSigners`. A backup
 signer's attest also reads `BackupSignerDelay` and, under a delay,
@@ -197,8 +203,8 @@ attests return before the check and make none. The execution these reads add,
 decoding at most `MaxCommitteeSize` backup signers and one membership test
 per signer, is not in the samples and no fit covers it. A threshold attest
 skips a reward mint, three storage writes and a fee transfer for each backup
-signer and adds one unreserve and one event for all of them, so its measured
-bound still holds. The next measurement makes the caller a backup signer past
+signer and adds one slash of the reserve and one event for all of them, so
+its measured bound still holds. The next measurement makes the caller a backup signer past
 its delay, with a full `BackupSigners` set, and folds the reads into the fits.
 
 Runtime regressions commit fixtures before dispatch and inspect real checkpoint

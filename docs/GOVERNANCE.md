@@ -208,6 +208,18 @@ the short ones on the upgrade that adds the pallet, and
 `0 < recovery <= standard <= long <= MaxDelay` always holds. Authority
 recovery has no delay of its own; it waits the standard one.
 
+### Backup signers
+
+`OrinqReceipts.set_backup_signers` names the committee members that certify
+unpaid and the blocks each waits after a receipt's submission before it may
+attest. It waits the standard delay. A non-zero delay must not be scheduled
+until every listed signer runs a cert-daemon release that waits out the delay
+before it attests: the chain refuses an early attest, and the older daemon
+drops a receipt after five refused attempts, so a listed signer on it would
+certify nothing. The delay is always less than half of `ReceiptExpiryBlocks`;
+`set_receipt_expiry_blocks` refuses a window that would break this, so shorten
+the delay before the window.
+
 ### What the long class does and does not bound
 
 The long class is a commitment about the dedicated levers: loosening a bridge

@@ -3965,9 +3965,10 @@ mod emission_reserves {
 // ---------------------------------------------------------------------------
 //
 // A backup signer's attestation counts toward the threshold and earns
-// nothing: no emission reward, and its fee share returns to the submitter.
-// With a delay set it is refused until that many blocks after the receipt's
-// submission, so the other members sign, and are paid, first.
+// nothing: no emission reward, and its fee share is burned, so the submitter
+// pays the whole fee whoever signs. With a delay set it is refused until that
+// many blocks after the receipt's submission, so the other members sign, and
+// are paid, first.
 
 const BACKUP_DELAY: u32 = 5;
 /// `(DEFAULT_FEE * 80 / 100) / 3`, the fee share of each of three signers.
@@ -4017,21 +4018,22 @@ fn rewarded() -> Vec<MockAccountId> {
         .collect()
 }
 
-fn backup_refunds() -> Vec<crate::Event<Test>> {
+fn backup_burns() -> Vec<crate::Event<Test>> {
     receipt_events()
         .into_iter()
-        .filter(|event| matches!(event, crate::Event::BackupSignerFeeRefunded { .. }))
+        .filter(|event| matches!(event, crate::Event::BackupSignerFeeBurned { .. }))
         .collect()
 }
 
 /// What certifying a receipt of committee {1, 2, 3} moved: each member's
-/// gain, the submitter's, the treasury's, and the MATRA minted.
+/// gain, what the submitter got back of its escrowed fee, the treasury's
+/// gain, and the change in total issuance, rewards minted less fee burned.
 #[derive(Debug, PartialEq)]
 struct Payout {
     members: Vec<u128>,
     submitter: u128,
     treasury: u128,
-    minted: u128,
+    issuance: i128,
 }
 
 fn certify_with_backups(backups: &[u8]) -> (H256, Payout) {
@@ -4053,7 +4055,7 @@ fn certify_with_backups(backups: &[u8]) -> (H256, Payout) {
             members: gained[..3].to_vec(),
             submitter: gained[3],
             treasury: Balances::free_balance(&treasury_account()) - treasury,
-            minted: Balances::total_issuance() - issuance,
+            issuance: Balances::total_issuance() as i128 - issuance as i128,
         },
     )
 }
@@ -4110,6 +4112,99 @@ fn set_backup_signers_replaces_the_set_and_delay_and_reports_them() {
         set_backups(&[], 0);
         assert!(pallet::BackupSigners::<Test>::get().is_empty());
         assert_eq!(pallet::BackupSignerDelay::<Test>::get(), 0);
+    });
+}
+
+/// A delay must leave a backup signer more than half of the expiry window:
+/// twice the delay stays under `ReceiptExpiryBlocks`, whether that is even
+/// or odd.
+#[test]
+fn set_backup_signers_refuses_a_delay_of_half_the_expiry_window_or_more() {
+    new_test_ext().execute_with(|| {
+        seed_submitter_and_committee(10, &[1, 2, 3]);
+        assert_eq!(pallet::ReceiptExpiryBlocks::<Test>::get(), 14_400);
+        for refused in [7_200, 7_201, u32::MAX] {
+            assert_noop!(
+                OrinqReceipts::set_backup_signers(RuntimeOrigin::root(), vec![acc(3)], refused),
+                pallet::Error::<Test>::BackupSignerDelayTooLong
+            );
+        }
+        set_backups(&[3], 7_199);
+
+        set_backups(&[3], 0);
+        assert_ok!(OrinqReceipts::set_receipt_expiry_blocks(
+            RuntimeOrigin::root(),
+            11
+        ));
+        assert_noop!(
+            OrinqReceipts::set_backup_signers(RuntimeOrigin::root(), vec![acc(3)], 6),
+            pallet::Error::<Test>::BackupSignerDelayTooLong
+        );
+        set_backups(&[3], 5);
+    });
+}
+
+/// The expiry window cannot shrink to twice the stored delay or less.
+#[test]
+fn set_receipt_expiry_blocks_keeps_the_window_above_twice_the_delay() {
+    new_test_ext().execute_with(|| {
+        seed_submitter_and_committee(10, &[1, 2, 3]);
+        set_backups(&[3], 8);
+        for refused in [10, 16] {
+            assert_noop!(
+                OrinqReceipts::set_receipt_expiry_blocks(RuntimeOrigin::root(), refused),
+                pallet::Error::<Test>::BackupSignerDelayTooLong
+            );
+        }
+        assert_ok!(OrinqReceipts::set_receipt_expiry_blocks(
+            RuntimeOrigin::root(),
+            17
+        ));
+        assert_eq!(pallet::ReceiptExpiryBlocks::<Test>::get(), 17);
+
+        set_backups(&[3], 0);
+        assert_ok!(OrinqReceipts::set_receipt_expiry_blocks(
+            RuntimeOrigin::root(),
+            crate::MIN_RECEIPT_EXPIRY_BLOCKS
+        ));
+    });
+}
+
+/// No delay is always allowed, so the backup signers can be cleared on a
+/// chain whose expiry window was never stored; any delay is refused there.
+#[test]
+fn a_zero_delay_needs_no_expiry_window() {
+    new_test_ext().execute_with(|| {
+        seed_submitter_and_committee(10, &[1, 2, 3]);
+        pallet::ReceiptExpiryBlocks::<Test>::kill();
+        assert_noop!(
+            OrinqReceipts::set_backup_signers(RuntimeOrigin::root(), vec![acc(3)], 1),
+            pallet::Error::<Test>::BackupSignerDelayTooLong
+        );
+        set_backups(&[3], 0);
+    });
+}
+
+/// The longest delay the default expiry window allows holds the backup
+/// signer for all of it.
+#[test]
+fn the_longest_delay_is_enforced_to_its_last_block() {
+    const LONGEST: u32 = 7_199;
+    new_test_ext().execute_with(|| {
+        let rid = three_member_receipt(0xBC);
+        set_backups(&[3], LONGEST);
+        System::set_block_number(LONGEST);
+        assert_noop!(
+            OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(3)),
+                rid,
+                canonical_for(rid)
+            ),
+            pallet::Error::<Test>::BackupSignerTooEarly
+        );
+        System::set_block_number(1 + LONGEST);
+        attest_canonical(3, rid);
+        assert_eq!(last_recorded_count(), 1);
     });
 }
 
@@ -4204,14 +4299,14 @@ fn the_delay_does_not_shield_a_bad_hash_from_its_strike() {
 }
 
 /// Two paid signers and one backup: the paid shares and the treasury's cut
-/// equal those of three paid signers, and the backup's share goes back to
-/// the submitter.
+/// equal those of three paid signers, and the backup's share leaves total
+/// issuance. The submitter gets none of its fee back.
 #[test]
 fn a_backup_signer_counts_toward_the_threshold_and_is_not_paid() {
     let all_paid = new_test_ext().execute_with(|| {
         let (_, payout) = certify_with_backups(&[]);
         assert_eq!(rewarded(), vec![acc(1), acc(2), acc(3)]);
-        assert_eq!(backup_refunds(), vec![]);
+        assert_eq!(backup_burns(), vec![]);
         payout
     });
     assert_eq!(
@@ -4220,7 +4315,7 @@ fn a_backup_signer_counts_toward_the_threshold_and_is_not_paid() {
             members: vec![REWARD + SHARE; 3],
             submitter: 0,
             treasury: TREASURY_CUT,
-            minted: 3 * REWARD,
+            issuance: 3 * REWARD as i128,
         }
     );
 
@@ -4230,9 +4325,9 @@ fn a_backup_signer_counts_toward_the_threshold_and_is_not_paid() {
             payout,
             Payout {
                 members: vec![all_paid.members[0], all_paid.members[1], 0],
-                submitter: SHARE,
+                submitter: 0,
                 treasury: all_paid.treasury,
-                minted: 2 * REWARD,
+                issuance: 2 * REWARD as i128 - SHARE as i128,
             }
         );
 
@@ -4257,19 +4352,49 @@ fn a_backup_signer_counts_toward_the_threshold_and_is_not_paid() {
             signer_count: 3,
         }));
         assert_eq!(
-            backup_refunds(),
-            vec![crate::Event::BackupSignerFeeRefunded {
+            backup_burns(),
+            vec![crate::Event::BackupSignerFeeBurned {
                 receipt_id: rid,
-                submitter: acc(10),
                 amount: SHARE,
-                backup_count: 1,
+                backup_signers: 1,
             }]
         );
     });
 }
 
-/// Every signer a backup: nothing is minted, the three shares return to the
-/// submitter, and the treasury keeps its 20% and the division's remainder.
+/// The submitter's cost does not depend on who signs: with no, one, two or
+/// three backup signers among the three signers it pays the whole fee, the
+/// treasury takes the same cut, and each backup signer's share is burned.
+#[test]
+fn the_submitter_pays_the_whole_fee_whatever_the_backup_signers() {
+    const FUNDED: u128 = 10_000_000_000;
+    for backups in [&[][..], &[3], &[2, 3], &[1, 2, 3]] {
+        new_test_ext().execute_with(|| {
+            let count = backups.len() as u128;
+            let (_, payout) = certify_with_backups(backups);
+            assert_eq!(
+                Balances::total_balance(&acc(10)),
+                FUNDED - DEFAULT_FEE,
+                "{count} backup signers"
+            );
+            assert_eq!(payout.submitter, 0, "{count} backup signers");
+            assert_eq!(payout.treasury, TREASURY_CUT, "{count} backup signers");
+            assert_eq!(
+                payout.members.iter().sum::<u128>(),
+                (3 - count) * (REWARD + SHARE),
+                "{count} backup signers"
+            );
+            assert_eq!(
+                payout.issuance,
+                ((3 - count) * REWARD) as i128 - (count * SHARE) as i128,
+                "{count} backup signers"
+            );
+        });
+    }
+}
+
+/// Every signer a backup: nothing is minted, the three shares are burned,
+/// and the treasury keeps its 20% and the division's remainder.
 #[test]
 fn a_receipt_only_backup_signers_certify_pays_no_signer() {
     new_test_ext().execute_with(|| {
@@ -4278,51 +4403,52 @@ fn a_receipt_only_backup_signers_certify_pays_no_signer() {
             payout,
             Payout {
                 members: vec![0; 3],
-                submitter: 3 * SHARE,
+                submitter: 0,
                 treasury: TREASURY_CUT,
-                minted: 0,
+                issuance: -3 * SHARE as i128,
             }
         );
         assert_eq!(rewarded(), vec![]);
         assert_eq!(OrinqReceipts::total_attestation_rewards(), 0);
         assert_eq!(pallet::AttestationRewardsPaidInEra::<Test>::get(), 0);
         assert_eq!(
-            backup_refunds(),
-            vec![crate::Event::BackupSignerFeeRefunded {
+            backup_burns(),
+            vec![crate::Event::BackupSignerFeeBurned {
                 receipt_id: rid,
-                submitter: acc(10),
                 amount: 3 * SHARE,
-                backup_count: 3,
+                backup_signers: 3,
             }]
         );
     });
 }
 
 /// A treasury pot that cannot be credited sends its cut back to the
-/// submitter as well, and the escrow still leaves the reserve whole.
+/// submitter. The backup signer's share is burned all the same, and the
+/// escrow leaves the reserve whole.
 #[test]
-fn a_backup_refund_and_a_dead_treasury_both_return_to_the_submitter() {
+fn a_dead_treasury_returns_its_cut_and_the_backup_share_still_burns() {
     new_test_ext().execute_with(|| {
         let rid = three_member_receipt(0xB9);
         set_backups(&[3], 0);
         Balances::make_free_balance_be(&treasury_account(), 0);
         let before = free_balances(&[1, 2, 3, 10]);
+        let issuance = Balances::total_issuance();
         for s in [1, 2, 3] {
             attest_canonical(s, rid);
         }
         assert_eq!(
             gains(&[1, 2, 3, 10], &before),
-            vec![REWARD + SHARE, REWARD + SHARE, 0, SHARE + TREASURY_CUT]
+            vec![REWARD + SHARE, REWARD + SHARE, 0, TREASURY_CUT]
         );
         assert_eq!(Balances::reserved_balance(&acc(10)), 0);
         assert_eq!(Balances::free_balance(&treasury_account()), 0);
+        assert_eq!(Balances::total_issuance(), issuance + 2 * REWARD - SHARE);
         assert_eq!(
-            backup_refunds(),
-            vec![crate::Event::BackupSignerFeeRefunded {
+            backup_burns(),
+            vec![crate::Event::BackupSignerFeeBurned {
                 receipt_id: rid,
-                submitter: acc(10),
                 amount: SHARE,
-                backup_count: 1,
+                backup_signers: 1,
             }]
         );
         assert!(
@@ -4338,10 +4464,78 @@ fn a_backup_refund_and_a_dead_treasury_both_return_to_the_submitter() {
     });
 }
 
-/// A receipt escrowed at a zero fee distributes nothing and reports no
-/// refund; the paid signers still earn the emission reward.
+/// A paid signer whose account cannot be credited leaves its share with the
+/// submitter: the escrow is gone, so a share left reserved could never be
+/// released.
 #[test]
-fn a_zero_fee_receipt_refunds_nothing_for_its_backup_signer() {
+fn a_share_a_dead_signer_cannot_take_returns_to_the_submitter() {
+    new_test_ext().execute_with(|| {
+        seed_submitter_and_committee(10, &[1, 2]);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1), acc(2), acc(4)],
+            3
+        ));
+        assert_ok!(OrinqReceipts::set_attestation_reward_per_signer(
+            RuntimeOrigin::root(),
+            0
+        ));
+        let rid = H256::from([0xBA; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xBB; 32])));
+        let before = free_balances(&[1, 2, 4, 10]);
+        let issuance = Balances::total_issuance();
+        for s in [1, 2, 4] {
+            attest_canonical(s, rid);
+        }
+        assert!(is_certified(rid));
+        assert_eq!(gains(&[1, 2, 4, 10], &before), vec![SHARE, SHARE, 0, SHARE]);
+        assert_eq!(Balances::reserved_balance(&acc(10)), 0);
+        assert_eq!(Balances::total_issuance(), issuance);
+        assert_eq!(backup_burns(), vec![]);
+    });
+}
+
+/// A fee too small to give each signer a unit burns nothing and reports no
+/// burn: the treasury takes all of it.
+#[test]
+fn a_fee_too_small_to_share_burns_nothing() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(OrinqReceipts::set_receipt_submission_fee_floor(
+            RuntimeOrigin::root(),
+            0
+        ));
+        assert_ok!(OrinqReceipts::set_receipt_submission_fee(
+            RuntimeOrigin::root(),
+            3
+        ));
+        let (rid, payout) = certify_with_backups(&[3]);
+        assert_eq!(
+            payout,
+            Payout {
+                members: vec![REWARD, REWARD, 0],
+                submitter: 0,
+                treasury: 3,
+                issuance: 2 * REWARD as i128,
+            }
+        );
+        assert_eq!(backup_burns(), vec![]);
+        assert!(
+            receipt_events().contains(&crate::Event::ReceiptFeeDistributed {
+                receipt_id: rid,
+                submitter: acc(10),
+                total_fee: 3,
+                per_signer_amount: 0,
+                treasury_amount: 3,
+                signer_count: 3,
+            })
+        );
+    });
+}
+
+/// A receipt escrowed at a zero fee distributes nothing and reports no
+/// burn; the paid signers still earn the emission reward.
+#[test]
+fn a_zero_fee_receipt_burns_nothing_for_its_backup_signer() {
     new_test_ext().execute_with(|| {
         assert_ok!(OrinqReceipts::set_receipt_submission_fee_floor(
             RuntimeOrigin::root(),
@@ -4358,10 +4552,10 @@ fn a_zero_fee_receipt_refunds_nothing_for_its_backup_signer() {
                 members: vec![REWARD, REWARD, 0],
                 submitter: 0,
                 treasury: 0,
-                minted: 2 * REWARD,
+                issuance: 2 * REWARD as i128,
             }
         );
-        assert_eq!(backup_refunds(), vec![]);
+        assert_eq!(backup_burns(), vec![]);
         assert!(!receipt_events()
             .iter()
             .any(|event| matches!(event, crate::Event::ReceiptFeeDistributed { .. })));
@@ -4370,9 +4564,9 @@ fn a_zero_fee_receipt_refunds_nothing_for_its_backup_signer() {
 }
 
 /// A receipt from before fees were escrowed has no submission block and no
-/// escrow: its backup signer waits for nothing, and nothing is refunded.
+/// escrow: its backup signer waits for nothing, and nothing is burned.
 #[test]
-fn a_receipt_without_escrow_has_no_delay_and_no_refund() {
+fn a_receipt_without_escrow_has_no_delay_and_no_burn() {
     new_test_ext().execute_with(|| {
         let rid = three_member_receipt(0xB6);
         pallet::ReceiptFeeEscrow::<Test>::remove(rid);
@@ -4394,7 +4588,7 @@ fn a_receipt_without_escrow_has_no_delay_and_no_refund() {
         assert_eq!(gains(&[1, 2, 3, 10], &before), vec![REWARD, REWARD, 0, 0]);
         assert_eq!(Balances::free_balance(&treasury_account()), treasury);
         assert_eq!(rewarded(), vec![acc(1), acc(2)]);
-        assert_eq!(backup_refunds(), vec![]);
+        assert_eq!(backup_burns(), vec![]);
     });
 }
 
@@ -4424,7 +4618,7 @@ fn a_backup_signer_that_left_the_committee_changes_nothing() {
         attest_canonical(2, rid);
         assert!(is_certified(rid));
         assert_eq!(gains(&[1, 2], &before), vec![REWARD + 400_000; 2]);
-        assert_eq!(backup_refunds(), vec![]);
+        assert_eq!(backup_burns(), vec![]);
     });
 }
 
@@ -4539,11 +4733,10 @@ fn backup_signer_variants_are_appended() {
                 members: vec![],
                 delay_blocks: 0
             },
-            crate::Event::BackupSignerFeeRefunded {
+            crate::Event::BackupSignerFeeBurned {
                 receipt_id: H256::zero(),
-                submitter: acc(0),
                 amount: 0,
-                backup_count: 0
+                backup_signers: 0
             },
         ]
         .map(|event| event.encode()[0]),
@@ -4554,9 +4747,10 @@ fn backup_signer_variants_are_appended() {
             pallet::Error::CannotEmptyBreakGlassKeysWhileArmed,
             pallet::Error::BackupSignerNotCommitteeMember,
             pallet::Error::BackupSignerTooEarly,
+            pallet::Error::BackupSignerDelayTooLong,
         ]
         .map(error_index),
-        [21, 22, 23]
+        [21, 22, 23, 24]
     );
 }
 
@@ -4611,6 +4805,44 @@ mod backup_signer_genesis {
             serde_json::from_value(config).expect("genesis JSON deserializes");
         assert_eq!(config.backup_signers, vec![acc(7)]);
         assert_eq!(config.backup_signer_delay, BACKUP_DELAY);
+    }
+
+    /// Genesis stores the default expiry window of 14,400 blocks when the
+    /// spec names none, and holds the delay to whichever it stores.
+    #[test]
+    fn genesis_takes_a_delay_under_half_the_expiry_window() {
+        genesis(vec![acc(1)], 7_199).execute_with(|| {
+            assert_eq!(pallet::BackupSignerDelay::<Test>::get(), 7_199);
+        });
+        let config = pallet_orinq_receipts::GenesisConfig::<Test> {
+            receipt_expiry_blocks: 20,
+            backup_signer_delay: 9,
+            ..Default::default()
+        };
+        sp_io::TestExternalities::new(config.build_storage().unwrap()).execute_with(|| {
+            assert_eq!(pallet::BackupSignerDelay::<Test>::get(), 9);
+        });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "backup_signer_delay must be less than half of receipt_expiry_blocks"
+    )]
+    fn a_delay_of_half_the_default_expiry_window_refuses_genesis() {
+        genesis(vec![acc(1)], 7_200);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "backup_signer_delay must be less than half of receipt_expiry_blocks"
+    )]
+    fn a_delay_of_half_the_named_expiry_window_refuses_genesis() {
+        let config = pallet_orinq_receipts::GenesisConfig::<Test> {
+            receipt_expiry_blocks: 20,
+            backup_signer_delay: 10,
+            ..Default::default()
+        };
+        let _ = config.build_storage();
     }
 
     #[test]

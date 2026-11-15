@@ -250,6 +250,7 @@ fn pricing_backup_signer_duty_is_refused_until_its_delay_has_passed() {
     externalities().execute_with(|| {
         let (id, hash) = receipt(3, 2, 1_000_000);
         pricing_params(50_000_000_000);
+        pallet_orinq_receipts::ReceiptExpiryBlocks::<Runtime>::put(14_400);
         assert_ok!(OrinqReceipts::set_backup_signers(
             RuntimeOrigin::root(),
             vec![account(3)],

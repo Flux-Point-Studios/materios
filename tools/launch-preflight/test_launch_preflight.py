@@ -4583,9 +4583,10 @@ def test_the_spec243_genesis_starts_settlement_at_its_current_version_settling_a
 
 @pytest.mark.parametrize("item", ["BackupSigners", "BackupSignerDelay"])
 def test_a_genesis_that_names_backup_signers_is_on_the_allowlist(spec243, item):
-    """Who certifies unpaid, and how long it waits first, holds no MATRA. The spec 243 metadata lacks both items."""
+    """Who certifies unpaid, and how long it waits first, holds no MATRA. The runtime's own metadata names both
+    items, so the allowlist is held to the names the runtime declares."""
     spec, meta = spec243
-    meta.storage_names[lp.storage_key("OrinqReceipts", item)] = f"OrinqReceipts.{item}"
+    assert meta.storage_names[lp.storage_key("OrinqReceipts", item)] == f"OrinqReceipts.{item}"
     put(spec, "OrinqReceipts", item, {"BackupSigners": lp.compact(1) + fresh_account(),
                                       "BackupSignerDelay": (100).to_bytes(4, "little")}[item])
     assert lp.check_genesis_storage(spec, meta) == []
