@@ -22,7 +22,9 @@ pub mod pallet {
     use alloc::collections::{BTreeMap, BTreeSet};
     use frame_support::dispatch::DispatchResultWithPostInfo;
     use frame_support::pallet_prelude::*;
-    use frame_support::traits::{BalanceStatus, Currency, Imbalance, ReservableCurrency};
+    use frame_support::traits::{
+        BalanceStatus, Currency, Imbalance, ReservableCurrency, SameOrOther,
+    };
     use frame_support::PalletId;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
@@ -41,6 +43,11 @@ pub mod pallet {
         <<T as Config>::Currency as frame_support::traits::Currency<
             <T as frame_system::Config>::AccountId,
         >>::Balance;
+
+    type NegativeImbalanceOf<T> =
+        <<T as Config>::Currency as frame_support::traits::Currency<
+            <T as frame_system::Config>::AccountId,
+        >>::NegativeImbalance;
 
     /// Mirror of pallet_grandpa's StoredPendingChange (which is pub(crate)).
     /// Must match the SCALE encoding layout exactly.
@@ -1440,25 +1447,22 @@ pub mod pallet {
             Ok(fee)
         }
 
-        /// Moves `amount` of the fee `submitter` holds in reserve to `to`'s
-        /// free balance and returns what moved. An account that does not
-        /// exist cannot be credited: `repatriate_reserved` then fails with
-        /// nothing moved, where a short reserve returns the remainder. The
-        /// receipt's escrow entry is already gone, so whatever did not move
-        /// is released to `submitter`; left reserved, nothing could free it.
-        fn pay_from_escrow(submitter: &T::AccountId, to: &T::AccountId, amount: u128) -> u128 {
-            let balance: BalanceOf<T> = amount.try_into().unwrap_or_default();
-            let unmoved: u128 =
-                match T::Currency::repatriate_reserved(submitter, to, balance, BalanceStatus::Free)
-                {
-                    Ok(remainder) => remainder.try_into().unwrap_or_default(),
-                    Err(_) => amount,
-                };
-            if unmoved > 0 {
-                let remainder: BalanceOf<T> = unmoved.try_into().unwrap_or_default();
-                T::Currency::unreserve(submitter, remainder);
+        /// Credits `amount` out of `pot` to `to`'s free balance and returns
+        /// what arrived. A credit of at least the existential deposit creates
+        /// an account that does not exist; a smaller one cannot be made, and
+        /// it stays in `pot`.
+        fn pay_from_pot(
+            pot: &mut NegativeImbalanceOf<T>,
+            to: &T::AccountId,
+            amount: u128,
+        ) -> u128 {
+            let share = pot.extract(amount.try_into().unwrap_or_default());
+            let credit = T::Currency::deposit_creating(to, share.peek());
+            let paid: u128 = credit.peek().try_into().unwrap_or_default();
+            if let SameOrOther::Same(unpaid) = share.offset(credit) {
+                pot.subsume(unpaid);
             }
-            amount.saturating_sub(unmoved)
+            paid
         }
 
         /// Component 4 helper: distribute the escrowed fee for a freshly
@@ -1473,10 +1477,12 @@ pub mod pallet {
         /// what they are without it, and the submitter pays the whole fee
         /// even if it holds its blob back until only backup signers attest.
         ///
-        /// Uses `repatriate_reserved` with `BalanceStatus::Free` to move
-        /// funds directly from the submitter's reserved balance into each
-        /// beneficiary's free balance, keeping the invariant that the fee
-        /// is only ever in one place: submitter's reserve -> recipients.
+        /// The whole fee is slashed from the submitter's reserve before any
+        /// of it is paid, and none of it returns to the submitter. A slash
+        /// ignores balance locks, where a transfer out of the reserve does
+        /// not: a submitter that locks its balance and empties the rest
+        /// after submitting would otherwise keep whatever could not move.
+        /// A share that cannot be credited goes to the treasury pot.
         fn distribute_submission_fee(
             receipt_id: H256,
             signers: &BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize>,
@@ -1504,25 +1510,26 @@ pub mod pallet {
             let signer_count = signers.len() as u32;
             let to_signers = reserved_fee.saturating_mul(80) / 100;
             let per_signer = to_signers / (signer_count as u128);
-            let signer_paid = per_signer.saturating_mul(signer_count as u128);
-            // Rounding dust from the 80% bucket is routed to treasury
-            // rather than dropped/burned — per Component-4 anti-BS rules.
-            let to_treasury = reserved_fee.saturating_sub(signer_paid);
+
+            let (mut pot, _) = T::Currency::slash_reserved(
+                &submitter,
+                reserved_fee.try_into().unwrap_or_default(),
+            );
 
             if per_signer > 0 {
                 for signer in signers.iter().filter(|signer| !backups.contains(*signer)) {
-                    Self::pay_from_escrow(&submitter, signer, per_signer);
+                    Self::pay_from_pot(&mut pot, signer, per_signer);
                 }
             }
 
             let backup_signers = signers.intersection(backups).count() as u32;
-            let to_burn: BalanceOf<T> = per_signer
-                .saturating_mul(backup_signers as u128)
-                .try_into()
-                .unwrap_or_default();
-            // Dropping the imbalance takes what was slashed out of total
-            // issuance.
-            let (burned, _) = T::Currency::slash_reserved(&submitter, to_burn);
+            // Dropping the imbalance takes it out of total issuance.
+            let burned = pot.extract(
+                per_signer
+                    .saturating_mul(backup_signers as u128)
+                    .try_into()
+                    .unwrap_or_default(),
+            );
             let amount: u128 = burned.peek().try_into().unwrap_or_default();
             if amount > 0 {
                 Self::deposit_event(Event::BackupSignerFeeBurned {
@@ -1532,22 +1539,22 @@ pub mod pallet {
                 });
             }
 
-            // The 20% base share plus the division's residue. The event
-            // reports what reached the pot, never the intended amount, so
-            // explorers that sum `treasury_amount` stay right when the pot
-            // could not be credited.
-            let actual_to_treasury = if to_treasury > 0 {
-                Self::pay_from_escrow(&submitter, &Self::treasury_account(), to_treasury)
-            } else {
-                0
-            };
+            // The 20% base share, the division's residue, and any signer
+            // share that could not be credited. The event reports what
+            // reached the treasury pot, never the intended amount, so
+            // explorers that sum `treasury_amount` stay right. A remainder
+            // the treasury pot cannot take is dropped with `pot`, out of
+            // total issuance.
+            let remainder: u128 = pot.peek().try_into().unwrap_or_default();
+            let treasury_amount =
+                Self::pay_from_pot(&mut pot, &Self::treasury_account(), remainder);
 
             Self::deposit_event(Event::ReceiptFeeDistributed {
                 receipt_id,
                 submitter,
                 total_fee: reserved_fee,
                 per_signer_amount: per_signer,
-                treasury_amount: actual_to_treasury,
+                treasury_amount,
                 signer_count,
             });
         }

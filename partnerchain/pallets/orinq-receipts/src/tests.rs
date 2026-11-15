@@ -2198,96 +2198,39 @@ fn set_receipt_expiry_blocks_rejects_below_minimum() {
     });
 }
 
-/// I3 — If the treasury pot is below ED at payout, `repatriate_reserved`
-/// silently returns the amount un-moved. Without the fix, the submitter's
-/// reserve would remain stuck AND the event would report a treasury_amount
-/// that was never transferred. The fix must refund the remainder to the
-/// submitter and emit an event whose `treasury_amount` reflects what
-/// actually moved.
+/// A treasury pot with no account is opened by its cut: the submitter's
+/// reserve is emptied, none of the fee returns to it, and the event reports
+/// what reached the pot.
 #[test]
-fn treasury_pot_below_ed_refunds_remainder_to_submitter() {
+fn a_treasury_pot_with_no_account_is_opened_by_its_cut() {
     new_test_ext().execute_with(|| {
-        // 5-member committee, threshold 3; 3 signers actually attest.
-        // Per-signer = 266_666, to_treasury = 200_002 on DEFAULT_FEE.
-        let submitter_seed = 10;
-        let committee_seeds: Vec<u8> = (1u8..=5).collect();
-
-        // Seed: submitter funded; committee bonded + joined; but
-        // explicitly DO NOT pre-fund the treasury pot. With ED=1 and a
-        // zero balance, the 200_002 repatriation will silently keep the
-        // funds reserved on the submitter (the pot can't be opened below ED).
-        Balances::make_free_balance_be(&acc(submitter_seed), 10_000_000_000);
-        for &s in committee_seeds.iter() {
-            Balances::make_free_balance_be(&acc(s), 10_000_000_000);
-            assert_ok!(OrinqReceipts::bond(
-                RuntimeOrigin::signed(acc(s)),
-                1_000_000_000
-            ));
-            assert_ok!(OrinqReceipts::join_committee(RuntimeOrigin::root(), acc(s)));
-        }
-        // Treasury pot explicitly drained below ED.
+        seed_submitter_and_committee(10, &[1, 2, 3, 4, 5]);
         Balances::make_free_balance_be(&treasury_account(), 0);
-        assert_eq!(Balances::free_balance(&treasury_account()), 0);
-
         assert_ok!(OrinqReceipts::set_committee(
             RuntimeOrigin::root(),
-            committee_seeds.iter().map(|&s| acc(s)).collect(),
+            (1u8..=5).map(acc).collect(),
             3
         ));
-
         let rid = H256::from([0x50; 32]);
-        let ch = H256::from([0x51; 32]);
-        assert_ok!(submit_c4(submitter_seed, rid, ch));
-        assert_eq!(
-            Balances::reserved_balance(&acc(submitter_seed)),
-            DEFAULT_FEE
-        );
+        assert_ok!(submit_c4(10, rid, H256::from([0x51; 32])));
+        assert_eq!(Balances::reserved_balance(&acc(10)), DEFAULT_FEE);
+        let submitter_free = Balances::free_balance(&acc(10));
 
-        let submitter_free_before = Balances::free_balance(&acc(submitter_seed));
-
-        // Three signers attest — threshold hits.
-        let signer_seeds = [1u8, 2, 3];
-        let cert_hash = canonical_for(rid); // canonical-only
-        for &s in signer_seeds.iter() {
-            assert_ok!(OrinqReceipts::attest_availability_cert(
-                RuntimeOrigin::signed(acc(s)),
-                rid,
-                cert_hash
-            ));
+        for s in [1, 2, 3] {
+            attest_canonical(s, rid);
         }
 
-        // Invariant 1: submitter's reserve is fully drained. Without the
-        // fix the treasury share would still be held.
-        assert_eq!(
-            Balances::reserved_balance(&acc(submitter_seed)),
-            0,
-            "submitter's full reserve must be released regardless of treasury state"
-        );
-
-        // Invariant 2: submitter's free balance reflects refund of the
-        // treasury share (since the pot was below ED).
-        let expected_refund = 200_002u128; // 20% + dust
-        assert_eq!(
-            Balances::free_balance(&acc(submitter_seed)),
-            submitter_free_before + expected_refund,
-            "submitter must be refunded the un-moved treasury share"
-        );
-
-        // Invariant 3: the event reports actual_treasury_moved (0 in this
-        // case), not the requested 200_002.
-        let events = frame_system::Pallet::<Test>::events();
-        let matched = events.iter().any(|r| {
+        assert_eq!(Balances::reserved_balance(&acc(10)), 0);
+        assert_eq!(Balances::free_balance(&acc(10)), submitter_free);
+        assert_eq!(Balances::free_balance(&treasury_account()), 200_002);
+        assert!(frame_system::Pallet::<Test>::events().iter().any(|r| {
             matches!(
                 &r.event,
                 RuntimeEvent::OrinqReceipts(
                     crate::Event::ReceiptFeeDistributed { treasury_amount, .. }
-                ) if *treasury_amount == 0
+                ) if *treasury_amount == 200_002
             )
-        });
-        assert!(
-            matched,
-            "event must report treasury_amount=0 when the pot was below ED"
-        );
+        }));
     });
 }
 
@@ -4422,11 +4365,67 @@ fn a_receipt_only_backup_signers_certify_pays_no_signer() {
     });
 }
 
-/// A treasury pot that cannot be credited sends its cut back to the
-/// submitter. The backup signer's share is burned all the same, and the
-/// escrow leaves the reserve whole.
+/// A submitter cannot keep its fee by locking its balance and moving the
+/// rest away once the fee is reserved: the certified receipt's fee leaves
+/// the reserve whole and reaches the signers and the treasury.
 #[test]
-fn a_dead_treasury_returns_its_cut_and_the_backup_share_still_burns() {
+fn a_submitter_with_a_locked_and_emptied_balance_still_pays_the_whole_fee() {
+    use frame_support::traits::{LockableCurrency, WithdrawReasons};
+    for backups in [&[][..], &[3]] {
+        new_test_ext().execute_with(|| {
+            seed_submitter_and_committee(10, &[1, 2, 3]);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                vec![acc(1), acc(2), acc(3)],
+                3
+            ));
+            assert_ok!(OrinqReceipts::set_attestation_reward_per_signer(
+                RuntimeOrigin::root(),
+                0
+            ));
+            set_backups(backups, 0);
+            Balances::make_free_balance_be(&acc(10), 8_000_000);
+            Balances::make_free_balance_be(&acc(77), 1_000_000);
+            Balances::set_lock(*b"vesting ", &acc(10), 5_000_000, WithdrawReasons::all());
+            let rid = H256::from([0xBC; 32]);
+            assert_ok!(submit_c4(10, rid, H256::from([0xBD; 32])));
+            assert_ok!(Balances::transfer_all(
+                RuntimeOrigin::signed(acc(10)),
+                acc(77),
+                true
+            ));
+            let held = Balances::total_balance(&acc(10)) + Balances::total_balance(&acc(77));
+            let before = free_balances(&[1, 2, 3]);
+            let treasury = Balances::free_balance(&treasury_account());
+            for s in [1, 2, 3] {
+                attest_canonical(s, rid);
+            }
+            assert!(is_certified(rid));
+            let paid = 3 - backups.len();
+            assert_eq!(
+                held - Balances::total_balance(&acc(10)) - Balances::total_balance(&acc(77)),
+                DEFAULT_FEE,
+                "{} backup signers",
+                backups.len()
+            );
+            assert_eq!(Balances::reserved_balance(&acc(10)), 0);
+            assert_eq!(
+                gains(&[1, 2, 3], &before),
+                [vec![SHARE; paid], vec![0; backups.len()]].concat()
+            );
+            assert_eq!(
+                Balances::free_balance(&treasury_account()) - treasury,
+                TREASURY_CUT
+            );
+        });
+    }
+}
+
+/// A treasury pot with no account is created by its cut. The backup
+/// signer's share is burned all the same, and nothing returns to the
+/// submitter.
+#[test]
+fn a_treasury_pot_with_no_account_still_takes_its_cut() {
     new_test_ext().execute_with(|| {
         let rid = three_member_receipt(0xB9);
         set_backups(&[3], 0);
@@ -4438,10 +4437,10 @@ fn a_dead_treasury_returns_its_cut_and_the_backup_share_still_burns() {
         }
         assert_eq!(
             gains(&[1, 2, 3, 10], &before),
-            vec![REWARD + SHARE, REWARD + SHARE, 0, TREASURY_CUT]
+            vec![REWARD + SHARE, REWARD + SHARE, 0, 0]
         );
         assert_eq!(Balances::reserved_balance(&acc(10)), 0);
-        assert_eq!(Balances::free_balance(&treasury_account()), 0);
+        assert_eq!(Balances::free_balance(&treasury_account()), TREASURY_CUT);
         assert_eq!(Balances::total_issuance(), issuance + 2 * REWARD - SHARE);
         assert_eq!(
             backup_burns(),
@@ -4457,18 +4456,17 @@ fn a_dead_treasury_returns_its_cut_and_the_backup_share_still_burns() {
                 submitter: acc(10),
                 total_fee: DEFAULT_FEE,
                 per_signer_amount: SHARE,
-                treasury_amount: 0,
+                treasury_amount: TREASURY_CUT,
                 signer_count: 3,
             })
         );
     });
 }
 
-/// A paid signer whose account cannot be credited leaves its share with the
-/// submitter: the escrow is gone, so a share left reserved could never be
-/// released.
+/// A paid signer with no account is created by its share: the submitter
+/// gets nothing back for a signer that emptied its account.
 #[test]
-fn a_share_a_dead_signer_cannot_take_returns_to_the_submitter() {
+fn a_signer_with_no_account_is_paid_its_share() {
     new_test_ext().execute_with(|| {
         seed_submitter_and_committee(10, &[1, 2]);
         assert_ok!(OrinqReceipts::set_committee(
@@ -4488,7 +4486,7 @@ fn a_share_a_dead_signer_cannot_take_returns_to_the_submitter() {
             attest_canonical(s, rid);
         }
         assert!(is_certified(rid));
-        assert_eq!(gains(&[1, 2, 4, 10], &before), vec![SHARE, SHARE, 0, SHARE]);
+        assert_eq!(gains(&[1, 2, 4, 10], &before), vec![SHARE, SHARE, SHARE, 0]);
         assert_eq!(Balances::reserved_balance(&acc(10)), 0);
         assert_eq!(Balances::total_issuance(), issuance);
         assert_eq!(backup_burns(), vec![]);

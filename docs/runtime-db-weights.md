@@ -34,8 +34,8 @@ Nothing here is deployed or enacted.
   now moves with it (`benchmark_motra_weights_price_storage_at_the_configured_schedule`).
 - **Threshold attestations charge each checkpoint once.** Their samples record
   `15 + 3n` reads and `10 + 3n` writes, which include the MOTRA checkpoint of
-  the n signers and of the treasury or refunded submitter. `balance_mutations`
-  already charges those, so the template subtracts `1 + n` reads and writes:
+  the n signers and of the treasury. `balance_mutations` already charges
+  those, so the template subtracts `1 + n` reads and writes:
   97 of each, 12,125,000,000 ref_time, at n = 96
   (`benchmark_threshold_attestation_charges_each_checkpoint_once`).
 - **Receipt hooks price their storage.** Each block, `OrinqReceipts::on_initialize`

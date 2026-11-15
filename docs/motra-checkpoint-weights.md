@@ -187,10 +187,15 @@ reserve and from total issuance, and reported by `BackupSignerFeeBurned`:
 nobody receives them, so a submitter pays the whole fee whoever signs. The
 burn moves no free balance, so the payout changes fewer accounts with backup
 signers than without. Whether a signer is a backup is read when the threshold
-is reached, not when it attested. A paid signer or a treasury pot whose
-account does not exist cannot be credited; that share is released to the
-submitter, and `ReceiptFeeDistributed` still reports `per_signer_amount` for
-every paid signer.
+is reached, not when it attested. The whole fee is slashed from the
+submitter's reserve before any of it is paid, so none of it returns to the
+submitter and a balance lock on the submitter keeps none of it back. A share
+of at least the existential deposit creates a paid signer's or the treasury
+pot's account if it does not exist. A smaller share to a signer with no
+account goes to the treasury pot; a smaller remainder to a treasury pot with
+no account leaves total issuance. `ReceiptFeeDistributed` still reports
+`per_signer_amount` for every paid signer, and its `treasury_amount` is what
+reached the pot.
 
 A canonical attest of a pending receipt reads `BackupSigners`. A backup
 signer's attest also reads `BackupSignerDelay` and, under a delay,
