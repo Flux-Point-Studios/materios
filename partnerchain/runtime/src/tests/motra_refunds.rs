@@ -241,6 +241,65 @@ fn pricing_attestation_duty_rejects_invalid_and_replayed_calls() {
     });
 }
 
+/// Receipt submitted at block 100 with a delay of 10: the fee extension
+/// refuses the backup signer's duty through block 109, in the pool and
+/// again before dispatch, alone or in a batch, and admits it free at 110.
+#[test]
+fn pricing_backup_signer_duty_is_refused_until_its_delay_has_passed() {
+    use sp_runtime::transaction_validity::InvalidTransaction;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 1_000_000);
+        pricing_params(50_000_000_000);
+        assert_ok!(OrinqReceipts::set_backup_signers(
+            RuntimeOrigin::root(),
+            vec![account(3)],
+            10
+        ));
+        let call = attest(id, hash);
+        let info = call.get_dispatch_info();
+        let batch = RuntimeCall::Utility(pallet_utility::Call::batch {
+            calls: vec![call.clone()],
+        });
+
+        System::set_block_number(109);
+        for early in [&call, &batch] {
+            assert_eq!(
+                validity(&account(3), early),
+                Err(InvalidTransaction::Call.into())
+            );
+        }
+        assert_eq!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&account(3), &call, &info, 0)
+                .map(|_| ()),
+            Err(InvalidTransaction::Call.into())
+        );
+        assert_eq!(
+            validity(&account(1), &call)
+                .expect("other members sign at once")
+                .priority,
+            u64::MAX - 1
+        );
+
+        System::set_block_number(110);
+        assert_eq!(
+            validity(&account(3), &call)
+                .expect("delay passed")
+                .provides
+                .len(),
+            1
+        );
+        assert_eq!(
+            pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                .pre_dispatch(&account(3), &call, &info, 0)
+                .expect("feeless duty"),
+            None
+        );
+        assert_ok!(call.dispatch(RuntimeOrigin::signed(account(3))));
+        assert_eq!(Motra::total_burned(), 0);
+    });
+}
+
 #[test]
 fn pricing_zero_balance_member_certifies_for_free_and_rechecks_before_dispatch() {
     use parity_scale_codec::Encode;
@@ -687,7 +746,8 @@ fn refund_non_threshold_attest_charges_no_checkpoints_and_no_motra() {
         );
         assert_eq!(
             actual,
-            <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1),
+            <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1)
+                .saturating_add(OrinqReceipts::backup_signer_weight(1)),
             "non-threshold attestation must not carry any checkpoint surcharge"
         );
         assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
@@ -744,9 +804,13 @@ fn refund_threshold_and_late_attests_cover_observed_checkpoints() {
         use pallet_orinq_receipts::weights::WeightInfo;
         assert_eq!(
             actual,
-            checkpoints.saturating_add(
-                pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_threshold(96)
-            ),
+            checkpoints
+                .saturating_add(
+                    pallet_orinq_receipts::weights::SubstrateWeight::<Runtime>::attest_threshold(
+                        96
+                    )
+                )
+                .saturating_add(OrinqReceipts::backup_signer_weight(1)),
             "threshold charges more than observed payouts: {actual:?}, {checkpoints:?}"
         );
         assert!(actual.all_lte(info.weight));
@@ -1156,7 +1220,8 @@ fn refund_batched_non_threshold_attests_fill_the_block_at_their_actual_weight() 
         // batch releases the unused fee path of its signed base; the block
         // stops only when one more single-attest batch cannot reserve its
         // declared weight.
-        let actual = <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1);
+        let actual = <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1)
+            .saturating_add(OrinqReceipts::backup_signer_weight(1));
         let consumed = *System::block_weight().get(DispatchClass::Normal);
         assert!(consumed.all_lte(cap));
         assert!(per_call
@@ -1510,7 +1575,9 @@ fn pricing_new_signer_after_95_prior_signers_reports_their_count() {
         let actual = post.actual_weight.expect("actual");
         assert_eq!(
             actual,
-            W::attest_non_threshold(96).saturating_add(W::balance_mutations(0))
+            W::attest_non_threshold(96)
+                .saturating_add(W::balance_mutations(0))
+                .saturating_add(OrinqReceipts::backup_signer_weight(1))
         );
         let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
             "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
@@ -1579,7 +1646,9 @@ fn pricing_new_signer_after_96_departed_signers_reports_their_count() {
         let actual = post.actual_weight.expect("actual");
         assert_eq!(
             actual,
-            W::attest_non_threshold(96).saturating_add(W::balance_mutations(0))
+            W::attest_non_threshold(96)
+                .saturating_add(W::balance_mutations(0))
+                .saturating_add(OrinqReceipts::backup_signer_weight(1))
         );
         assert!(post.calc_actual_weight(&info).all_lte(info.weight));
         let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(

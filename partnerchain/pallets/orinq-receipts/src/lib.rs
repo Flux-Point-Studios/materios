@@ -57,6 +57,10 @@ pub mod pallet {
     /// in-flight receipt before its signers cross the threshold.
     pub const MIN_RECEIPT_EXPIRY_BLOCKS: u32 = 10;
 
+    /// The storage reads that hold a backup signer to its delay:
+    /// `BackupSigners`, `BackupSignerDelay` and `ReceiptSubmittedAt`.
+    pub const MAX_BACKUP_SIGNER_READS: u64 = 3;
+
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
@@ -412,6 +416,21 @@ pub mod pallet {
         OptionQuery,
     >;
 
+    /// Committee members whose attestations count toward the threshold but
+    /// earn neither the emission reward nor a fee share, and are refused
+    /// until `BackupSignerDelay` blocks after the receipt's submission. An
+    /// account that leaves the committee stays listed. Only a member can
+    /// attest, so the entry does nothing unless the account rejoins, and
+    /// then it is a backup signer again.
+    #[pallet::storage]
+    pub type BackupSigners<T: Config> =
+        StorageValue<_, BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize>, ValueQuery>;
+
+    /// Blocks after a receipt's submission before a backup signer may attest
+    /// it. Zero imposes no delay.
+    #[pallet::storage]
+    pub type BackupSignerDelay<T: Config> = StorageValue<_, u32, ValueQuery>;
+
     // ── Events ───────────────────────────────────────────────────────────
 
     #[pallet::event]
@@ -494,7 +513,8 @@ pub mod pallet {
         AutoEjected { who: T::AccountId, remaining_bond: u128 },
         /// Submission-fee escrow was distributed on threshold hit. `total_fee`
         /// is the full escrow amount; `per_signer_amount` is the flat share
-        /// each of the `signer_count` actual signers received; `treasury_amount`
+        /// each of the `signer_count` actual signers received, backup signers
+        /// excepted (see `BackupSignerFeeRefunded`); `treasury_amount`
         /// is the residual (20% + any rounding dust).
         ReceiptFeeDistributed {
             receipt_id: H256,
@@ -596,6 +616,22 @@ pub mod pallet {
             previous: u32,
             threshold: u32,
         },
+        /// Root replaced the backup signers and their delay.
+        BackupSignersUpdated {
+            members: Vec<T::AccountId>,
+            delay_blocks: u32,
+        },
+        /// The fee shares of a certified receipt's backup signers went back
+        /// to its submitter. `ReceiptFeeDistributed` counts those signers in
+        /// its `signer_count`, so `per_signer_amount` reached only
+        /// `signer_count - backup_count` of them. `amount` is what was
+        /// unreserved.
+        BackupSignerFeeRefunded {
+            receipt_id: H256,
+            submitter: T::AccountId,
+            amount: u128,
+            backup_count: u32,
+        },
     }
 
     // Error doc comments ship in on-chain metadata. Keep them actionable.
@@ -690,6 +726,14 @@ pub mod pallet {
         /// would pass — the floor would read ARMED on chain while enforcing
         /// nothing. Disarm the floor first, or pass a non-empty replacement.
         CannotEmptyBreakGlassKeysWhileArmed,
+        /// `set_backup_signers` named an account that is not in the
+        /// attestation committee. Add it with `join_committee` first, or
+        /// drop it from the list.
+        BackupSignerNotCommitteeMember,
+        /// A backup signer attested before `BackupSignerDelay` blocks had
+        /// passed since the receipt's submission. Retry from block
+        /// `ReceiptSubmittedAt + BackupSignerDelay`.
+        BackupSignerTooEarly,
     }
 
     // ── Genesis ──────────────────────────────────────────────────────────
@@ -717,6 +761,12 @@ pub mod pallet {
         /// Initial expiry deadline in blocks (Component 4). Defaults to
         /// 14_400 blocks (~24h at 6s/block).
         pub receipt_expiry_blocks: u32,
+        /// Initial backup signers. Not checked against the committee, which
+        /// genesis does not set: a listed account is a backup signer from
+        /// the block it joins.
+        pub backup_signers: Vec<T::AccountId>,
+        /// Initial backup signer delay in blocks. Zero imposes none.
+        pub backup_signer_delay: u32,
         #[serde(skip)]
         pub _phantom: core::marker::PhantomData<T>,
     }
@@ -772,6 +822,18 @@ pub mod pallet {
             ReceiptSubmissionFee::<T>::put(fee);
             ReceiptSubmissionFeeFloor::<T>::put(floor);
             ReceiptExpiryBlocks::<T>::put(expiry);
+            // Stored only when set, so a genesis that names no backup
+            // signers has the state root it would have without these items.
+            if !self.backup_signers.is_empty() {
+                let listed: BTreeSet<T::AccountId> = self.backup_signers.iter().cloned().collect();
+                match BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::try_from(listed) {
+                    Ok(backups) => BackupSigners::<T>::put(backups),
+                    Err(_) => panic!("backup_signers exceeds MaxCommitteeSize"),
+                }
+            }
+            if self.backup_signer_delay != 0 {
+                BackupSignerDelay::<T>::put(self.backup_signer_delay);
+            }
         }
     }
 
@@ -1057,9 +1119,36 @@ pub mod pallet {
             before.iter().filter(|(who, balance)| T::Currency::free_balance(who) != **balance).count() as u32
         }
 
+        /// Refuses `who`'s attestation of `receipt_id` while `who` is a backup
+        /// signer still inside its delay. A receipt with no submission block
+        /// has none. Returns how many of `MAX_BACKUP_SIGNER_READS` the check
+        /// made, `backups` included.
+        fn backup_delay_reads(
+            backups: &BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize>,
+            who: &T::AccountId,
+            receipt_id: H256,
+        ) -> Result<u64, DispatchError> {
+            if !backups.contains(who) {
+                return Ok(1);
+            }
+            let delay = BackupSignerDelay::<T>::get();
+            if delay == 0 {
+                return Ok(2);
+            }
+            if let Some(submitted_at) = ReceiptSubmittedAt::<T>::get(receipt_id) {
+                ensure!(
+                    frame_system::Pallet::<T>::block_number()
+                        >= submitted_at.saturating_add(delay.into()),
+                    Error::<T>::BackupSignerTooEarly
+                );
+            }
+            Ok(MAX_BACKUP_SIGNER_READS)
+        }
+
         /// Classifies a member's attestation by what dispatch would do. Errors
         /// are attestations dispatch would fail or strike: a non-member, an
-        /// unknown receipt, or a non-canonical hash on a pending receipt.
+        /// unknown receipt, a non-canonical hash on a pending receipt, or a
+        /// backup signer inside its delay.
         pub fn validate_attestation(
             who: &T::AccountId,
             receipt_id: H256,
@@ -1077,6 +1166,7 @@ pub mod pallet {
                 Self::canonical_cert_hash(receipt_id) == Some(H256::from(claimed_hash)),
                 Error::<T>::CertHashMismatch
             );
+            Self::backup_delay_reads(&BackupSigners::<T>::get(), who, receipt_id)?;
             match Attestations::<T>::get(receipt_id) {
                 Some((hash, _)) if hash != H256::from(claimed_hash) => {
                     Err(Error::<T>::CertHashMismatch.into())
@@ -1198,6 +1288,28 @@ pub mod pallet {
             T::TreasuryPotId::get().into_account_truncating()
         }
 
+        /// Weight of the first `reads` of the storage that holds a backup
+        /// signer to its delay, in the order an attest reads it:
+        /// `BackupSigners`, `BackupSignerDelay`, `ReceiptSubmittedAt`. The
+        /// benchmarked attestation weights do not include these reads, so
+        /// an attest adds them. Proof bounds are taken as the benchmarked
+        /// ones are: an item's largest encoding under three 495-byte trie
+        /// layers for a value and seven for a map.
+        pub fn backup_signer_weight(reads: u64) -> Weight {
+            const TRIE_LAYER: usize = 495;
+            let proofs = [
+                BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::max_encoded_len()
+                    + 3 * TRIE_LAYER,
+                u32::max_encoded_len() + 3 * TRIE_LAYER,
+                // Blake2_128Concat of the receipt id, then the block number.
+                16 + H256::len_bytes() + BlockNumberFor::<T>::max_encoded_len() + 7 * TRIE_LAYER,
+            ];
+            let proof: usize = proofs.iter().take(reads as usize).sum();
+            T::DbWeight::get()
+                .reads(reads)
+                .saturating_add(Weight::from_parts(0, proof as u64))
+        }
+
         /// Most recent block `who` authored, if any. Liveness signal for
         /// committee selection; survives the per-era `BlocksAuthored` reset.
         pub fn last_authored_block(who: &T::AccountId) -> Option<BlockNumberFor<T>> {
@@ -1312,6 +1424,11 @@ pub mod pallet {
         /// no escrow (legacy / pre-Component-4) or if `signers` is empty
         /// (defensive — threshold is always >= 1).
         ///
+        /// A signer in `backups` is counted in the split and not paid: its
+        /// share is unreserved to the submitter. Dividing by every signer
+        /// keeps a paid signer's share what it is without the backup, so
+        /// waiting for a backup signer earns the others nothing.
+        ///
         /// Uses `repatriate_reserved` with `BalanceStatus::Free` to move
         /// funds directly from the submitter's reserved balance into each
         /// beneficiary's free balance, keeping the invariant that the fee
@@ -1319,6 +1436,7 @@ pub mod pallet {
         fn distribute_submission_fee(
             receipt_id: H256,
             signers: &BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize>,
+            backups: &BoundedBTreeSet<T::AccountId, T::MaxCommitteeSize>,
         ) {
             let (submitter, reserved_fee) = match ReceiptFeeEscrow::<T>::take(receipt_id) {
                 Some(v) => v,
@@ -1352,7 +1470,7 @@ pub mod pallet {
             // any un-moved remainder; we ignore it because in practice
             // the reserve is exactly `reserved_fee` (set in submit).
             if per_signer > 0 {
-                for signer in signers.iter() {
+                for signer in signers.iter().filter(|signer| !backups.contains(*signer)) {
                     let balance: BalanceOf<T> = per_signer.try_into().unwrap_or_default();
                     let _ = T::Currency::repatriate_reserved(
                         &submitter,
@@ -1361,6 +1479,21 @@ pub mod pallet {
                         BalanceStatus::Free,
                     );
                 }
+            }
+
+            let backup_count = signers.intersection(backups).count() as u32;
+            if backup_count > 0 {
+                let refund = per_signer.saturating_mul(backup_count as u128);
+                let balance: BalanceOf<T> = refund.try_into().unwrap_or_default();
+                let unmoved: u128 = T::Currency::unreserve(&submitter, balance)
+                    .try_into()
+                    .unwrap_or_default();
+                Self::deposit_event(Event::BackupSignerFeeRefunded {
+                    receipt_id,
+                    submitter: submitter.clone(),
+                    amount: refund.saturating_sub(unmoved),
+                    backup_count,
+                });
             }
 
             // Remaining reserve -> treasury. This captures the 20% base
@@ -1606,7 +1739,8 @@ pub mod pallet {
             .max(<T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get()))
             .max(<T as Config>::WeightInfo::attest_bad_hash())
             .saturating_add(<T as Config>::WeightInfo::balance_mutations(
-                T::MaxCommitteeSize::get().saturating_add(2))))]
+                T::MaxCommitteeSize::get().saturating_add(2)))
+            .saturating_add(Pallet::<T>::backup_signer_weight(MAX_BACKUP_SIGNER_READS)))]
         pub fn attest_availability_cert(
             origin: OriginFor<T>,
             receipt_id: H256,
@@ -1674,6 +1808,9 @@ pub mod pallet {
                 return Ok(Some(<T as Config>::WeightInfo::attest_bad_hash()
                     .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into());
             }
+
+            let backups = BackupSigners::<T>::get();
+            let backup_reads = Self::backup_delay_reads(&backups, &attester, receipt_id)?;
 
             // The `*existing_hash == cert_h256` check below is tautological
             // post-canonical gate, kept so any future schema drift cannot
@@ -1744,7 +1881,7 @@ pub mod pallet {
                 if total_att_paid < attestation_reserve && era_att_paid < era_cap {
                     // Get signers before we remove the attestation
                     if let Some((_, ref signers)) = Attestations::<T>::get(receipt_id) {
-                        for signer in signers.iter() {
+                        for signer in signers.iter().filter(|signer| !backups.contains(*signer)) {
                             // Re-check era cap inside loop (multiple signers per cert)
                             let current_era_paid = AttestationRewardsPaidInEra::<T>::get();
                             if current_era_paid >= era_cap {
@@ -1786,7 +1923,7 @@ pub mod pallet {
                 // the actual signers and the treasury pot BEFORE removing
                 // the attestation record (we need the signer set).
                 if let Some((_, ref signers)) = Attestations::<T>::get(receipt_id) {
-                    Self::distribute_submission_fee(receipt_id, signers);
+                    Self::distribute_submission_fee(receipt_id, signers, &backups);
                 }
 
                 // Clean up the attestation record — it's no longer needed.
@@ -1798,7 +1935,11 @@ pub mod pallet {
                 });
             }
             let changed = Self::changed_accounts(&balances_before);
-            Ok(Some(base.saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into())
+            Ok(Some(
+                base.saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))
+                    .saturating_add(Self::backup_signer_weight(backup_reads)),
+            )
+            .into())
         }
 
         /// Submit an anchor — a lightweight on-chain binding for SDK-originated
@@ -2576,6 +2717,51 @@ pub mod pallet {
             ensure_root(origin)?;
             PinnedCommittee::<T>::kill();
             Self::deposit_event(Event::PinnedCommitteeCleared);
+            Ok(())
+        }
+
+        /// Root-only: replace the backup signers and their delay.
+        ///
+        /// A backup signer's attestation counts toward the threshold, but at
+        /// certification it earns neither the emission reward nor a share of
+        /// the submission fee; its share returns to the submitter. Its
+        /// attestation of a receipt is refused until `delay_blocks` blocks
+        /// after the receipt's submission, so the other members sign, and are
+        /// paid, first. `delay_blocks` of zero imposes no delay.
+        ///
+        /// Every member must be in the committee now. One that leaves later
+        /// stays listed until the next call. Only a member can attest, so
+        /// the entry does nothing unless the account rejoins, and then it is
+        /// a backup signer again.
+        #[pallet::call_index(29)]
+        #[pallet::weight(Weight::from_parts(10_000, 0)
+            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().writes(2)))]
+        pub fn set_backup_signers(
+            origin: OriginFor<T>,
+            members: Vec<T::AccountId>,
+            delay_blocks: u32,
+        ) -> DispatchResult {
+            ensure_root(origin)?;
+
+            let committee = CommitteeMembers::<T>::get();
+            let mut backups = BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::new();
+            for member in members {
+                ensure!(
+                    committee.contains(&member),
+                    Error::<T>::BackupSignerNotCommitteeMember
+                );
+                backups
+                    .try_insert(member)
+                    .map_err(|_| Error::<T>::CommitteeFull)?;
+            }
+
+            BackupSigners::<T>::put(&backups);
+            BackupSignerDelay::<T>::put(delay_blocks);
+            Self::deposit_event(Event::BackupSignersUpdated {
+                members: backups.into_inner().into_iter().collect(),
+                delay_blocks,
+            });
             Ok(())
         }
     }
