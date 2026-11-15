@@ -68,6 +68,10 @@ pub mod pallet {
     /// `BackupSigners`, `BackupSignerDelay` and `ReceiptSubmittedAt`.
     pub const MAX_BACKUP_SIGNER_READS: u64 = 3;
 
+    /// Bytes of one trie layer in a storage proof bound, as the benchmarked
+    /// weights take it.
+    const TRIE_LAYER: usize = 495;
+
     #[pallet::pallet]
     pub struct Pallet<T>(_);
 
@@ -306,7 +310,8 @@ pub mod pallet {
     /// Per-receipt fee escrow. Populated on `submit_receipt`; drained on
     /// threshold-hit payout OR `expire_receipt_fee`. Missing entry means
     /// either the receipt predates Component 4 (legacy) or the fee has
-    /// already been settled.
+    /// already been settled. An uncertified receipt with no entry is
+    /// refused attestation.
     ///
     /// Key: receipt_id -> (submitter_account, reserved_amount)
     #[pallet::storage]
@@ -752,6 +757,12 @@ pub mod pallet {
         /// receipt can be expired. Pass `set_backup_signers` a shorter
         /// delay, or shorten the delay before lowering the expiry window.
         BackupSignerDelayTooLong,
+        /// `attest_availability_cert` was called on an uncertified receipt
+        /// that holds no submission fee in escrow: the fee was refunded when
+        /// the receipt expired or Root left it uncertified, or the receipt
+        /// predates the fee. It can no longer be certified. Submit the
+        /// content again under a new receipt id.
+        ReceiptFeeNotEscrowed,
     }
 
     // ── Genesis ──────────────────────────────────────────────────────────
@@ -1176,8 +1187,9 @@ pub mod pallet {
 
         /// Classifies a member's attestation by what dispatch would do. Errors
         /// are attestations dispatch would fail or strike: a non-member, an
-        /// unknown receipt, a non-canonical hash on a pending receipt, or a
-        /// backup signer inside its delay.
+        /// unknown receipt, a pending receipt with no fee in escrow, a
+        /// non-canonical hash on a pending receipt, or a backup signer inside
+        /// its delay.
         pub fn validate_attestation(
             who: &T::AccountId,
             receipt_id: H256,
@@ -1191,6 +1203,10 @@ pub mod pallet {
             if record.availability_cert_hash != [0; 32] {
                 return Ok(crate::types::Attestation::Stale);
             }
+            ensure!(
+                ReceiptFeeEscrow::<T>::contains_key(receipt_id),
+                Error::<T>::ReceiptFeeNotEscrowed
+            );
             ensure!(
                 Self::canonical_cert_hash(receipt_id) == Some(H256::from(claimed_hash)),
                 Error::<T>::CertHashMismatch
@@ -1325,7 +1341,6 @@ pub mod pallet {
         /// ones are: an item's largest encoding under three 495-byte trie
         /// layers for a value and seven for a map.
         pub fn backup_signer_weight(reads: u64) -> Weight {
-            const TRIE_LAYER: usize = 495;
             let proofs = [
                 BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::max_encoded_len()
                     + 3 * TRIE_LAYER,
@@ -1336,6 +1351,22 @@ pub mod pallet {
             let proof: usize = proofs.iter().take(reads as usize).sum();
             T::DbWeight::get()
                 .reads(reads)
+                .saturating_add(Weight::from_parts(0, proof as u64))
+        }
+
+        /// Weight of the `ReceiptFeeEscrow` read that refuses an attest of a
+        /// pending receipt with no fee in escrow. The benchmarked
+        /// non-threshold and bad-hash weights do not include it, so those
+        /// attests add it; the threshold weight holds it, read for the
+        /// payout. The proof bound is taken as in `backup_signer_weight`.
+        pub fn escrow_read_weight() -> Weight {
+            // Blake2_128Concat of the receipt id, then the submitter and fee.
+            let proof = 16
+                + H256::len_bytes()
+                + <(T::AccountId, u128)>::max_encoded_len()
+                + 7 * TRIE_LAYER;
+            T::DbWeight::get()
+                .reads(1)
                 .saturating_add(Weight::from_parts(0, proof as u64))
         }
 
@@ -1468,8 +1499,8 @@ pub mod pallet {
         /// Component 4 helper: distribute the escrowed fee for a freshly
         /// certified receipt. 80% pro-rata-flat to `signers`, 20% plus
         /// rounding residue to the treasury pot. No-op if the receipt has
-        /// no escrow (legacy / pre-Component-4) or if `signers` is empty
-        /// (defensive — threshold is always >= 1).
+        /// no escrow (defensive — an attest is refused without one) or if
+        /// `signers` is empty (defensive — threshold is always >= 1).
         ///
         /// A signer in `backups` is counted in the split and not paid: its
         /// share is burned. Nobody receives it, so a backup signer's
@@ -1490,7 +1521,7 @@ pub mod pallet {
         ) {
             let (submitter, reserved_fee) = match ReceiptFeeEscrow::<T>::take(receipt_id) {
                 Some(v) => v,
-                None => return, // pre-Component-4 receipt — nothing to pay out
+                None => return,
             };
             ReceiptSubmittedAt::<T>::remove(receipt_id);
 
@@ -1741,10 +1772,21 @@ pub mod pallet {
         /// reaches the threshold the certificate is finalized on the receipt
         /// record (same effect as `set_availability_cert`), and only those
         /// members are paid.
+        ///
+        /// An uncertified receipt is attested only while its submission fee
+        /// is in escrow. Once the fee is refunded, by `expire_receipt_fee` or
+        /// by Root, every attest of the receipt fails with
+        /// `ReceiptFeeNotEscrowed`, whatever hash it claims: nothing is
+        /// recorded and no strike is taken, and the receipt can no longer be
+        /// certified. A receipt submitted before the fee existed has no
+        /// escrow and is refused the same way. An attest of a certified
+        /// receipt stays a no-op.
         #[pallet::call_index(3)]
         #[pallet::weight(<T as Config>::WeightInfo::attest_threshold(T::MaxCommitteeSize::get())
-            .max(<T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get()))
-            .max(<T as Config>::WeightInfo::attest_bad_hash())
+            .max(<T as Config>::WeightInfo::attest_non_threshold(T::MaxCommitteeSize::get())
+                .saturating_add(Pallet::<T>::escrow_read_weight()))
+            .max(<T as Config>::WeightInfo::attest_bad_hash()
+                .saturating_add(Pallet::<T>::escrow_read_weight()))
             .saturating_add(<T as Config>::WeightInfo::balance_mutations(
                 T::MaxCommitteeSize::get().saturating_add(2)))
             .saturating_add(Pallet::<T>::backup_signer_weight(MAX_BACKUP_SIGNER_READS)))]
@@ -1768,6 +1810,11 @@ pub mod pallet {
             if record.availability_cert_hash != [0u8; 32] {
                 return Ok(Some(base).into());
             }
+
+            // Checked before the hash, so a receipt nobody can certify takes
+            // no strike and records no signer.
+            let (submitter, _) = ReceiptFeeEscrow::<T>::get(receipt_id)
+                .ok_or(Error::<T>::ReceiptFeeNotEscrowed)?;
 
             // The receipt must exist and `claimed_hash` must equal the
             // runtime-computed canonical hash. Stale daemons take a strike
@@ -1813,7 +1860,8 @@ pub mod pallet {
                 }
                 let changed = Self::changed_accounts(&balances_before);
                 return Ok(Some(<T as Config>::WeightInfo::attest_bad_hash()
-                    .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))).into());
+                    .saturating_add(<T as Config>::WeightInfo::balance_mutations(changed))
+                    .saturating_add(Self::escrow_read_weight())).into());
             }
 
             let backups = BackupSigners::<T>::get();
@@ -1846,7 +1894,8 @@ pub mod pallet {
             let weighed = decoded.max(count);
 
             let threshold = AttestationThreshold::<T>::get().max(1);
-            base = <T as Config>::WeightInfo::attest_non_threshold(weighed);
+            base = <T as Config>::WeightInfo::attest_non_threshold(weighed)
+                .saturating_add(Self::escrow_read_weight());
 
             Self::deposit_event(Event::AttestationRecorded {
                 receipt_id,
@@ -1864,10 +1913,8 @@ pub mod pallet {
                         balances_before.insert(signer.clone(), T::Currency::free_balance(&signer));
                     }
                 }
-                if let Some((submitter, _)) = ReceiptFeeEscrow::<T>::get(receipt_id) {
-                    for who in [submitter, Self::treasury_account()] {
-                        balances_before.insert(who.clone(), T::Currency::free_balance(&who));
-                    }
+                for who in [submitter, Self::treasury_account()] {
+                    balances_before.insert(who.clone(), T::Currency::free_balance(&who));
                 }
                 // Pay attestation rewards BEFORE removing the attestation record.
                 // Each signer gets an equal share of the per-receipt reward.
@@ -2426,6 +2473,11 @@ pub mod pallet {
         /// Permissionless: refund the escrowed submission fee back to the
         /// submitter's free balance once the receipt has expired without
         /// reaching the attestation threshold.
+        ///
+        /// The receipt stays in the registry and can no longer be certified:
+        /// with no fee in escrow, `attest_availability_cert` refuses it with
+        /// `ReceiptFeeNotEscrowed`. To have the content certified, submit it
+        /// again under a new receipt id.
         ///
         /// Fails with:
         /// * `ReceiptNotFound` — the escrow entry is absent (receipt was

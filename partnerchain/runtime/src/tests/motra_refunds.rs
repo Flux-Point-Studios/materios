@@ -64,6 +64,17 @@ fn receipt(committee_size: u32, threshold: u32, fee: u128) -> (H256, [u8; 32]) {
     (id, hash)
 }
 
+/// Stores `record` as the pending receipt `id`, with the escrow entry a
+/// zero-fee submission leaves, and returns its canonical hash.
+fn pending_copy(
+    id: H256,
+    record: &pallet_orinq_receipts::types::ReceiptRecord<AccountId>,
+) -> [u8; 32] {
+    pallet_orinq_receipts::Receipts::<Runtime>::insert(id, record);
+    pallet_orinq_receipts::ReceiptFeeEscrow::<Runtime>::insert(id, (&record.submitter, 0u128));
+    OrinqReceipts::canonical_cert_hash(id).expect("hash").0
+}
+
 fn attest(id: H256, claimed_hash: [u8; 32]) -> RuntimeCall {
     RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::attest_availability_cert {
         receipt_id: id,
@@ -361,11 +372,10 @@ fn pricing_pure_attestation_batches_are_free_and_have_per_receipt_tags() {
         let (id, hash) = receipt(3, 2, 0);
         pricing_params(50_000_000_000);
         let second = H256::repeat_byte(55);
-        pallet_orinq_receipts::Receipts::<Runtime>::insert(
+        let other_hash = pending_copy(
             second,
-            pallet_orinq_receipts::Receipts::<Runtime>::get(id).expect("receipt"),
+            &pallet_orinq_receipts::Receipts::<Runtime>::get(id).expect("receipt"),
         );
-        let other_hash = OrinqReceipts::canonical_cert_hash(second).expect("hash").0;
         let single = attest(id, hash);
         for atomic in [false, true] {
             let calls = vec![single.clone(), attest(second, other_hash)];
@@ -643,11 +653,10 @@ fn pricing_zero_balance_pure_batches_execute_and_pay_nothing() {
             pricing_params(50_000_000_000);
             let who = account(1);
             let second = H256::repeat_byte(55);
-            pallet_orinq_receipts::Receipts::<Runtime>::insert(
+            let other_hash = pending_copy(
                 second,
-                pallet_orinq_receipts::Receipts::<Runtime>::get(id).expect("receipt"),
+                &pallet_orinq_receipts::Receipts::<Runtime>::get(id).expect("receipt"),
             );
-            let other_hash = OrinqReceipts::canonical_cert_hash(second).expect("hash").0;
             let calls = vec![attest(id, hash), attest(second, other_hash)];
             let batch = RuntimeCall::Utility(if atomic {
                 pallet_utility::Call::batch_all { calls }
@@ -748,7 +757,8 @@ fn refund_non_threshold_attest_charges_no_checkpoints_and_no_motra() {
         assert_eq!(
             actual,
             <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1)
-                .saturating_add(OrinqReceipts::backup_signer_weight(1)),
+                .saturating_add(OrinqReceipts::backup_signer_weight(1))
+                .saturating_add(OrinqReceipts::escrow_read_weight()),
             "non-threshold attestation must not carry any checkpoint surcharge"
         );
         assert_ok!(pallet_motra::fee::ChargeMotra::<Runtime>::post_dispatch(
@@ -1089,8 +1099,7 @@ fn refund_non_threshold_block_capacity_matches_priced_work() {
         let mut proof = 0;
         for i in 0u64..20_000 {
             let id = H256::from_low_u64_be(i + 1_000);
-            pallet_orinq_receipts::Receipts::<Runtime>::insert(id, record.clone());
-            let hash = OrinqReceipts::canonical_cert_hash(id).expect("cert").0;
+            let hash = pending_copy(id, &record);
             let call = attest(id, hash);
             let info = call.get_dispatch_info();
             let len = call.encoded_size() + 128;
@@ -1194,8 +1203,7 @@ fn refund_batched_non_threshold_attests_fill_the_block_at_their_actual_weight() 
             let mut ids = Vec::new();
             let calls = (0..width).map(|i| {
                 let id = H256::from_low_u64_be(accepted + u64::from(i) + 1_000);
-                pallet_orinq_receipts::Receipts::<Runtime>::insert(id, record.clone());
-                let hash = OrinqReceipts::canonical_cert_hash(id).expect("cert").0;
+                let hash = pending_copy(id, &record);
                 ids.push(id);
                 attest(id, hash)
             }).collect();
@@ -1222,7 +1230,8 @@ fn refund_batched_non_threshold_attests_fill_the_block_at_their_actual_weight() 
         // stops only when one more single-attest batch cannot reserve its
         // declared weight.
         let actual = <<Runtime as pallet_orinq_receipts::Config>::WeightInfo as pallet_orinq_receipts::weights::WeightInfo>::attest_non_threshold(1)
-            .saturating_add(OrinqReceipts::backup_signer_weight(1));
+            .saturating_add(OrinqReceipts::backup_signer_weight(1))
+            .saturating_add(OrinqReceipts::escrow_read_weight());
         let consumed = *System::block_weight().get(DispatchClass::Normal);
         assert!(consumed.all_lte(cap));
         assert!(per_call
@@ -1474,11 +1483,9 @@ fn duty_batch_tolerates_as_many_stale_attests_as_new_ones() {
         pricing_params(50_000_000_000);
         let pending = |tag: u8| {
             let id = H256::repeat_byte(tag);
-            pallet_orinq_receipts::Receipts::<Runtime>::insert(
-                id,
-                pallet_orinq_receipts::Receipts::<Runtime>::get(certified).expect("receipt"),
-            );
-            (id, OrinqReceipts::canonical_cert_hash(id).expect("hash").0)
+            let record =
+                pallet_orinq_receipts::Receipts::<Runtime>::get(certified).expect("receipt");
+            (id, pending_copy(id, &record))
         };
         let (b, b_hash) = pending(55);
         let (c, c_hash) = pending(56);
@@ -1579,6 +1586,7 @@ fn pricing_new_signer_after_95_prior_signers_reports_their_count() {
             W::attest_non_threshold(96)
                 .saturating_add(W::balance_mutations(0))
                 .saturating_add(OrinqReceipts::backup_signer_weight(1))
+                .saturating_add(OrinqReceipts::escrow_read_weight())
         );
         let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
             "../../../pallets/orinq-receipts/benchmarking/attestation-samples.json"
@@ -1650,6 +1658,7 @@ fn pricing_new_signer_after_96_departed_signers_reports_their_count() {
             W::attest_non_threshold(96)
                 .saturating_add(W::balance_mutations(0))
                 .saturating_add(OrinqReceipts::backup_signer_weight(1))
+                .saturating_add(OrinqReceipts::escrow_read_weight())
         );
         assert!(post.calc_actual_weight(&info).all_lte(info.weight));
         let samples: Vec<serde_json::Value> = serde_json::from_str(include_str!(
@@ -1802,6 +1811,114 @@ fn receipt_fee_remainder_too_small_to_open_the_treasury_pot_is_burned() {
                 signer_count: 3,
             }
             .into(),
+        );
+    });
+}
+
+fn expire(id: H256) -> RuntimeCall {
+    RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::expire_receipt_fee { receipt_id: id })
+}
+
+/// A submitter that holds its blob back through the expiry window and takes
+/// its fee back is never certified. The receipt stays, with no fee in
+/// escrow, and every member's attest of it is refused as a duty, in the pool
+/// and before dispatch, alone or in a batch, and fails at dispatch.
+#[test]
+fn receipt_fee_refund_ends_every_attest_of_the_receipt() {
+    use sp_runtime::transaction_validity::InvalidTransaction;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 1_000_000);
+        pallet_orinq_receipts::ReceiptExpiryBlocks::<Runtime>::put(14_400);
+        let submitter = Balances::free_balance(account(200));
+        System::set_block_number(100 + 14_400 + 1);
+        dispatch(expire(id), account(200));
+        assert_eq!(Balances::free_balance(account(200)), submitter + 1_000_000);
+        assert_eq!(Balances::reserved_balance(account(200)), 0);
+
+        let members = free(1..=3);
+        let issuance = Balances::total_issuance();
+        let call = attest(id, hash);
+        let batch = utility(pallet_utility::Call::batch {
+            calls: vec![call.clone()],
+        });
+        for member in 1..=3 {
+            let who = account(member);
+            for duty in [&call, &batch] {
+                assert_eq!(
+                    crate::motra_duty::validate(&who, duty),
+                    Some(Err(InvalidTransaction::Call.into()))
+                );
+                assert_eq!(validity(&who, duty), Err(InvalidTransaction::Call.into()));
+            }
+            assert_eq!(
+                pallet_motra::fee::ChargeMotra::<Runtime>::new()
+                    .pre_dispatch(&who, &call, &call.get_dispatch_info(), 0)
+                    .map(|_| ()),
+                Err(InvalidTransaction::Call.into())
+            );
+            assert_eq!(
+                call.clone()
+                    .dispatch(RuntimeOrigin::signed(who))
+                    .map(|_| ())
+                    .map_err(|failure| failure.error),
+                Err(pallet_orinq_receipts::Error::<Runtime>::ReceiptFeeNotEscrowed.into())
+            );
+        }
+        assert_eq!(
+            pallet_orinq_receipts::Receipts::<Runtime>::get(id)
+                .expect("the receipt stays")
+                .availability_cert_hash,
+            [0; 32]
+        );
+        assert!(!pallet_orinq_receipts::Attestations::<Runtime>::contains_key(id));
+        assert_eq!(free(1..=3), members);
+        assert_eq!(Balances::total_issuance(), issuance);
+    });
+}
+
+/// A pending receipt's attest reads `ReceiptFeeEscrow` before anything else
+/// of it. The measured non-threshold and bad-hash weights lack that read, so
+/// each such attest returns it on top: one read and 3,561 proof bytes. A
+/// submission prepays it for the `t - 1` non-threshold attests of its
+/// certification; the threshold attest's measured weight holds it.
+#[test]
+fn receipt_fee_escrow_read_is_charged_to_the_attests_that_lack_it() {
+    use pallet_orinq_receipts::weights::WeightInfo;
+    type W = <Runtime as pallet_orinq_receipts::Config>::WeightInfo;
+    externalities().execute_with(|| {
+        let (id, hash) = receipt(3, 2, 1_000_000);
+        pallet_orinq_receipts::BadAttestSlashThreshold::<Runtime>::put(2);
+        let escrow_read = Weight::from_parts(25_000_000, 3_561);
+        let backup_read = OrinqReceipts::backup_signer_weight(1);
+
+        let (_, post) = dispatch(attest(id, [99; 32]), account(3));
+        assert_eq!(
+            post.actual_weight,
+            Some(W::attest_bad_hash().saturating_add(escrow_read))
+        );
+        let (_, post) = dispatch(attest(id, hash), account(1));
+        assert_eq!(
+            post.actual_weight,
+            Some(
+                W::attest_non_threshold(1)
+                    .saturating_add(backup_read)
+                    .saturating_add(escrow_read)
+            )
+        );
+        assert_eq!(
+            crate::motra_duty::deferred_weight(&submit(H256::repeat_byte(9))),
+            ExtrinsicBaseWeight::get()
+                .saturating_mul(2)
+                .saturating_add(W::attest_non_threshold(1))
+                .saturating_add(W::attest_threshold(2))
+                .saturating_add(W::balance_mutations(4))
+                .saturating_add(
+                    OrinqReceipts::backup_signer_weight(
+                        pallet_orinq_receipts::MAX_BACKUP_SIGNER_READS
+                    )
+                    .saturating_mul(2)
+                )
+                .saturating_add(escrow_read)
         );
     });
 }
