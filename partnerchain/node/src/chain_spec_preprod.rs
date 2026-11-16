@@ -36,10 +36,24 @@ const PREPROD_SLOTS_PER_EPOCH: u32 = 600;
 /// genesis so chain-resets inherit them (compile-time defaults override
 /// runtime storage on reset).
 ///
-/// AttestationThreshold + initial CommitteeMembers are NOT yet exposed in
-/// `pallet-orinq-receipts` GenesisConfig; restore those via post-genesis
-/// multisig sudo until that surface lands.
+/// Its genesis seats no attestation committee: Root set preprod's after
+/// genesis.
 pub fn preprod_config() -> Result<ChainSpec, String> {
+    Ok(ChainSpec::builder(
+        WASM_BINARY.ok_or("WASM binary not available")?,
+        None,
+    )
+    .with_name("Materios Preprod v6")
+    .with_id("materios_preprod_v6")
+    .with_chain_type(ChainType::Live)
+    .with_protocol_id("materios-preprod-v6")
+    .with_properties(crate::chain_spec::properties())
+    .with_genesis_config_patch(genesis_patch())
+    .build())
+}
+
+/// Preprod's genesis, as a patch over every pallet's genesis defaults.
+pub(crate) fn genesis_patch() -> serde_json::Value {
     // -- Accounts --
     let alice_faucet = account([
         0xd4, 0x35, 0x93, 0xc7, 0x15, 0xfd, 0xd3, 0x1c,
@@ -216,16 +230,7 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         authority(node3_cross_chain, node3_aura, node3_grandpa),
     ];
 
-    Ok(ChainSpec::builder(
-        WASM_BINARY.ok_or("WASM binary not available")?,
-        None,
-    )
-    .with_name("Materios Preprod v6")
-    .with_id("materios_preprod_v6")
-    .with_chain_type(ChainType::Live)
-    .with_protocol_id("materios-preprod-v6")
-    .with_properties(crate::chain_spec::properties())
-    .with_genesis_config_patch(serde_json::json!({
+    serde_json::json!({
         "balances": {
             "balances": [
                 // //Alice faucet — 10M MATRA for drips + rescues.
@@ -268,25 +273,10 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         "grandpa": {
             "authorities": [],
         },
-        "motra": {
-            // MUST mirror `MotraParams::default()` in pallets/motra/src/types.rs
-            // — genesis build ignores Rust Default and applies these directly.
-            "minFee": 1_000_000_000u128,
-            "congestionRate": 0,
-            "targetFullnessPpm": 500_000_000,
-            "decayRatePerBlockPpm": 999_900_000,
-            "generationPerMatraPerBlock": 100_000u128,
-            "maxBalance": 1_000_000_000_000_000_000u128,
-            "maxCongestionStep": 1_000_000_000u128,
-            "lengthFeePerByte": 1_000_000u128,
-            "congestionSmoothingPpm": 100_000_000
-        },
+        "motra": crate::chain_spec::motra_genesis(100_000),
         // OrinqReceipts: governance-tuned values. A FRAME pallet's genesis
         // config is camelCase with deny_unknown_fields, so a snake_case key
         // makes the whole genesis fail to build.
-        //
-        // NOT YET EXPOSED at genesis: attestation_threshold + initial
-        // committee members — restore via post-genesis multisig sudo.
         "orinqReceipts": {
             // 1 MATRA per signer.
             "attestationRewardPerSigner": 1_000_000u128,
@@ -333,8 +323,7 @@ pub fn preprod_config() -> Result<ChainSpec, String> {
         // deployed. Expected snake_case fields if set later:
         // native_token_policy_id, native_token_asset_name,
         // illiquid_supply_validator_address.
-    }))
-    .build())
+    })
 }
 
 #[cfg(test)]
@@ -874,5 +863,17 @@ mod tests {
             stored_attestor_rewards(storage),
             (1_000_000, 50_000_000_000, 32)
         );
+    }
+
+    /// Preprod's genesis applies MOTRA's default parameters, which genesis
+    /// does not take from `MotraParams::default()` by itself.
+    #[test]
+    fn preprod_starts_motra_at_its_default_parameters() {
+        start(&preprod_config().unwrap()).execute_with(|| {
+            assert_eq!(
+                materios_runtime::Motra::params(),
+                materios_runtime::pallet_motra::types::MotraParams::default()
+            );
+        });
     }
 }

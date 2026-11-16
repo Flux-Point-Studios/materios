@@ -477,13 +477,16 @@ parameter_types! {
     pub const DepositFactor: Balance = 500;
 }
 
+/// The most signatories a multisig may have.
+pub const MAX_SIGNATORIES: u32 = 10;
+
 impl pallet_multisig::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type RuntimeCall = RuntimeCall;
     type Currency = Balances;
     type DepositBase = DepositBase;
     type DepositFactor = DepositFactor;
-    type MaxSignatories = ConstU32<10>;
+    type MaxSignatories = ConstU32<MAX_SIGNATORIES>;
     type WeightInfo = balance_weights::WithMotra;
 }
 
@@ -522,13 +525,16 @@ parameter_types! {
     pub const RecoveryDeposit: Balance = 1_000;
 }
 
+/// The most friends a recovery configuration may name.
+pub const MAX_RECOVERY_FRIENDS: u32 = 9;
+
 impl pallet_recovery::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type RuntimeCall = RuntimeCall;
     type Currency = Balances;
     type ConfigDepositBase = RecoveryConfigDepositBase;
     type FriendDepositFactor = RecoveryFriendDepositFactor;
-    type MaxFriends = ConstU32<9>;
+    type MaxFriends = ConstU32<MAX_RECOVERY_FRIENDS>;
     type RecoveryDeposit = RecoveryDeposit;
     type WeightInfo = balance_weights::WithMotra;
 }
@@ -693,6 +699,20 @@ pub const CARDANO_PREPROD: pallet_intent_settlement::CardanoIdentity =
             0x3a, 0xc6, 0xbc, 0x78, 0x51, 0xbc, 0x3e, 0x6e, 0x4a, 0xfe, 0x64, 0xd1, 0x57, 0x78,
             0xbe, 0xd8, 0xbd, 0x86,
         ],
+        aegis_policy_v1_script_hash: [0; 28],
+    };
+
+/// Cardano mainnet, as a mainnet genesis names it: its network magic and the
+/// blake2b-256 of its published `shelley-genesis.json`
+/// (book.world.dev.cardano.org/environments/mainnet), with no Aegis policy.
+/// The policy is applied to the chain's own genesis hash, so a launch either
+/// names the deployed script hash here or leaves Root to bind it with
+/// `IntentSettlement.bind_aegis_policy_v1`.
+pub const CARDANO_MAINNET: pallet_intent_settlement::CardanoIdentity =
+    pallet_intent_settlement::CardanoIdentity {
+        network_magic: pallet_intent_settlement::types::CARDANO_MAINNET_NETWORK_MAGIC,
+        mainchain_genesis_hash:
+            pallet_intent_settlement::types::CARDANO_MAINNET_SHELLEY_GENESIS_HASH,
         aegis_policy_v1_script_hash: [0; 28],
     };
 

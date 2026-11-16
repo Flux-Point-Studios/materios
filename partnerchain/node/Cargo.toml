@@ -54,6 +54,7 @@ substrate-frame-rpc-system = { workspace = true }
 # 202 (HIGH #1 follow-up to PR #9, 2026-04-21). See runtime/Cargo.toml and
 # node/src/rpc.rs for the rationale.
 frame-system = { workspace = true, features = ["std"] }
+frame-support = { workspace = true, features = ["std"] }
 frame-metadata = "16.0.0"
 
 # IOG Partner Chains toolkit
@@ -99,6 +100,10 @@ motra-primitives = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 flate2 = "1"
+pallet-multisig = { workspace = true, features = ["std"] }
+pallet-recovery = { workspace = true, features = ["std"] }
+pallet-root-timelock = { workspace = true, features = ["std"] }
+pallet-sudo = { workspace = true, features = ["std"] }
 pallet-intent-settlement = { workspace = true, features = ["std"] }
 pallet-orinq-receipts = { workspace = true, features = ["std"] }
 authority-selection-inherents = { workspace = true, features = ["mock"] }

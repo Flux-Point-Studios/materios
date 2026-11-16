@@ -2,6 +2,7 @@
 
 mod chain_identity;
 mod chain_spec;
+mod chain_spec_mainnet;
 mod chain_spec_preprod;
 mod cli;
 mod command;

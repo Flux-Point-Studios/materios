@@ -155,6 +155,32 @@ pub fn properties() -> sc_service::Properties {
     properties
 }
 
+/// MOTRA's price floor per transaction, in MOTRA base units (15 decimals).
+pub const MOTRA_MIN_FEE: u128 = 1_000_000_000;
+/// MOTRA's price per byte of a transaction.
+pub const MOTRA_LENGTH_FEE_PER_BYTE: u128 = 1_000_000;
+/// The share of a MOTRA balance, in parts per billion, that each block keeps.
+pub const MOTRA_KEPT_PER_BLOCK: u32 = 999_900_000;
+/// The most MOTRA an account accumulates.
+pub const MOTRA_MAX_BALANCE: u128 = 1_000_000_000_000_000_000;
+
+/// MOTRA's genesis: `MotraParams::default()` (pallets/motra/src/types.rs),
+/// which the genesis build does not apply by itself, with the MOTRA base
+/// units one MATRA generates each block.
+pub fn motra_genesis(generation_per_matra_per_block: u128) -> serde_json::Value {
+    serde_json::json!({
+        "minFee": MOTRA_MIN_FEE,
+        "congestionRate": 0,
+        "targetFullnessPpm": 500_000_000,
+        "decayRatePerBlockPpm": MOTRA_KEPT_PER_BLOCK,
+        "generationPerMatraPerBlock": generation_per_matra_per_block,
+        "maxBalance": MOTRA_MAX_BALANCE,
+        "maxCongestionStep": 1_000_000_000u128,
+        "lengthFeePerByte": MOTRA_LENGTH_FEE_PER_BYTE,
+        "congestionSmoothingPpm": 100_000_000
+    })
+}
+
 /// Development chain spec with a single validator (Alice).
 pub fn development_config() -> Result<ChainSpec, String> {
     Ok(ChainSpec::builder(
@@ -392,22 +418,27 @@ pub(crate) mod tests {
         slot: u64,
         cardano: &AuthoritySelectionInputs,
     ) -> (Block, InherentData) {
+        let data = inherent_data(slot, Some(cardano));
+        let (header, inherents) = discarded(|| run(&opening(parent, slot), None, &data));
+        (Block::new(header, inherents), data)
+    }
+
+    /// The header that opens the block after `parent` at `slot`, as its
+    /// author hands it to the runtime.
+    pub(crate) fn opening(parent: &Header, slot: u64) -> Header {
         let digest = Digest {
             logs: vec![DigestItem::PreRuntime(
                 AURA_ENGINE_ID,
                 Slot::from(slot).encode(),
             )],
         };
-        let pre = Header::new(
+        Header::new(
             parent.number + 1,
             Default::default(),
             Default::default(),
             parent.hash(),
             digest,
-        );
-        let data = inherent_data(slot, Some(cardano));
-        let (header, inherents) = discarded(|| run(&pre, None, &data));
-        (Block::new(header, inherents), data)
+        )
     }
 
     /// Checks `block`'s inherents as every peer does before importing it:
@@ -462,7 +493,7 @@ pub(crate) mod tests {
     /// Runs the block `header` opens: initialises it, applies `inherents`,
     /// or those the runtime makes from `data` if none are given, and
     /// finalises it.
-    fn run(
+    pub(crate) fn run(
         header: &Header,
         inherents: Option<Vec<UncheckedExtrinsic>>,
         data: &InherentData,
@@ -738,7 +769,7 @@ pub(crate) mod tests {
     }
 
     /// Loads `json` as the node loads the chain spec file `--chain` names.
-    fn load_file(name: &str, json: &serde_json::Value) -> Result<ChainSpec, String> {
+    pub(crate) fn load_file(name: &str, json: &serde_json::Value) -> Result<ChainSpec, String> {
         let path = std::env::temp_dir().join(format!(
             "materios-node-test-{}-{name}.json",
             std::process::id()

@@ -871,6 +871,20 @@ subwasm metadata runtime.wasm --format json | jq -jcS '{V14: {pallets: [.V14.pal
 The same trim of the preprod v6 runtime's metadata gives
 `fixtures/preprod-v6-metadata.json` byte for byte.
 
+`fixtures/mainnet-launch.json` is a launch manifest of freshly generated
+public keys with the fields the node's mainnet chain-spec builder reads, and
+`fixtures/mainnet-launch-raw.json` the raw spec the node builds from it (see
+`docs/MAINNET-GENESIS.md`), without its code; a node test holds it to the
+spec this source builds. The rules that read only the spec, its metadata and
+the manifest are run on it, and the findings left are the rule changes a
+fixed-issuance mainnet needs:
+
+```
+materios-node build-spec --chain mainnet:../tools/launch-preflight/fixtures/mainnet-launch.json --raw \
+    --disable-default-bootnode --base-path "$(mktemp -d)" > raw.json
+jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > ../tools/launch-preflight/fixtures/mainnet-launch-raw.json
+```
+
 The historical preprod v6 fixture leaves
 `SessionCommitteeManagement.CurrentCommittee` empty and seeds Aura and GRANDPA
 directly, and rule 9 refuses that. The spec-244 fixture and the CLI tests' clean
