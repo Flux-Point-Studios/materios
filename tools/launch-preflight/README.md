@@ -847,7 +847,7 @@ genesis-hash test checks the computed hash against the one the live network
 reports.
 
 The spec 243 fixtures are the preprod genesis that spec 243 (transaction version
-6, MOTRA holding checkpoints, the Root timelock, bonded settlement requests,
+7, MOTRA holding checkpoints, the Root timelock, bonded settlement requests,
 settlement's Cardano ids in genesis storage, no PerpEngine) builds, without
 its code, and that runtime's metadata, trimmed to what the preflight reads.
 A test holds both fixtures to the spec and transaction versions the runtime
