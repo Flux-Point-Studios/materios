@@ -22,6 +22,7 @@ mod chain_identity;
 mod settlement_bonds;
 mod cardano_ids;
 mod weight_safety;
+mod fixed_issuance;
 
 /// A committee member: its cross-chain key and its session keys.
 type Authority = (CrossChainPublic, SessionKeys);

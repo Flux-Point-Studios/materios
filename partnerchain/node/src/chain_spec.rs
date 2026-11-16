@@ -1,6 +1,6 @@
 use materios_runtime::{
-    opaque::SessionKeys, AccountId, Balance, Block, CrossChainPublic, Runtime,
-    SessionCommitteeManagement, Signature, TESTNET_TIMELOCK_DELAYS, WASM_BINARY,
+    opaque::SessionKeys, AccountId, Balance, Block, CrossChainPublic, Runtime, SS58Prefix,
+    SessionCommitteeManagement, Signature, MATRA_DECIMALS, TESTNET_TIMELOCK_DELAYS, WASM_BINARY,
 };
 use sc_service::ChainType;
 use sp_consensus_aura::{runtime_decl_for_aura_api::AuraApi, sr25519::AuthorityId as AuraId};
@@ -144,6 +144,17 @@ pub fn check_genesis_committee(spec: &dyn sc_service::ChainSpec) -> Result<(), S
 /// In permissioned-only mode (D=1.0) with 6s blocks, 60 slots = ~6 min epochs.
 const SLOTS_PER_EPOCH: u32 = 60;
 
+/// What wallets and explorers read from a chain spec: MATRA's symbol and
+/// decimals (MOTRA has 15, Midnight DUST parity, in its own pallet's storage)
+/// and the address prefix the runtime declares.
+pub fn properties() -> sc_service::Properties {
+    let mut properties = sc_service::Properties::new();
+    properties.insert("tokenDecimals".to_string(), MATRA_DECIMALS.into());
+    properties.insert("tokenSymbol".to_string(), "MATRA".into());
+    properties.insert("ss58Format".to_string(), SS58Prefix::get().into());
+    properties
+}
+
 /// Development chain spec with a single validator (Alice).
 pub fn development_config() -> Result<ChainSpec, String> {
     Ok(ChainSpec::builder(
@@ -153,6 +164,7 @@ pub fn development_config() -> Result<ChainSpec, String> {
     .with_name("Materios Development")
     .with_id("materios_dev")
     .with_chain_type(ChainType::Development)
+    .with_properties(properties())
     .with_genesis_config_patch(testnet_genesis(
         // Initial authorities
         vec![authority_keys_from_seed("Alice")],
@@ -183,6 +195,7 @@ pub fn local_testnet_config() -> Result<ChainSpec, String> {
     .with_name("Materios Local Testnet")
     .with_id("materios_local")
     .with_chain_type(ChainType::Local)
+    .with_properties(properties())
     .with_genesis_config_patch(testnet_genesis(
         // Initial authorities
         vec![
@@ -847,11 +860,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// Preprod v6 started with no genesis committee, before the live-quorum
-    /// floor, and its first rotation seated Cardano's draw. The node loads
-    /// that genesis, and refuses the same genesis with any byte changed.
-    #[test]
-    fn the_node_loads_the_preprod_v6_genesis_and_refuses_any_other_without_a_committee() {
+    /// The raw chain spec the live preprod v6 chain runs from.
+    fn preprod_v6() -> serde_json::Value {
         use std::io::Read;
         let mut text = String::new();
         flate2::read::GzDecoder::new(
@@ -863,7 +873,15 @@ pub(crate) mod tests {
         )
         .read_to_string(&mut text)
         .unwrap();
-        let v6: serde_json::Value = serde_json::from_str(&text).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// Preprod v6 started with no genesis committee, before the live-quorum
+    /// floor, and its first rotation seated Cardano's draw. The node loads
+    /// that genesis, and refuses the same genesis with any byte changed.
+    #[test]
+    fn the_node_loads_the_preprod_v6_genesis_and_refuses_any_other_without_a_committee() {
+        let v6 = preprod_v6();
         load_file("preprod-v6", &v6).unwrap();
 
         let mut other = v6;
@@ -881,5 +899,26 @@ pub(crate) mod tests {
             ),
             "{refused}"
         );
+    }
+
+    /// Wallets and explorers take the address prefix from the chain spec's
+    /// properties or from the runtime metadata. Every spec the node builds
+    /// in, and the one the live preprod chain runs from, advertises the
+    /// prefix the runtime declares.
+    #[test]
+    fn every_chain_spec_advertises_the_address_prefix_the_runtime_declares() {
+        let prefix = serde_json::Value::from(super::SS58Prefix::get());
+        for (name, spec) in [
+            ("development", super::development_config().unwrap()),
+            ("local", super::local_testnet_config().unwrap()),
+            ("preprod", crate::chain_spec_preprod::preprod_config().unwrap()),
+            ("preprod v6", load_file("preprod-v6-properties", &preprod_v6()).unwrap()),
+        ] {
+            assert_eq!(
+                sc_service::ChainSpec::properties(&spec).get("ss58Format"),
+                Some(&prefix),
+                "{name}"
+            );
+        }
     }
 }

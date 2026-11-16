@@ -64,6 +64,7 @@ Operators earn tMATRA from two separate reserve pools:
 - **Bonded attestation** — post a bond, then governance admits you to the committee (`join_committee` is root-gated); attestors earn per certified receipt
 - **Backup signers** — governance can name committee members that certify unpaid and only after a delay (`set_backup_signers`), so the other attestors sign first and are the ones paid; a backup signer's fee share is burned; see [SPO rewards](docs/SPO_REWARDS.md)
 - **Per-era cap** — attestation rewards capped per era (50,000 MATRA on preprod) to prevent reserve drain. The reward, the cap and its baseline committee size have no default: a genesis that omits them pays no attestation rewards
+- **Fixed issuance** — a genesis may declare `orinqReceipts.fixedIssuance`: everything it issues, the Treasury's existential deposit included. That chain mints no era emission, stores a zero receipt fee, bond requirement and attestation reward and refuses any other, and refuses every signed call that moves, burns, mints or bonds MATRA (every Balances call, vested transfers, billing top-ups and withdrawals, attestor bonds), on its own or inside a batch, a multisig or a recovered account. Root's force calls still move MATRA after the timelock's delay. Preprod declares none
 
 > **Running a Cardano SPO?** See [docs/SPO_REWARDS.md](docs/SPO_REWARDS.md) for the full **dual‑stream** picture — keep earning ADA on your pool *and* earn MATRA on Materios.
 

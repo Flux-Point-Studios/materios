@@ -312,3 +312,22 @@ fn preprod_digests_are_byte_identical_to_the_pinned_constant() {
         ));
     });
 }
+
+/// Wallets and explorers that read the address format from the runtime
+/// metadata, rather than from the chain properties, encode accounts with the
+/// prefix every Materios chain spec advertises.
+#[test]
+fn metadata_declares_the_address_prefix_the_chain_specs_advertise() {
+    let system = genesis_state()
+        .execute_with(Runtime::metadata_ir)
+        .pallets
+        .into_iter()
+        .find(|pallet| pallet.name == "System")
+        .expect("System is in the metadata");
+    let prefix = system
+        .constants
+        .iter()
+        .find(|constant| constant.name == "SS58Prefix")
+        .map(|constant| constant.value.clone());
+    assert_eq!(prefix, Some(42u16.to_le_bytes().to_vec()));
+}

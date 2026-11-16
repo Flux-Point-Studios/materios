@@ -6,6 +6,13 @@
 //! their inner call under this filter, so gating `Sudo` gates them all. Root's
 //! own dispatches bypass the filter, which is how `RootTimelock::enact` runs a
 //! call once its delay has passed.
+//!
+//! On a chain whose genesis fixed its MATRA issuance the same filter refuses
+//! the signed calls that move, burn, mint or bond MATRA. The wrappers
+//! re-dispatch those too, so none carries one past it. What still moves MATRA
+//! there is Root's: its force calls, and the payout of a treasury spend it
+//! approved. The recovery veto still forfeits a rescuer's deposit to the
+//! account it tried to take.
 
 use crate::{
     AccountId, BlockNumber, IntentSettlementDefaultMinSignerThreshold, Runtime, RuntimeCall,
@@ -182,6 +189,22 @@ impl Contains<RuntimeCall> for SudoRootGate {
             // `sudo_as`, `set_key` and `remove_key` are scheduled; Root may
             // call them after the delay.
             RuntimeCall::Sudo(_) => false,
+            // Transfers, burns and account upgrades; a transfer under a
+            // vesting lock; billing credit, which burns the MATRA it is
+            // bought with and mints it back on withdrawal; and an attestor
+            // bond, which a slash moves to the reserve pot. Every other
+            // Balances call is Root's. The issuance is read only for these
+            // calls, so no other call pays a storage read here.
+            RuntimeCall::Balances(_)
+            | RuntimeCall::Vesting(pallet_vesting::Call::vested_transfer { .. })
+            | RuntimeCall::Billing(
+                pallet_billing::Call::topup_self { .. }
+                | pallet_billing::Call::topup_for { .. }
+                | pallet_billing::Call::execute_withdrawal {},
+            )
+            | RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::bond { .. }) => {
+                !pallet_orinq_receipts::FixedIssuance::<Runtime>::exists()
+            }
             _ => true,
         }
     }

@@ -28,7 +28,7 @@ pub mod pallet {
     use frame_support::PalletId;
     use frame_system::pallet_prelude::*;
     use sp_core::H256;
-    use sp_runtime::Perbill;
+    use sp_runtime::{Perbill, SaturatedConversion};
     use sp_runtime::traits::{AccountIdConversion, Saturating, Zero};
 
     use crate::types::{
@@ -209,6 +209,16 @@ pub mod pallet {
     #[pallet::getter(fn validator_rewards)]
     pub type ValidatorRewards<T: Config> =
         StorageMap<_, Blake2_128Concat, T::AccountId, u128, ValueQuery>;
+
+    /// The MATRA issuance genesis declared for a chain that keeps it fixed.
+    /// While it is set, the era emission mints nothing, the receipt fee, the
+    /// bond requirement and the attestation reward stay zero, and the
+    /// runtime refuses every signed call that moves, burns, mints or bonds
+    /// MATRA, so only Root changes the issuance. A chain without it, as
+    /// preprod, mints as `T::ValidatorRewardPerEra` and
+    /// `T::ValidatorEmissionReserve` say.
+    #[pallet::storage]
+    pub type FixedIssuance<T: Config> = StorageValue<_, u128, OptionQuery>;
 
     /// Player anti-cheat signatures, keyed by receipt_id.
     /// Stored separately from ReceiptRecord for backward compatibility.
@@ -763,6 +773,11 @@ pub mod pallet {
         /// predates the fee. It can no longer be certified. Submit the
         /// content again under a new receipt id.
         ReceiptFeeNotEscrowed,
+        /// The chain's genesis fixed its MATRA issuance, so the receipt
+        /// submission fee, the bond requirement and the attestation reward
+        /// stay zero: each makes a certification or a slash move, mint or
+        /// burn MATRA. Pass zero.
+        IssuanceFixed,
     }
 
     // ── Genesis ──────────────────────────────────────────────────────────
@@ -779,13 +794,15 @@ pub mod pallet {
         /// Initial baseline attestor count for cap auto-scaling; non-zero.
         pub era_cap_baseline_attestor_count: Option<u32>,
         /// Initial bond requirement for joining the committee
-        /// (Component 8). Defaults to 1K MATRA.
+        /// (Component 8). Defaults to 1K MATRA, and to none under
+        /// `fixed_issuance`.
         pub bond_requirement: u128,
         /// Initial per-receipt submission fee (Component 4). Defaults to
-        /// 1 MATRA (1_000_000 base units).
+        /// 1 MATRA (1_000_000 base units), and to none under
+        /// `fixed_issuance`.
         pub receipt_submission_fee: u128,
         /// Initial fee floor (Component 4). Defaults to 0.1 MATRA
-        /// (100_000 base units).
+        /// (100_000 base units), and to none under `fixed_issuance`.
         pub receipt_submission_fee_floor: u128,
         /// Initial expiry deadline in blocks (Component 4). Defaults to
         /// 14_400 blocks (~24h at 6s/block).
@@ -797,6 +814,12 @@ pub mod pallet {
         /// Initial backup signer delay in blocks. Zero imposes none; any other
         /// must be less than half of the expiry window genesis stores.
         pub backup_signer_delay: u32,
+        /// The MATRA issuance the chain keeps: everything genesis issues, the
+        /// Treasury's existential deposit included, which the runtime's
+        /// genesis builder checks. Such a genesis names no attestation
+        /// reward, fee, fee floor or bond requirement other than zero. None
+        /// leaves the issuance open.
+        pub fixed_issuance: Option<u128>,
         #[serde(skip)]
         pub _phantom: core::marker::PhantomData<T>,
     }
@@ -828,17 +851,30 @@ pub mod pallet {
                     "attestation reward, era cap base and era cap baseline must be set together"
                 ),
             }
-            let bond_req = if self.bond_requirement == 0 {
+            // A fee is slashed from its submitter and partly burned, a bond
+            // is slashed to the reserve pot and a reward is minted, so a
+            // chain that fixes its issuance stores all three as zero, where
+            // any other chain reads a zero as the default.
+            let fixed = self.fixed_issuance.is_some();
+            assert!(
+                !fixed
+                    || (self.attestation_reward_per_signer.unwrap_or(0) == 0
+                        && self.receipt_submission_fee == 0
+                        && self.receipt_submission_fee_floor == 0
+                        && self.bond_requirement == 0),
+                "a genesis that fixes its issuance pays no attestation reward, charges no receipt fee and requires no bond"
+            );
+            let bond_req = if self.bond_requirement == 0 && !fixed {
                 1_000_000_000u128 // 1K MATRA (6 decimals)
             } else {
                 self.bond_requirement
             };
-            let fee = if self.receipt_submission_fee == 0 {
+            let fee = if self.receipt_submission_fee == 0 && !fixed {
                 1_000_000u128 // 1 MATRA (6 decimals)
             } else {
                 self.receipt_submission_fee
             };
-            let floor = if self.receipt_submission_fee_floor == 0 {
+            let floor = if self.receipt_submission_fee_floor == 0 && !fixed {
                 100_000u128 // 0.1 MATRA (6 decimals)
             } else {
                 self.receipt_submission_fee_floor
@@ -867,6 +903,9 @@ pub mod pallet {
             );
             if self.backup_signer_delay != 0 {
                 BackupSignerDelay::<T>::put(self.backup_signer_delay);
+            }
+            if let Some(issuance) = self.fixed_issuance {
+                FixedIssuance::<T>::put(issuance);
             }
         }
     }
@@ -922,151 +961,154 @@ pub mod pallet {
             weight = weight.saturating_add(db.reads_writes(authorities.len() as u64, stamped));
 
             // ── Validator rewards: era distribution ──────────────────────
-            // Era length: 14400 blocks (~24h at 6s block time), minting until
-            // `T::ValidatorEmissionReserve` has been paid out in total.
+            // Era length: 14400 blocks (~24h at 6s block time). An era mints
+            // until `T::ValidatorEmissionReserve` has been paid out in total,
+            // and nothing once genesis has fixed the issuance. It ends
+            // whether or not it minted.
             const ERA_LENGTH: u32 = 14400;
-            let validator_reserve = T::ValidatorEmissionReserve::get();
 
             let block_num: u32 = n.into();
             let era_start: u32 = EraStartBlock::<T>::get().into();
 
             if block_num > 0 && block_num.saturating_sub(era_start) >= ERA_LENGTH {
-                // The reserve's running total.
-                weight = weight.saturating_add(db.reads(1));
-                // Distribute rewards for this era
-                let total_distributed = TotalRewardsDistributed::<T>::get();
-                if total_distributed < validator_reserve {
-                    let remaining = validator_reserve.saturating_sub(total_distributed);
-                    let era_reward = core::cmp::min(T::ValidatorRewardPerEra::get(), remaining);
+                // The fixed issuance, and the reserve's running total.
+                weight = weight.saturating_add(db.reads(2));
+                let era_reward = if FixedIssuance::<T>::exists() {
+                    0
+                } else {
+                    let remaining = T::ValidatorEmissionReserve::get()
+                        .saturating_sub(TotalRewardsDistributed::<T>::get());
+                    core::cmp::min(T::ValidatorRewardPerEra::get(), remaining)
+                };
 
-                    // Sum total blocks authored this era
-                    let mut authored: Vec<(T::AccountId, u32)> = Vec::new();
-                    let mut total_blocks: u32 = 0;
-                    for (account, count) in BlocksAuthored::<T>::iter() {
-                        weight = weight.saturating_add(db.reads(1));
-                        if count > 0 {
-                            total_blocks = total_blocks.saturating_add(count);
-                            authored.push((account, count));
+                // Sum total blocks authored this era
+                let mut authored: Vec<(T::AccountId, u32)> = Vec::new();
+                let mut total_blocks: u32 = 0;
+                for (account, count) in BlocksAuthored::<T>::iter() {
+                    weight = weight.saturating_add(db.reads(1));
+                    if count > 0 {
+                        total_blocks = total_blocks.saturating_add(count);
+                        authored.push((account, count));
+                    }
+                }
+
+                if total_blocks > 0 {
+                    // Validator emission split: runtime-tunable validator/treasury share (Option A — 2026-04-21).
+                    //
+                    // Future upgrade path (Option B — block-fullness-weighted):
+                    // Per Midnight whitepaper (2025-06) §5, block rewards can be split into:
+                    //   - fixed subsidy (100% to producer, guarantees floor reward)
+                    //   - variable component (producer/treasury split by block fullness)
+                    // Defer until preprod mainnet has organic tx volume; block-fullness signal
+                    // is noise at current preprod volumes. Flag for re-eval post-mainnet TGE.
+                    //
+                    // Rounding residue → treasury (safer sink than validators).
+                    // `T::TreasuryEmissionShare` is a runtime-tunable `Get<Perbill>`
+                    // (defaults to 15% in the runtime's `parameter_types!`) so governance
+                    // can retune via runtime upgrade without code change.
+                    //
+                    // NOTE: pre-202 the full `era_reward` went to validators; `total_distributed`
+                    // and `ValidatorRewards` tracked the lifetime-paid validator figure only.
+                    // With the split, BOTH go through the pool: validators track their share,
+                    // treasury emission is accounted under `TotalRewardsDistributed` as well
+                    // so `ValidatorEmissionReserve` still gates the full emission envelope.
+                    let treasury_share: Perbill = T::TreasuryEmissionShare::get();
+                    // Validator gets the complement of the treasury share, computed via
+                    // `Perbill::saturating_sub` to stay in the Perbill domain. At
+                    // treasury_share=15% this is validator_share=85%.
+                    let validator_share: Perbill =
+                        Perbill::one().saturating_sub(treasury_share);
+                    let validator_pool = validator_share.mul_floor(era_reward);
+                    // Treasury gets the exact complement — this ensures
+                    // validator_pool + treasury_pool == era_reward with zero leak,
+                    // and rolls any residue from the percent multiplication into
+                    // treasury (the safer sink per spec).
+                    let treasury_pool = era_reward.saturating_sub(validator_pool);
+
+                    let mut distributed_to_validators: u128 = 0;
+                    let mut validators_rewarded: u32 = 0;
+
+                    // Pro-rata pay validators from the 85% pool. Any floor()
+                    // residue here also rolls into treasury below.
+                    for (account, blocks) in &authored {
+                        // Pro-rata: reward = validator_pool * blocks / total_blocks
+                        let reward = validator_pool
+                            .saturating_mul(*blocks as u128)
+                            / (total_blocks as u128);
+
+                        if reward > 0 {
+                            // Credit the validator's MATRA balance via Balances pallet
+                            use frame_support::traits::Currency;
+                            let balance: <T as pallet_balances::Config>::Balance =
+                                reward.try_into().unwrap_or_default();
+                            let _ = pallet_balances::Pallet::<T>::deposit_creating(
+                                account,
+                                balance,
+                            );
+                            // The account and its lifetime reward.
+                            weight = weight.saturating_add(
+                                <T as Config>::WeightInfo::balance_mutations(1)
+                                    .saturating_add(db.reads_writes(2, 2)),
+                            );
+
+                            // Track lifetime rewards
+                            ValidatorRewards::<T>::mutate(account, |total| {
+                                *total = total.saturating_add(reward);
+                            });
+                            distributed_to_validators =
+                                distributed_to_validators.saturating_add(reward);
+                            validators_rewarded = validators_rewarded.saturating_add(1);
                         }
                     }
 
-                    if total_blocks > 0 {
-                        // Validator emission split: runtime-tunable validator/treasury share (Option A — 2026-04-21).
-                        //
-                        // Future upgrade path (Option B — block-fullness-weighted):
-                        // Per Midnight whitepaper (2025-06) §5, block rewards can be split into:
-                        //   - fixed subsidy (100% to producer, guarantees floor reward)
-                        //   - variable component (producer/treasury split by block fullness)
-                        // Defer until preprod mainnet has organic tx volume; block-fullness signal
-                        // is noise at current preprod volumes. Flag for re-eval post-mainnet TGE.
-                        //
-                        // Rounding residue → treasury (safer sink than validators).
-                        // `T::TreasuryEmissionShare` is a runtime-tunable `Get<Perbill>`
-                        // (defaults to 15% in the runtime's `parameter_types!`) so governance
-                        // can retune via runtime upgrade without code change.
-                        //
-                        // NOTE: pre-202 the full `era_reward` went to validators; `total_distributed`
-                        // and `ValidatorRewards` tracked the lifetime-paid validator figure only.
-                        // With the split, BOTH go through the pool: validators track their share,
-                        // treasury emission is accounted under `TotalRewardsDistributed` as well
-                        // so `ValidatorEmissionReserve` still gates the full emission envelope.
-                        let treasury_share: Perbill = T::TreasuryEmissionShare::get();
-                        // Validator gets the complement of the treasury share, computed via
-                        // `Perbill::saturating_sub` to stay in the Perbill domain. At
-                        // treasury_share=15% this is validator_share=85%.
-                        let validator_share: Perbill =
-                            Perbill::one().saturating_sub(treasury_share);
-                        let validator_pool = validator_share.mul_floor(era_reward);
-                        // Treasury gets the exact complement — this ensures
-                        // validator_pool + treasury_pool == era_reward with zero leak,
-                        // and rolls any residue from the percent multiplication into
-                        // treasury (the safer sink per spec).
-                        let treasury_pool = era_reward.saturating_sub(validator_pool);
+                    // Credit treasury: baseline 15% pool + pro-rata residue
+                    // from the validator loop. `residue` can legitimately be 0
+                    // when `validator_pool` divides evenly by total_blocks.
+                    let pro_rata_residue =
+                        validator_pool.saturating_sub(distributed_to_validators);
+                    let treasury_emission = treasury_pool.saturating_add(pro_rata_residue);
+                    let distributed_this_era = distributed_to_validators
+                        .saturating_add(treasury_emission);
 
-                        let mut distributed_to_validators: u128 = 0;
-                        let validators_count = authored.len() as u32;
-
-                        // Pro-rata pay validators from the 85% pool. Any floor()
-                        // residue here also rolls into treasury below.
-                        for (account, blocks) in &authored {
-                            // Pro-rata: reward = validator_pool * blocks / total_blocks
-                            let reward = validator_pool
-                                .saturating_mul(*blocks as u128)
-                                / (total_blocks as u128);
-
-                            if reward > 0 {
-                                // Credit the validator's MATRA balance via Balances pallet
-                                use frame_support::traits::Currency;
-                                let balance: <T as pallet_balances::Config>::Balance =
-                                    reward.try_into().unwrap_or_default();
-                                let _ = pallet_balances::Pallet::<T>::deposit_creating(
-                                    account,
-                                    balance,
-                                );
-                                // The account and its lifetime reward.
-                                weight = weight.saturating_add(
-                                    <T as Config>::WeightInfo::balance_mutations(1)
-                                        .saturating_add(db.reads_writes(2, 2)),
-                                );
-
-                                // Track lifetime rewards
-                                ValidatorRewards::<T>::mutate(account, |total| {
-                                    *total = total.saturating_add(reward);
-                                });
-                                distributed_to_validators =
-                                    distributed_to_validators.saturating_add(reward);
-                            }
-                        }
-
-                        // Credit treasury: baseline 15% pool + pro-rata residue
-                        // from the validator loop. `residue` can legitimately be 0
-                        // when `validator_pool` divides evenly by total_blocks.
-                        let pro_rata_residue =
-                            validator_pool.saturating_sub(distributed_to_validators);
-                        let treasury_emission = treasury_pool.saturating_add(pro_rata_residue);
-                        let distributed_this_era = distributed_to_validators
-                            .saturating_add(treasury_emission);
-
-                        if treasury_emission > 0 {
-                            use frame_support::traits::Currency;
-                            let balance: <T as pallet_balances::Config>::Balance =
-                                treasury_emission.try_into().unwrap_or_default();
-                            let _ = pallet_balances::Pallet::<T>::deposit_creating(
-                                &Self::treasury_account(),
-                                balance,
-                            );
-                            weight = weight.saturating_add(
-                                <T as Config>::WeightInfo::balance_mutations(1)
-                                    .saturating_add(db.reads_writes(1, 1)),
-                            );
-                        }
-
-                        // Total issuance, and the reserve's running total.
-                        weight = weight.saturating_add(db.reads_writes(1, 2));
-                        TotalRewardsDistributed::<T>::mutate(|total| {
-                            *total = total.saturating_add(distributed_this_era);
-                        });
-
-                        Self::deposit_event(Event::ValidatorRewardsDistributed {
-                            era_blocks: total_blocks,
-                            total_distributed: distributed_this_era,
-                            validators_rewarded: validators_count,
-                        });
-
-                        log::info!(
-                            "Era emission: validators={} ({} blocks), treasury={}, total={}",
-                            distributed_to_validators, total_blocks,
-                            treasury_emission, distributed_this_era,
+                    if treasury_emission > 0 {
+                        use frame_support::traits::Currency;
+                        let balance: <T as pallet_balances::Config>::Balance =
+                            treasury_emission.try_into().unwrap_or_default();
+                        let _ = pallet_balances::Pallet::<T>::deposit_creating(
+                            &Self::treasury_account(),
+                            balance,
+                        );
+                        weight = weight.saturating_add(
+                            <T as Config>::WeightInfo::balance_mutations(1)
+                                .saturating_add(db.reads_writes(1, 1)),
                         );
                     }
 
-                    // Reset for next era
-                    let cleared = BlocksAuthored::<T>::clear(u32::MAX, None).unique;
-                    ReceiptsCertifiedInEra::<T>::put(0u32);
-                    AttestationRewardsPaidInEra::<T>::put(0u128);
-                    EraStartBlock::<T>::put(n);
-                    weight = weight.saturating_add(db.writes(u64::from(cleared) + 3));
+                    // Total issuance, and the reserve's running total.
+                    weight = weight.saturating_add(db.reads_writes(1, 2));
+                    TotalRewardsDistributed::<T>::mutate(|total| {
+                        *total = total.saturating_add(distributed_this_era);
+                    });
+
+                    Self::deposit_event(Event::ValidatorRewardsDistributed {
+                        era_blocks: total_blocks,
+                        total_distributed: distributed_this_era,
+                        validators_rewarded,
+                    });
+
+                    log::info!(
+                        "Era emission: validators={} ({} blocks), treasury={}, total={}",
+                        distributed_to_validators, total_blocks,
+                        treasury_emission, distributed_this_era,
+                    );
                 }
+
+                // Reset for next era
+                let cleared = BlocksAuthored::<T>::clear(u32::MAX, None).unique;
+                ReceiptsCertifiedInEra::<T>::put(0u32);
+                AttestationRewardsPaidInEra::<T>::put(0u128);
+                EraStartBlock::<T>::put(n);
+                weight = weight.saturating_add(db.writes(u64::from(cleared) + 3));
             }
 
             weight.saturating_add(Weight::from_parts(10_000_000, 0))
@@ -1111,6 +1153,11 @@ pub mod pallet {
 
             T::DbWeight::get().reads_writes(reads, writes)
         }
+
+        #[cfg(feature = "try-runtime")]
+        fn try_state(_n: BlockNumberFor<T>) -> Result<(), sp_runtime::TryRuntimeError> {
+            Self::ensure_fixed_issuance().map_err(Into::into)
+        }
     }
 
     impl<T: Config> Pallet<T>
@@ -1149,6 +1196,30 @@ pub mod pallet {
     // ── Component 5 + 8 helpers (no AccountId bound needed) ─────────────
 
     impl<T: Config> Pallet<T> {
+        /// Refuses a chain whose `Balances.TotalIssuance` is not the fixed
+        /// issuance its genesis declared. A chain that declared none passes.
+        pub fn ensure_fixed_issuance() -> Result<(), &'static str> {
+            match FixedIssuance::<T>::get() {
+                Some(fixed)
+                    if pallet_balances::TotalIssuance::<T>::get().saturated_into::<u128>()
+                        != fixed =>
+                {
+                    Err("TotalIssuance differs from the fixed issuance its genesis declared")
+                }
+                _ => Ok(()),
+            }
+        }
+
+        /// Refuses a fee, bond requirement or attestation reward other than
+        /// zero on a chain whose genesis fixed its issuance.
+        fn ensure_zero_while_issuance_fixed(value: u128) -> DispatchResult {
+            ensure!(
+                value == 0 || !FixedIssuance::<T>::exists(),
+                Error::<T>::IssuanceFixed
+            );
+            Ok(())
+        }
+
         fn changed_accounts(before: &BTreeMap<T::AccountId, BalanceOf<T>>) -> u32 {
             before.iter().filter(|(who, balance)| T::Currency::free_balance(who) != **balance).count() as u32
         }
@@ -2176,15 +2247,17 @@ pub mod pallet {
         // ── Component 5: governance setters for dynamic reward config ────
 
         /// Update the per-signer attestation reward. Root-only. Takes effect
-        /// immediately; future certifications pay out at the new rate.
+        /// immediately; future certifications pay out at the new rate. Only
+        /// zero while the issuance is fixed.
         #[pallet::call_index(9)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
-            .saturating_add(T::DbWeight::get().writes(1)))]
+            .saturating_add(T::DbWeight::get().reads_writes(1, 1)))]
         pub fn set_attestation_reward_per_signer(
             origin: OriginFor<T>,
             value: u128,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            Self::ensure_zero_while_issuance_fixed(value)?;
             AttestationRewardPerSigner::<T>::put(value);
             Self::deposit_event(Event::AttestationRewardPerSignerUpdated { new_value: value });
             Ok(())
@@ -2383,15 +2456,16 @@ pub mod pallet {
         /// Root-only. Takes effect immediately; new joins must meet the
         /// new requirement, but existing members are NOT retroactively
         /// ejected (prevents a governance key from booting the committee
-        /// by raising the bar).
+        /// by raising the bar). Only zero while the issuance is fixed.
         #[pallet::call_index(15)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
-            .saturating_add(T::DbWeight::get().writes(1)))]
+            .saturating_add(T::DbWeight::get().reads_writes(1, 1)))]
         pub fn set_bond_requirement(
             origin: OriginFor<T>,
             value: u128,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            Self::ensure_zero_while_issuance_fixed(value)?;
             BondRequirement::<T>::put(value);
             Self::deposit_event(Event::BondRequirementUpdated { new_value: value });
             Ok(())
@@ -2401,16 +2475,18 @@ pub mod pallet {
 
         /// Update the per-receipt submission fee. Root-only. The new value
         /// must be at or above `ReceiptSubmissionFeeFloor`; otherwise
-        /// rejected with `FeeBelowFloor`.
+        /// rejected with `FeeBelowFloor`. Only zero while the issuance is
+        /// fixed.
         #[pallet::call_index(16)]
         #[pallet::weight(Weight::from_parts(10_000, 0)
-            .saturating_add(T::DbWeight::get().reads(1))
+            .saturating_add(T::DbWeight::get().reads(2))
             .saturating_add(T::DbWeight::get().writes(1)))]
         pub fn set_receipt_submission_fee(
             origin: OriginFor<T>,
             value: u128,
         ) -> DispatchResult {
             ensure_root(origin)?;
+            Self::ensure_zero_while_issuance_fixed(value)?;
             let floor = ReceiptSubmissionFeeFloor::<T>::get();
             ensure!(value >= floor, Error::<T>::FeeBelowFloor);
             ReceiptSubmissionFee::<T>::put(value);
