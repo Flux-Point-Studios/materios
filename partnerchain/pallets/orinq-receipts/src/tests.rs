@@ -190,6 +190,7 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
         receipt_expiry_blocks: 14_400,
         backup_signers: vec![],
         backup_signer_delay: 0,
+        fixed_issuance: None,
         _phantom: Default::default(),
     }
     .assimilate_storage(&mut t)
@@ -3903,6 +3904,424 @@ mod emission_reserves {
                 3 * 10_000_000
             );
             assert_eq!(OrinqReceipts::attestation_rewards(acc(1)), 10_000_000);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The era rolls over whether or not it mints
+// ---------------------------------------------------------------------------
+//
+// The per-era attestation cap and the authored-block counts are the era's
+// books, so they must roll over every era, including on a chain that mints
+// nothing.
+
+mod era_rollover {
+    use super::*;
+    use frame_support::traits::Hooks;
+
+    const ERA_LENGTH: u32 = 14_400;
+    const AUTHOR: u8 = 0xA1;
+
+    /// Ends the era that started at `start`, which `AUTHOR` authored whole,
+    /// with the per-era attestation counters left dirty. Returns the block
+    /// the next era starts at.
+    fn end_era_started_at(start: u32) -> u32 {
+        pallet::BlocksAuthored::<Test>::insert(acc(AUTHOR), ERA_LENGTH);
+        pallet::ReceiptsCertifiedInEra::<Test>::put(3u32);
+        pallet::AttestationRewardsPaidInEra::<Test>::put(30_000_000u128);
+        let boundary = start + ERA_LENGTH;
+        System::set_block_number(boundary);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(boundary);
+        boundary
+    }
+
+    fn assert_rolled_over_at(boundary: u32) {
+        assert_eq!(pallet::EraStartBlock::<Test>::get(), boundary);
+        assert_eq!(pallet::BlocksAuthored::<Test>::get(acc(AUTHOR)), 0);
+        assert_eq!(pallet::ReceiptsCertifiedInEra::<Test>::get(), 0);
+        assert_eq!(pallet::AttestationRewardsPaidInEra::<Test>::get(), 0);
+    }
+
+    /// Two eras end in turn, each a full era after the last, and neither
+    /// mints: the era event reports the blocks and nothing distributed.
+    fn assert_eras_roll_over_without_minting() {
+        pallet::EraStartBlock::<Test>::put(1u32);
+        let issuance = Balances::total_issuance();
+        let distributed = pallet::TotalRewardsDistributed::<Test>::get();
+
+        let first = end_era_started_at(1);
+        assert_rolled_over_at(first);
+        System::assert_last_event(
+            crate::Event::<Test>::ValidatorRewardsDistributed {
+                era_blocks: ERA_LENGTH,
+                total_distributed: 0,
+                validators_rewarded: 0,
+            }
+            .into(),
+        );
+
+        // One block short of a full era is still the same era.
+        pallet::BlocksAuthored::<Test>::insert(acc(AUTHOR), 7u32);
+        System::set_block_number(first + ERA_LENGTH - 1);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(first + ERA_LENGTH - 1);
+        assert_eq!(pallet::EraStartBlock::<Test>::get(), first);
+        assert_eq!(pallet::BlocksAuthored::<Test>::get(acc(AUTHOR)), 7);
+
+        let second = end_era_started_at(first);
+        assert_rolled_over_at(second);
+
+        assert_eq!(Balances::total_issuance(), issuance);
+        assert_eq!(pallet::TotalRewardsDistributed::<Test>::get(), distributed);
+        assert_eq!(OrinqReceipts::validator_rewards(acc(AUTHOR)), 0);
+    }
+
+    #[test]
+    fn eras_roll_over_with_no_emission_reserve() {
+        ValidatorEmissionReserveValue::set(0);
+        new_test_ext().execute_with(assert_eras_roll_over_without_minting);
+    }
+
+    #[test]
+    fn eras_roll_over_once_the_emission_reserve_is_spent() {
+        new_test_ext().execute_with(|| {
+            pallet::TotalRewardsDistributed::<Test>::put(VALIDATOR_EMISSION_RESERVE);
+            assert_eras_roll_over_without_minting();
+        });
+    }
+
+    #[test]
+    fn eras_roll_over_with_no_reward_per_era() {
+        ValidatorRewardPerEraValue::set(0);
+        new_test_ext().execute_with(assert_eras_roll_over_without_minting);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// A chain that pays no attestation reward mints nothing on certification
+// ---------------------------------------------------------------------------
+
+mod unpaid_attestation {
+    use super::*;
+
+    /// The test chain with the attestation reward and era cap base genesis
+    /// names, and the baseline set beside them.
+    fn chain(reward: Option<u128>, era_cap_base: Option<u128>) -> sp_io::TestExternalities {
+        let mut storage = frame_system::GenesisConfig::<Test>::default()
+            .build_storage()
+            .unwrap();
+        pallet_orinq_receipts::GenesisConfig::<Test> {
+            attestation_reward_per_signer: reward,
+            era_cap_base,
+            era_cap_baseline_attestor_count: reward.map(|_| 16),
+            ..Default::default()
+        }
+        .assimilate_storage(&mut storage)
+        .unwrap();
+        let mut ext = sp_io::TestExternalities::new(storage);
+        ext.execute_with(|| {
+            System::set_block_number(1);
+            Timestamp::set_timestamp(1_000);
+        });
+        ext
+    }
+
+    /// Committee {1, 2, 3} certifies a receipt account 10 submits. The fee
+    /// moves from the submitter to the signers and the treasury; nothing is
+    /// minted or burned.
+    fn assert_certifying_mints_nothing() {
+        seed_submitter_and_committee(10, &[1, 2, 3]);
+        assert_ok!(OrinqReceipts::set_committee(
+            RuntimeOrigin::root(),
+            vec![acc(1), acc(2), acc(3)],
+            3
+        ));
+        let issuance = Balances::total_issuance();
+
+        let rid = H256::from([0xF1; 32]);
+        assert_ok!(submit_c4(10, rid, H256::from([0xF2; 32])));
+        let cert_hash = H256::from(canonical_for(rid));
+        for s in 1u8..=3 {
+            assert_ok!(OrinqReceipts::attest_availability_cert(
+                RuntimeOrigin::signed(acc(s)),
+                rid,
+                cert_hash.0
+            ));
+        }
+
+        System::assert_has_event(
+            crate::Event::<Test>::AvailabilityCertified {
+                receipt_id: rid,
+                cert_hash,
+            }
+            .into(),
+        );
+        assert_eq!(Balances::total_issuance(), issuance);
+        assert_eq!(pallet::TotalAttestationRewards::<Test>::get(), 0);
+        for s in 1u8..=3 {
+            assert_eq!(OrinqReceipts::attestation_rewards(acc(s)), 0);
+        }
+    }
+
+    #[test]
+    fn a_genesis_that_names_no_attestation_reward_mints_nothing() {
+        chain(None, None).execute_with(assert_certifying_mints_nothing);
+    }
+
+    #[test]
+    fn a_zero_attestation_reward_mints_nothing_under_an_open_era_cap() {
+        chain(Some(0), Some(50_000_000_000)).execute_with(assert_certifying_mints_nothing);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fixed issuance
+// ---------------------------------------------------------------------------
+//
+// A genesis may declare the MATRA issuance its chain keeps. The era emission
+// then mints nothing, and try-runtime holds `Balances.TotalIssuance` to the
+// declared figure.
+
+mod fixed_issuance {
+    use super::*;
+    use frame_support::traits::Hooks;
+
+    const ISSUED: u128 = 3_000;
+    const DRIFTED: &str = "TotalIssuance differs from the fixed issuance its genesis declared";
+
+    /// Accounts 1 and 2 hold `ISSUED` between them, and genesis fixes
+    /// `declared`.
+    fn chain(declared: Option<u128>) -> sp_io::TestExternalities {
+        let mut storage = frame_system::GenesisConfig::<Test>::default()
+            .build_storage()
+            .unwrap();
+        pallet_balances::GenesisConfig::<Test> {
+            balances: vec![(acc(1), 1_000), (acc(2), 2_000)],
+        }
+        .assimilate_storage(&mut storage)
+        .unwrap();
+        pallet_orinq_receipts::GenesisConfig::<Test> {
+            fixed_issuance: declared,
+            ..Default::default()
+        }
+        .assimilate_storage(&mut storage)
+        .unwrap();
+        let mut ext = sp_io::TestExternalities::new(storage);
+        ext.execute_with(|| System::set_block_number(1));
+        ext
+    }
+
+    /// Ends an era account 1 authored whole; returns what it minted.
+    fn end_era() -> u128 {
+        pallet::BlocksAuthored::<Test>::insert(acc(1), 14_400u32);
+        pallet::EraStartBlock::<Test>::put(1u32);
+        let issuance = Balances::total_issuance();
+        System::set_block_number(14_401);
+        let _ = <OrinqReceipts as Hooks<_>>::on_initialize(14_401);
+        assert_eq!(pallet::EraStartBlock::<Test>::get(), 14_401);
+        Balances::total_issuance() - issuance
+    }
+
+    #[test]
+    fn genesis_stores_the_issuance_only_when_it_declares_one() {
+        chain(Some(ISSUED)).execute_with(|| {
+            assert_eq!(pallet::FixedIssuance::<Test>::get(), Some(ISSUED));
+            assert_ok!(OrinqReceipts::ensure_fixed_issuance());
+        });
+        chain(None).execute_with(|| {
+            assert!(!pallet::FixedIssuance::<Test>::exists());
+            assert_ok!(OrinqReceipts::ensure_fixed_issuance());
+        });
+    }
+
+    #[test]
+    fn the_genesis_patch_names_it_in_camel_case() {
+        let mut config =
+            serde_json::to_value(pallet_orinq_receipts::GenesisConfig::<Test>::default()).unwrap();
+        assert_eq!(config["fixedIssuance"], serde_json::Value::Null);
+        config["fixedIssuance"] = 3_000u64.into();
+        let config: pallet_orinq_receipts::GenesisConfig<Test> =
+            serde_json::from_value(config).expect("genesis JSON deserializes");
+        assert_eq!(config.fixed_issuance, Some(ISSUED));
+    }
+
+    #[test]
+    fn an_era_mints_nothing_once_genesis_fixes_the_issuance() {
+        chain(Some(ISSUED)).execute_with(|| {
+            assert_eq!(end_era(), 0);
+            assert_eq!(pallet::TotalRewardsDistributed::<Test>::get(), 0);
+            assert_ok!(OrinqReceipts::ensure_fixed_issuance());
+        });
+        chain(None).execute_with(|| {
+            assert_eq!(end_era(), VALIDATOR_REWARD_PER_ERA);
+        });
+    }
+
+    #[test]
+    fn issuance_that_leaves_the_declared_figure_fails_the_check() {
+        chain(Some(ISSUED)).execute_with(|| {
+            Balances::make_free_balance_be(&acc(1), 1_001);
+            assert_eq!(OrinqReceipts::ensure_fixed_issuance(), Err(DRIFTED));
+            Balances::make_free_balance_be(&acc(1), 999);
+            assert_eq!(OrinqReceipts::ensure_fixed_issuance(), Err(DRIFTED));
+        });
+        chain(None).execute_with(|| {
+            Balances::make_free_balance_be(&acc(1), 1_001);
+            assert_ok!(OrinqReceipts::ensure_fixed_issuance());
+        });
+    }
+
+    #[cfg(feature = "try-runtime")]
+    #[test]
+    fn try_state_holds_the_issuance_to_the_declared_figure() {
+        chain(Some(ISSUED)).execute_with(|| {
+            assert_ok!(<OrinqReceipts as Hooks<_>>::try_state(1));
+            Balances::make_free_balance_be(&acc(2), 1_999);
+            assert_eq!(
+                <OrinqReceipts as Hooks<_>>::try_state(1),
+                Err(DRIFTED.into())
+            );
+        });
+    }
+
+    fn build_fixed(config: pallet_orinq_receipts::GenesisConfig<Test>) {
+        let _ = pallet_orinq_receipts::GenesisConfig::<Test> {
+            fixed_issuance: Some(0),
+            ..config
+        }
+        .build_storage();
+    }
+
+    #[test]
+    #[should_panic(expected = "a genesis that fixes its issuance pays no attestation reward")]
+    fn a_genesis_that_fixes_its_issuance_cannot_pay_attestation_rewards() {
+        build_fixed(pallet_orinq_receipts::GenesisConfig {
+            attestation_reward_per_signer: Some(1),
+            era_cap_base: Some(1),
+            era_cap_baseline_attestor_count: Some(1),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "charges no receipt fee")]
+    fn a_genesis_that_fixes_its_issuance_cannot_charge_a_receipt_fee() {
+        build_fixed(pallet_orinq_receipts::GenesisConfig {
+            receipt_submission_fee: 1,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "charges no receipt fee")]
+    fn a_genesis_that_fixes_its_issuance_cannot_set_a_fee_floor() {
+        build_fixed(pallet_orinq_receipts::GenesisConfig {
+            receipt_submission_fee_floor: 1,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "requires no bond")]
+    fn a_genesis_that_fixes_its_issuance_cannot_require_a_bond() {
+        build_fixed(pallet_orinq_receipts::GenesisConfig {
+            bond_requirement: 1,
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn a_genesis_that_fixes_its_issuance_may_name_a_zero_attestation_reward() {
+        let storage = pallet_orinq_receipts::GenesisConfig::<Test> {
+            fixed_issuance: Some(0),
+            attestation_reward_per_signer: Some(0),
+            era_cap_base: Some(1),
+            era_cap_baseline_attestor_count: Some(1),
+            ..Default::default()
+        }
+        .build_storage()
+        .unwrap();
+        sp_io::TestExternalities::new(storage).execute_with(|| {
+            assert_eq!(pallet::FixedIssuance::<Test>::get(), Some(0));
+            assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 0);
+        });
+    }
+
+    /// A zero in the genesis config stands for the default fee, floor and
+    /// bond, except on a chain that fixes its issuance, which stores the zero.
+    #[test]
+    fn a_genesis_that_fixes_its_issuance_stores_no_fee_and_no_bond() {
+        chain(Some(ISSUED)).execute_with(|| {
+            assert_eq!(OrinqReceipts::receipt_submission_fee(), 0);
+            assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), 0);
+            assert_eq!(OrinqReceipts::bond_requirement(), 0);
+        });
+        chain(None).execute_with(|| {
+            assert_eq!(OrinqReceipts::receipt_submission_fee(), DEFAULT_FEE);
+            assert_eq!(OrinqReceipts::receipt_submission_fee_floor(), DEFAULT_FLOOR);
+            assert_eq!(OrinqReceipts::bond_requirement(), 1_000_000_000);
+        });
+    }
+
+    /// The three values that make a certification or a slash move MATRA stay
+    /// zero while the issuance is fixed. A chain that fixes none sets them
+    /// as before.
+    #[test]
+    fn root_sets_no_fee_bond_or_reward_while_the_issuance_is_fixed() {
+        let setters: [fn(u128) -> frame_support::dispatch::DispatchResult; 3] = [
+            |value| OrinqReceipts::set_receipt_submission_fee(RuntimeOrigin::root(), value),
+            |value| OrinqReceipts::set_bond_requirement(RuntimeOrigin::root(), value),
+            |value| OrinqReceipts::set_attestation_reward_per_signer(RuntimeOrigin::root(), value),
+        ];
+        chain(Some(ISSUED)).execute_with(|| {
+            for set in setters {
+                assert_noop!(set(1), pallet::Error::<Test>::IssuanceFixed);
+                assert_ok!(set(0));
+            }
+        });
+        chain(None).execute_with(|| {
+            for set in setters {
+                assert_ok!(set(2_000_000));
+            }
+            assert_eq!(OrinqReceipts::receipt_submission_fee(), 2_000_000);
+            assert_eq!(OrinqReceipts::bond_requirement(), 2_000_000);
+            assert_eq!(OrinqReceipts::attestation_reward_per_signer(), 2_000_000);
+        });
+    }
+
+    /// Accounts 1 and 2 certify a receipt account 1 submits. No balance
+    /// changes, free or reserved, and the issuance stays the declared one.
+    #[test]
+    fn a_receipt_certifies_without_moving_matra_once_the_issuance_is_fixed() {
+        chain(Some(ISSUED)).execute_with(|| {
+            Timestamp::set_timestamp(1_000);
+            assert_ok!(OrinqReceipts::set_committee(
+                RuntimeOrigin::root(),
+                vec![acc(1), acc(2)],
+                2
+            ));
+            let rid = H256::from([0xF1; 32]);
+            assert_ok!(submit(1, rid, H256::from([0xF2; 32])));
+            let cert_hash = H256::from(canonical_for(rid));
+            for signer in [1, 2] {
+                assert_ok!(OrinqReceipts::attest_availability_cert(
+                    RuntimeOrigin::signed(acc(signer)),
+                    rid,
+                    cert_hash.0
+                ));
+            }
+            System::assert_has_event(
+                crate::Event::<Test>::AvailabilityCertified {
+                    receipt_id: rid,
+                    cert_hash,
+                }
+                .into(),
+            );
+            for (who, held) in [(1, 1_000), (2, 2_000)] {
+                assert_eq!(Balances::free_balance(acc(who)), held);
+                assert_eq!(Balances::reserved_balance(acc(who)), 0);
+            }
+            assert_ok!(OrinqReceipts::ensure_fixed_issuance());
         });
     }
 }

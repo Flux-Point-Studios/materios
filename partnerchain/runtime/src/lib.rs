@@ -204,7 +204,7 @@ pub const VERSION: RuntimeVersion = RuntimeVersion {
     spec_name: create_runtime_str!("materios"),
     impl_name: create_runtime_str!("materios-node"),
     authoring_version: 1,
-    spec_version: 243,
+    spec_version: 244,
     impl_version: 1,
     apis: RUNTIME_API_VERSIONS,
     transaction_version: 7,
@@ -263,6 +263,12 @@ parameter_types! {
 // Frame system
 // ---------------------------------------------------------------------------
 
+parameter_types! {
+    /// The address prefix every Materios chain spec advertises as its
+    /// `ss58Format`, for the clients that read it from the metadata.
+    pub const SS58Prefix: u16 = 42;
+}
+
 #[derive_impl(frame_system::config_preludes::SolochainDefaultConfig)]
 impl frame_system::Config for Runtime {
     type Block = Block;
@@ -276,6 +282,7 @@ impl frame_system::Config for Runtime {
     type AccountData = pallet_balances::AccountData<Balance>;
     type OnNewAccount = ();
     type Version = Version;
+    type SS58Prefix = SS58Prefix;
     type BaseCallFilter = root_gate::SudoRootGate;
 }
 
@@ -1839,6 +1846,7 @@ impl_runtime_apis! {
             genesis_committee::ensure_runnable_genesis_committee(&genesis)?;
             genesis.intent_settlement.ensure_cardano_ids()?;
             <RuntimeGenesisConfig as frame_support::traits::BuildGenesisConfig>::build(&genesis);
+            OrinqReceipts::ensure_fixed_issuance()?;
             Ok(())
         }
 

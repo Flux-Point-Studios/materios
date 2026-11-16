@@ -846,7 +846,7 @@ The preprod v6 fixture is the published preprod raw chain spec, and the
 genesis-hash test checks the computed hash against the one the live network
 reports.
 
-The spec 243 fixtures are the preprod genesis that spec 243 (transaction version
+The spec 244 fixtures are the preprod genesis that spec 244 (transaction version
 7, MOTRA holding checkpoints, the Root timelock, bonded settlement requests,
 settlement's Cardano ids in genesis storage, no PerpEngine) builds, without
 its code, and that runtime's metadata, trimmed to what the preflight reads.
@@ -859,13 +859,13 @@ writes):
 
 ```
 materios-node build-spec --chain preprod --raw --disable-default-bootnode --base-path "$(mktemp -d)" > raw.json
-jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec243-raw.json
+jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > fixtures/preprod-spec244-raw.json
 jq -r '.genesis.raw.top["0x3a636f6465"][2:]' raw.json | xxd -r -p > runtime.wasm
 subwasm metadata runtime.wasm --format json | jq -jcS '{V14: {pallets: [.V14.pallets[]
   | {name, constants: [.constants[] | {name, value}], storage: (.storage | if . == null
   then null else {prefix, entries: [.entries[] | {name}]} end)}], types: {types:
   [.V14.types.types[] | select(.type.path | length > 0) | {id, type: {path: .type.path}}]}}}' \
-  > fixtures/spec243-metadata.json
+  > fixtures/spec244-metadata.json
 ```
 
 The same trim of the preprod v6 runtime's metadata gives
@@ -873,7 +873,7 @@ The same trim of the preprod v6 runtime's metadata gives
 
 The historical preprod v6 fixture leaves
 `SessionCommitteeManagement.CurrentCommittee` empty and seeds Aura and GRANDPA
-directly, and rule 9 refuses that. The spec-243 fixture and the CLI tests' clean
+directly, and rule 9 refuses that. The spec-244 fixture and the CLI tests' clean
 launch seat their authorities as the genesis committee:
 the committee, then the Aura authors, GRANDPA voters and session validators
 the session genesis takes from it.
