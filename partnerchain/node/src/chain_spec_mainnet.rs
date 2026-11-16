@@ -14,10 +14,10 @@ use crate::chain_spec::{
 use frame_support::dispatch::DispatchClass;
 use materios_runtime::{
     input_sanity::MAX_COMMITTEE_SIZE, opaque::SessionKeys, AccountId, Balance, CrossChainPublic,
-    DepositBase, DepositFactor, ExistentialDeposit, Multisig, RecoveryConfigDepositBase,
-    RecoveryDeposit, RecoveryFriendDepositFactor, RootTimelockDefaultDelays, RuntimeBlockLength,
-    CARDANO_MAINNET, DAYS, MATRA, MAX_RECOVERY_FRIENDS, MAX_SIGNATORIES, MAX_VALIDATORS,
-    WASM_BINARY,
+    DepositBase, DepositFactor, ExistentialDeposit, Multisig, OracleMaxAttestors,
+    OracleMinAttestorThreshold, RecoveryConfigDepositBase, RecoveryDeposit,
+    RecoveryFriendDepositFactor, RootTimelockDefaultDelays, RuntimeBlockLength, CARDANO_MAINNET,
+    DAYS, MATRA, MAX_RECOVERY_FRIENDS, MAX_SIGNATORIES, MAX_VALIDATORS, WASM_BINARY,
 };
 use sc_service::ChainType;
 use serde_json::Value as Json;
@@ -25,6 +25,8 @@ use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_consensus_grandpa::AuthorityId as GrandpaId;
 use sp_core::{crypto::Ss58Codec, ecdsa, ed25519, sr25519};
 use std::collections::{BTreeMap, BTreeSet};
+
+mod committee_candidate;
 
 /// What `--chain` starts with to build mainnet from the launch manifest whose
 /// path follows.
@@ -57,6 +59,108 @@ const CARDANO_MAINNET_FOLLOWER: [(&str, &str); 7] = [
     ("CARDANO_SECURITY_PARAMETER", "2160"),
     ("CARDANO_ACTIVE_SLOTS_COEFF", "0.05"),
 ];
+
+/// The fields a launch manifest holds: the preflight's, and those genesis
+/// needs that the preflight does not read.
+const LAUNCH_FIELDS: &[&str] = &[
+    "roles",
+    "economics",
+    "supply",
+    "slots_per_epoch",
+    "cardano_follower",
+    "settlement",
+    "nodes",
+    "rpc_proxies",
+    "public_rpc",
+    "dust",
+    "attestation_threshold",
+    "partner_chain",
+];
+
+/// The fields of each object of a fixed shape the manifest holds, as the
+/// launch preflight and this builder read them.
+const OBJECT_FIELDS: [(&str, &[&str]); 4] = [
+    (
+        "economics",
+        &[
+            "attestation_reward_per_signer",
+            "era_cap_base",
+            "era_cap_baseline_attestor_count",
+            "validator_reward_per_era",
+            "treasury_emission_share_perbill",
+            "fee_buffer",
+        ],
+    ),
+    (
+        "partner_chain",
+        &[
+            "genesis_utxo",
+            "committee_candidate_address",
+            "d_parameter_policy_id",
+            "permissioned_candidates_policy_id",
+        ],
+    ),
+    ("settlement", &["aegis_policy_v1_script_hash"]),
+    ("supply", &["genesis_lock"]),
+];
+
+const GENESIS_LOCK_FIELDS: &[&str] = &["utxo", "address", "native_script"];
+
+/// The fields of each entry of a list of objects the manifest holds.
+const ITEM_FIELDS: [(&str, &[&str]); 2] = [
+    (
+        "nodes",
+        &[
+            "name",
+            "host",
+            "authority",
+            "addresses",
+            "argv",
+            "env",
+            "exe_sha256",
+            "aura",
+            "grandpa",
+            "cross_chain",
+            "cmdline",
+            "exe",
+            "chain_spec",
+            "served_genesis",
+            "served_chain",
+            "served_chain_type",
+            "served_properties",
+            "process_stat",
+            "system_stat",
+            "chain_spec_stat",
+        ],
+    ),
+    (
+        "rpc_proxies",
+        &["name", "node", "kind", "config", "other_targets"],
+    ),
+];
+
+/// The roles a mainnet genesis gives a meaning.
+const ROLES: [&str; 11] = [
+    "sudo",
+    "guardian",
+    "endowed",
+    "anchor_signer",
+    "attestors",
+    "oracle",
+    "enactor",
+    "gateway_sponsor",
+    "recovery_friends",
+    "recovery_rescuers",
+    DUST_POOL,
+];
+
+/// The highest output index partner-chains' `UtxoIndex` reads: it parses a
+/// genesis UTXO's index as a `u16` that must also be an `i16`.
+const MAX_GENESIS_UTXO_INDEX: u16 = i16::MAX as u16;
+
+/// Cardano mainnet's enterprise script address header: address type 7, a
+/// script hash and no stake part, on network 1.
+const MAINNET_SCRIPT_ADDRESS: u8 = 0x71;
 
 /// The role whose accounts hold dust for signers admitted after genesis. No
 /// signed call moves MATRA and none may be minted, so Root's force transfer
@@ -185,8 +289,9 @@ pub fn mainnet_config(manifest: &std::path::Path) -> Result<ChainSpec, String> {
 /// The mainnet chain spec a launch manifest, given as JSON, declares.
 pub fn mainnet_config_from(manifest: &str) -> Result<ChainSpec, String> {
     let code = WASM_BINARY.ok_or("WASM binary not available")?;
-    let launch: Json = serde_json::from_str(manifest)
-        .map_err(|error| format!("the launch manifest is not JSON: {error}"))?;
+    let launch = parse_once_each(manifest).map_err(|error| {
+        format!("the launch manifest is not JSON that names each key once: {error}")
+    })?;
     let patch = genesis_patch(&launch)
         .map_err(|refusal| format!("refusing the launch manifest: {refusal}"))?;
     Ok(ChainSpec::builder(code, None)
@@ -197,6 +302,83 @@ pub fn mainnet_config_from(manifest: &str) -> Result<ChainSpec, String> {
         .with_properties(properties())
         .with_genesis_config_patch(patch)
         .build())
+}
+
+/// JSON whose objects name each key once. serde_json keeps the last of a key
+/// an object repeats, so the value written first would be read by no one.
+fn parse_once_each(text: &str) -> Result<Json, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let json = serde::Deserializer::deserialize_any(&mut deserializer, OnceEach)?;
+    deserializer.end()?;
+    Ok(json)
+}
+
+struct OnceEach;
+
+impl<'de> serde::de::DeserializeSeed<'de> for OnceEach {
+    type Value = Json;
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Json, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for OnceEach {
+    type Value = Json;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Json, E> {
+        Ok(value.into())
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Json, E> {
+        Ok(value.into())
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Json, E> {
+        Ok(value.into())
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Json, E> {
+        Ok(value.into())
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Json, E> {
+        Ok(value.into())
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Json, E> {
+        Ok(value.into())
+    }
+
+    fn visit_unit<E>(self) -> Result<Json, E> {
+        Ok(Json::Null)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Json, A::Error> {
+        let mut items = Vec::new();
+        while let Some(item) = seq.next_element_seed(OnceEach)? {
+            items.push(item);
+        }
+        Ok(Json::Array(items))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Json, A::Error> {
+        let mut object = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "an object names the key {key:?} twice"
+                )));
+            }
+            let value = map.next_value_seed(OnceEach)?;
+            object.insert(key, value);
+        }
+        Ok(Json::Object(object))
+    }
 }
 
 /// A value of the launch manifest and the path that names it in a refusal.
@@ -263,6 +445,18 @@ impl<'a> At<'a> {
             .collect())
     }
 
+    /// Refuses a field outside `fields`.
+    fn only(&self, fields: &[&str]) -> Result<(), String> {
+        match self
+            .entries()?
+            .into_iter()
+            .find(|(name, _)| !fields.contains(name))
+        {
+            Some((_, at)) => Err(format!("{} is not a field {} may hold", at.path, self.path)),
+            None => Ok(()),
+        }
+    }
+
     fn text(&self) -> Result<&'a str, String> {
         self.value
             .as_str()
@@ -281,9 +475,10 @@ impl<'a> At<'a> {
         let text = self.text()?;
         text.strip_prefix("0x")
             .filter(|digits| {
-                digits
-                    .bytes()
-                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+                digits.len() % 2 == 0
+                    && digits
+                        .bytes()
+                        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
             })
             .and_then(|_| sp_core::bytes::from_hex(text).ok())
             .ok_or_else(|| {
@@ -435,8 +630,10 @@ fn entry(at: &At, burned: &Burned) -> Result<Entry, String> {
         return Err(format!("{} must be a public key or a multisig", at.path));
     }
     if let Some(key) = at.optional("key")? {
+        at.only(&["key", "pop"])?;
         return Ok(account(account_of(&public_key(&key, burned)?)));
     }
+    at.only(&["threshold", "members"])?;
     let listed = at
         .field("members")?
         .items()?
@@ -567,35 +764,42 @@ fn partner_chain(launch: &At, burned: &Burned) -> Result<(Json, Json), String> {
     let partner_chain = launch.field("partner_chain")?;
     let genesis_utxo = partner_chain.field("genesis_utxo")?;
     let utxo = genesis_utxo.text()?;
-    let well_formed = utxo.split_once('#').is_some_and(|(tx, index)| {
-        tx.len() == 64
-            && tx.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-            && index.parse::<u16>().is_ok_and(|n| n.to_string() == index)
-    });
-    if !well_formed {
+    let (tx, index) = utxo
+        .split_once('#')
+        .filter(|(tx, _)| {
+            tx.len() == 64 && tx.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .and_then(|(tx, index)| {
+            let tx: [u8; 32] = sp_core::bytes::from_hex(tx).ok()?.try_into().ok()?;
+            let index = index
+                .parse::<u16>()
+                .ok()
+                .filter(|n| n.to_string() == index)?;
+            Some((tx, index))
+        })
+        .ok_or_else(|| {
+            format!(
+                "{} must be <64 lowercase hex>#<output index>",
+                genesis_utxo.path
+            )
+        })?;
+    if index > MAX_GENESIS_UTXO_INDEX {
         return Err(format!(
-            "{} must be <64 lowercase hex>#<output index>",
+            "{} names output {index}: the runtime reads an output index of at most \
+             {MAX_GENESIS_UTXO_INDEX}",
             genesis_utxo.path
         ));
     }
     burned.refuse(&genesis_utxo, utxo.as_bytes())?;
-    if utxo.starts_with(&"0".repeat(64)) {
+    if tx == [0; 32] {
         return Err(format!("{} is all zero", genesis_utxo.path));
     }
-    let address = partner_chain.field("committee_candidate_address")?;
-    let bech32 = address.text()?;
-    let mainnet = bech32.strip_prefix("addr1").is_some_and(|data| {
-        !data.is_empty()
-            && data
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
-    });
-    if !mainnet || bech32.len() > 120 {
-        return Err(format!(
-            "{} must be a Cardano mainnet address (addr1...) of at most 120 characters",
-            address.path
-        ));
-    }
+    let validator = committee_candidate::validator_hash(&tx, index)?;
+    let bech32 = committee_candidate_address(
+        &partner_chain.field("committee_candidate_address")?,
+        &validator,
+        &genesis_utxo.path,
+    )?;
     let policy = |name: &str| -> Result<String, String> {
         let at = partner_chain.field(name)?;
         let id = at.hex_of::<28>("a Cardano policy id")?;
@@ -616,6 +820,103 @@ fn partner_chain(launch: &At, burned: &Burned) -> Result<(Json, Json), String> {
         "permissioned_candidates_policy_id": policy("permissioned_candidates_policy_id")?,
     });
     Ok((sidechain, scripts))
+}
+
+/// The committee candidate address as the manifest gives it: lowercase
+/// bech32 whose checksum holds, and Cardano mainnet's enterprise address of
+/// `validator`, the committee candidate validator the genesis UTXO at
+/// `utxo_path` parameterises.
+fn committee_candidate_address<'a>(
+    at: &At<'a>,
+    validator: &[u8; 28],
+    utxo_path: &str,
+) -> Result<&'a str, String> {
+    use bech32::{FromBase32, ToBase32};
+    let text = at.text()?;
+    if text.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err(format!("{} must be lowercase bech32", at.path));
+    }
+    let (hrp, data) = bech32::decode(text)
+        .map_err(|error| format!("{} is not a bech32 address: {error}", at.path))?;
+    if hrp != "addr" {
+        return Err(format!(
+            "{} is not a Cardano mainnet address: its prefix is {hrp}, not addr",
+            at.path
+        ));
+    }
+    let payload = Vec::<u8>::from_base32(&data)
+        .map_err(|error| format!("{} is not a bech32 address: {error}", at.path))?;
+    let expected = [&[MAINNET_SCRIPT_ADDRESS], &validator[..]].concat();
+    match payload.split_first() {
+        _ if payload == expected => Ok(text),
+        Some((header, _)) if header & 0x0f != MAINNET_SCRIPT_ADDRESS & 0x0f => Err(format!(
+            "{} is not on Cardano mainnet: its header names network {}",
+            at.path,
+            header & 0x0f
+        )),
+        Some((&MAINNET_SCRIPT_ADDRESS, hash)) if hash.len() == validator.len() => {
+            let derived = bech32::encode("addr", expected.to_base32())
+                .map_err(|error| format!("cannot write the derived address: {error}"))?;
+            Err(format!(
+                "{} is the address of script {}, but the committee candidate validator {utxo_path} \
+                 parameterises is at {derived}",
+                at.path,
+                sp_core::bytes::to_hex(hash, false)
+            ))
+        }
+        Some((&MAINNET_SCRIPT_ADDRESS, _)) => Err(format!(
+            "{} holds {} bytes: a header and a 28-byte script hash are 29",
+            at.path,
+            payload.len()
+        )),
+        _ => Err(format!(
+            "{} is not an enterprise script address: its header must be 0x{MAINNET_SCRIPT_ADDRESS:02x}",
+            at.path
+        )),
+    }
+}
+
+/// Refuses a field no reader of the manifest knows in any object of a fixed
+/// shape, and a role a mainnet genesis gives no meaning.
+fn ensure_known_fields(launch: &At) -> Result<(), String> {
+    launch.only(LAUNCH_FIELDS)?;
+    for (name, fields) in OBJECT_FIELDS {
+        if let Some(object) = launch.optional(name)? {
+            object.only(fields)?;
+        }
+    }
+    if let Some(follower) = launch.optional("cardano_follower")? {
+        follower.only(&CARDANO_MAINNET_FOLLOWER.map(|(name, _)| name))?;
+    }
+    if let Some(lock) = launch
+        .optional("supply")?
+        .map(|supply| supply.optional("genesis_lock"))
+        .transpose()?
+        .flatten()
+    {
+        lock.only(GENESIS_LOCK_FIELDS)?;
+    }
+    for (name, fields) in ITEM_FIELDS {
+        for item in launch
+            .optional(name)?
+            .map(|list| list.items())
+            .transpose()?
+            .into_iter()
+            .flatten()
+        {
+            item.only(fields)?;
+        }
+    }
+    for (role, at) in launch.field("roles")?.entries()? {
+        if !ROLES.contains(&role) {
+            return Err(format!(
+                "{} is not a role a mainnet genesis knows: the roles are {}",
+                at.path,
+                ROLES.join(", ")
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a launch whose sessions or Cardano follower settings are not
@@ -762,6 +1063,7 @@ fn genesis_patch(launch: &Json) -> Result<Json, String> {
         path: ROOT.to_string(),
         value: launch,
     };
+    ensure_known_fields(&launch)?;
     let burned = Burned::known();
     let mut roles = BTreeMap::new();
     for (role, entries) in launch.field("roles")?.entries()? {
@@ -785,6 +1087,18 @@ fn genesis_patch(launch: &Json) -> Result<Json, String> {
         if !roles.contains_key(role) {
             return Err(format!("roles.{role} is missing"));
         }
+    }
+    let oracles = roles["oracle"].len();
+    let (needed, roster) = (
+        OracleMinAttestorThreshold::get() as usize,
+        OracleMaxAttestors::get() as usize,
+    );
+    if !(needed..=roster).contains(&oracles) {
+        return Err(format!(
+            "roles.oracle names {oracles} oracles: a price needs {needed} \
+             (OracleMinAttestorThreshold), and a pair's roster holds at most {roster} \
+             (OracleMaxAttestors)"
+        ));
     }
     if roles["anchor_signer"].is_empty() {
         return Err("roles.anchor_signer is empty: name the key that writes anchors".to_string());
@@ -1846,29 +2160,57 @@ mod tests {
         });
     }
 
+    /// An edit that removes the field at `path`.
+    fn remove(path: &'static [&'static str]) -> Box<dyn Fn(&mut Json)> {
+        Box::new(move |launch: &mut Json| {
+            let (last, parents) = path.split_last().unwrap();
+            let mut at = launch;
+            for name in parents {
+                at = match name.parse::<usize>() {
+                    Ok(index) => &mut at[index],
+                    Err(_) => &mut at[*name],
+                };
+            }
+            at.as_object_mut().unwrap().remove(*last);
+        })
+    }
+
+    /// An edit that sets the fixture's field at `pointer` to `value`.
+    fn set(pointer: impl Into<String>, value: Json) -> Box<dyn Fn(&mut Json)> {
+        let pointer = pointer.into();
+        Box::new(move |launch: &mut Json| {
+            *launch
+                .pointer_mut(&pointer)
+                .expect("the fixture has the field") = value.clone();
+        })
+    }
+
+    /// An edit that adds `name` to the object at `pointer`.
+    fn insert(pointer: &'static str, name: &'static str, value: Json) -> Box<dyn Fn(&mut Json)> {
+        Box::new(move |launch: &mut Json| {
+            launch
+                .pointer_mut(pointer)
+                .and_then(Json::as_object_mut)
+                .expect("the fixture has the object")
+                .insert(name.to_string(), value.clone());
+        })
+    }
+
+    /// Each edit of the fixture the builder does not refuse with its reason,
+    /// with what it did instead.
+    fn unrefused(cases: Vec<(Box<dyn Fn(&mut Json)>, String)>) -> Vec<String> {
+        cases
+            .into_iter()
+            .filter_map(|(edit, reason)| {
+                let refused = refusal(|launch| edit(launch));
+                (!refused.contains(&reason))
+                    .then(|| format!("expected `{reason}`, got `{refused}`"))
+            })
+            .collect()
+    }
+
     #[test]
     fn a_malformed_or_incomplete_manifest_is_refused_naming_the_field() {
-        fn remove(path: &'static [&'static str]) -> Box<dyn Fn(&mut Json)> {
-            Box::new(move |launch: &mut Json| {
-                let (last, parents) = path.split_last().unwrap();
-                let mut at = launch;
-                for name in parents {
-                    at = match name.parse::<usize>() {
-                        Ok(index) => &mut at[index],
-                        Err(_) => &mut at[*name],
-                    };
-                }
-                at.as_object_mut().unwrap().remove(*last);
-            })
-        }
-        fn set(pointer: impl Into<String>, value: Json) -> Box<dyn Fn(&mut Json)> {
-            let pointer = pointer.into();
-            Box::new(move |launch: &mut Json| {
-                *launch
-                    .pointer_mut(&pointer)
-                    .expect("the fixture has the field") = value.clone();
-            })
-        }
         let oracle = dust_of("oracle", &holders(&fixture(), "oracle")[0]);
         let not_an_amount = format!(
             "{} must be a non-negative integer",
@@ -2017,19 +2359,396 @@ mod tests {
             (set("/roles/guardian", json_list()), "roles.guardian must name exactly one multisig"),
             (set("/nodes/0/authority", false.into()), "nodes seats 3 authorities: a mainnet genesis seats from 4 to 32"),
         ];
-        let mut wrong = Vec::new();
-        for (edit, reason) in cases {
-            let refused = refusal(|launch| edit(launch));
-            if !refused.contains(&format!("refusing the launch manifest: {reason}")) {
-                wrong.push(format!("expected `{reason}`, got `{refused}`"));
-            }
-        }
+        let cases = cases
+            .into_iter()
+            .map(|(edit, reason)| (edit, format!("refusing the launch manifest: {reason}")))
+            .collect();
+        let wrong = unrefused(cases);
         assert!(wrong.is_empty(), "{wrong:#?}");
         let not_json = mainnet_config_from("{").err().unwrap();
         assert!(
             not_json.contains("the launch manifest is not JSON"),
             "{not_json}"
         );
+    }
+
+    /// Hex is `0x`, then lowercase digits, two a byte, as many bytes as its
+    /// field holds. `from_hex` reads an odd count of digits with a zero
+    /// nibble in front, which would make 55 digits a policy id and 65 a
+    /// compressed key.
+    #[test]
+    fn hex_is_0x_and_two_lowercase_digits_a_byte_of_exactly_the_fields_bytes() {
+        let digits = |n: usize| -> String { "a7c3".chars().cycle().take(n).collect() };
+        let not_hex = "must be 0x and lowercase hex, two digits a byte";
+        let not_a_key = "is not an SS58 address or a 0x-hex public key";
+        let policy = "/partner_chain/d_parameter_policy_id";
+        let utxo = "partner_chain.genesis_utxo must be <64 lowercase hex>#<output index>";
+        let cases: Vec<(&str, String, String)> = vec![
+            (policy, format!("0x{}", digits(55)), format!("partner_chain.d_parameter_policy_id {not_hex}")),
+            (
+                "/partner_chain/permissioned_candidates_policy_id",
+                format!("0x{}", digits(57)),
+                format!("partner_chain.permissioned_candidates_policy_id {not_hex}"),
+            ),
+            (
+                "/settlement/aegis_policy_v1_script_hash",
+                format!("0x{}", digits(55)),
+                format!("settlement.aegis_policy_v1_script_hash {not_hex}"),
+            ),
+            ("/nodes/0/aura", format!("0x{}", digits(63)), format!("nodes[0].aura {not_hex}")),
+            ("/nodes/1/grandpa", format!("0x{}", digits(63)), format!("nodes[1].grandpa {not_hex}")),
+            ("/nodes/2/cross_chain", format!("0x2{}", digits(64)), format!("nodes[2].cross_chain {not_hex}")),
+            ("/nodes/2/cross_chain", format!("0x3{}", digits(64)), format!("nodes[2].cross_chain {not_hex}")),
+            ("/roles/oracle/0", format!("0x{}", digits(63)), format!("roles.oracle[0] {not_hex}")),
+            ("/roles/sudo/0/members/1/key", format!("0x{}", digits(65)), format!("roles.sudo[0].members[1].key {not_hex}")),
+            (policy, format!("0x{}", digits(56).to_uppercase()), format!("partner_chain.d_parameter_policy_id {not_hex}")),
+            ("/nodes/0/cross_chain", format!("0x02{}", digits(64).to_uppercase()), format!("nodes[0].cross_chain {not_hex}")),
+            (policy, digits(56), format!("partner_chain.d_parameter_policy_id {not_hex}")),
+            ("/nodes/0/cross_chain", format!("02{}", digits(64)), format!("nodes[0].cross_chain {not_hex}")),
+            ("/nodes/0/aura", digits(64), format!("nodes[0].aura {not_a_key}")),
+            ("/nodes/1/grandpa", format!("0X{}", digits(64)), format!("nodes[1].grandpa {not_a_key}")),
+            (policy, format!(" 0x{}", digits(56)), format!("partner_chain.d_parameter_policy_id {not_hex}")),
+            (policy, format!("0x{}\n", digits(56)), format!("partner_chain.d_parameter_policy_id {not_hex}")),
+            ("/nodes/1/grandpa", format!("0x{} {}", digits(32), digits(32)), format!("nodes[1].grandpa {not_hex}")),
+            ("/nodes/3/aura", format!("0x{}", digits(62)), "nodes[3].aura is 31 bytes".to_string()),
+            (
+                policy,
+                format!("0x{}", digits(54)),
+                "partner_chain.d_parameter_policy_id must be a Cardano policy id: 28 bytes of 0x-hex"
+                    .to_string(),
+            ),
+            ("/partner_chain/genesis_utxo", format!("{}#0", digits(63)), utxo.to_string()),
+            ("/partner_chain/genesis_utxo", format!("{}#0", digits(65)), utxo.to_string()),
+            ("/partner_chain/genesis_utxo", format!("0x{}#0", digits(64)), utxo.to_string()),
+        ];
+        let wrong = unrefused(
+            cases
+                .into_iter()
+                .map(|(pointer, value, reason)| (set(pointer, value.into()), reason))
+                .collect(),
+        );
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
+    fn bech32_text(hrp: &str, payload: &[u8]) -> String {
+        use bech32::ToBase32;
+        bech32::encode(hrp, payload.to_base32()).unwrap()
+    }
+
+    fn genesis_utxo(launch: &Json) -> ([u8; 32], u16) {
+        let (tx, index) = launch["partner_chain"]["genesis_utxo"]
+            .as_str()
+            .and_then(|utxo| utxo.split_once('#'))
+            .unwrap();
+        let tx = sp_core::bytes::from_hex(tx).unwrap().try_into().unwrap();
+        (tx, index.parse().unwrap())
+    }
+
+    /// The follower reads registrations at the committee candidate address,
+    /// so it must be, checksum and all, Cardano mainnet's enterprise address
+    /// of the validator `genesis_utxo` parameterises.
+    #[test]
+    fn the_committee_candidate_address_is_mainnets_address_of_the_validator_of_the_genesis_utxo() {
+        let launch = fixture();
+        let declared = launch["partner_chain"]["committee_candidate_address"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (tx, index) = genesis_utxo(&launch);
+        let validator = committee_candidate::validator_hash(&tx, index).unwrap();
+        assert_eq!(
+            bech32_text("addr", &[&[0x71], &validator[..]].concat()),
+            declared
+        );
+        build(&launch).unwrap();
+        let address = |header: u8, hash: &[u8]| bech32_text("addr", &[&[header], hash].concat());
+        let last = declared.len() - 1;
+        let checksum = if declared.ends_with('q') { "p" } else { "q" };
+        let field = "partner_chain.committee_candidate_address";
+        let not_bech32 = format!("{field} is not a bech32 address");
+        let not_enterprise = format!("{field} is not an enterprise script address");
+        let cases = vec![
+            (
+                format!("{}b{}", &declared[..10], &declared[11..]),
+                not_bech32.clone(),
+            ),
+            (
+                format!("{}{checksum}", &declared[..last]),
+                not_bech32.clone(),
+            ),
+            (declared[..last].to_string(), not_bech32.clone()),
+            (String::new(), not_bech32.clone()),
+            (format!("{declared} "), not_bech32),
+            (
+                declared.to_uppercase(),
+                format!("{field} must be lowercase bech32"),
+            ),
+            (
+                bech32_text("addr_test", &[&[0x70], &validator[..]].concat()),
+                format!("{field} is not a Cardano mainnet address: its prefix is addr_test"),
+            ),
+            (
+                bech32_text("stake", &[&[0xf1], &validator[..]].concat()),
+                format!("{field} is not a Cardano mainnet address: its prefix is stake"),
+            ),
+            (
+                address(0x70, &validator),
+                format!("{field} is not on Cardano mainnet: its header names network 0"),
+            ),
+            (address(0x61, &validator), not_enterprise.clone()),
+            (
+                address(0x11, &[validator, validator].concat()),
+                not_enterprise.clone(),
+            ),
+            (
+                address(0x01, &[validator, validator].concat()),
+                not_enterprise,
+            ),
+            (
+                address(0x71, &validator[..27]),
+                format!("{field} holds 28 bytes: a header and a 28-byte script hash are 29"),
+            ),
+            (
+                address(0x71, &[&validator[..], &[0]].concat()),
+                format!("{field} holds 30 bytes"),
+            ),
+            (
+                address(0x71, &[0x5a; 28]),
+                format!(
+                    "{field} is the address of script 0x{}, but the committee candidate validator \
+                     partner_chain.genesis_utxo parameterises is at {declared}",
+                    "5a".repeat(28)
+                ),
+            ),
+        ];
+        let wrong = unrefused(
+            cases
+                .into_iter()
+                .map(|(value, reason)| {
+                    (
+                        set("/partner_chain/committee_candidate_address", value.into()),
+                        reason,
+                    )
+                })
+                .collect(),
+        );
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        let other_utxo = refusal(|launch| {
+            launch["partner_chain"]["genesis_utxo"] =
+                format!("{}#1", &sp_core::bytes::to_hex(&tx, false)[2..]).into();
+        });
+        assert!(
+            other_utxo.contains("but the committee candidate validator partner_chain.genesis_utxo parameterises is at addr1"),
+            "{other_utxo}"
+        );
+    }
+
+    /// The runtime reads a genesis UTXO's output index as partner-chains'
+    /// `UtxoIndex`, which refuses one above `i16::MAX`.
+    #[test]
+    fn a_genesis_utxo_output_index_the_runtime_cannot_read_is_refused() {
+        let launch = fixture();
+        let (tx, _) = genesis_utxo(&launch);
+        let tx_hex = sp_core::bytes::to_hex(&tx, false)[2..].to_string();
+        for index in [32_768u32, 65_535] {
+            let refused = refusal(|launch| {
+                launch["partner_chain"]["genesis_utxo"] = format!("{tx_hex}#{index}").into();
+            });
+            assert!(
+                refused.contains(&format!(
+                    "partner_chain.genesis_utxo names output {index}: the runtime reads an output \
+                     index of at most 32767"
+                )),
+                "{refused}"
+            );
+        }
+        let validator = committee_candidate::validator_hash(&tx, 32_767).unwrap();
+        let at_the_cap = edited(|launch| {
+            launch["partner_chain"]["genesis_utxo"] = format!("{tx_hex}#32767").into();
+            launch["partner_chain"]["committee_candidate_address"] =
+                bech32_text("addr", &[&[0x71], &validator[..]].concat()).into();
+        });
+        start(&build(&at_the_cap).unwrap()).execute_with(|| {
+            assert_eq!(
+                Sidechain::genesis_utxo().to_string(),
+                format!("{tx_hex}#32767")
+            );
+        });
+    }
+
+    /// Every object of the manifest holds only the fields some reader of it
+    /// knows, and `roles` only the roles a mainnet genesis gives a meaning:
+    /// a misspelt optional field would be read by no one.
+    #[test]
+    fn a_field_or_role_no_reader_of_the_manifest_knows_is_refused() {
+        let key: Json = AccountId::from([7; 32]).to_ss58check().into();
+        let proxy = serde_json::json!([{
+            "name": "rpc", "node": "a", "kind": "nginx", "config": "rpc.conf", "nmae": "rpc"
+        }]);
+        let cases: Vec<(Box<dyn Fn(&mut Json)>, &str)> = vec![
+            (insert("", "attestation_treshold", 2.into()), "attestation_treshold is not a field the launch manifest may hold"),
+            (
+                insert("/partner_chain", "committeeCandidateAddress", "addr1".into()),
+                "partner_chain.committeeCandidateAddress is not a field partner_chain may hold",
+            ),
+            (insert("/economics", "era_cap_bse", 0.into()), "economics.era_cap_bse is not a field economics may hold"),
+            (
+                insert("/settlement", "aegis_policy_v2_script_hash", Json::Null),
+                "settlement.aegis_policy_v2_script_hash is not a field settlement may hold",
+            ),
+            (
+                insert("/cardano_follower", "MC__SECURITY_PARAMETER", "2160".into()),
+                "cardano_follower.MC__SECURITY_PARAMETER is not a field cardano_follower may hold",
+            ),
+            (insert("/supply", "genesis_locks", serde_json::json!({})), "supply.genesis_locks is not a field supply may hold"),
+            (
+                insert("/supply/genesis_lock", "datum", "0x00".into()),
+                "supply.genesis_lock.datum is not a field supply.genesis_lock may hold",
+            ),
+            (insert("/nodes/0", "cross_chian", "0x02".into()), "nodes[0].cross_chian is not a field nodes[0] may hold"),
+            (insert("", "rpc_proxies", proxy), "rpc_proxies[0].nmae is not a field rpc_proxies[0] may hold"),
+            (
+                insert("/roles", "recovery_freinds", serde_json::json!([key])),
+                "roles.recovery_freinds is not a role a mainnet genesis knows",
+            ),
+            (insert("/roles/sudo/0", "treshold", 2.into()), "roles.sudo[0].treshold is not a field roles.sudo[0] may hold"),
+            (
+                insert("/roles/guardian/0/members/1", "pop_", "0x00".into()),
+                "roles.guardian[0].members[1].pop_ is not a field roles.guardian[0].members[1] may hold",
+            ),
+            (
+                insert("/roles/sudo/0/members/0", "threshold", 1.into()),
+                "roles.sudo[0].members[0].threshold is not a field roles.sudo[0].members[0] may hold",
+            ),
+        ];
+        let wrong = unrefused(
+            cases
+                .into_iter()
+                .map(|(edit, reason)| (edit, format!("refusing the launch manifest: {reason}")))
+                .collect(),
+        );
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        let with_the_preflights_fields = edited(|launch| {
+            let node = launch["nodes"][0].as_object_mut().unwrap();
+            for capture in [
+                "cmdline",
+                "exe",
+                "chain_spec",
+                "served_genesis",
+                "served_chain",
+                "served_chain_type",
+                "served_properties",
+                "process_stat",
+                "system_stat",
+                "chain_spec_stat",
+            ] {
+                node.insert(capture.to_string(), format!("captures/{capture}").into());
+            }
+            node.insert(
+                "addresses".to_string(),
+                serde_json::json!(["/dns/a/tcp/30333"]),
+            );
+            launch["rpc_proxies"] = serde_json::json!([{
+                "name": "rpc", "node": "a", "kind": "nginx", "config": "rpc.conf", "other_targets": []
+            }]);
+            launch["public_rpc"] = serde_json::json!(["wss://rpc.invalid"]);
+            launch["roles"]["sudo"][0]["members"][0]["pop"] = "0x00".into();
+        });
+        build(&with_the_preflights_fields).unwrap();
+    }
+
+    /// serde_json keeps the last of a key an object repeats, so the value
+    /// written first would be read by no one, and a JSON escape can spell
+    /// the same key two ways.
+    #[test]
+    fn a_key_one_object_names_twice_is_refused() {
+        let oracle = holders(&fixture(), "oracle")[0].to_ss58check();
+        let threshold = "\"attestation_threshold\": 2,";
+        let cases = [
+            (
+                "attestation_threshold",
+                FIXTURE.replacen(
+                    threshold,
+                    &format!("{threshold} \"attestation_threshold\": 3,"),
+                    1,
+                ),
+            ),
+            (
+                "attestation_threshold",
+                FIXTURE.replacen(
+                    threshold,
+                    &format!("{threshold} \"\\u0061ttestation_threshold\": 3,"),
+                    1,
+                ),
+            ),
+            (
+                oracle.as_str(),
+                FIXTURE.replacen(
+                    &format!("\"{oracle}\": "),
+                    &format!("\"{oracle}\": 60000, \"{oracle}\": "),
+                    1,
+                ),
+            ),
+            (
+                "threshold",
+                FIXTURE.replacen(
+                    "\"threshold\": 2,",
+                    "\"threshold\": 2, \"threshold\": 3,",
+                    1,
+                ),
+            ),
+        ];
+        for (key, text) in cases {
+            assert_ne!(text, FIXTURE);
+            let refused = mainnet_config_from(&text).err().unwrap_or_default();
+            assert!(
+                refused.contains(&format!("an object names the key {key:?} twice")),
+                "{key}: {refused}"
+            );
+        }
+        build(&fixture()).unwrap();
+    }
+
+    /// The oracle aggregates a price once `OracleMinAttestorThreshold`
+    /// attestors have submitted it, and holds at most `OracleMaxAttestors` on
+    /// a pair's roster, which Root fills after genesis.
+    #[test]
+    fn a_launch_names_from_as_many_oracles_as_a_price_needs_to_as_many_as_a_roster_holds() {
+        let launch = fixture();
+        let oracles = holders(&launch, "oracle");
+        assert_eq!(oracles.len(), 3);
+        build(&launch).unwrap();
+        let reason = |named: usize| {
+            format!(
+                "roles.oracle names {named} oracles: a price needs 3 (OracleMinAttestorThreshold), \
+                 and a pair's roster holds at most 16 (OracleMaxAttestors)"
+            )
+        };
+        let mut cases: Vec<(Box<dyn Fn(&mut Json)>, String)> = Vec::new();
+        for kept in [0, 2] {
+            let dropped: Vec<String> = oracles[kept..].iter().map(|o| o.to_ss58check()).collect();
+            cases.push((
+                Box::new(move |launch: &mut Json| {
+                    launch["roles"]["oracle"]
+                        .as_array_mut()
+                        .unwrap()
+                        .truncate(kept);
+                    for key in &dropped {
+                        launch["dust"]["oracle"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove(key);
+                    }
+                }),
+                reason(kept),
+            ));
+        }
+        let seventeen: Vec<Json> = (100..117u8)
+            .map(|seed| AccountId::from([seed; 32]).to_ss58check().into())
+            .collect();
+        cases.push((set("/roles/oracle", Json::Array(seventeen)), reason(17)));
+        let wrong = unrefused(cases);
+        assert!(wrong.is_empty(), "{wrong:#?}");
     }
 
     fn json_list() -> Json {
@@ -2113,7 +2832,7 @@ mod tests {
             (
                 "/partner_chain/committee_candidate_address",
                 "addr_test1wrld9uhaepas48twjy3qevncsyrhjdqnkz2wzu4yzjc2qhq24f4v4".into(),
-                "partner_chain.committee_candidate_address must be a Cardano mainnet address",
+                "partner_chain.committee_candidate_address is not a Cardano mainnet address",
             ),
             ("/roles/attestors/0", preprod["sudo"]["key"].clone(), named),
             (
@@ -2243,6 +2962,7 @@ mod tests {
             members(&launch, "sudo")[1].clone(),
             members(&launch, "guardian")[2].clone(),
         );
+        let spare = AccountId::from([7; 32]);
         let unendowed = |role: &'static str, who: &AccountId| -> Box<dyn Fn(&mut Json)> {
             let key = who.to_ss58check();
             Box::new(move |launch: &mut Json| {
@@ -2307,15 +3027,16 @@ mod tests {
             ),
             (
                 {
-                    let key = oracle.to_ss58check();
+                    let key = spare.to_ss58check();
                     Box::new(move |launch: &mut Json| {
-                        launch["roles"]["oracle"] = json_list();
-                        launch["dust"]["oracle"] = serde_json::json!({});
-                        launch["roles"]["spare"] = serde_json::json!([key]);
-                        launch["dust"]["spare"] = serde_json::json!({ &key: 5_000 });
+                        launch["roles"]["endowed"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(key.clone().into());
+                        launch["dust"]["endowed"][&key] = 5_000.into();
                     })
                 },
-                format!("dust.spare.{oracle} endows an account the builder sizes no dust for"),
+                format!("dust.endowed.{spare} endows an account the builder sizes no dust for"),
             ),
             (
                 {
@@ -2325,13 +3046,7 @@ mod tests {
                 "mainnet issues less than one MATRA (1000000)".to_string(),
             ),
         ];
-        let mut wrong = Vec::new();
-        for (edit, reason) in cases {
-            let refused = refusal(|launch| edit(launch));
-            if !refused.contains(&reason) {
-                wrong.push(format!("expected `{reason}`, got `{refused}`"));
-            }
-        }
+        let wrong = unrefused(cases);
         assert!(wrong.is_empty(), "{wrong:#?}");
         let without_recovery = edited(|launch| {
             for list in ["roles", "dust"] {

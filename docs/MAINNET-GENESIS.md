@@ -14,8 +14,9 @@ genesis. Nodes start from the raw spec file, never from `mainnet:`: the
 preflight refuses a node whose `--chain` names a chain built into the node.
 
 `tools/launch-preflight/fixtures/mainnet-launch.json` is a complete manifest
-of freshly generated public keys. The node's tests build it, and the
-preflight's tests check the raw spec it builds
+of freshly generated public keys, whose `partner_chain` values are the ones
+partner-chains v1.8.0 derives from its genesis UTXO. The node's tests build
+it, and the preflight's tests check the raw spec it builds
 (`fixtures/mainnet-launch-raw.json`, without its code).
 
 ## Order of a launch
@@ -30,6 +31,14 @@ preflight's tests check the raw spec it builds
 4. The launch preflight signs and checks the spec and the manifest, the
    cMATRA genesis lock is created with the genesis hash as its datum, and the
    nodes start from the raw spec.
+5. The sudo multisig schedules `Oracle.register_attestor(pair, account)`
+   through RootTimelock for each `roles.oracle` entry's account and each pair
+   the chain prices, and the enactor enacts each call once its standard
+   delay (7 days) has passed. Genesis has no field for the oracle roster, so
+   no price is written before then: a pair's price needs
+   `OracleMinAttestorThreshold` (3) registered attestors submitting for the
+   same slot, and the builder refuses a manifest with fewer than 3 or more
+   than `OracleMaxAttestors` (16) oracles.
 
 ## The launch manifest
 
@@ -41,7 +50,7 @@ not read:
 |---|---|
 | `dust` | `role -> account -> base units`: the MATRA each role account holds at genesis. An account is named by its key (SS58 or 0x-hex), or by its account for a multisig entry. Every name must be an entry of that role. |
 | `attestation_threshold` | How many of `roles.attestors` certify a receipt. |
-| `partner_chain` | `genesis_utxo` (`<tx hash>#<index>`), `committee_candidate_address` (the Cardano mainnet bech32 address), `d_parameter_policy_id` and `permissioned_candidates_policy_id` (0x-hex, 28 bytes). |
+| `partner_chain` | `genesis_utxo` (`<tx hash>#<index>`, the index at most 32767, the most partner-chains' `UtxoIndex` reads), `committee_candidate_address` (lowercase bech32, see below), `d_parameter_policy_id` and `permissioned_candidates_policy_id` (0x-hex, 28 bytes). |
 | `nodes[].cross_chain` | Each authority's ECDSA partner-chain key, 33 bytes compressed, 0x-hex. |
 
 and these roles, besides `sudo`, `guardian`, `anchor_signer`, `attestors`,
@@ -58,6 +67,26 @@ and these roles, besides `sudo`, `guardian`, `anchor_signer`, `attestors`,
 `endowed` lists the sudo and guardian keyholders' own keys, which hold dust
 of their own. The preflight counts an account as declared when it is a role
 entry's account, and a multisig member is no entry.
+
+`roles` names no other role, and every object of the manifest holds only the
+fields the preflight or the builder reads: the top level, `economics`,
+`partner_chain`, `settlement`, `cardano_follower`, `supply` and its
+`genesis_lock`, each `nodes` and `rpc_proxies` entry, and each role entry (a
+multisig's `threshold` and `members`, a member's `key` and `pop`). No object
+names a key twice, however the key is escaped. A misspelt optional field
+would otherwise be read by no one.
+
+`committee_candidate_address` must be, checksum and all, Cardano mainnet's
+enterprise script address (header `0x71`) of the committee candidate
+validator `genesis_utxo` parameterises. The builder derives it as
+partner-chains v1.8.0 does: the validator of
+partner-chains-smart-contracts v8.1.0 (`raw-scripts`), applied to the UTXO
+as Plutus data `Constr 0 [Constr 0 [tx hash], index]`, hashed as a Plutus V2
+script. Preprod's genesis UTXO derives the address preprod's genesis
+stores, which the node's tests pin. The two policy ids also follow from
+`genesis_utxo` but go through the version oracle's scripts; the builder takes
+them as given, and the launch preflight's rule 9 reads their outputs through
+the built spec.
 
 ## What genesis holds
 
@@ -121,7 +150,10 @@ than its load names, at the fee the runtime charges.
 
 The builder refuses a manifest, naming the field, when:
 
-- a field is missing or not of its type, or hex is not `0x` and lowercase;
+- the manifest names a key twice in one object, a field no reader of the
+  manifest knows, or a role other than those above;
+- a field is missing or not of its type, or hex is not `0x` and lowercase
+  with two digits a byte and exactly the bytes its field holds;
 - a key is a well-known development key (`//Alice` to `//Ferdie`, their
   `//stash`, `//One`, `//Two`, under sr25519, ed25519 and ECDSA, and an ECDSA
   key's account), any account, key, script or Cardano value preprod's genesis
@@ -131,13 +163,18 @@ The builder refuses a manifest, naming the field, when:
 - `roles.sudo` or `roles.guardian` is not exactly one multisig of keys with a
   threshold of at least 2, or has more than `MaxSignatories` members;
 - `roles.anchor_signer` is empty, `roles.attestors` is empty or larger than
-  the committee, `attestation_threshold` is outside 1 to the attestors, or
-  `roles.recovery_friends` names more than `MaxFriends`;
+  the committee, `attestation_threshold` is outside 1 to the attestors,
+  `roles.oracle` names fewer than `OracleMinAttestorThreshold` or more than
+  `OracleMaxAttestors`, or `roles.recovery_friends` names more than
+  `MaxFriends`;
 - fewer than 4 or more than `MaxValidators` authorities; a partner-chain key
   is not compressed;
 - `slots_per_epoch` is not 600, `cardano_follower` is not Cardano mainnet's,
-  `partner_chain.committee_candidate_address` is not a mainnet `addr1`
-  address, or `economics.attestation_reward_per_signer` is not 0;
+  `partner_chain.genesis_utxo` names an output above 32767,
+  `partner_chain.committee_candidate_address` is not lowercase bech32 with a
+  valid checksum, not `addr`, not on network 1, not an enterprise script
+  address, or not the address of the validator `genesis_utxo`
+  parameterises, or `economics.attestation_reward_per_signer` is not 0;
 - a role account that signs or pays a deposit holds no dust or less than its
   floor, `dust` names an account that is no entry of its role, endows an
   account the builder sizes nothing for, or endows one below the existential

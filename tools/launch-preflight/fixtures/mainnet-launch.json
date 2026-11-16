@@ -41,7 +41,9 @@
       "5DvEwWDdgqnN1hEzmpnG1Mxmv6DcJLSm3f9fFzoaF1hFanuu"
     ],
     "oracle": [
-      "5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE"
+      "5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE",
+      "5GbM9HyTRh3BPKMYbv33HEf6DzuHzuvAhfHFxm3986FkfZje",
+      "5Fgug1BaP7SsLATVdbfiD1kREs1r7XatfUWHWgX7LcZvpLsz"
     ],
     "enactor": [
       "5HppT8j1Sf2NM2QPSRr4RkaHzHeHi99pZc72pqcNgM8CskLW"
@@ -90,7 +92,9 @@
       "5DvEwWDdgqnN1hEzmpnG1Mxmv6DcJLSm3f9fFzoaF1hFanuu": 5000
     },
     "oracle": {
-      "5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": 100000
+      "5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": 100000,
+      "5GbM9HyTRh3BPKMYbv33HEf6DzuHzuvAhfHFxm3986FkfZje": 60000,
+      "5Fgug1BaP7SsLATVdbfiD1kREs1r7XatfUWHWgX7LcZvpLsz": 60000
     },
     "enactor": {
       "5HppT8j1Sf2NM2QPSRr4RkaHzHeHi99pZc72pqcNgM8CskLW": 120000
@@ -128,9 +132,9 @@
   },
   "partner_chain": {
     "genesis_utxo": "09b6fee196c91cd2a78183f837b83f8410183edcdf1edca6e80ff7571dd7a75d#0",
-    "committee_candidate_address": "addr1w80gl66ejcereu2sg6z0e7hmg64t93h89u8kazl80mh57xg2zpuu7",
-    "d_parameter_policy_id": "0x1d146e9b59f9eb80ced8e9ba4ef913900752def6511acdcf3dc37d69",
-    "permissioned_candidates_policy_id": "0x3068019fc8ef3fc3cab9e872fe00e35e77dd599c86f54a4819225988"
+    "committee_candidate_address": "addr1wxyms7gzunu2e97z2l5lhhnem74ml97wedq3ductnvf4zug6kx8rr",
+    "d_parameter_policy_id": "0xbca168784c7086baa491ff876a1e9d6ee2b8a418a841dc0d445a674e",
+    "permissioned_candidates_policy_id": "0x8d5698c66e509f7758befcca95b5bc1632daf4b864d5fdd049dc40b2"
   },
   "slots_per_epoch": 600,
   "settlement": {
