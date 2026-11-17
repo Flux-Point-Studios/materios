@@ -1,7 +1,8 @@
 """Rule 8, and the Ariadne rule the node's service draws each chain's committees under, against the real materios-node
 binary, which MATERIOS_NODE names; CI builds it from this tree. Every node run is offline, on a base path of its own,
-and a node started to serve its genesis listens on loopback only, with no peers. The spec is a fresh
-`build-spec --chain preprod --raw` from that binary."""
+and a node started to serve its genesis listens on loopback only, with no peers. The specs are fresh from that
+binary: `build-spec --chain preprod --raw`, and `build-spec --chain mainnet:<launch manifest> --raw` of the fixture
+manifest and of the clean launch's."""
 import hashlib
 import json
 import os
@@ -18,9 +19,9 @@ import pytest
 import launch_preflight as lp
 import test_launch_preflight as base
 
-# The fixtures the CLI tests take by name.
-clean, endpoint, kupo, metadata_v14, preprod_path = (
-    base.clean, base.endpoint, base.kupo, base.metadata_v14, base.preprod_path)
+# The fixtures the CLI tests take by name, and the clock they all run under.
+clean, clock, endpoint, kupo, metadata_v14, preprod_path = (
+    base.clean, base.clock, base.endpoint, base.kupo, base.metadata_v14, base.preprod_path)
 
 
 @pytest.fixture(scope="module")
@@ -425,27 +426,119 @@ def test_a_running_node_whose_chain_spec_file_was_overwritten_after_it_started_i
     assert findings(preprod, entry) == [serves_other(rehearsal, preprod)]
 
 
+MANIFEST = base.FIXTURES / "mainnet-launch.json"
+
+
+@pytest.fixture(scope="module")
+def mainnet_build(node, tmp_path_factory) -> Path:
+    """The mainnet chain spec the binary builds from the fixture launch manifest, raw."""
+    tmp = tmp_path_factory.mktemp("mainnet-build")
+    path = tmp / "mainnet-raw.json"
+    path.write_bytes(build_spec(node, f"mainnet:{MANIFEST}", tmp / "base", "--raw"))
+    return path
+
+
+def built_mainnet(mainnet_build: Path) -> tuple[lp.Spec, lp.Metadata, dict]:
+    spec = lp.load_spec(str(mainnet_build))
+    meta = lp.Metadata.from_v14(lp.subwasm_metadata(spec.code, base.subwasm()))
+    return spec, meta, json.loads(MANIFEST.read_text())
+
+
+def build_findings(spec: lp.Spec, meta: lp.Metadata, node: Path, manifest: bytes) -> list[str]:
+    return [str(f) for f in lp.check_node_build(spec, meta, {"nodes": [base.pinned_to(node)]}, manifest)]
+
+
+def test_every_rule_that_reads_only_the_spec_passes_the_mainnet_spec_the_node_builds(mainnet_build):
+    """The spec carries the runtime the node embeds, so the rules read that runtime's own metadata, whole: its
+    deposits and its settlement defaults, every pallet whose storage version is pinned, and the code whose length
+    sizes the upgrade a sudo keyholder's and the enactor's dust pays for. The fixture's raw spec is this build less
+    its code."""
+    spec, meta, launch = built_mainnet(mainnet_build)
+    fixture = lp.load_spec(str(base.FIXTURES / "mainnet-launch-raw.json"))
+    assert {key: value for key, value in spec.storage.items() if key != lp.CODE_KEY} == fixture.storage
+    assert len(spec.code) > 500_000
+    assert base.spec_rule_findings(spec, meta, launch, base.KNOWN) == []
+    assert [name for _, name, _, _, _ in lp.pinned_storage(meta)] == base.PINNED_IDS
+
+
+def test_the_node_builds_the_spec_it_built_from_the_launch_manifest(mainnet_build, node):
+    """The same manifest in another byte order, with a pop on a multisig member, builds the same spec."""
+    spec, meta, launch = built_mainnet(mainnet_build)
+    assert build_findings(spec, meta, node, MANIFEST.read_bytes()) == []
+    launch["roles"]["sudo"][0]["members"][0]["pop"] = "0x" + "00" * 64
+    assert build_findings(spec, meta, node, json.dumps(launch, sort_keys=True, indent=1).encode()) == []
+
+
+def test_a_spec_the_node_does_not_build_from_the_launch_manifest_is_refused_naming_what_differs(mainnet_build, node):
+    """Edits no reader of the manifest could tell from it: a keyholder's balance frozen, MOTRA that generates
+    nothing, a runtime with one more custom section, a fork block and a storage value the runtime never reads."""
+    spec, meta, launch = built_mainnet(mainnet_build)
+    keyholder = lp.role_account(launch["roles"]["sudo"][0]["members"][0])
+    spec.storage[base.account_key(keyholder)] = base.account_info(spec.balance(keyholder)[0], frozen=2**128 - 1)
+    base.put(spec, "Motra", "Params", bytes(108))
+    stray = lp.storage_key("Sudo", "Key") + b"\x01"
+    spec.storage[stray] = bytes(32)
+    del spec.storage[lp.storage_key("Grandpa", "CurrentSetId")]
+    code = spec.code + base.custom_section(b"note", b"another build")
+    spec.storage[lp.CODE_KEY] = code
+    spec.doc["forkBlocks"] = base.FORK_BLOCK
+    embedded = lp.blake2_256(lp.load_spec(str(mainnet_build)).code).hex()
+    names = sorted([(base.account_key(keyholder), f"{base.account_entry(keyholder)}, whose value differs"),
+                    (lp.storage_key("Motra", "Params"), "Motra.Params, whose value differs"),
+                    (stray, "Sudo.Key[0x01], which only the checked spec sets"),
+                    (lp.storage_key("Grandpa", "CurrentSetId"),
+                     "Grandpa.CurrentSetId, which only the node's build sets")])
+    assert build_findings(spec, meta, node, MANIFEST.read_bytes()) == [
+        f"{base.NOT_THE_BUILD}genesis :code (blake2-256 {lp.blake2_256(code).hex()}) is not the runtime its node "
+        f"binary embeds and builds mainnet with ({embedded})",
+        f"{base.NOT_THE_BUILD}genesis storage differs at 4 keys: {'; '.join(name for _, name in names)}",
+        f"{base.NOT_THE_BUILD}it gives forkBlocks, which the node's build does not: the node reads a code "
+        "substitute, a fork id, a fork or bad block and other fields a build never writes"]
+
+
+def test_a_launch_manifest_the_node_refuses_builds_no_spec(mainnet_build, node):
+    spec, meta, launch = built_mainnet(mainnet_build)
+    enactor = launch["roles"]["enactor"][0]
+    launch["dust"]["enactor"][enactor] = 500
+    assert build_findings(spec, meta, node, json.dumps(launch).encode()) == [
+        "[8 node] authority val0: its node binary builds no mainnet chain spec from the launch manifest (Error: "
+        f'Input("refusing the launch manifest: dust.enactor.{enactor} endows roles.enactor[0] ({enactor}) 500, below '
+        'its floor of 106050: the existential deposit, its deposits and the dust that generates its MOTRA")): the '
+        "checked chain spec is not one the node builds from it"]
+
+
 def on_real_node(clean, node: Path, pin: str) -> None:
+    """Pin each authority of the clean launch to the real node, and take as its chain spec the one that node builds
+    from the clean launch's manifest: Root and the guardian under the keys the tests hold, the runtime the node
+    embeds."""
     for entry in clean.launch["nodes"]:
         if entry["authority"]:
             entry.update(exe=str(node), exe_sha256=pin)
+    manifest = clean.tmp_path / "manifest-to-build.json"
+    manifest.write_text(json.dumps(clean.launch))
+    built = clean.tmp_path / "node-raw.json"
+    built.write_bytes(build_spec(node, f"mainnet:{manifest}", clean.tmp_path / "build-base", "--raw"))
+    clean.spec = lp.load_spec(str(built))
 
 
-def test_cli_passes_a_clean_launch_its_real_node_attests(clean, capsys, node, pin):
+# The whole launch as an operator runs it: the node builds the spec from the manifest, each multisig member's holder
+# signs its challenge for that genesis, the manifest is signed, and check runs the same binary on export-blocks,
+# chain-id and build-spec. The spec carries the runtime this tree builds, which rule 1 scans for every well-known
+# key.
+def test_cli_passes_the_mainnet_spec_its_real_node_builds_from_the_launch_manifest(clean, capsys, node, pin):
     on_real_node(clean, node, pin)
+    assert len(clean.spec.code) > 500_000
     code, out = clean.run(capsys)
     assert (code, out.strip()) == (0, "MAINNET LAUNCH PREFLIGHT: PASS")
 
 
-# The clean launch carrying the runtime this tree builds, the code a mainnet genesis carries, in place of preprod v6's,
-# with the System.LastRuntimeUpgrade build-spec writes for it: rule 1 scans that code for every well-known key.
-def test_cli_passes_a_clean_launch_carrying_the_runtime_this_tree_builds(clean, capsys, node, pin, preprod):
+def test_cli_refuses_a_spec_its_real_node_does_not_build_from_the_launch_manifest(clean, capsys, node, pin):
+    """A genesis that leaves the GRANDPA set id unset reads as the one build-spec writes to every other rule."""
     on_real_node(clean, node, pin)
-    built = lp.load_spec(str(preprod))
-    for key in (lp.CODE_KEY, lp.storage_key("System", "LastRuntimeUpgrade")):
-        clean.spec.storage[key] = built.storage[key]
+    del clean.spec.storage[lp.storage_key("Grandpa", "CurrentSetId")]
     code, out = clean.run(capsys)
-    assert (code, out.strip()) == (0, "MAINNET LAUNCH PREFLIGHT: PASS")
+    assert code == 1 and base.only_reason(out, f"{base.NOT_THE_BUILD}genesis storage differs at 1 key: "
+                                               "Grandpa.CurrentSetId, which only the node's build sets"), out
 
 
 def test_cli_refuses_the_red_teams_chain_built_into_the_real_node(clean, capsys, node, pin):

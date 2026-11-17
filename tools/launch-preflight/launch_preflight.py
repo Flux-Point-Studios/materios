@@ -8,7 +8,8 @@ subwasm, the extractor the runtime-upgrade ceremony gate uses), the authority
 nodes' launch commands and the RPC proxy configs in front of them, what each
 public RPC URL serves, probed live, and what Cardano holds, through a Kupo index:
 the cMATRA lock that backs genesis and the permissioned candidates the runtime
-draws the committee from. A launch manifest, signed with a launch
+draws the committee from, from a Kupo whose node's tip is within ten minutes
+of this host's clock. A launch manifest, signed with a launch
 key launch_keys.json pins, supplies what genesis cannot show: who holds each
 role, with each multisig member's holder's proof of possession of its key, the
 explicit economics, where the lock is, how long a session lasts, the Cardano
@@ -23,9 +24,12 @@ Rules, each of which refuses on its own:
                  key, an ed25519 key of small order) as a role or a member of a
                  role's multisig, or as an aura or grandpa key that genesis,
                  the launch or the Cardano candidates seat; a 33-byte role key
-                 that is no compressed ECDSA key; Sudo.Key, the attestation
-                 committee or its threshold, or a genesis account that no
-                 declared role (or the Treasury) accounts for, or Root
+                 that is no compressed ECDSA key, a point on secp256k1;
+                 Sudo.Key, the attestation committee or its threshold, or a
+                 genesis account that no declared role (or the Treasury)
+                 accounts for; an attestation committee not encoded as a set,
+                 each account once in ascending order, or listing more
+                 entries than the runtime's MaxCommitteeSize; Root
                  not a multisig of threshold 2 or more, or one that a
                  keyholder, or the keys anyone can sign as, meet alone; an
                  off-chain role left
@@ -33,18 +37,25 @@ Rules, each of which refuses on its own:
                  test network
   2 rewards      attestor reward and subsidy values or validator reward
                  parameters not declared, or genesis and the runtime do not
-                 hold exactly the declared values
+                 hold exactly the declared values; a receipt expiry other
+                 than the day of blocks the runtime's genesis writes
   3 rpc          an authority's running node process serves unsafe RPC methods
                  on an external or proxied listener, a public RPC URL lists or
                  answers an unsafe method, or an authority has no launch entry
   4 supply       a genesis that does not fix its issuance, or fixes another
                  than it holds, the launch's dust and the Treasury's
                  existential deposit sum to, or one MATRA or more; an account
-                 holding other than its declared dust; an attestation reward,
+                 holding other than its declared dust, or whose System.Account
+                 is otherwise not the one the Balances genesis writes (a
+                 nonce, a consumer, a sufficient, a frozen balance, other
+                 than one provider, other flags); an attestation reward,
                  receipt fee, fee floor or bond other than zero; issuance above
                  the cMATRA the lock holds on Cardano; a lock fewer than two key
                  holders can spend, or not bound to this genesis by its datum;
-                 genesis storage outside the allowlist
+                 genesis storage outside the allowlist, a key under a single
+                 value's that the runtime does not read, or a pallet storage
+                 version or other value no rule reads that is not the one
+                 build-spec writes
   5 pallets      PerpEngine in the runtime metadata, under any name
   6 checkpoint   genesis hash, runtime code hash, chain-spec hash or launch
                  manifest differ from the signed launch manifest, or no pinned
@@ -68,7 +79,13 @@ Rules, each of which refuses on its own:
                  changed less than a second before its node process started;
                  the spec's runtime, as its node binary runs it at block one,
                  holds a chain id other than the genesis hash, or reads other
-                 Cardano ids from the spec than the preflight does
+                 Cardano ids from the spec than the preflight does; the
+                 checked spec is not the one the pinned node binary builds
+                 from the launch manifest (build-spec --chain
+                 mainnet:<manifest> --raw, run offline): any genesis storage
+                 key or value, the runtime code, child storage, or any field
+                 but the boot nodes differs, a code substitute, fork id, fork
+                 or bad block among them
   9 committee    the genesis committee, which the runtime seats at every
                  rotation whose Cardano draw fails, not exactly the declared
                  authorities, each once, or past the runtime's MaxValidators,
@@ -94,7 +111,8 @@ Rules, each of which refuses on its own:
                  committee policy, declared or in genesis, other than the
                  genesis UTXO and the scripts it derives; a D-parameter or
                  candidates output created later than two Cardano epochs
-                 before the launch's
+                 before the launch's, the epoch the session that holds the
+                 tip of Kupo's node started in
  10 possession   a member of a multisig in any role, at any depth, that is a
                  bare key or the all-zero key, gives no proof of possession,
                  or gives one that is not its key's signature (sr25519, or
@@ -105,12 +123,20 @@ Rules, each of which refuses on its own:
                  (IntentSettlement.CardanoIds) absent or other than Cardano
                  mainnet's network magic and Shelley genesis hash, or an Aegis
                  policy hash other than the one the launch declares, or any
-                 where it declares the policy bound after genesis (null)
+                 where it declares the policy bound after genesis (null);
+                 settlement lifetimes, signer threshold, pool utilization,
+                 storage version or legacy cutovers other than the runtime's
+                 defaults
  12 dust         a role signer (a sudo or guardian keyholder, the sudo
                  account with recovery friends, an anchor signer, attestor,
                  oracle, enactor, gateway sponsor, recovery friend or
                  rescuer) with no provider at genesis, or holding less than
-                 the existential deposit and the deposits its roles reserve
+                 the deposits its roles reserve and, free of them, the
+                 larger of the existential deposit and the working dust
+                 whose MOTRA pays its role's calls, a runtime upgrade among
+                 a sudo keyholder's and the enactor's; Motra.Params other
+                 than mainnet's, byte for byte; a Motra.AccrualCheckpoint
+                 other than each endowed account's free balance at block 0
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
@@ -133,6 +159,7 @@ import http.client
 import ipaddress
 import itertools
 import json
+import math
 import re
 import shlex
 import socket
@@ -143,6 +170,7 @@ import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import base58
@@ -214,9 +242,6 @@ GENESIS_STORAGE = frozenset({
     "OrinqReceipts.AttestationRewardPerSigner", "OrinqReceipts.EraCapBase", "OrinqReceipts.EraCapBaselineAttestorCount",
     "OrinqReceipts.BondRequirement", "OrinqReceipts.ReceiptExpiryBlocks", "OrinqReceipts.ReceiptSubmissionFee",
     "OrinqReceipts.ReceiptSubmissionFeeFloor",
-    # The committee members that certify unpaid and how long they wait first
-    # hold no MATRA. A genesis that names none stores neither.
-    "OrinqReceipts.BackupSigners", "OrinqReceipts.BackupSignerDelay",
     # The issuance a genesis fixes, which rule 4 holds to what genesis endows, and the attestation committee and its
     # threshold, which rule 1 holds to the declared attestors: none holds MATRA.
     "OrinqReceipts.FixedIssuance", "OrinqReceipts.CommitteeMembers", "OrinqReceipts.AttestationThreshold",
@@ -241,8 +266,48 @@ GENESIS_STORAGE = frozenset({
     # without waiting out its delay in public.
     "RootTimelock.Delays", "RootTimelock.Guardian",
 })
-GENESIS_WELL_KNOWN_KEYS = {CODE_KEY, b":extrinsic_index"}
+# The allowlisted items that are maps. Every other one is a single value, which the runtime reads at its 32-byte key
+# alone: a longer key under it is storage no runtime code reads.
+GENESIS_MAPS = frozenset({"System.Account", "System.BlockHash", "Grandpa.SetIdSession", "Motra.AccrualCheckpoint"})
+EXTRINSIC_INDEX_KEY = b":extrinsic_index"
+GENESIS_WELL_KNOWN_KEYS = {CODE_KEY, EXTRINSIC_INDEX_KEY}
 STORAGE_VERSION_KEY = b":__STORAGE_VERSION__:"
+# The storage version build-spec writes for each pallet of the runtime whose code declares one above 0; it writes 0
+# for every other pallet. A runtime upgrade migrates a pallet whose stored version is below its code's.
+STORAGE_VERSIONS = {"Balances": 1, "Grandpa": 5, "Motra": 1, "Multisig": 1, "TeeAttestation": 1}
+# frame_system's genesis hash of block 0, which its genesis build stores as the parent hash and as BlockHash[0].
+GENESIS_PARENT_HASH = bytes([69]) * 32
+# Motra.Params as a mainnet genesis stores it, each field with its width in bytes and its value: MotraParams::default()
+# with the generation a mainnet launch runs on. The minimum fee is 10^9 MOTRA base units (15 decimals) and a byte
+# costs 10^6; the congestion rate starts at 0, moves by at most 10^9 a block, a tenth of the way to its target, and
+# rises only over blocks more than half full (Perbill 500,000,000); a balance keeps 99.99% a block (Perbill
+# 999,900,000), is capped at 10^18, and one MATRA (10^6 base units) generates 10^10 a block.
+MOTRA_PARAMS = (
+    ("min_fee", 16, 10**9), ("congestion_rate", 16, 0), ("target_fullness", 4, 500_000_000),
+    ("decay_rate_per_block", 4, 999_900_000), ("generation_per_matra_per_block", 16, 10**10),
+    ("max_balance", 16, 10**18), ("max_congestion_step", 16, 10**9), ("length_fee_per_byte", 16, 10**6),
+    ("congestion_smoothing", 4, 100_000_000),
+)
+MOTRA = {name: value for name, _, value in MOTRA_PARAMS}
+# Motra.AccrualCheckpoint's value: the free MATRA an account has held since a block, a u128 and a u32 block number.
+ACCRUAL_CHECKPOINT = (16, 4)
+# What each key that signs for a role signs in a day, as docs/MAINNET-GENESIS.md sizes its dust: (calls, bytes of
+# one). A sudo keyholder's and the enactor's keys also sign a call that carries a whole runtime.
+ROLE_LOADS = {"sudo": (24, 512), "guardian": (64, 384), "enactor": (64, 512), "anchor_signer": (1_000, 512),
+              "gateway_sponsor": (2_000, 512), "oracle": (4_800, 512), "attestors": (100, 256),
+              "recovery_friends": (8, 256), "recovery_rescuers": (24, 512)}
+UPGRADE_ROLES = ("sudo", "enactor")
+# The call that carries a runtime is sized at this many times the genesis runtime code, as genesis stores it.
+UPGRADE_HEADROOM = 2
+DAY_MILLIS = 86_400_000
+# secp256k1's field prime: a compressed key's x is below it and x³ + 7 is a square modulo it.
+SECP256K1_PRIME = 2**256 - 2**32 - 977
+# What `--chain` starts with to have the node build mainnet from the launch manifest whose path follows.
+MAINNET_CHAIN_PREFIX = "mainnet:"
+# The chain spec fields a node may be given other than as its own build-spec writes them: the peers it dials first.
+OPERATOR_SPEC_FIELDS = frozenset({"bootNodes"})
+# The most storage keys a finding names one by one.
+NAMED_KEYS = 16
 POLICY_ID_LEN = 28
 # partner-chains' MainchainAddress, a BoundedVec of this many bytes: the runtime reads a longer one as undecodable.
 MAINCHAIN_ADDRESS_LIMIT = 120
@@ -261,6 +326,8 @@ REWARD_ITEMS = (
 # System.Account's AccountInfo<Nonce = u32, AccountData<Balance>>: nonce, consumers, providers and sufficients, then
 # free, reserved, frozen and flags.
 ACCOUNT_INFO = (4, 4, 4, 4, BALANCE, BALANCE, BALANCE, BALANCE)
+# pallet_balances' ExtraFlags as its genesis writes them for every account it endows: the new-logic bit alone.
+ACCOUNT_FLAGS = 1 << 127
 ECONOMICS_FIELDS = {"fee_buffer", *(field for field, _ in VALIDATOR_REWARD_CONSTANTS),
                     *(field for field, _, _ in REWARD_ITEMS)}
 # SessionCommitteeManagement.CurrentCommittee: the epoch it serves, a u64, then its members, each a cross-chain key
@@ -517,6 +584,9 @@ KUPO_TIMEOUT = 30
 KUPO_LIMIT = 16 * 1024 * 1024
 # Five minutes of slots: a synced Kupo trails its node by a block or two.
 KUPO_MAX_LAG_SLOTS = 300
+# How far the tip of Kupo's node may be from this host's clock, in seconds, either way. Cardano makes a block every
+# 20 seconds on average, so a tip this old is a node that has stopped following the chain.
+KUPO_MAX_TIP_AGE = 600
 # The node's followers serve a Cardano epoch's committee from the data of the epoch this many before it, so a datum
 # created later than that epoch is not there for a chain's first block.
 COMMITTEE_DATA_LAG_EPOCHS = 2
@@ -951,6 +1021,21 @@ class Metadata:
             return ":code (runtime WASM)"
         return self.storage_names.get(key[:32], f"storage 0x{key[:32].hex()}")
 
+    def entry(self, key: bytes) -> str:
+        """One storage key as a finding names it apart from every other: a well-known key as its text, a pallet's
+        storage version, an item the metadata declares by its name, with the rest of the key for an entry of a map,
+        and any other key in hex."""
+        if key.startswith(b":"):
+            return key.decode(errors="replace")
+        version = next((pallet for pallet in self.pallets
+                        if key == twox_128(pallet.encode()) + twox_128(STORAGE_VERSION_KEY)), None)
+        if version is not None:
+            return f"the storage version of {version}"
+        name = self.storage_names.get(key[:32])
+        if name is None:
+            return f"storage 0x{key.hex()}"
+        return name if len(key) == 32 else f"{name}[0x{key[32:].hex()}]"
+
 
 # ---------------------------------------------------------------------------
 # Well-known keys, key strings and role entries
@@ -1144,6 +1229,14 @@ def no_secret(key: bytes, scheme: str) -> str | None:
     if scheme == "ed25519" and key in ED25519_SMALL_ORDER:
         return f"0x{key.hex()}, an ed25519 key of small order, whose ed25519 signature of any message needs no secret"
     return None
+
+
+def secp256k1_point(key: bytes) -> bool:
+    """Whether 33 bytes are a compressed secp256k1 public key: 0x02 or 0x03, then the x of a point on the curve
+    y² = x³ + 7. About half of all x are on no point, and no ECDSA key signs as the account of such bytes."""
+    x = int.from_bytes(key[1:], "big")
+    return (len(key) == 33 and key[0] in (2, 3) and x < SECP256K1_PRIME
+            and pow(x**3 + 7, (SECP256K1_PRIME - 1) // 2, SECP256K1_PRIME) == 1)
 
 
 def multisig_account(members: list[bytes], threshold: int) -> bytes:
@@ -1442,8 +1535,24 @@ def committee_datum(kupo: str, policy: bytes, what: str) -> tuple[bytes, int]:
     return kupo_datum(kupo, output.get("datum_hash"), where), created
 
 
+def wall_clock() -> float:
+    """This host's clock, in seconds since the Unix epoch."""
+    return time.time()
+
+
+def cardano_slot_millis(slot: int) -> int:
+    """When a Shelley-era Cardano mainnet slot starts, in milliseconds since the Unix epoch."""
+    first_slot = int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_SLOT_NUMBER"])
+    if slot < first_slot:
+        raise InputError(f"Cardano slot {slot} is before Cardano mainnet's Shelley era, which starts at slot "
+                         f"{first_slot}: no partner chain output is that old")
+    return int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_TIMESTAMP_MILLIS"]) + \
+        (slot - first_slot) * int(CARDANO_MAINNET_FOLLOWER["MC__SLOT_DURATION_MILLIS"])
+
+
 def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
-    """The genesis lock output, the permissioned candidates and the D-parameter, as the Kupo index holds them now."""
+    """The genesis lock output, the permissioned candidates and the D-parameter, as the Kupo index holds them now:
+    Kupo within KUPO_MAX_LAG_SLOTS of its node, and its node's tip within KUPO_MAX_TIP_AGE of this host's clock."""
     health = kupo_get(kupo, "/health")
     if not isinstance(health, dict):
         health = {}
@@ -1453,6 +1562,12 @@ def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
     if tip - checkpoint > KUPO_MAX_LAG_SLOTS:
         raise InputError(f"Kupo is {tip - checkpoint} slots behind its node: an output it lists "
                          "as unspent may already be spent")
+    age = round(wall_clock() - cardano_slot_millis(tip) / 1000)
+    if abs(age) > KUPO_MAX_TIP_AGE:
+        raise InputError(f"the tip of Kupo's node, slot {tip}, is {abs(age)} seconds "
+                         f"{'behind' if age > 0 else 'ahead of'} this host's clock, more than {KUPO_MAX_TIP_AGE}: "
+                         "its node is not following Cardano mainnet, so an output it lists as unspent may be spent "
+                         "and the epoch a launch starts in is another, or this host's clock is wrong")
     tx, _, index = launch["supply"]["genesis_lock"]["utxo"].partition("#")
     matches = unspent(kupo_get(kupo, f"/matches/{int(index)}@{tx}?unspent"), "the genesis lock")
     lock = matches[0] if matches else None
@@ -1927,6 +2042,9 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                     findings.append(Finding(KEYS, f"{leaf} is 33 bytes whose first is 0x{raw[0]:02x}, not a compressed "
                                                   "ECDSA key (0x02 or 0x03): its account is blake2-256 of bytes no "
                                                   "ECDSA key signs as"))
+                elif len(raw) == 33 and not secp256k1_point(raw):
+                    findings.append(Finding(KEYS, f"{leaf} is 33 bytes that are no point on secp256k1: its account is "
+                                                  "blake2-256 of bytes no ECDSA key signs as"))
                 if reason := no_secret(raw, "sr25519"):
                     findings.append(Finding(KEYS, f"{leaf}: {reason}"))
                 elif reason := no_secret(raw, "ed25519"):
@@ -1983,19 +2101,27 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
 
 def check_attestation_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     """The receipt attestation committee genesis seats from block zero: OrinqReceipts.CommitteeMembers must be the
-    accounts roles.attestors declares, no more than the runtime's MaxCommitteeSize, which it reads a longer set past
-    as none, and OrinqReceipts.AttestationThreshold the declared attestation_threshold, from 1 to the committee's
-    size: a member no role declares certifies receipts unchecked."""
+    accounts roles.attestors declares, as SCALE encodes a set, each once in ascending order, and list no more than
+    the runtime's MaxCommitteeSize, which it counts every listed entry against, a repeated one too, and reads a
+    longer list past as no committee; and OrinqReceipts.AttestationThreshold the declared attestation_threshold,
+    from 1 to the committee's size: a member no role declares certifies receipts unchecked."""
     try:
         attestors = [role_account(entry) for entry in launch.get("roles", {}).get("attestors", [])]
     except ValueError:
         return []  # rule 1 refuses a role key that does not decode
     raw = spec.value("OrinqReceipts", "CommitteeMembers")
-    members = set(fixed_list(raw, 32, "OrinqReceipts.CommitteeMembers does not decode as a set of 32-byte accounts")
-                  if raw is not None else [])
+    listed = fixed_list(raw, 32, "OrinqReceipts.CommitteeMembers does not decode as a set of 32-byte accounts") \
+        if raw is not None else []
+    members = set(listed)
     findings = [Finding(KEYS, f"genesis OrinqReceipts.CommitteeMembers seats {ss58(member, spec.ss58_prefix)}, which "
                               "roles.attestors does not declare: it certifies receipts unchecked")
                 for member in sorted(members - set(attestors))]
+    if listed != sorted(members):
+        findings.append(Finding(KEYS, f"genesis OrinqReceipts.CommitteeMembers lists {len(listed)} "
+                                      f"entr{'y' if len(listed) == 1 else 'ies'} that are not {len(members)} accounts "
+                                      "each once in ascending order, as SCALE encodes a set and build-spec writes "
+                                      "it: the runtime counts every listed entry against its MaxCommitteeSize and "
+                                      "seats each account once, so the committee it reads is not the one listed"))
     findings += [Finding(KEYS, f"roles.attestors[{i}] {ss58(account, spec.ss58_prefix)} is not in genesis "
                                "OrinqReceipts.CommitteeMembers: it certifies no receipt")
                  for i, account in enumerate(attestors) if account not in members]
@@ -2004,8 +2130,8 @@ def check_attestation_committee(spec: Spec, meta: Metadata, launch: dict) -> lis
         findings.append(Finding(KEYS, "the runtime metadata declares no OrinqReceipts.MaxCommitteeSize the preflight "
                                       "can read: whether the runtime decodes the genesis attestation committee is "
                                       "unknown here"))
-    elif len(members) > bound:
-        findings.append(Finding(KEYS, f"genesis OrinqReceipts.CommitteeMembers seats {len(members)} attestors, and the "
+    elif len(listed) > bound:
+        findings.append(Finding(KEYS, f"genesis OrinqReceipts.CommitteeMembers lists {len(listed)} attestors, and the "
                                       f"runtime's OrinqReceipts.MaxCommitteeSize is {bound}: a set past it decodes as "
                                       "none, so no receipt is certified"))
     declared, stored = launch.get("attestation_threshold"), spec.uint("OrinqReceipts", "AttestationThreshold", 4)
@@ -2759,6 +2885,11 @@ def check_cardano_committee(meta: Metadata, cardano: CardanoView) -> list[Findin
         findings += [Finding(COMMITTEE, f"Cardano permissioned candidate {i} has a {len(key)}-byte {name}, not "
                                         f"{width} bytes: Ariadne drops it")
                      for key, name, width in zip(cand.keys, CANDIDATE_KEYS, CANDIDATE_KEY_WIDTHS) if len(key) != width]
+        if len(cand.partner_chains_key) == CROSS_CHAIN_KEY and not secp256k1_point(cand.partner_chains_key):
+            findings.append(Finding(COMMITTEE, f"Cardano permissioned candidate {i} has a partner chains key that is "
+                                               "no compressed secp256k1 point: no key signs as it, and once the "
+                                               "committee is drawn from Cardano its seat is filed under an account "
+                                               "no one holds"))
     for index, name in enumerate(CANDIDATE_KEYS):
         findings += [Finding(COMMITTEE, f"Cardano permissioned candidate {i} repeats candidate {j}'s {name}: the "
                                         "runtime keeps the first and drops it")
@@ -2789,33 +2920,41 @@ def check_cardano_committee(meta: Metadata, cardano: CardanoView) -> list[Findin
     return findings
 
 
+def cardano_epoch_at(millis: int) -> int:
+    """The Cardano mainnet epoch at a time in milliseconds since the Unix epoch, by the layout every authority's
+    follower runs with."""
+    return int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_NUMBER"]) + \
+        (millis - int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_TIMESTAMP_MILLIS"])) // CARDANO_EPOCH_MILLIS
+
+
 def cardano_epoch(slot: int) -> int:
-    """The Cardano mainnet epoch of a Shelley-era slot, by the layout every authority's follower runs with."""
-    first_slot = int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_SLOT_NUMBER"])
-    if slot < first_slot:
-        raise InputError(f"Cardano slot {slot} is before Cardano mainnet's Shelley era, which starts at slot "
-                         f"{first_slot}: no partner chain output is that old")
-    slot_millis = int(CARDANO_MAINNET_FOLLOWER["MC__SLOT_DURATION_MILLIS"])
-    return int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_NUMBER"]) + (slot - first_slot) * slot_millis // \
-        CARDANO_EPOCH_MILLIS
+    """The Cardano mainnet epoch of a Shelley-era slot."""
+    return cardano_epoch_at(cardano_slot_millis(slot))
 
 
-def cardano_epoch_start(epoch: int) -> str:
-    """When a Cardano mainnet epoch starts, in UTC."""
+def cardano_epoch_start(epoch: int, session: int = 1) -> str:
+    """When a Cardano mainnet epoch starts, in UTC, or when the first session of `session` milliseconds that starts
+    in it does."""
     millis = int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_TIMESTAMP_MILLIS"]) + \
         (epoch - int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_NUMBER"])) * CARDANO_EPOCH_MILLIS
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(millis // 1000))
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(-(-millis // session) * session // 1000))
 
 
-def check_committee_age(cardano: CardanoView) -> list[Finding]:
+def check_committee_age(spec: Spec, meta: Metadata, cardano: CardanoView) -> list[Finding]:
     """The node's followers serve a Cardano epoch's committee from the D-parameter and permissioned candidates as
-    they stood at the end of the epoch two before it. The chain's first block is authored no earlier than the
-    epoch Kupo's node is in now, so an output created in that epoch or the one before is not there for it: the
-    follower finds no data, no node authors block 1, and none does until Cardano reaches the epoch two after the
-    output's."""
+    they stood at the end of the epoch two before it. Block 1 asks for the committee of the Cardano epoch its
+    session started in, and a session, genesis Sidechain.SlotsPerEpoch slots of the runtime's slot duration, starts
+    at a multiple of its length since the Unix epoch: so the launch epoch is the one in which the session that holds
+    the tip of Kupo's node started, the epoch before the tip's for the first minutes of an epoch. An output created
+    in the launch epoch or the one before is not there for the first block: the follower finds no data, no node
+    authors block 1, and none does until Cardano reaches the epoch two after the output's. Rule 9's session check
+    refuses a session whose length genesis or the runtime does not give."""
     if cardano.tip_slot is None:
         raise InputError("the Cardano view holds no tip: the epoch a launch starts in is unknown")
-    now = cardano_epoch(cardano.tip_slot)
+    session = (spec.uint("Sidechain", "SlotsPerEpoch", 4) or 0) * (uint_constant(meta, "Aura", "SlotDuration", 8) or 0)
+    if not session:
+        return []
+    now = cardano_epoch_at(cardano_slot_millis(cardano.tip_slot) // session * session)
     findings = []
     for what in ("D-parameter", "permissioned candidates"):
         if what not in cardano.created:
@@ -2827,8 +2966,8 @@ def check_committee_age(cardano: CardanoView) -> list[Finding]:
                                                f"launch in epoch {now} reads the committee from epoch "
                                                f"{now - COMMITTEE_DATA_LAG_EPOCHS}, when it did not exist: the node's "
                                                f"follower finds no {what} and no block is authored. The earliest "
-                                               f"valid launch is in epoch {earliest}, from "
-                                               f"{cardano_epoch_start(earliest)}"))
+                                               f"valid launch is in the first session that starts in epoch "
+                                               f"{earliest}, from {cardano_epoch_start(earliest, session)}"))
     return findings
 
 
@@ -2967,7 +3106,7 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                             {aura: (name, f"0x{aura.hex()}") for name, aura, _ in declared},
                             "Aura.Authorities", "aura key", "it authors the slots of two authorities",
                             "it authors blocks unchecked", "it authors no block")
-    findings += check_grandpa_voters(spec, declared) + check_grandpa_set(spec)
+    findings += check_grandpa_voters(spec, meta, declared) + check_grandpa_set(spec)
     session = compact(len(members)) + b"".join(blake2_256(cross_chain) + aura + grandpa
                                                for cross_chain, aura, grandpa in members)
     if spec.value("Session", "ValidatorsAndKeys") != session:
@@ -3140,14 +3279,24 @@ def genesis_voters(spec: Spec) -> list[bytes] | None:
         raw, 40, "Grandpa.Authorities does not decode as a list of 32-byte keys and u64 weights")
 
 
-def check_grandpa_voters(spec: Spec, declared: list[tuple[str, bytes, bytes]]) -> list[Finding]:
+def check_grandpa_voters(spec: Spec, meta: Metadata, declared: list[tuple[str, bytes, bytes]]) -> list[Finding]:
     """Genesis Grandpa.Authorities must be the declared authorities' grandpa keys, each once and at weight 1 as
-    build-spec writes them: a weight above 1, or a key listed twice, counts as several voters."""
+    build-spec writes them: a weight above 1, or a key listed twice, counts as several voters. It lists no more
+    than the runtime's Grandpa.MaxAuthorities, past which the runtime cannot decode it."""
     voters = genesis_voters(spec)
     if voters is None:
         return [Finding(COMMITTEE, "genesis sets no Grandpa.Authorities, which build-spec always writes: who finalizes "
                                    "is unchecked")]
-    return seated_once([(voter[:32], f"0x{voter[:32].hex()}") for voter in voters],
+    bound = uint_constant(meta, "Grandpa", "MaxAuthorities", 4)
+    if bound is None:
+        bounded = [Finding(COMMITTEE, "the runtime metadata declares no Grandpa.MaxAuthorities the preflight can "
+                                      "read: whether the runtime can decode the genesis voters is unknown here")]
+    else:
+        bounded = [Finding(COMMITTEE, f"genesis Grandpa.Authorities lists {len(voters)} voters, more than the "
+                                      f"runtime's Grandpa.MaxAuthorities {bound}: the runtime cannot decode it and "
+                                      "reads no voter, and GRANDPA refuses an empty authority set")
+                   ] if len(voters) > bound else []
+    return bounded + seated_once([(voter[:32], f"0x{voter[:32].hex()}") for voter in voters],
                        {grandpa: (name, f"0x{grandpa.hex()}") for name, _, grandpa in declared},
                        "Grandpa.Authorities", "grandpa key", "it counts twice toward finality",
                        "who finalizes is unchecked", "it does not vote on finality") + [
@@ -3415,7 +3564,9 @@ def check_supply(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView)
 def check_endowments(spec: Spec, meta: Metadata, launch: dict, endowed: dict[bytes, tuple[int, str]],
                      fixed: int | None) -> list[Finding]:
     """Each genesis account holds, free and nothing reserved, exactly what the launch's dust endows it, the Treasury
-    its existential deposit, and no account more; and the fixed issuance is their sum."""
+    its existential deposit, and no account more or below that deposit, under which the Balances genesis endows no
+    account; the rest of its System.Account is what that genesis writes for an endowed account, no nonce, consumer,
+    sufficient or frozen balance, one provider and the flags of ACCOUNT_FLAGS; and the fixed issuance is the sum."""
     if "dust" not in launch:
         return [Finding(SUPPLY, "the launch declares no dust: what each genesis account holds is unchecked")]
     declared = dict(endowed)
@@ -3433,6 +3584,20 @@ def check_endowments(spec: Spec, meta: Metadata, launch: dict, endowed: dict[byt
             said = f"{where} declares {amount}" if where else "the launch's dust declares none"
             findings.append(Finding(SUPPLY, f"genesis endows {ss58(account, spec.ss58_prefix)} {free} free and "
                                             f"{reserved} reserved, but {said}"))
+        if where and amount < deposit:
+            findings.append(Finding(SUPPLY, f"{where} declares {amount}, below the existential deposit {deposit}: the "
+                                            "Balances genesis endows no account less, so no build-spec writes it"))
+        info = spec.account_info(account)
+        if info is not None and (*info[:4], *info[6:]) != (0, 0, 1, 0, 0, ACCOUNT_FLAGS):
+            nonce, consumers, providers, sufficients, _, _, frozen, flags = info
+            findings.append(Finding(SUPPLY, f"genesis System.Account of {ss58(account, spec.ss58_prefix)} holds nonce "
+                                            f"{nonce}, consumers {consumers}, providers {providers}, sufficients "
+                                            f"{sufficients}, frozen {frozen} and flags 0x{flags:032x}, not the nonce "
+                                            "0, consumers 0, providers 1, sufficients 0, frozen 0 and flags "
+                                            f"0x{ACCOUNT_FLAGS:032x} the Balances genesis writes for an account it "
+                                            "endows: a frozen balance cannot be reserved for a deposit, a nonce "
+                                            "refuses its first calls, and a reference count nothing took keeps or "
+                                            "drops the account apart from its balance"))
     total = sum(amount for amount, _ in declared.values())
     if fixed is not None and fixed != total:
         findings.append(Finding(SUPPLY, f"OrinqReceipts.FixedIssuance stores {fixed}, not the {total} the launch's "
@@ -3440,18 +3605,31 @@ def check_endowments(spec: Spec, meta: Metadata, launch: dict, endowed: dict[byt
     return findings
 
 
-def signer_floors(launch: dict, deposits: dict[str, int]) -> dict[bytes, tuple[int, list[str]]]:
-    """The deposits each account that signs reserves, with who it is: a keyholder of a multisig, in a role that holds
-    Root or its veto or one that signs, the multisig deposit its threshold takes when it opens a call; the sudo
-    account its recovery configuration, a base and a deposit per friend, when the launch names recovery friends; a
-    rescuer its recovery deposit; every other signing role's entry nothing beyond the existential deposit."""
+@dataclass
+class SignerNeed:
+    """What an account that signs needs its dust for: the deposits its roles reserve, the calls it signs in a day,
+    each (calls, bytes of one), whether it also signs a call that carries a runtime, and who it is."""
+    reserved: int = 0
+    loads: list[tuple[int, int]] = dataclasses.field(default_factory=list)
+    upgrades: bool = False
+    whom: list[str] = dataclasses.field(default_factory=list)
+
+
+def signer_needs(launch: dict, deposits: dict[str, int]) -> dict[bytes, SignerNeed]:
+    """What each account that signs needs, with who it is: a keyholder of a multisig, in a role that holds Root or
+    its veto or one that signs, the multisig deposit its threshold takes when it opens a call; the sudo account its
+    recovery configuration, a base and a deposit per friend, when the launch names recovery friends; a rescuer its
+    recovery deposit; every other signing role's entry no deposit. Each key that signs for a role, the entry's own or
+    each key of its multisig at any depth, carries the role's load of ROLE_LOADS, once for each entry it signs for:
+    the key pays the fee of a call its multisig makes."""
     roles = launch.get("roles", {})
     friends = len(roles.get("recovery_friends", []))
-    needs: dict[bytes, tuple[int, list[str]]] = {}
+    needs: dict[bytes, SignerNeed] = {}
 
     def need(account: bytes, deposit: int, who: str) -> None:
-        reserved, whom = needs.get(account, (0, []))
-        needs[account] = (reserved + deposit, [*whom, who])
+        signer = needs.setdefault(account, SignerNeed())
+        signer.reserved += deposit
+        signer.whom.append(who)
 
     for role in (*KEYHOLDER_ROLES, *SIGNING_ROLES):
         for i, entry in enumerate(roles.get(role, [])):
@@ -3467,36 +3645,117 @@ def signer_floors(launch: dict, deposits: dict[str, int]) -> dict[bytes, tuple[i
                         need(role_account(member),
                              deposits["multisig_base"] + deposits["multisig_factor"] * multisig["threshold"],
                              f"{path}.members[{j}], a keyholder of {path}")
+                for account, leaf_where in {role_account(leaf): leaf_where
+                                            for leaf_where, _, leaf in role_leaves(entry, where)}.items():
+                    if account not in needs:
+                        need(account, 0, leaf_where)
+                    needs[account].loads.append(ROLE_LOADS[role])
+                    needs[account].upgrades |= role in UPGRADE_ROLES
             except ValueError:
                 continue  # rule 1 refuses a role key that does not decode and a multisig that lists a member twice
     return needs
 
 
+def motra_fee(length: int) -> int:
+    """The MOTRA fee of a call of `length` bytes under MOTRA_PARAMS while its congestion rate is the zero genesis
+    starts it at, which it leaves only over blocks more than half full: the minimum fee and the price of its bytes."""
+    return MOTRA["min_fee"] + MOTRA["length_fee_per_byte"] * length
+
+
+def working_dust(loads: list[tuple[int, int]], upgrade_bytes: int | None, blocks_per_day: int) -> int:
+    """The free MATRA base units whose MOTRA, under MOTRA_PARAMS, never runs out under `loads`, each (calls a day,
+    bytes of one) with its calls evenly spaced, and never falls below the fee of a call of `upgrade_bytes` where the
+    account signs one. A balance that generates g a block and keeps the share r of itself settles at g / (1 - r).
+    A fee f paid every k blocks holds it below that by at most f / (1 - r^k), right after a call, and the calls of
+    several loads by at most the sum. With x = k(1 - r), r^k is at most 1 - x + x²/2, and a call lands at most a
+    block early, so f / (r · x · (1 - x/2)) bounds each load's share from above, in whole fractions."""
+    lost = Fraction(10**9 - MOTRA["decay_rate_per_block"], 10**9)
+    owed = Fraction(0 if upgrade_bytes is None else motra_fee(upgrade_bytes))
+    for calls, length in loads:
+        spacing = lost * blocks_per_day / calls
+        owed += motra_fee(length) / ((1 - lost) * spacing * (1 - spacing / 2))
+    settles = Fraction(MOTRA["generation_per_matra_per_block"], MATRA) / lost
+    return math.ceil(owed / settles)
+
+
 def check_dust(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     """Every account that signs exists at genesis, with the provider frame_system's CheckNonce needs, and holds free
-    at least its floor: the existential deposit, which keeps it, and the deposits its roles reserve, read from the
-    runtime metadata. No signed call moves MATRA and none is minted after genesis, so a signer endowed below its floor
-    can never sign, or never pay its role's deposit."""
+    at least its floor: the deposits its roles reserve, read from the runtime metadata, and, left free once they are
+    reserved, the larger of the existential deposit, which keeps it, and its working dust, which generates the MOTRA
+    its calls cost: MOTRA comes of free MATRA alone. For a sudo keyholder and the enactor those calls include one
+    that carries a runtime UPGRADE_HEADROOM times the size of the genesis runtime code. No signed call moves MATRA
+    and none is minted after genesis, so a signer endowed below its floor can never sign, never pay its role's
+    deposit, or never pay for its role's calls."""
     constants = {"existential": ("Balances", "ExistentialDeposit"), "rescuer": RECOVERY_DEPOSIT,
                  "config_base": RECOVERY_CONFIG[0], "friend_factor": RECOVERY_CONFIG[1],
                  "multisig_base": MULTISIG_DEPOSIT[0], "multisig_factor": MULTISIG_DEPOSIT[1]}
     deposits = {name: uint_constant(meta, *constant, BALANCE) for name, constant in constants.items()}
     missing = [".".join(constants[name]) for name, value in deposits.items() if value is None]
+    slot = uint_constant(meta, "Aura", "SlotDuration", 8)
+    if not slot:
+        missing.append("Aura.SlotDuration above 0")
     if missing:
         return [Finding(DUST, f"the runtime metadata declares no {', '.join(missing)} the preflight can read: the "
                               "dust each signer needs is unknown here")]
+    upgrade_bytes = UPGRADE_HEADROOM * len(spec.code)
     findings = []
-    for account, (reserved, whom) in signer_floors(launch, deposits).items():
-        who = f"{' and '.join(whom)} ({ss58(account, spec.ss58_prefix)})"
-        floor = deposits["existential"] + reserved
+    for account, signer in signer_needs(launch, deposits).items():
+        who = f"{' and '.join(signer.whom)} ({ss58(account, spec.ss58_prefix)})"
+        working = working_dust(signer.loads, upgrade_bytes if signer.upgrades else None, DAY_MILLIS // slot)
+        floor = signer.reserved + max(deposits["existential"], working)
         info = spec.account_info(account)
         if info is None or info[2] == 0:
             findings.append(Finding(DUST, f"{who} has no provider at genesis: it cannot sign, and nothing after "
                                           "genesis endows it"))
         elif info[4] < floor:
+            upgrade = f", a {upgrade_bytes}-byte runtime upgrade among them" if signer.upgrades else ""
             findings.append(Finding(DUST, f"{who} holds {info[4]} free at genesis, below its floor of {floor}: the "
-                                          f"existential deposit {deposits['existential']} and the {reserved} its "
-                                          "roles reserve"))
+                                          f"{signer.reserved} its roles reserve and, left free, the larger of the "
+                                          f"existential deposit {deposits['existential']} and the working dust "
+                                          f"{working} that generates the MOTRA its calls cost{upgrade}"))
+    return findings
+
+
+def check_motra(spec: Spec) -> list[Finding]:
+    """What a signer's dust is worth: genesis Motra.Params must be MOTRA_PARAMS, byte for byte, the fee and
+    generation every dust floor is worked under, and genesis must hold a Motra.AccrualCheckpoint for exactly the
+    accounts it endows, each the account's free balance held since block 0, as the Balances genesis writes one. The
+    runtime generates an account's MOTRA from its checkpoint: with none it generates nothing, and with a lower
+    amount it generates less than its dust does."""
+    findings = []
+    expected = b"".join(value.to_bytes(width, "little") for _, width, value in MOTRA_PARAMS)
+    stored = spec.value("Motra", "Params")
+    if stored != expected:
+        fields = None if stored is None else scale_uints(stored, tuple(width for _, width, _ in MOTRA_PARAMS))
+        if stored is None:
+            shown = "sets no Motra.Params, which the runtime reads as all zero"
+        elif fields is None:
+            shown = f"stores a Motra.Params of {len(stored)} bytes, not the {len(expected)} its type encodes to"
+        else:
+            shown = "stores Motra.Params with " + ", ".join(
+                f"{name} {got} for {value}" for (name, _, value), got in zip(MOTRA_PARAMS, fields) if got != value)
+        findings.append(Finding(DUST, f"genesis {shown}: every signer's dust is sized for the fee and the "
+                                      "generation of the mainnet parameters, " + ", ".join(
+                                          f"{name} {value}" for name, _, value in MOTRA_PARAMS)))
+    prefix = storage_key("Motra", "AccrualCheckpoint")
+    accounts = spec.accounts()
+    wanted = {prefix + hashlib.blake2b(account, digest_size=16).digest() + account:
+              (account, spec.balance(account)[0]) for account in accounts}
+    for key in sorted(key for key in spec.storage if key.startswith(prefix) and key not in wanted):
+        findings.append(Finding(DUST, f"genesis sets the Motra.AccrualCheckpoint 0x{key.hex()}, which is not "
+                                      "blake2_128 of an account genesis endows followed by that account: build-spec "
+                                      "writes a checkpoint for each endowed account and no other"))
+    for key, (account, free) in sorted(wanted.items()):
+        stored = spec.storage.get(key)
+        if stored != free.to_bytes(ACCRUAL_CHECKPOINT[0], "little") + bytes(ACCRUAL_CHECKPOINT[1]):
+            fields = None if stored is None else scale_uints(stored, ACCRUAL_CHECKPOINT)
+            shown = "sets no Motra.AccrualCheckpoint" if stored is None else (
+                f"sets a Motra.AccrualCheckpoint of {len(stored)} bytes" if fields is None else
+                f"checkpoints {fields[0]} MATRA base units held since block {fields[1]}")
+            findings.append(Finding(DUST, f"genesis {shown} for {ss58(account, spec.ss58_prefix)}, not the {free} it "
+                                          "holds free, held since block 0, as build-spec writes it: the runtime "
+                                          "generates its MOTRA from the checkpoint, so it generates none, or other "
+                                          "than its dust is sized to"))
     return findings
 
 
@@ -3552,12 +3811,10 @@ def _plutus_bytes(datum: bytes) -> bytes | None:
 
 
 def check_genesis_storage(spec: Spec, meta: Metadata) -> list[Finding]:
-    """Genesis may set only GENESIS_STORAGE, each pallet's storage version and
-    the runtime's own well-known keys."""
+    """Genesis may set only GENESIS_STORAGE, each pallet's storage version and the runtime's own well-known keys. An
+    item that is no map is set at its own 32-byte key alone: the runtime reads no longer key under it."""
     versions = {twox_128(name.encode()) + twox_128(STORAGE_VERSION_KEY) for name in meta.pallets}
     outside: dict[str, int] = {}
-    findings = []
-    accounts = set(spec.accounts())
     for key in sorted(spec.storage):
         if key in GENESIS_WELL_KNOWN_KEYS or key in versions:
             continue
@@ -3565,20 +3822,91 @@ def check_genesis_storage(spec: Spec, meta: Metadata) -> list[Finding]:
             label = key.decode(errors="replace")
         else:
             label = meta.storage_names.get(key[:32], f"storage 0x{key[:32].hex()}")
+        if label in GENESIS_STORAGE and label not in GENESIS_MAPS and len(key) != 32:
+            label = f"storage 0x{key.hex()}, a key under {label}'s that the runtime does not read,"
         if label not in GENESIS_STORAGE:
             outside[label] = outside.get(label, 0) + 1
-        elif label == "Motra.AccrualCheckpoint":
-            account = key[-32:]
-            expected = storage_key("Motra", label.split(".")[1]) + hashlib.blake2b(account, digest_size=16).digest() + account
-            fields = scale_uints(spec.storage[key], (16, 4))
-            if (key != expected or account not in accounts or fields is None or fields[-1] != 0
-                    or fields[0] > spec.balance(account)[0]):
-                findings.append(Finding(SUPPLY, f"genesis sets invalid {label}: expected a canonical System.Account "
-                                               "key, block zero and no more than its free MATRA balance"))
-    return findings + [Finding(SUPPLY, f"genesis sets {label} ({count} {'entry' if count == 1 else 'entries'}), which a "
+    return [Finding(SUPPLY, f"genesis sets {label} ({count} {'entry' if count == 1 else 'entries'}), which a "
                             "mainnet genesis may not set: storage outside the genesis allowlist can hold a claim on "
                             "MATRA that the supply check does not count")
             for label, count in outside.items()]
+
+
+def pinned_storage(meta: Metadata) -> list[tuple[str, str, bytes, bytes | None, str]]:
+    """What build-spec writes for the genesis storage no other rule reads, which every node's genesis hash covers:
+    (rule, name, key, value, what another value does). The settlement lifetimes and signer threshold are the
+    runtime's own defaults, from its metadata, which its genesis build stores; the rest are the values the runtime's
+    genesis builds hard-code: frame_system's reference-count flags and block 0's parent hash, vesting's storage
+    version, each pallet's storage version, an extrinsic index of 0, the native-token observation with no scripts,
+    a day of blocks before a receipt expires, and settlement's pool utilization (target 5,000 and cap 7,500 basis
+    points over no value), storage version and closed legacy cutovers."""
+    def u32(value: int) -> bytes:
+        return value.to_bytes(4, "little")
+
+    hash_reads = "the genesis hash every node computes covers it, and nothing reads it after block 1"
+    settles = "settlement runs on other parameters than the runtime's defaults, which build-spec writes"
+    pinned = [
+        (SUPPLY, ":extrinsic_index", EXTRINSIC_INDEX_KEY, u32(0), "the runtime numbers block 1's extrinsics from it"),
+        (SUPPLY, "System.UpgradedToU32RefCount", storage_key("System", "UpgradedToU32RefCount"), b"\x01",
+         "a later runtime upgrade would migrate reference counts that are already in the current layout"),
+        (SUPPLY, "System.UpgradedToTripleRefCount", storage_key("System", "UpgradedToTripleRefCount"), b"\x01",
+         "a later runtime upgrade would migrate reference counts that are already in the current layout"),
+        (SUPPLY, "System.ParentHash", storage_key("System", "ParentHash"), GENESIS_PARENT_HASH, hash_reads),
+        (SUPPLY, "System.BlockHash[0]", storage_key("System", "BlockHash") + twox_64(u32(0)) + u32(0),
+         GENESIS_PARENT_HASH, hash_reads),
+        (SUPPLY, "Vesting.StorageVersion", storage_key("Vesting", "StorageVersion"), b"\x01",
+         "a later runtime upgrade would migrate vesting schedules that are already in the current layout"),
+        (CHECKPOINT, "NativeTokenManagement.MainChainScriptsConfiguration",
+         storage_key("NativeTokenManagement", "MainChainScriptsConfiguration"), bytes(POLICY_ID_LEN + 2),
+         "the Cardano deposit observation reads other scripts than the none build-spec writes"),
+        (REWARDS, "OrinqReceipts.ReceiptExpiryBlocks", storage_key("OrinqReceipts", "ReceiptExpiryBlocks"),
+         u32(14_400), "a receipt expires, and a backup signer's delay is bounded, on another window than the day of "
+                      "blocks the runtime's genesis gives it"),
+        (SETTLEMENT, "IntentSettlement.PoolUtilization", storage_key("IntentSettlement", "PoolUtilization"),
+         u32(5_000) + u32(7_500) + bytes(16), settles),
+        (SETTLEMENT, "IntentSettlement.SettlementStorageVersion",
+         storage_key("IntentSettlement", "SettlementStorageVersion"), u32(5),
+         "a later runtime upgrade migrates settlement storage that is already in the current layout, or the legacy "
+         "settle and expire calls stay open"),
+        (SETTLEMENT, "IntentSettlement.StcaCutoverBlock", storage_key("IntentSettlement", "StcaCutoverBlock"),
+         u32(0), "the legacy settle call stays open until that block"),
+        (SETTLEMENT, "IntentSettlement.PolicyExpireCutoverBlock",
+         storage_key("IntentSettlement", "PolicyExpireCutoverBlock"), u32(0),
+         "the legacy expire call stays open until that block"),
+    ]
+    for item, constant in (("IntentTTL", "DefaultIntentTTL"), ("ClaimTTL", "DefaultClaimTTL"),
+                           ("MinSignerThreshold", "DefaultMinSignerThreshold")):
+        pinned.append((SETTLEMENT, f"IntentSettlement.{item}", storage_key("IntentSettlement", item),
+                       meta.constants.get(("IntentSettlement", constant)), settles))
+    for pallet in meta.pallets:
+        pinned.append((SUPPLY, f"the storage version of {pallet}",
+                       twox_128(pallet.encode()) + twox_128(STORAGE_VERSION_KEY),
+                       STORAGE_VERSIONS.get(pallet, 0).to_bytes(2, "little"),
+                       f"a later runtime upgrade runs {pallet}'s migrations against storage already in its layout, "
+                       "or skips them"))
+    return pinned
+
+
+def check_pinned_storage(spec: Spec, meta: Metadata) -> list[Finding]:
+    """Genesis must hold each value of pinned_storage as build-spec writes it, and System.BlockHash no entry but
+    block 0's."""
+    findings = []
+    for rule, name, key, value, effect in pinned_storage(meta):
+        stored = spec.storage.get(key)
+        if value is None:
+            findings.append(Finding(rule, f"the runtime metadata declares no default the preflight can read for "
+                                          f"{name}: what build-spec writes for it is unknown here"))
+        elif stored != value:
+            shown = "sets no" if stored is None else f"stores 0x{stored.hex()} as"
+            findings.append(Finding(rule, f"genesis {shown} {name}, not the 0x{value.hex()} build-spec writes: "
+                                          f"{effect}"))
+    prefix = storage_key("System", "BlockHash")
+    extra = sum(key.startswith(prefix) for key in spec.storage) - 1
+    if extra > 0:
+        findings.append(Finding(SUPPLY, f"genesis sets {extra} System.BlockHash entr{'y' if extra == 1 else 'ies'} "
+                                        "besides block 0's, the one build-spec writes: a new chain has no earlier "
+                                        "block to name"))
+    return findings
 
 
 def check_pallets(meta: Metadata) -> list[Finding]:
@@ -4260,6 +4588,109 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
     return findings
 
 
+def node_build(exe: Path, manifest: Path, scratch: Path, where: str) -> tuple[dict | None, str]:
+    """The raw chain spec the node builds from a launch manifest, as `build-spec --chain mainnet:<manifest> --raw`
+    prints it, or None when it builds none, and what it printed instead. It runs offline: in an empty working
+    directory, on a fresh base path, with no environment and no default boot node."""
+    run = Path(tempfile.mkdtemp(dir=scratch))
+    command = [str(exe), "build-spec", "--chain", MAINNET_CHAIN_PREFIX + str(manifest), "--raw",
+               "--disable-default-bootnode", "--base-path", str(run / "base")]
+    try:
+        done = subprocess.run(command, cwd=run, env={}, stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=NODE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return None, f"it ran past {NODE_TIMEOUT} seconds"
+    except OSError as e:
+        raise InputError(f"{where}: cannot run its node binary on this host: {e.strerror}") from e
+    if done.returncode:
+        return None, (done.stdout + done.stderr).decode(errors="replace") or f"exit status {done.returncode}"
+    try:
+        built = json.loads(done.stdout.decode("utf-8"), object_pairs_hook=unique_keys)
+        if not isinstance(built["genesis"]["raw"]["top"], dict):
+            raise TypeError("genesis.raw.top is no object")
+    except (ValueError, TypeError, KeyError, RecursionError) as e:
+        raise InputError(f"{where}: its node's build-spec printed no raw chain spec: {e}") from e
+    return built, ""
+
+
+def genesis_shell(doc: dict) -> dict:
+    """A raw chain spec's genesis less its top storage: its child storage and whatever else it holds."""
+    genesis = doc["genesis"]
+    return {**genesis, "raw": {name: value for name, value in genesis["raw"].items() if name != "top"}}
+
+
+def build_differences(spec: Spec, built: dict, meta: Metadata) -> list[str]:
+    """How the checked chain spec differs from the one a node builds from the launch manifest: genesis top storage
+    key for key, named by pallet and item where the metadata declares them, the runtime code apart; child storage;
+    and every field of the spec but OPERATOR_SPEC_FIELDS, a field only one of them holds included. A code
+    substitute, a fork or bad block, a fork id or any other field the node does not write is such a field."""
+    top = {hex_bytes(key, "a storage key of the node's build-spec"):
+           hex_bytes(value, "a storage value of the node's build-spec")
+           for key, value in built["genesis"]["raw"]["top"].items()}
+    differences = []
+    if spec.storage.get(CODE_KEY) != top.get(CODE_KEY):
+        code, embedded = (blake2_256(storage[CODE_KEY]).hex() if CODE_KEY in storage else "none"
+                          for storage in (spec.storage, top))
+        differences.append(f"genesis :code (blake2-256 {code}) is not the runtime its node binary embeds and builds "
+                           f"mainnet with ({embedded})")
+    apart = [f"{meta.entry(key)}, " + ("whose value differs" if key in spec.storage and key in top else
+                                       "which only the checked spec sets" if key in spec.storage else
+                                       "which only the node's build sets")
+             for key in sorted(set(spec.storage) | set(top))
+             if key != CODE_KEY and spec.storage.get(key) != top.get(key)]
+    if apart:
+        more = f"; and {len(apart) - NAMED_KEYS} more" if len(apart) > NAMED_KEYS else ""
+        differences.append(f"genesis storage differs at {len(apart)} key{'s' * (len(apart) != 1)}: "
+                           f"{'; '.join(apart[:NAMED_KEYS])}{more}")
+    if genesis_shell(spec.doc) != genesis_shell(built):
+        differences.append("its genesis holds other than the top storage and the empty child storage the node's "
+                           "build holds")
+    absent = object()
+    for field in sorted((set(spec.doc) | set(built)) - OPERATOR_SPEC_FIELDS - {"genesis"}):
+        checked, node = spec.doc.get(field, absent), built.get(field, absent)
+        if checked is absent:
+            differences.append(f"it has no {field}, which the node's build gives as {json.dumps(node)[:120]}")
+        elif node is absent:
+            differences.append(f"it gives {field}, which the node's build does not: the node reads a code "
+                               "substitute, a fork id, a fork or bad block and other fields a build never writes")
+        elif json.dumps(checked, sort_keys=True) != json.dumps(node, sort_keys=True):
+            differences.append(f"its {field} is {json.dumps(checked)[:120]}, where the node's build gives "
+                               f"{json.dumps(node)[:120]}")
+    return differences
+
+
+def check_node_build(spec: Spec, meta: Metadata, launch: dict, manifest: bytes) -> list[Finding]:
+    """The checked chain spec must be the one each authority's pinned node binary builds from the launch manifest,
+    `manifest` as the file holds it: the binary runs offline on `build-spec --chain mainnet:<manifest> --raw`, once
+    for each binary the authorities pin, and the spec may differ from what it prints in OPERATOR_SPEC_FIELDS alone.
+    The rules before this one read the manifest and genesis apart from the node's builder, so they hold a wrong
+    builder to the manifest; this one holds whatever they do not read to what the builder writes. Rule 8's genesis
+    attestation refuses an authority whose binary is not the pinned one, which is not run here."""
+    findings, run = [], set()
+    with tempfile.TemporaryDirectory(prefix="launch-preflight-build-") as tmp:
+        scratch = Path(tmp)
+        given = scratch / "launch-manifest.json"
+        given.write_bytes(manifest)
+        for node in launch.get("nodes", []):
+            if not node["authority"]:
+                continue
+            where = f"authority {node['name']}"
+            sha, exe = pinned_binary(node, scratch, where)
+            if sha != node["exe_sha256"] or sha in run:
+                continue
+            run.add(sha)
+            built, said = node_build(exe, given, scratch, where)
+            if built is None:
+                findings.append(Finding(NODE, f"{where}: its node binary builds no mainnet chain spec from the launch "
+                                              f"manifest ({stop_reason(said)}): the checked chain spec is not one "
+                                              "the node builds from it"))
+                continue
+            findings += [Finding(NODE, f"{where}: the checked chain spec is not the one its node binary builds from "
+                                       f"the launch manifest: {difference}")
+                         for difference in build_differences(spec, built, meta)]
+    return findings
+
+
 def signature_verifies(key: bytes, payload: bytes, signature: bytes) -> bool:
     try:
         signing.VerifyKey(key).verify(payload, signature)
@@ -4380,9 +4811,10 @@ def validate_node(node, where: str) -> None:
                 raise InputError(f"{where} is an authority and must declare its {field} public key (SS58 or 0x-hex)")
         cross_chain = node.get("cross_chain")
         key = hex_bytes(cross_chain, f"{where} cross_chain") if isinstance(cross_chain, str) else b""
-        if len(key) != CROSS_CHAIN_KEY or key[0] not in (2, 3):
+        if len(key) != CROSS_CHAIN_KEY or not secp256k1_point(key):
             raise InputError(f"{where} is an authority and must declare its cross_chain key: its ECDSA partner-chain "
-                             f"key, {CROSS_CHAIN_KEY} bytes compressed (0x02 or 0x03 first), as 0x-hex")
+                             f"key, {CROSS_CHAIN_KEY} bytes compressed (0x02 or 0x03 first, then the x of a point on "
+                             "secp256k1), as 0x-hex")
         pin = node.get("exe_sha256")
         if not isinstance(pin, str) or len(hex_bytes(pin, f"{where} exe_sha256")) != 32:
             raise InputError(f"{where} is an authority and must pin the sha256 of its node binary as exe_sha256")
@@ -4519,7 +4951,7 @@ def validate_launch(launch) -> None:
             raise InputError(f"public_rpc[{i}] must name no user, password or fragment")
 
 
-def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_key: str | None,
+def run_checks(spec: Spec, meta: Metadata, launch: dict, manifest: bytes, signed: dict, manifest_key: str | None,
                cardano: CardanoView, extra_well_known: list[Path] = ()) -> list[Finding]:
     validate_launch(launch)
     keys, key_findings = launch_keys(manifest_key)
@@ -4534,14 +4966,16 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_partner_chain(spec, launch)
             + check_candidate_authorities(launch, cardano)
             + check_cardano_committee(meta, cardano)
-            + check_committee_age(cardano)
+            + check_committee_age(spec, meta, cardano)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_public_rpc(launch)
             + check_supply(spec, meta, launch, cardano)
             + check_dust(spec, meta, launch)
+            + check_motra(spec)
             + check_genesis_lock(spec, launch, cardano, well_known)
             + check_genesis_storage(spec, meta)
+            + check_pinned_storage(spec, meta)
             + check_pallets(meta)
             + key_findings
             + check_checkpoint(spec, launch, signed, keys)
@@ -4551,6 +4985,7 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
             + check_guardian(spec, meta, launch, well_known)
             + check_delays(spec, meta)
             + check_node_genesis(spec, launch)
+            + check_node_build(spec, meta, launch, manifest)
             + check_settlement(spec, launch))
 
 
@@ -4587,11 +5022,12 @@ def read_json(path: str, what: str):
 
 def cmd_check(args) -> int:
     spec = load_spec(args.spec)
-    launch = read_json(args.launch, "launch manifest")
+    manifest = read_file(args.launch, "launch manifest")
+    launch = parse_json(manifest, args.launch, "launch manifest")
     validate_launch(launch)
     meta = Metadata.from_v14(subwasm_metadata(spec.code, args.subwasm))
     cardano = cardano_view(args.kupo, spec, launch)
-    findings = run_checks(spec, meta, launch, read_json(args.signed_manifest, "signed manifest"),
+    findings = run_checks(spec, meta, launch, manifest, read_json(args.signed_manifest, "signed manifest"),
                           args.manifest_key, cardano, [Path(p) for p in args.extra_well_known])
     if findings:
         print(f"MAINNET LAUNCH PREFLIGHT: REFUSE ({len(findings)} reasons)")
