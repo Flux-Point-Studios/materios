@@ -10,6 +10,7 @@ import copy
 import dataclasses
 import gzip
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -17,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -110,6 +112,9 @@ def meta(metadata_v14) -> lp.Metadata:
 
 # The public key table, as a check loads it when no operator table is given.
 KNOWN = lp.load_well_known()
+# The tables less the retired preprod keys, for the tests that seat preprod's authors as stand-ins for fresh keys.
+PUBLIC_KNOWN = lp.WellKnown({needle: key for needle, key in KNOWN.keys.items() if key.label != "retired preprod key"},
+                            KNOWN.phrase_hash, KNOWN.seed_hash)
 
 
 @pytest.fixture(scope="session")
@@ -327,7 +332,7 @@ def test_table_holds_published_ecdsa_alice_and_its_account(known):
 
 def test_table_holds_retired_published_keys(known):
     keys = known.keys.values()
-    retired = [k for k in keys if k.label.startswith("retired")]
+    retired = [k for k in keys if k.label == "retired validator key, mnemonic published on-chain"]
     assert {k.scheme for k in retired} == {"sr25519", "ed25519"}
 
 
@@ -486,6 +491,25 @@ def test_table_holds_the_keys_of_trivial_mini_secrets(known):
         assert str(known.keys[bytes.fromhex(public)]) == f"mini-secret 0x{byte}*32, public ({scheme})"
     assert {(k.label, k.scheme) for k in known.keys.values() if k.label.startswith("mini-secret")} == {
         (f"mini-secret 0x{byte}*32, public", scheme) for byte, scheme in TRIVIAL_SEED_KEYS}
+
+
+def test_the_public_table_lists_each_secrets_key_under_every_scheme(known):
+    """A phrase or seed derives a key under each scheme, and the holder of an exposed one can sign under any: so
+    every label of the public table that names a secret lists its sr25519, ed25519 and ECDSA keys. The exceptions:
+    a small scalar is a secret key of sr25519 and of secp256k1 alone, a mini-secret of 0x00 or 0xff bytes is no
+    secp256k1 secret, and the retired validator key's rows are the public keys it ran under: the table's generator
+    holds no secret of it, so it derives no ECDSA key for it."""
+    table = json.loads((HERE / "well_known_keys.json").read_text())["keys"]
+    schemes: dict[str, set[str]] = {}
+    for row in table:
+        schemes.setdefault(row["label"], set()).add(row["scheme"])
+    partial = {label: sorted(found) for label, found in schemes.items()
+               if found != {"sr25519", "ed25519", "ecdsa"} and not label.startswith("secret scalar ")}
+    assert partial == {"retired validator key, mnemonic published on-chain": ["ed25519", "sr25519"],
+                       "mini-secret 0x00*32, public": ["ed25519", "sr25519"],
+                       "mini-secret 0xff*32, public": ["ed25519", "sr25519"]}
+    assert len(schemes) - len(partial) - sum(label.startswith("secret scalar ") for label in schemes) == 122
+    assert all(found <= {"sr25519", "ecdsa"} for label, found in schemes.items() if label.startswith("secret scalar "))
 
 
 @pytest.mark.parametrize("after", [0, 1, lp.BLOCK - 1])
@@ -1609,8 +1633,14 @@ def test_test_network_names_are_one_pattern_shared_with_the_anchor_worker():
 # Rule 1 and 3: the Cardano permissioned candidates (the committee the runtime draws)
 # ---------------------------------------------------------------------------
 
+def cross_chain_of(aura: bytes) -> bytes:
+    """The partner-chain key the tests give the authority whose aura key is `aura`, a compressed ECDSA key, so a
+    launch, a genesis committee and a Cardano candidate built apart from each other name one key for it."""
+    return coincurve.PrivateKey(lp.blake2_256(b"cross-chain" + aura)).public_key.format()
+
+
 def candidate(aura: bytes, gran: bytes | None = None, sidechain: bytes | None = None) -> lp.Candidate:
-    return lp.Candidate(sidechain or bytes([2]) + fresh_account(), aura, gran or fresh_account())
+    return lp.Candidate(sidechain or cross_chain_of(aura), aura, gran or fresh_account())
 
 
 def test_dev_key_in_a_cardano_permissioned_candidate_is_named(spec, meta, known):
@@ -1864,17 +1894,17 @@ def rpc_findings(tmp_path, nodes, config=None, proxy_node="edge", kind="nginx", 
 BEHIND_PROXY = ["[3 rpc] authority val1 serves unsafe RPC methods behind proxy public-rpc"]
 
 
-def authority(argv, host="val1", name="val1", aura=None):
+def authority(argv, host="val1", name="val1", aura=None, cross_chain=None):
     return {"name": name, "host": host, "authority": True, "aura": "0x" + (aura or fresh_account()).hex(),
-            "grandpa": "0x" + fresh_account().hex(), "argv": argv,
-            "exe_sha256": "0x" + hashlib.sha256(b"materios-node").hexdigest()}
+            "grandpa": "0x" + fresh_account().hex(), "cross_chain": "0x" + (cross_chain or cross_chain_key()).hex(),
+            "argv": argv, "exe_sha256": "0x" + hashlib.sha256(b"materios-node").hexdigest()}
 
 
 def declared(argv, is_authority: bool, **fields) -> dict:
     """A node that runs `argv`, declared an authority, which pins its node binary, or not."""
     node = dict(authority(argv), authority=is_authority, **fields)
     if not is_authority:
-        del node["exe_sha256"]
+        del node["exe_sha256"], node["cross_chain"]
     return node
 
 
@@ -2856,14 +2886,14 @@ def grandpa_list(*voters: tuple[bytes, int]) -> bytes:
 
 
 def cross_chain_key() -> bytes:
-    """The shape of a compressed ECDSA public key: a parity byte, then 32 bytes."""
-    return bytes([2]) + fresh_account()
+    """A compressed ECDSA public key: a parity byte, then the x of a point on secp256k1."""
+    return coincurve.PrivateKey().public_key.format()
 
 
 def genesis_members(spec: lp.Spec) -> list[tuple[bytes, bytes, bytes]]:
-    """The preprod genesis authors as committee members: a fresh cross-chain key each, then its aura and grandpa
+    """The preprod genesis authors as committee members: each one's cross-chain key, then its aura and grandpa
     keys."""
-    return [(cross_chain_key(), aura, gran) for aura, gran in zip(aura_keys(spec), grandpa_keys(spec))]
+    return [(cross_chain_of(aura), aura, gran) for aura, gran in zip(aura_keys(spec), grandpa_keys(spec))]
 
 
 def committee_value(members, epoch: int = 0) -> bytes:
@@ -2885,8 +2915,9 @@ def seat(spec: lp.Spec, members) -> None:
 
 def members_launch(members, extra=()) -> dict:
     """An authority for each member, declaring its aura and grandpa keys."""
-    return rpc_launch([dict(authority(["materios-node"], f"val{i}", f"val{i}", aura), grandpa="0x" + gran.hex())
-                       for i, (_, aura, gran) in enumerate(members)] + list(extra))
+    return rpc_launch([dict(authority(["materios-node"], f"val{i}", f"val{i}", aura, cross_chain),
+                            grandpa="0x" + gran.hex())
+                       for i, (cross_chain, aura, gran) in enumerate(members)] + list(extra))
 
 
 def committee_findings(spec: lp.Spec, meta: lp.Metadata, launch: dict) -> list[str]:
@@ -2982,7 +3013,7 @@ def authority_key_findings(seated, meta, write, members) -> list[str]:
     cardano = lp.CardanoView(lock=None, candidates=[lp.Candidate(*member) for member in seated_members],
                              d_parameter=(len(seated_members), 0))
     write(spec, launch, cardano, members)
-    return [m for m in dev_key_findings(spec, meta, KNOWN, launch, cardano=cardano)
+    return [m for m in dev_key_findings(spec, meta, PUBLIC_KNOWN, launch, cardano=cardano)
             if m.startswith(tuple(f"[1 dev-keys] {name}" for name in AUTHORITY_PLACE_NAMES))]
 
 
@@ -3083,7 +3114,10 @@ def test_two_genesis_committee_members_under_one_cross_chain_key_are_refused(sea
     seat(spec, shared)
     assert committee_findings(spec, meta, launch) == [
         f"[9 committee] {COMMITTEE}[1] repeats member 0's cross-chain key: each authority sits in the committee "
-        "once, under its own key"]
+        "once, under its own key",
+        f"[9 committee] {COMMITTEE}[1] cross-chain key 0x{members[0][0].hex()} is not the cross_chain key authority "
+        "val1 declares: genesis seats it under a partner-chain key no declared authority holds, and files its session "
+        "keys under that key's account"]
 
 
 @pytest.mark.parametrize("members", [1, 3])
@@ -4143,9 +4177,6 @@ def test_a_malformed_public_rpc_list_is_an_input_error(urls, error):
 # A preprod cert-daemon account. Its chain-spec source endows BondRequirement +
 # 100 MATRA; the genesis preprod actually launched with gave it 100 MATRA.
 PREPROD_ATTESTOR = bytes.fromhex("44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9480a517a97f189964b")
-FLOOR = 1_000 * MATRA + 500 + 100 * MATRA
-RESERVES = {"ValidatorEmissionReserve": 150_000_000 * MATRA, "AttestationRewardReserve": 50_000_000 * MATRA}
-RUNTIME_CONSTANTS = dict(RESERVES, ValidatorRewardPerEra=VALIDATOR_REWARD_PER_ERA)
 # Native scripts over the key hashes 01.., 02.., 03.. and their mainnet enterprise
 # addresses, as pycardano encodes and hashes them: atLeast 2 of the three keys; the
 # same after slot 100; one key's signature.
@@ -4180,111 +4211,54 @@ def script_address(script) -> str:
     return "addr1" + "".join(lp.BECH32_CHARSET[v] for v in values)
 
 
+# The Cardano mainnet slot the tests' Kupo is at, in epoch 600, and the one its outputs were created at, in epoch 590.
+KUPO_TIP = 4_492_800 + (600 - 208) * 432_000 + 1_000
+# When Cardano mainnet's Shelley era began, slot 4,492,800, in seconds since the Unix epoch: a slot is a second.
+SHELLEY_START = 1_596_059_091
+
+
+# The preflight's own clock, before any test sets one.
+HOST_CLOCK = getattr(lp, "wall_clock", None)
+
+
+@pytest.fixture(autouse=True)
+def clock(monkeypatch):
+    """The clock of the host a check runs on reads five seconds after the tip the test Kupo serves, unless a test
+    sets it."""
+    monkeypatch.setattr(lp, "wall_clock", lambda: SHELLEY_START + KUPO_TIP - 4_492_800 + 5, raising=False)
+CREATED = 4_492_800 + (590 - 208) * 432_000
+
+
 def kupo_output(address=SCRIPT_ADDRESS, assets=None, tx=LOCK_TX, index=1, datum_hash=None) -> dict:
     """An unspent output as Kupo's /matches returns it."""
     return {"transaction_index": 0, "transaction_id": tx, "output_index": index, "address": address,
             "value": {"coins": 2_000_000, "assets": assets or {}},
             "datum_hash": datum_hash, "datum_type": "inline" if datum_hash else None, "script_hash": None,
-            "created_at": {"slot_no": 1, "header_hash": "00" * 32}, "spent_at": None}
+            "created_at": {"slot_no": CREATED, "header_hash": "00" * 32}, "spent_at": None}
 
 
 def locked(amount, address=SCRIPT_ADDRESS, unit=lp.CMATRA_UNIT) -> lp.CardanoView:
     return lp.CardanoView(lock=kupo_output(address, {unit: amount}), candidates=[], d_parameter=(0, 0))
 
 
-def with_constants(metadata_v14: dict, constants=None) -> dict:
-    """The fixture metadata plus the u128 OrinqReceipts constants a runtime
-    that declares its emission reserves and validator reward exposes."""
+def with_constants(metadata_v14: dict) -> dict:
+    """The fixture metadata plus the u128 validator reward per era a runtime that declares it exposes."""
     v14 = copy.deepcopy(metadata_v14)
     pallet = next(p for p in v14["pallets"] if p["name"] == "OrinqReceipts")
     pallet["constants"] = list(pallet.get("constants") or []) + [
-        {"name": name, "value": list(value.to_bytes(16, "little"))}
-        for name, value in (RUNTIME_CONSTANTS if constants is None else constants).items()]
+        {"name": "ValidatorRewardPerEra", "value": list(VALIDATOR_REWARD_PER_ERA.to_bytes(16, "little"))}]
     return v14
-
-
-def roster(spec) -> list[str]:
-    """One attestor endowed at the floor, so a supply test sees only what it sets up."""
-    attestor = fresh_account()
-    endow(spec, attestor, FLOOR)
-    return [ss58(attestor)]
 
 
 def issuance_of(spec) -> int:
     return int.from_bytes(spec.value("Balances", "TotalIssuance"), "little")
 
 
-def supply_findings(spec, meta, attestors, fee_buffer, cardano=None, lock=LOCK):
+def supply_findings(spec, meta, cardano=None, lock=LOCK):
+    """Rule 4 on a genesis whose lock holds more than any issuance, for a launch that declares nothing else."""
     if cardano is None:
-        cardano = locked(issuance_of(spec) + 200_000_000 * MATRA)
-    launch = {"roles": {"attestors": attestors}, "economics": {"fee_buffer": fee_buffer},
-              "supply": {"genesis_lock": lock}}
-    return messages(lp.check_supply(spec, meta, launch, cardano))
-
-
-def test_attestor_endowed_at_bond_plus_ed_plus_buffer_passes(spec, runtime_meta):
-    attestor = fresh_account()
-    endow(spec, attestor, FLOOR)
-    assert supply_findings(spec, runtime_meta, [ss58(attestor)], 100 * MATRA) == []
-
-
-def test_attestor_endowed_one_unit_below_the_floor_is_refused(spec, runtime_meta):
-    attestor = fresh_account()
-    endow(spec, attestor, FLOOR - 1)
-    found = supply_findings(spec, runtime_meta, [ss58(attestor)], 100 * MATRA)
-    assert found == [f"[4 supply] roles.attestors[0] is endowed {FLOOR - 1}, below "
-                     f"bond + existential deposit + fee buffer = {FLOOR}"]
-
-
-def test_preprod_genesis_endowed_its_attestors_below_the_bond(spec, runtime_meta):
-    found = supply_findings(spec, runtime_meta, [ss58(PREPROD_ATTESTOR)], 0)
-    assert found == ["[4 supply] roles.attestors[0] is endowed 100000000, below "
-                     "bond + existential deposit + fee buffer = 1000000500"]
-
-
-def test_unendowed_attestor_is_refused(spec, runtime_meta):
-    found = supply_findings(spec, runtime_meta, [ss58(fresh_account())], 0)
-    assert len(found) == 1 and "is endowed 0" in found[0]
-
-
-def test_multisig_attestor_is_sized_by_its_account(spec, runtime_meta):
-    members = [fresh_account(), fresh_account()]
-    endow(spec, lp.multisig_account(members, 2), FLOOR)
-    launch_attestors = [msig(2, *members)]
-    assert supply_findings(spec, runtime_meta, launch_attestors, 100 * MATRA) == []
-
-
-def test_endowment_floor_needs_every_input(spec, runtime_meta):
-    found = supply_findings(spec, runtime_meta, [ss58(PREPROD_ATTESTOR)], None)
-    assert found[0].startswith("[4 supply] cannot size attestor endowments")
-
-
-def test_runtime_emission_reserves_above_the_cardano_lock_are_refused(spec, runtime_meta):
-    attestors = roster(spec)
-    issuance = issuance_of(spec)
-    found = supply_findings(spec, runtime_meta, attestors, 0, locked(issuance))
-    assert found == [f"[4 supply] Materios can issue {issuance + 200_000_000 * MATRA} (genesis {issuance} "
-                     f"+ runtime emission reserves {200_000_000 * MATRA}) against {issuance} cMATRA "
-                     f"locked on Cardano at {LOCK_TX}#1: the difference is reserve counted both as "
-                     "cMATRA and as MATRA"]
-
-
-def test_genesis_and_emission_reserves_fully_locked_pass(spec, runtime_meta):
-    assert supply_findings(spec, runtime_meta, roster(spec), 0) == []
-
-
-def test_genesis_issuance_above_the_cardano_lock_is_refused(spec, metadata_v14):
-    no_emission = {"ValidatorEmissionReserve": 0, "AttestationRewardReserve": 0}
-    meta = lp.Metadata.from_v14(with_constants(metadata_v14, no_emission))
-    found = supply_findings(spec, meta, roster(spec), 0, locked(975_000 * MATRA))
-    assert len(found) == 1 and "counted both as cMATRA and as MATRA" in found[0]
-
-
-def test_the_backing_is_what_cardano_holds_not_a_declared_number(spec, runtime_meta):
-    """A launch that names the whole 277.5M reserve as backing but locked only
-    G on Cardano is refused on what Cardano holds."""
-    found = supply_findings(spec, runtime_meta, roster(spec), 0, locked(975_000 * MATRA))
-    assert any(f"against {975_000 * MATRA} cMATRA locked on Cardano" in m for m in found)
+        cardano = locked(10**30)
+    return messages(lp.check_supply(spec, meta, {"roles": {}, "supply": {"genesis_lock": lock}}, cardano))
 
 
 GENESIS_DATUM = object()
@@ -4399,22 +4373,21 @@ def test_a_lock_made_for_another_genesis_is_refused(spec):
 
 def test_lock_holding_another_token_backs_nothing(spec, runtime_meta):
     cardano = locked(10**18, unit="98c61f406f7c8df11ccff49ca1631d8bca9663894537c6c5ee5ed418.634d41545241")
-    found = supply_findings(spec, runtime_meta, roster(spec), 0, cardano)
+    found = supply_findings(spec, runtime_meta, cardano)
     assert any("against 0 cMATRA locked on Cardano" in m for m in found)
 
 
 def test_issuance_below_what_genesis_accounts_hold_is_refused(spec, runtime_meta):
     held = issuance_of(spec)
     put(spec, "Balances", "TotalIssuance", (1).to_bytes(16, "little"))
-    found = supply_findings(spec, runtime_meta, [], 0, locked(held + 200_000_000 * MATRA - 1))
+    found = supply_findings(spec, runtime_meta)
     assert f"[4 supply] Balances.TotalIssuance stores 1, but genesis accounts hold {held}" in found
-    assert any(f"(genesis {held} + runtime emission reserves" in m for m in found)
 
 
 def test_missing_issuance_is_refused_and_accounts_still_count(spec, runtime_meta):
     held = issuance_of(spec)
     del spec.storage[lp.storage_key("Balances", "TotalIssuance")]
-    found = supply_findings(spec, runtime_meta, [], 0, locked(held + 200_000_000 * MATRA))
+    found = supply_findings(spec, runtime_meta)
     assert f"[4 supply] Balances.TotalIssuance stores 0, but genesis accounts hold {held}" in found
 
 
@@ -4422,7 +4395,7 @@ def test_reserved_balances_count_toward_issuance(spec, runtime_meta):
     account = fresh_account()
     spec.storage[account_key(account)] = bytes(32) + (5 * MATRA).to_bytes(16, "little") + bytes(32)
     held = issuance_of(spec) + 5 * MATRA
-    found = supply_findings(spec, runtime_meta, [], 0)
+    found = supply_findings(spec, runtime_meta)
     assert f"[4 supply] Balances.TotalIssuance stores {held - 5 * MATRA}, but genesis accounts hold {held}" in found
 
 
@@ -4430,25 +4403,24 @@ def test_reserved_balances_count_toward_issuance(spec, runtime_meta):
 @pytest.mark.parametrize("pallet, item", [("OrinqReceipts", "BondRequirement"), ("Balances", "TotalIssuance")])
 def test_a_supply_number_stored_at_another_width_is_an_input_error(spec, runtime_meta, pallet, item, change):
     """Both are u128: 16 bytes."""
-    attestors = roster(spec)
     stored = int.from_bytes(spec.value(pallet, item), "little")
     put(spec, pallet, item, stored.to_bytes(16 + change, "little"))
     with pytest.raises(lp.InputError, match="^" + re.escape(mis_sized(f"{pallet}.{item}", 16 + change, 16))):
-        supply_findings(spec, runtime_meta, attestors, 100 * MATRA)
+        supply_findings(spec, runtime_meta)
 
 
 @pytest.mark.parametrize("size", [48, 79, 81])
-@pytest.mark.parametrize("whose", ["an attestor", "another account"])
+@pytest.mark.parametrize("whose", ["a fresh account", "another account"])
 def test_an_account_stored_at_another_width_is_an_input_error(spec, runtime_meta, whose, size):
     """An account is AccountInfo<u32, AccountData<u128>>, 80 bytes: FRAME
     reads a shorter one as an empty account."""
-    attestor = fresh_account()
-    endow(spec, attestor, FLOOR)
-    key = account_key(attestor if whose == "an attestor" else PREPROD_ATTESTOR)
+    account = fresh_account()
+    endow(spec, account, 5_000)
+    key = account_key(account if whose == "a fresh account" else PREPROD_ATTESTOR)
     spec.storage[key] = (spec.storage[key] + bytes(1))[:size]
     error = mis_sized(f"System.Account value at 0x{key.hex()}", size, 80)
     with pytest.raises(lp.InputError, match="^" + re.escape(error)):
-        supply_findings(spec, runtime_meta, [ss58(attestor)], 100 * MATRA)
+        supply_findings(spec, runtime_meta)
 
 
 @pytest.mark.parametrize("misfile", [lambda key: key[:32] + bytes(16) + key[48:], lambda key: key[:-1],
@@ -4465,12 +4437,7 @@ def test_an_account_filed_under_another_key_is_an_input_error(spec, meta, runtim
     with pytest.raises(lp.InputError, match=error):
         lp.check_dev_keys(spec, meta, {}, NO_CARDANO, [], known)
     with pytest.raises(lp.InputError, match=error):
-        supply_findings(spec, runtime_meta, [], 0)
-
-
-def test_empty_attestor_roster_is_refused(spec, runtime_meta):
-    found = supply_findings(spec, runtime_meta, [], 0)
-    assert "[4 supply] roles.attestors names no account: the endowment floor has nothing to check" in found
+        supply_findings(spec, runtime_meta)
 
 
 def with_billing(metadata_v14: dict) -> lp.Metadata:
@@ -4496,38 +4463,144 @@ def motra_checkpoint_metadata(meta):
     return meta
 
 
-def test_motra_genesis_checkpoints_match_actual_endowments(spec, meta):
-    account = spec.accounts()[0]
-    spec.storage[map_key("Motra", "AccrualCheckpoint", account)] = spec.balance(account)[0].to_bytes(16, "little") + bytes(4)
-    assert lp.check_genesis_storage(spec, motra_checkpoint_metadata(meta)) == []
-
-
 def test_motra_genesis_rejects_even_a_zero_decay_clock(spec, meta):
     spec.storage[map_key("Motra", "LastTouched", spec.accounts()[0])] = bytes(4)
     findings = lp.check_genesis_storage(spec, motra_checkpoint_metadata(meta))
     assert any("outside the genesis allowlist" in finding.message for finding in findings)
 
 
-@pytest.mark.parametrize("item,value", [
-    ("LastTouched", (1).to_bytes(4, "little")),
-    ("LastTouched", bytes(3)),
-    ("AccrualCheckpoint", bytes(19)),
-    ("AccrualCheckpoint", (2**128 - 1).to_bytes(16, "little") + bytes(4)),
-    ("AccrualCheckpoint", bytes(16) + (1).to_bytes(4, "little")),
-])
-def test_motra_genesis_checkpoint_cannot_invent_holdings(spec, meta, item, value):
-    spec.storage[map_key("Motra", item, spec.accounts()[0])] = value
+@pytest.mark.parametrize("value", [(1).to_bytes(4, "little"), bytes(3)])
+def test_motra_genesis_cannot_set_a_decay_clock(spec, meta, value):
+    spec.storage[map_key("Motra", "LastTouched", spec.accounts()[0])] = value
     assert lp.check_genesis_storage(spec, motra_checkpoint_metadata(meta))
 
 
-@pytest.mark.parametrize("malformed_key", [False, True])
-def test_motra_genesis_checkpoint_requires_canonical_endowed_account(spec, meta, malformed_key):
-    account = spec.accounts()[0] if malformed_key else fresh_account()
+def motra_findings(spec: lp.Spec) -> list[str]:
+    return messages(lp.check_motra(spec))
+
+
+def checkpoint(held: int, since: int = 0) -> bytes:
+    return held.to_bytes(16, "little") + since.to_bytes(4, "little")
+
+
+def test_the_mainnet_fixture_checkpoints_each_endowed_account_at_its_free_balance(mainnet):
+    """The Balances genesis writes a MOTRA checkpoint for every account it endows, the Treasury among them: the
+    balance it holds, held since block 0."""
+    spec, meta, _ = mainnet
+    prefix = lp.storage_key("Motra", "AccrualCheckpoint")
+    assert lp.treasury_account(meta) in spec.accounts() and len(spec.accounts()) == 22
+    assert {key: value for key, value in spec.storage.items() if key.startswith(prefix)} == {
+        map_key("Motra", "AccrualCheckpoint", account): checkpoint(spec.balance(account)[0])
+        for account in spec.accounts()}
+    assert motra_findings(spec) == []
+
+
+CHECKPOINTS = [
+    (lambda free: None, "sets no Motra.AccrualCheckpoint"),
+    (lambda free: checkpoint(0), "checkpoints 0 MATRA base units held since block 0"),
+    (lambda free: checkpoint(free - 1), "checkpoints {less} MATRA base units held since block 0"),
+    (lambda free: checkpoint(free + 1), "checkpoints {more} MATRA base units held since block 0"),
+    (lambda free: checkpoint(free, 1), "checkpoints {free} MATRA base units held since block 1"),
+    (lambda free: checkpoint(free)[:-1], "sets a Motra.AccrualCheckpoint of 19 bytes"),
+    (lambda free: checkpoint(free) + bytes(1), "sets a Motra.AccrualCheckpoint of 21 bytes"),
+]
+
+
+@pytest.mark.parametrize("value, shown", CHECKPOINTS, ids=[shown for _, shown in CHECKPOINTS])
+def test_a_checkpoint_other_than_the_accounts_free_balance_at_block_zero_is_refused(mainnet, value, shown):
+    spec, _, launch = mainnet
+    account = account_of(launch["roles"]["enactor"][0])
+    free = spec.balance(account)[0]
     key = map_key("Motra", "AccrualCheckpoint", account)
-    if malformed_key:
-        key = key[:32] + bytes(16) + account
-    spec.storage[key] = bytes(20)
-    assert lp.check_genesis_storage(spec, motra_checkpoint_metadata(meta))
+    if value(free) is None:
+        del spec.storage[key]
+    else:
+        spec.storage[key] = value(free)
+    assert motra_findings(spec) == [
+        f"[12 dust] genesis {shown.format(free=free, less=free - 1, more=free + 1)} for {ss58(account)}, not the "
+        f"{free} it holds free, held since block 0, as build-spec writes it: the runtime generates its MOTRA from "
+        "the checkpoint, so it generates none, or other than its dust is sized to"]
+
+
+def test_a_genesis_with_no_checkpoint_is_refused_for_every_account(mainnet):
+    spec, _, _ = mainnet
+    for key in [key for key in spec.storage if key.startswith(lp.storage_key("Motra", "AccrualCheckpoint"))]:
+        del spec.storage[key]
+    found = motra_findings(spec)
+    assert len(found) == 22 and all("genesis sets no Motra.AccrualCheckpoint for " in message for message in found)
+
+
+@pytest.mark.parametrize("stray", ["an account genesis does not endow", "another hash", "a longer key"])
+def test_a_checkpoint_for_no_endowed_account_is_refused(mainnet, stray):
+    spec, _, _ = mainnet
+    account = spec.accounts()[0]
+    key = {"an account genesis does not endow": map_key("Motra", "AccrualCheckpoint", fresh_account()),
+           "another hash": lp.storage_key("Motra", "AccrualCheckpoint") + bytes(16) + account,
+           "a longer key": map_key("Motra", "AccrualCheckpoint", account) + bytes(1)}[stray]
+    spec.storage[key] = checkpoint(spec.balance(account)[0])
+    assert motra_findings(spec) == [
+        f"[12 dust] genesis sets the Motra.AccrualCheckpoint 0x{key.hex()}, which is not blake2_128 of an account "
+        "genesis endows followed by that account: build-spec writes a checkpoint for each endowed account and no "
+        "other"]
+
+
+# Motra.Params as mainnet's genesis stores it, spelled out here apart from the preflight's table: a u128 minimum fee
+# of 10^9, a u128 congestion rate of 0, a u32 target fullness of 500,000,000 parts per billion, a u32 share kept each
+# block of 999,900,000, a u128 generation of 10^10 per MATRA per block, a u128 cap of 10^18, a u128 congestion step
+# of 10^9, a u128 price per byte of 10^6 and a u32 congestion smoothing of 100,000,000.
+MAINNET_MOTRA_PARAMS = bytes.fromhex(
+    "00ca9a3b000000000000000000000000" "00000000000000000000000000000000" "0065cd1d" "6043993b"
+    "00e40b54020000000000000000000000" "000064a7b3b6e00d0000000000000000" "00ca9a3b000000000000000000000000"
+    "40420f00000000000000000000000000" "00e1f505")
+MOTRA_SIZED_FOR = ("every signer's dust is sized for the fee and the generation of the mainnet parameters, min_fee "
+                   "1000000000, congestion_rate 0, target_fullness 500000000, decay_rate_per_block 999900000, "
+                   "generation_per_matra_per_block 10000000000, max_balance 1000000000000000000, max_congestion_step "
+                   "1000000000, length_fee_per_byte 1000000, congestion_smoothing 100000000")
+
+
+def test_the_mainnet_fixture_stores_the_motra_params_the_preflight_pins(mainnet):
+    """The node's genesis builders name the same values: its MOTRA constants, and mainnet's generation."""
+    spec, _, _ = mainnet
+    assert spec.value("Motra", "Params") == MAINNET_MOTRA_PARAMS
+    assert motra_findings(spec) == []
+    node = HERE.parent.parent / "partnerchain" / "node" / "src"
+    shared, mainnet_source = (node / "chain_spec.rs").read_text(), (node / "chain_spec_mainnet.rs").read_text()
+    for declared in ("pub const MOTRA_MIN_FEE: u128 = 1_000_000_000;",
+                     "pub const MOTRA_LENGTH_FEE_PER_BYTE: u128 = 1_000_000;",
+                     "pub const MOTRA_KEPT_PER_BLOCK: u32 = 999_900_000;",
+                     "pub const MOTRA_MAX_BALANCE: u128 = 1_000_000_000_000_000_000;",
+                     '"congestionRate": 0,', '"targetFullnessPpm": 500_000_000,',
+                     '"maxCongestionStep": 1_000_000_000u128,', '"congestionSmoothingPpm": 100_000_000'):
+        assert declared in shared
+    assert "pub const MAINNET_GENERATION_PER_MATRA_PER_BLOCK: u128 = 10_000_000_000;" in mainnet_source
+
+
+MOTRA_PARAMS_EDITS = [
+    (lambda raw: None, "sets no Motra.Params, which the runtime reads as all zero"),
+    (lambda raw: b"", "stores a Motra.Params of 0 bytes, not the 108 its type encodes to"),
+    (lambda raw: raw + bytes(1), "stores a Motra.Params of 109 bytes, not the 108 its type encodes to"),
+    (lambda raw: raw[:-1] + bytes([raw[-1] ^ 1]),
+     "stores Motra.Params with congestion_smoothing 83222784 for 100000000"),
+    (lambda raw: raw[:40] + (10**5).to_bytes(16, "little") + raw[56:],
+     "stores Motra.Params with generation_per_matra_per_block 100000 for 10000000000"),
+    (lambda raw: (10**12).to_bytes(16, "little") + (1).to_bytes(16, "little") + raw[32:],
+     "stores Motra.Params with min_fee 1000000000000 for 1000000000, congestion_rate 1 for 0"),
+    (lambda raw: bytes(108),
+     "stores Motra.Params with min_fee 0 for 1000000000, target_fullness 0 for 500000000, decay_rate_per_block 0 for "
+     "999900000, generation_per_matra_per_block 0 for 10000000000, max_balance 0 for 1000000000000000000, "
+     "max_congestion_step 0 for 1000000000, length_fee_per_byte 0 for 1000000, congestion_smoothing 0 for 100000000"),
+]
+
+
+@pytest.mark.parametrize("edit, shown", MOTRA_PARAMS_EDITS, ids=[shown[:60] for _, shown in MOTRA_PARAMS_EDITS])
+def test_motra_params_other_than_mainnets_are_refused(mainnet, edit, shown):
+    spec, _, _ = mainnet
+    key = lp.storage_key("Motra", "Params")
+    if edit(spec.storage[key]) is None:
+        del spec.storage[key]
+    else:
+        spec.storage[key] = edit(spec.storage[key])
+    assert motra_findings(spec) == [f"[12 dust] genesis {shown}: {MOTRA_SIZED_FOR}"]
 
 
 @pytest.fixture
@@ -4581,10 +4654,6 @@ def test_the_spec244_genesis_starts_settlement_at_its_current_version_settling_a
     assert lp.stored_cardano_ids(spec) == (1, CARDANO_PREPROD_SHELLEY, bytes(28))
 
 
-# The fields the node's mainnet chain-spec builder reads from a launch manifest beyond those the preflight reads.
-GENESIS_FIELDS = ("dust", "attestation_threshold", "partner_chain")
-
-
 @pytest.fixture
 def mainnet() -> tuple[lp.Spec, lp.Metadata, dict]:
     """The genesis `materios-node build-spec --chain mainnet:fixtures/mainnet-launch.json --raw` writes, less its
@@ -4596,51 +4665,1211 @@ def mainnet() -> tuple[lp.Spec, lp.Metadata, dict]:
     return spec, lp.Metadata.from_v14(v14), json.loads((FIXTURES / "mainnet-launch.json").read_text())
 
 
+def spec_rule_findings(spec: lp.Spec, meta: lp.Metadata, launch: dict, known, cardano=NO_CARDANO) -> list[str]:
+    """Every rule that reads only the spec, its metadata and the manifest, after the manifest is read: rules 3, 6, 8
+    and 10 read node captures, live RPC or signatures, and the Cardano half of rules 4 and 9 reads Kupo."""
+    lp.validate_launch(launch)
+    return messages(lp.check_chain_identity(spec)
+                    + lp.check_dev_keys(spec, meta, launch, cardano, [], known)
+                    + lp.check_attestation_committee(spec, meta, launch)
+                    + lp.check_committee(spec, meta, launch)
+                    + lp.check_sessions(spec, meta, launch)
+                    + lp.check_follower(launch)
+                    + lp.check_partner_chain(spec, launch)
+                    + lp.check_rewards(spec, meta, launch)
+                    + lp.check_supply(spec, meta, launch, cardano)
+                    + lp.check_dust(spec, meta, launch)
+                    + lp.check_motra(spec)
+                    + lp.check_genesis_storage(spec, meta)
+                    + lp.check_pinned_storage(spec, meta)
+                    + lp.check_pallets(meta)
+                    + lp.check_observation(spec)
+                    + lp.check_code_overrides(launch)
+                    + lp.check_guardian(spec, meta, launch, known)
+                    + lp.check_delays(spec, meta)
+                    + lp.check_settlement(spec, launch))
+
+
 def test_the_mainnet_fixture_launch_passes_each_rule_that_reads_neither_cardano_nor_a_signature(mainnet, known):
-    """The node builds a mainnet genesis from the launch manifest. Every rule that reads only the spec, its metadata
-    and the manifest passes it but for what a fixed-issuance mainnet needs the rules to change for: the manifest's
-    genesis fields, the Treasury account the runtime endows its existential deposit, and the attestation committee
-    and fixed issuance genesis stores. Rules 3, 6, 8 and 10 read node captures, live RPC or signatures, and the
-    Cardano half of rules 4 and 9 reads Kupo."""
+    """The node builds a mainnet genesis from the launch manifest: its fixed issuance of dust, the Treasury's
+    existential deposit, the attestation committee seated at genesis, each authority's partner-chain key and the
+    Cardano scripts its genesis UTXO derives. Every rule that reads only the spec, its metadata and the manifest
+    passes it."""
     spec, meta, launch = mainnet
-    with pytest.raises(lp.InputError, match="unknown launch manifest field attestation_threshold"):
-        lp.validate_launch(launch)
-    lp.validate_launch({field: value for field, value in launch.items() if field not in GENESIS_FIELDS})
     assert spec.value("Sudo", "Key") == lp.role_account(launch["roles"]["sudo"][0])
-    found = messages(lp.check_chain_identity(spec)
-                     + lp.check_dev_keys(spec, meta, launch, NO_CARDANO, [], known)
-                     + lp.check_committee(spec, meta, launch)
-                     + lp.check_sessions(spec, meta, launch)
-                     + lp.check_follower(launch)
-                     + lp.check_rewards(spec, meta, launch)
-                     + lp.check_supply(spec, meta, launch, NO_CARDANO)
-                     + lp.check_genesis_storage(spec, meta)
-                     + lp.check_pallets(meta)
-                     + lp.check_observation(spec)
-                     + lp.check_code_overrides(launch)
-                     + lp.check_guardian(spec, meta, launch, known)
-                     + lp.check_delays(spec, meta)
-                     + lp.check_settlement(spec, launch))
-    treasury = lp.ss58((b"modl" + b"mat/trsy").ljust(32, b"\0"), 42)
-    outside = "which a mainnet genesis may not set: storage outside the genesis allowlist can hold a claim on MATRA " \
-              "that the supply check does not count"
-    assert found == [
-        f"[1 dev-keys] genesis account {treasury} is not declared in any role: who holds it is unchecked",
-        f"[4 supply] genesis sets OrinqReceipts.CommitteeMembers (1 entry), {outside}",
-        f"[4 supply] genesis sets OrinqReceipts.FixedIssuance (1 entry), {outside}",
-        f"[4 supply] genesis sets OrinqReceipts.AttestationThreshold (1 entry), {outside}",
-    ]
+    assert spec_rule_findings(spec, meta, launch, known) == []
 
 
-@pytest.mark.parametrize("item", ["BackupSigners", "BackupSignerDelay"])
-def test_a_genesis_that_names_backup_signers_is_on_the_allowlist(spec244, item):
-    """Who certifies unpaid, and how long it waits first, holds no MATRA. The runtime's own metadata names both
-    items, so the allowlist is held to the names the runtime declares."""
-    spec, meta = spec244
-    assert meta.storage_names[lp.storage_key("OrinqReceipts", item)] == f"OrinqReceipts.{item}"
-    put(spec, "OrinqReceipts", item, {"BackupSigners": lp.compact(1) + fresh_account(),
-                                      "BackupSignerDelay": (100).to_bytes(4, "little")}[item])
-    assert lp.check_genesis_storage(spec, meta) == []
+ED = 500
+TREASURY = (b"modl" + b"mat/trsy").ljust(32, b"\0")
+
+
+def test_the_mainnet_fixture_fixes_its_issuance_at_its_dust_and_the_treasurys_existential_deposit(mainnet):
+    spec, meta, launch = mainnet
+    dust = sum(amount for accounts in launch["dust"].values() for amount in accounts.values())
+    assert meta.constants[("Balances", "ExistentialDeposit")] == ED.to_bytes(16, "little")
+    assert lp.treasury_account(meta) == TREASURY and spec.balance(TREASURY) == (ED, 0)
+    assert spec.uint("OrinqReceipts", "FixedIssuance", 16) == spec.uint("Balances", "TotalIssuance", 16) \
+        == dust + ED == 906_500
+
+
+def account_of(text: str) -> bytes:
+    raw = base58.b58decode(text)[1:33] if not text.startswith("0x") else bytes.fromhex(text[2:])
+    return lp.blake2_256(raw) if len(raw) == 33 else raw
+
+
+def set_account(spec: lp.Spec, account: bytes, free: int, providers: int = 1) -> None:
+    """An account as the Balances genesis writes one: a provider, its free balance and the MOTRA checkpoint of that
+    balance at block 0, with the issuance and the fixed issuance moved with it."""
+    old = spec.balance(account)[0]
+    spec.storage[account_key(account)] = (bytes(8) + providers.to_bytes(4, "little") + bytes(4)
+                                          + free.to_bytes(16, "little") + bytes(32) + (2**127).to_bytes(16, "little"))
+    spec.storage[map_key("Motra", "AccrualCheckpoint", account)] = free.to_bytes(16, "little") + bytes(4)
+    for pallet, item in (("Balances", "TotalIssuance"), ("OrinqReceipts", "FixedIssuance")):
+        put(spec, pallet, item, (spec.uint(pallet, item, 16) + free - old).to_bytes(16, "little"))
+
+
+def redust(spec: lp.Spec, launch: dict, role: str, name: str, amount: int) -> None:
+    """Endow a role account `amount` in genesis and in the launch's dust alike."""
+    launch["dust"].setdefault(role, {})[name] = amount
+    set_account(spec, account_of(name), amount)
+
+
+# ---------------------------------------------------------------------------
+# The launch manifest's genesis fields
+# ---------------------------------------------------------------------------
+
+def test_a_role_no_mainnet_launch_knows_is_an_input_error(mainnet):
+    _, _, launch = mainnet
+    launch["roles"]["treasurer"] = [ss58(fresh_account())]
+    with pytest.raises(lp.InputError, match="^roles.treasurer is not a role a mainnet launch knows: the roles are "
+                                            "anchor_signer, attestors, dust_pool, enactor, endowed, gateway_sponsor, "
+                                            "guardian, oracle, recovery_friends, recovery_rescuers, sudo$"):
+        lp.validate_launch(launch)
+
+
+@pytest.mark.parametrize("node", [0, 4], ids=["an authority", "another node"])
+def test_a_node_field_no_reader_knows_is_an_input_error(mainnet, node):
+    _, _, launch = mainnet
+    launch["nodes"].append({"name": "edge", "host": "edge", "authority": False})
+    launch["nodes"][node]["partner_chain_key"] = "0x02" + "ab" * 32
+    with pytest.raises(lp.InputError, match=f"^nodes\\[{node}\\] has unknown field partner_chain_key$"):
+        lp.validate_launch(launch)
+
+
+PARTNER_CHAIN_UTXO = "09b6fee196c91cd2a78183f837b83f8410183edcdf1edca6e80ff7571dd7a75d"
+NOT_A_GENESIS_UTXO = "^partner_chain.genesis_utxo must be <64 lowercase hex>#<output index from 0 to 32767"
+
+
+@pytest.mark.parametrize("edit, error", [
+    (lambda pc: pc.pop("d_parameter_policy_id"), "^partner_chain must hold exactly committee_candidate_address, "),
+    (lambda pc: pc.update(genesis_lock="x"), "^partner_chain must hold exactly committee_candidate_address, "),
+    (lambda pc: pc.update(genesis_utxo=7), "^partner_chain must hold exactly committee_candidate_address, "),
+    (lambda pc: pc.update(genesis_utxo=f"{PARTNER_CHAIN_UTXO}#32768"), NOT_A_GENESIS_UTXO),
+    (lambda pc: pc.update(genesis_utxo=f"{PARTNER_CHAIN_UTXO}#01"), NOT_A_GENESIS_UTXO),
+    (lambda pc: pc.update(genesis_utxo=f"{PARTNER_CHAIN_UTXO.upper()}#0"), NOT_A_GENESIS_UTXO),
+    (lambda pc: pc.update(genesis_utxo=f"{PARTNER_CHAIN_UTXO}#-1"), NOT_A_GENESIS_UTXO),
+    (lambda pc: pc.update(genesis_utxo=PARTNER_CHAIN_UTXO), NOT_A_GENESIS_UTXO),
+    (lambda pc: pc.update(d_parameter_policy_id="0x" + "ab" * 27),
+     "^partner_chain.d_parameter_policy_id must be a 28-byte Cardano policy id$"),
+    (lambda pc: pc.update(permissioned_candidates_policy_id="0x" + "AB" * 28),
+     "^partner_chain.permissioned_candidates_policy_id is not 0x-prefixed lowercase hex"),
+], ids=["a field missing", "an unknown field", "a number", "output 32768", "a leading zero", "upper case",
+        "a negative index", "no index", "27-byte policy", "upper-case policy"])
+def test_a_partner_chain_the_builder_would_not_read_is_an_input_error(mainnet, edit, error):
+    _, _, launch = mainnet
+    edit(launch["partner_chain"])
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_launch(launch)
+
+
+def test_the_highest_genesis_utxo_index_partner_chains_reads_is_read(mainnet):
+    _, _, launch = mainnet
+    launch["partner_chain"]["genesis_utxo"] = f"{PARTNER_CHAIN_UTXO}#32767"
+    lp.validate_launch(launch)
+
+
+@pytest.mark.parametrize("dust, error", [
+    (["5000"], "^dust must map each role to an object of accounts and the base units each holds$"),
+    ({"oracle": 5000}, "^dust must map each role to an object of accounts and the base units each holds$"),
+    ({"oracle": {"5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": -1}}, "must be a u128 of base units$"),
+    ({"oracle": {"5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": True}}, "must be a u128 of base units$"),
+    ({"oracle": {"5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": "5000"}}, "must be a u128 of base units$"),
+    ({"oracle": {"5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": 2**128}}, "must be a u128 of base units$"),
+    ({"oracle": {"0X" + "ab" * 32: 5000}}, "^dust.oracle account is not 0x-prefixed lowercase hex"),
+])
+def test_dust_the_builder_would_not_read_is_an_input_error(mainnet, dust, error):
+    _, _, launch = mainnet
+    launch["dust"] = dust
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_launch(launch)
+
+
+@pytest.mark.parametrize("threshold", ["2", -1, True, 2**32, 2.0])
+def test_an_attestation_threshold_that_is_not_a_u32_is_an_input_error(mainnet, threshold):
+    _, _, launch = mainnet
+    launch["attestation_threshold"] = threshold
+    with pytest.raises(lp.InputError, match="^attestation_threshold must be a u32"):
+        lp.validate_launch(launch)
+
+
+NO_CROSS_CHAIN = ("^nodes\\[0\\] is an authority and must declare its cross_chain key: its ECDSA partner-chain key, 33 "
+                  "bytes compressed \\(0x02 or 0x03 first, then the x of a point on secp256k1\\), as 0x-hex$")
+
+
+@pytest.mark.parametrize("cross_chain, error", [
+    (None, NO_CROSS_CHAIN), (7, NO_CROSS_CHAIN), ("0x02" + "ab" * 31, NO_CROSS_CHAIN),
+    ("0x04" + "ab" * 32, NO_CROSS_CHAIN), ("0x00" + "ab" * 32, NO_CROSS_CHAIN),
+    ("0x02" + "AB" * 32, "^nodes\\[0\\] cross_chain is not 0x-prefixed lowercase hex"),
+], ids=["missing", "a number", "32 bytes", "uncompressed prefix", "zero prefix", "upper case"])
+def test_an_authority_without_a_compressed_partner_chain_key_is_an_input_error(mainnet, cross_chain, error):
+    _, _, launch = mainnet
+    if cross_chain is None:
+        del launch["nodes"][0]["cross_chain"]
+    else:
+        launch["nodes"][0]["cross_chain"] = cross_chain
+    with pytest.raises(lp.InputError, match=error):
+        lp.validate_launch(launch)
+
+
+def test_a_partner_chain_key_on_a_node_that_is_no_authority_is_an_input_error(mainnet):
+    _, _, launch = mainnet
+    launch["nodes"].append({"name": "edge", "host": "edge", "authority": False, "cross_chain": "0x02" + "ab" * 32})
+    with pytest.raises(lp.InputError, match="^nodes\\[4\\] cross_chain is read for an authority only$"):
+        lp.validate_launch(launch)
+
+
+# ---------------------------------------------------------------------------
+# Rule 1: the Treasury, role keys and the attestation committee
+# ---------------------------------------------------------------------------
+
+def test_another_pallet_account_is_not_declared_as_the_treasury_is(mainnet, known):
+    spec, meta, launch = mainnet
+    pot = (b"modl" + b"mat/attr").ljust(32, b"\0")
+    set_account(spec, pot, ED)
+    found = spec_rule_findings(spec, meta, launch, known)
+    assert f"[1 dev-keys] genesis account {ss58(pot)} is not declared in any role: who holds it is unchecked" in found
+    assert not any(ss58(TREASURY) in message for message in found)
+
+
+@pytest.mark.parametrize("first", [0x00, 0x04, 0x06, 0xff])
+def test_a_33_byte_role_key_that_is_no_compressed_ecdsa_key_is_refused(spec, meta, known, first):
+    """An oracle given as 0x00 followed by a 32-byte key reads as a 33-byte ECDSA key whose account, blake2-256 of
+    those bytes, no key signs as."""
+    key = bytes([first]) + fresh_account()
+    launch = {"roles": {"oracle": ["0x" + key.hex()], "sudo": [msig(2, fresh_account(), key)]}}
+    found = dev_key_findings(spec, meta, known, launch)
+    for where in ("roles.oracle[0]", "roles.sudo[0].members[1]"):
+        assert f"[1 dev-keys] {where} is 33 bytes whose first is 0x{first:02x}, not a compressed ECDSA key (0x02 or " \
+               "0x03): its account is blake2-256 of bytes no ECDSA key signs as" in found
+
+
+def off_curve_key(parity: int = 2) -> bytes:
+    """33 bytes shaped as a compressed ECDSA key whose x is on no point of secp256k1, as coincurve reads them."""
+    for counter in itertools.count():
+        key = bytes([parity]) + hashlib.sha256(b"off the curve %d" % counter).digest()
+        try:
+            coincurve.PublicKey(key)
+        except ValueError:
+            return key
+
+
+def test_the_preflights_curve_check_agrees_with_libsecp256k1():
+    def parses(key: bytes) -> bool:
+        try:
+            coincurve.PublicKey(key)
+        except ValueError:
+            return False
+        return True
+
+    keys = [bytes([2 + i % 2]) + hashlib.sha256(b"x %d" % i).digest() for i in range(400)]
+    keys += [coincurve.PrivateKey().public_key.format() for _ in range(20)]
+    prime = 2**256 - 2**32 - 977
+    keys += [bytes([2]) + bytes(32), bytes([3]) + bytes([255]) * 32, bytes([2]) + prime.to_bytes(32, "big"),
+             bytes([2]) + (prime - 1).to_bytes(32, "big"), bytes([4]) + coincurve.PrivateKey().public_key.format()[1:],
+             off_curve_key(), off_curve_key(3)]
+    assert [lp.secp256k1_point(key) for key in keys] == [parses(key) for key in keys]
+    assert 150 < sum(map(lp.secp256k1_point, keys[:400])) < 250
+    assert not lp.secp256k1_point(off_curve_key())
+    assert not lp.secp256k1_point(coincurve.PrivateKey().public_key.format()[:32])
+
+
+@pytest.mark.parametrize("parity", [2, 3])
+def test_a_33_byte_role_key_that_is_no_point_on_the_curve_is_refused(spec, meta, known, parity):
+    """About half of all 32-byte values are the x of no point on secp256k1: 0x02 or 0x03 before one is the shape of
+    a compressed key that no secret has, so its account never signs."""
+    key = off_curve_key(parity)
+    launch = {"roles": {"oracle": ["0x" + key.hex()], "sudo": [msig(2, fresh_account(), key)]}}
+    found = dev_key_findings(spec, meta, known, launch)
+    for where in ("roles.oracle[0]", "roles.sudo[0].members[1]"):
+        assert f"[1 dev-keys] {where} is 33 bytes that are no point on secp256k1: its account is blake2-256 of " \
+               "bytes no ECDSA key signs as" in found
+
+
+def test_an_authority_whose_partner_chain_key_is_no_point_on_the_curve_is_an_input_error(mainnet):
+    _, _, launch = mainnet
+    launch["nodes"][0]["cross_chain"] = "0x" + off_curve_key().hex()
+    with pytest.raises(lp.InputError, match=NO_CROSS_CHAIN):
+        lp.validate_launch(launch)
+
+
+def test_a_cardano_candidate_whose_partner_chain_key_is_no_point_on_the_curve_is_refused(mainnet):
+    _, meta, launch = mainnet
+    candidates = fixture_candidates(launch)
+    candidates[1] = dataclasses.replace(candidates[1], partner_chains_key=off_curve_key())
+    cardano = lp.CardanoView(lock=None, candidates=candidates, d_parameter=(4, 0))
+    assert messages(lp.check_cardano_committee(meta, cardano)) == [
+        "[9 committee] Cardano permissioned candidate 1 has a partner chains key that is no compressed secp256k1 "
+        "point: no key signs as it, and once the committee is drawn from Cardano its seat is filed under an account "
+        "no one holds"]
+
+
+def test_a_compressed_ecdsa_role_key_is_read(spec, meta, known):
+    launch = {"roles": {"oracle": ["0x" + fresh_ecdsa_key().hex()]}}
+    assert not any("roles.oracle[0]" in message for message in dev_key_findings(spec, meta, known, launch))
+
+
+def committee_members(*accounts: bytes) -> bytes:
+    return lp.compact(len(accounts)) + b"".join(sorted(accounts))
+
+
+def attestation_findings(spec, meta, launch) -> list[str]:
+    return messages(lp.check_attestation_committee(spec, meta, launch))
+
+
+def test_a_genesis_attestation_committee_no_role_declares_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    outsider = fresh_account()
+    attestors = [account_of(text) for text in launch["roles"]["attestors"]]
+    put(spec, "OrinqReceipts", "CommitteeMembers", committee_members(outsider, *attestors[1:]))
+    assert attestation_findings(spec, meta, launch) == [
+        f"[1 dev-keys] genesis OrinqReceipts.CommitteeMembers seats {ss58(outsider)}, which roles.attestors does not "
+        "declare: it certifies receipts unchecked",
+        f"[1 dev-keys] roles.attestors[0] {launch['roles']['attestors'][0]} is not in genesis "
+        "OrinqReceipts.CommitteeMembers: it certifies no receipt"]
+
+
+def test_a_genesis_that_seats_no_attestation_committee_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    for item in ("CommitteeMembers", "AttestationThreshold"):
+        del spec.storage[lp.storage_key("OrinqReceipts", item)]
+    assert attestation_findings(spec, meta, launch) == [
+        f"[1 dev-keys] roles.attestors[{i}] {text} is not in genesis OrinqReceipts.CommitteeMembers: it certifies no "
+        "receipt" for i, text in enumerate(launch["roles"]["attestors"])] + [
+        "[1 dev-keys] genesis sets no OrinqReceipts.AttestationThreshold: the committee certifies no receipt"]
+
+
+@pytest.mark.parametrize("stored, declared, found", [
+    (3, 2, ["[1 dev-keys] genesis OrinqReceipts.AttestationThreshold is 3, not the attestation_threshold 2 the launch "
+            "declares"]),
+    (0, 0, ["[1 dev-keys] genesis OrinqReceipts.AttestationThreshold 0 is outside 1 to the 3 members of the "
+            "committee: no receipt is certified"]),
+    (4, 4, ["[1 dev-keys] genesis OrinqReceipts.AttestationThreshold 4 is outside 1 to the 3 members of the "
+            "committee: no receipt is certified"]),
+    (2, None, ["[1 dev-keys] the launch declares no attestation_threshold: how many attestors certify a receipt is "
+               "unchecked"]),
+])
+def test_an_attestation_threshold_other_than_the_declared_one_in_range_is_refused(mainnet, stored, declared, found):
+    spec, meta, launch = mainnet
+    put(spec, "OrinqReceipts", "AttestationThreshold", stored.to_bytes(4, "little"))
+    if declared is None:
+        del launch["attestation_threshold"]
+    else:
+        launch["attestation_threshold"] = declared
+    assert attestation_findings(spec, meta, launch) == found
+
+
+def test_an_attestation_committee_past_the_runtimes_bound_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    meta.constants[("OrinqReceipts", "MaxCommitteeSize")] = (2).to_bytes(4, "little")
+    assert attestation_findings(spec, meta, launch) == [
+        "[1 dev-keys] genesis OrinqReceipts.CommitteeMembers lists 3 attestors, and the runtime's "
+        "OrinqReceipts.MaxCommitteeSize is 2: a set past it decodes as none, so no receipt is certified"]
+
+
+def not_a_set(listed: int, accounts: int) -> str:
+    return (f"[1 dev-keys] genesis OrinqReceipts.CommitteeMembers lists {listed} entries that are not {accounts} "
+            "accounts each once in ascending order, as SCALE encodes a set and build-spec writes it: the runtime "
+            "counts every listed entry against its MaxCommitteeSize and seats each account once, so the committee it "
+            "reads is not the one listed")
+
+
+def test_the_runtime_bounds_the_attestation_committee_at_the_size_the_fixture_metadata_declares(mainnet):
+    _, meta, _ = mainnet
+    source = (HERE.parent.parent / "partnerchain" / "runtime" / "src" / "lib.rs").read_text()
+    assert "type MaxCommitteeSize = ConstU32<96>;" in source
+    assert lp.uint_constant(meta, "OrinqReceipts", "MaxCommitteeSize", 4) == 96
+
+
+def test_an_attestation_committee_that_repeats_its_members_past_the_runtimes_bound_is_refused(mainnet):
+    """The runtime checks a set's listed length against MaxCommitteeSize before it drops the repeats, so 97 entries
+    of the three declared attestors decode as no committee at all, where a reader that collects them into a set
+    sees the three."""
+    spec, meta, launch = mainnet
+    members = lp.fixed_list(spec.value("OrinqReceipts", "CommitteeMembers"), 32, "the fixture's committee")
+    listed = members + [members[0]] * 94
+    put(spec, "OrinqReceipts", "CommitteeMembers", lp.compact(len(listed)) + b"".join(listed))
+    assert attestation_findings(spec, meta, launch) == [
+        not_a_set(97, 3),
+        "[1 dev-keys] genesis OrinqReceipts.CommitteeMembers lists 97 attestors, and the runtime's "
+        "OrinqReceipts.MaxCommitteeSize is 96: a set past it decodes as none, so no receipt is certified"]
+
+
+@pytest.mark.parametrize("order, listed, accounts", [
+    (lambda members: members + [members[0]], 4, 3),
+    (lambda members: [members[0]] * 3, 3, 1),
+    (lambda members: members[::-1], 3, 3),
+    (lambda members: [members[1], members[0], members[2]], 3, 3),
+], ids=["a member twice", "one member three times", "descending", "two exchanged"])
+def test_an_attestation_committee_not_encoded_as_a_set_is_refused(mainnet, order, listed, accounts):
+    spec, meta, launch = mainnet
+    members = order(lp.fixed_list(spec.value("OrinqReceipts", "CommitteeMembers"), 32, "the fixture's committee"))
+    put(spec, "OrinqReceipts", "CommitteeMembers", lp.compact(len(members)) + b"".join(members))
+    found = attestation_findings(spec, meta, launch)
+    assert not_a_set(listed, accounts) in found
+    assert [message for message in found if "is not in genesis" not in message and "is outside 1 to" not in message] \
+        == [not_a_set(listed, accounts)]
+
+
+@pytest.mark.parametrize("item, value", [("BackupSigners", lambda members: members),
+                                         ("BackupSigners", lambda members: lp.compact(0)),
+                                         ("BackupSignerDelay", lambda members: (2**31).to_bytes(4, "little")),
+                                         ("BackupSignerDelay", lambda members: bytes(4))])
+def test_a_genesis_that_names_backup_signers_or_their_delay_is_refused(mainnet, known, item, value):
+    """build-spec writes neither: a backup signer certifies unpaid once its delay has passed, and no role declares
+    one."""
+    spec, meta, launch = mainnet
+    put(spec, "OrinqReceipts", item, value(spec.value("OrinqReceipts", "CommitteeMembers")))
+    assert spec_rule_findings(spec, meta, launch, known) == [
+        f"[4 supply] genesis sets OrinqReceipts.{item} (1 entry), which a mainnet genesis may not set: storage "
+        "outside the genesis allowlist can hold a claim on MATRA that the supply check does not count"]
+
+
+def test_a_runtime_that_hides_its_attestation_committee_bound_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    del meta.constants[("OrinqReceipts", "MaxCommitteeSize")]
+    assert attestation_findings(spec, meta, launch) == [
+        "[1 dev-keys] the runtime metadata declares no OrinqReceipts.MaxCommitteeSize the preflight can read: whether "
+        "the runtime decodes the genesis attestation committee is unknown here"]
+
+
+# ---------------------------------------------------------------------------
+# Rule 4: a fixed issuance of dust
+# ---------------------------------------------------------------------------
+
+def mainnet_supply(spec, meta, launch, cardano=NO_CARDANO) -> list[str]:
+    return messages(lp.check_supply(spec, meta, launch, cardano))
+
+
+def test_a_genesis_that_fixes_no_issuance_is_refused(spec244, mainnet):
+    spec, meta, launch = mainnet
+    del spec.storage[lp.storage_key("OrinqReceipts", "FixedIssuance")]
+    assert mainnet_supply(spec, meta, launch) == [
+        "[4 supply] genesis sets no OrinqReceipts.FixedIssuance: a genesis that does not fix its issuance lets the "
+        "runtime mint its emission reserves, and a mainnet genesis issues dust that nothing adds to"]
+    preprod, _ = spec244
+    assert "[4 supply] genesis sets no OrinqReceipts.FixedIssuance: a genesis that does not fix its issuance lets the " \
+           "runtime mint its emission reserves, and a mainnet genesis issues dust that nothing adds to" \
+           in mainnet_supply(preprod, meta, launch)
+
+
+def test_a_fixed_issuance_other_than_genesis_holds_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    put(spec, "OrinqReceipts", "FixedIssuance", (906_501).to_bytes(16, "little"))
+    assert mainnet_supply(spec, meta, launch) == [
+        "[4 supply] OrinqReceipts.FixedIssuance stores 906501, but Balances.TotalIssuance stores 906500: the runtime "
+        "holds the issuance to the fixed one",
+        "[4 supply] OrinqReceipts.FixedIssuance stores 906501, not the 906500 the launch's dust and the Treasury's "
+        "existential deposit sum to"]
+
+
+def test_an_account_holding_other_than_its_declared_dust_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    oracle = launch["roles"]["oracle"][0]
+    set_account(spec, account_of(oracle), 100_001)
+    assert mainnet_supply(spec, meta, launch) == [
+        f"[4 supply] genesis endows {oracle} 100001 free and 0 reserved, but dust.oracle.{oracle} declares 100000",
+        "[4 supply] OrinqReceipts.FixedIssuance stores 906501, not the 906500 the launch's dust and the Treasury's "
+        "existential deposit sum to"]
+
+
+def test_an_account_genesis_endows_and_no_dust_declares_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    outsider = fresh_account()
+    set_account(spec, outsider, ED)
+    assert f"[4 supply] genesis endows {ss58(outsider)} 500 free and 0 reserved, but the launch's dust declares none" \
+           in mainnet_supply(spec, meta, launch)
+
+
+def account_info(free: int, nonce=0, consumers=0, providers=1, sufficients=0, reserved=0, frozen=0,
+                 flags=2**127) -> bytes:
+    """frame_system's AccountInfo over pallet_balances' AccountData: four u32 counts, then four u128."""
+    return (b"".join(count.to_bytes(4, "little") for count in (nonce, consumers, providers, sufficients))
+            + b"".join(amount.to_bytes(16, "little") for amount in (free, reserved, frozen, flags)))
+
+
+def test_the_balances_genesis_writes_every_fixture_account_one_shape(mainnet):
+    """Each of the 22 accounts the node's build endows, the Treasury among them, holds its balance free behind one
+    provider, with pallet_balances' new-logic flag and nothing else."""
+    spec, meta, _ = mainnet
+    assert lp.treasury_account(meta) in spec.accounts()
+    assert [spec.storage[account_key(account)] for account in spec.accounts()] == [
+        account_info(spec.balance(account)[0]) for account in spec.accounts()]
+    source = (HERE.parent.parent / "partnerchain" / "runtime" / "src" / "lib.rs").read_text()
+    assert "type AccountData = pallet_balances::AccountData<Balance>;" in source
+    assert lp.ACCOUNT_FLAGS == 2**127
+
+
+def mis_shaped(account: bytes, nonce=0, consumers=0, providers=1, sufficients=0, frozen=0, flags=2**127) -> str:
+    return (f"[4 supply] genesis System.Account of {ss58(account)} holds nonce {nonce}, consumers {consumers}, "
+            f"providers {providers}, sufficients {sufficients}, frozen {frozen} and flags 0x{flags:032x}, not the "
+            "nonce 0, consumers 0, providers 1, sufficients 0, frozen 0 and flags 0x80000000000000000000000000000000 "
+            "the Balances genesis writes for an account it endows: a frozen balance cannot be reserved for a "
+            "deposit, a nonce refuses its first calls, and a reference count nothing took keeps or drops the "
+            "account apart from its balance")
+
+
+ACCOUNT_SHAPES = [{"frozen": 2**128 - 1}, {"frozen": 1}, {"nonce": 7}, {"nonce": 2**32 - 1}, {"consumers": 1},
+                  {"providers": 2}, {"providers": 0}, {"providers": 2**32 - 1}, {"providers": 0, "sufficients": 1},
+                  {"sufficients": 5}, {"flags": 0}, {"flags": 2**128 - 1}, {"flags": 2**127 + 1}]
+SHAPED_ACCOUNTS = {
+    "a sudo keyholder": lambda meta, launch: lp.role_account(launch["roles"]["sudo"][0]["members"][0]),
+    "the sudo account": lambda meta, launch: lp.role_account(launch["roles"]["sudo"][0]),
+    "the Treasury": lambda meta, launch: lp.treasury_account(meta),
+    "the dust pool": lambda meta, launch: lp.role_account(launch["roles"]["dust_pool"][0]),
+    "an attestor": lambda meta, launch: lp.role_account(launch["roles"]["attestors"][0]),
+}
+
+
+@pytest.mark.parametrize("who", SHAPED_ACCOUNTS)
+@pytest.mark.parametrize("fields", ACCOUNT_SHAPES, ids=[",".join(f"{k}={v}" for k, v in s.items())
+                                                         for s in ACCOUNT_SHAPES])
+def test_a_genesis_account_that_is_not_the_one_the_balances_genesis_writes_is_refused(mainnet, who, fields):
+    """A sudo keyholder whose whole balance is frozen can reserve no multisig deposit, so Root can never act; a
+    nonce, a consumer, a sufficient or another provider count is a state no endowment leaves."""
+    spec, meta, launch = mainnet
+    account = SHAPED_ACCOUNTS[who](meta, launch)
+    spec.storage[account_key(account)] = account_info(spec.balance(account)[0], **fields)
+    assert mainnet_supply(spec, meta, launch) == [mis_shaped(account, **fields)]
+
+
+def test_dust_below_the_existential_deposit_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    pool = launch["roles"]["dust_pool"][0]
+    redust(spec, launch, "dust_pool", pool, ED - 1)
+    assert mainnet_supply(spec, meta, launch) == [
+        f"[4 supply] dust.dust_pool.{pool} declares 499, below the existential deposit 500: the Balances genesis "
+        "endows no account less, so no build-spec writes it"]
+    redust(spec, launch, "dust_pool", pool, ED)
+    assert mainnet_supply(spec, meta, launch) == []
+
+
+def test_reserved_dust_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    oracle = launch["roles"]["oracle"][0]
+    key = account_key(account_of(oracle))
+    raw = spec.storage[key]
+    spec.storage[key] = raw[:16] + (99_000).to_bytes(16, "little") + (1_000).to_bytes(16, "little") + raw[48:]
+    assert mainnet_supply(spec, meta, launch) == [
+        f"[4 supply] genesis endows {oracle} 99000 free and 1000 reserved, but dust.oracle.{oracle} declares 100000"]
+
+
+def test_dust_genesis_does_not_hold_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    oracle = launch["roles"]["oracle"][0]
+    del spec.storage[account_key(account_of(oracle))]
+    assert f"[4 supply] genesis endows {oracle} 0 free and 0 reserved, but dust.oracle.{oracle} declares 100000" \
+           in mainnet_supply(spec, meta, launch)
+
+
+def test_a_treasury_endowed_other_than_its_existential_deposit_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    set_account(spec, TREASURY, ED + 1)
+    assert mainnet_supply(spec, meta, launch)[0] == (
+        f"[4 supply] genesis endows {ss58(TREASURY)} 501 free and 0 reserved, but the Treasury's existential deposit "
+        "declares 500")
+
+
+@pytest.mark.parametrize("edit, fault", [
+    (lambda dust, roles: dust.update(treasurer={ss58(fresh_account()): 1}),
+     "dust.treasurer endows a role roles does not declare"),
+    (lambda dust, roles: dust["oracle"].update({roles["enactor"][0]: 1}),
+     "dust.oracle.{enactor} names an account that is no entry of roles.oracle"),
+    (lambda dust, roles: dust.update(enactor={roles["enactor"][0]: 120_000, "0x" + account_of(
+        roles["enactor"][0]).hex(): 1}),
+     "dust.enactor.{enactor} endows the account dust.enactor.0x{enactor_hex} endows"),
+    (lambda dust, roles: dust["oracle"].update({"5Garbage": 1}),
+     "dust.oracle.5Garbage: SS58 payload is not a 32-byte account; dust names an account by its public key, or a "
+     "multisig by its account"),
+], ids=["an undeclared role", "another role's entry", "an account twice", "not a key"])
+def test_dust_that_names_no_entry_of_its_role_once_is_refused(mainnet, edit, fault):
+    spec, meta, launch = mainnet
+    edit(launch["dust"], launch["roles"])
+    enactor = launch["roles"]["enactor"][0]
+    want = "[4 supply] " + fault.format(enactor=enactor, enactor_hex=account_of(enactor).hex())
+    assert want in mainnet_supply(spec, meta, launch)
+
+
+def test_a_launch_that_declares_no_dust_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    del launch["dust"]
+    assert mainnet_supply(spec, meta, launch) == [
+        "[4 supply] the launch declares no dust: what each genesis account holds is unchecked"]
+
+
+def test_a_genesis_that_issues_a_matra_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    pool = launch["roles"]["dust_pool"][0]
+    redust(spec, launch, "dust_pool", pool, lp.MATRA - 906_500 + 100_000)
+    assert mainnet_supply(spec, meta, launch) == [
+        "[4 supply] genesis issues 1000000 base units, at least one MATRA (1000000): a mainnet genesis issues dust, "
+        "enough for each role account to exist and sign"]
+
+
+def test_the_issuance_cap_is_the_runtimes_matra():
+    source = (HERE.parent.parent / "partnerchain/runtime/src/lib.rs").read_text()
+    assert "pub const MATRA_DECIMALS: u32 = 6;" in source
+    assert "pub const MATRA: Balance = 10u128.pow(MATRA_DECIMALS);" in source
+    assert lp.MATRA == 10**6
+
+
+@pytest.mark.parametrize("item", ["AttestationRewardPerSigner", "ReceiptSubmissionFee", "ReceiptSubmissionFeeFloor",
+                                  "BondRequirement"])
+@pytest.mark.parametrize("value", [1, None], ids=["one", "unset"])
+def test_a_fixed_issuance_genesis_that_pays_or_bonds_anything_is_refused(mainnet, item, value):
+    spec, meta, launch = mainnet
+    key = lp.storage_key("OrinqReceipts", item)
+    if value is None:
+        del spec.storage[key]
+    else:
+        spec.storage[key] = value.to_bytes(16, "little")
+    shown = "sets no" if value is None else "stores 1 as"
+    assert mainnet_supply(spec, meta, launch) == [
+        f"[4 supply] genesis {shown} OrinqReceipts.{item}: a genesis that fixes its issuance stores it as 0, since "
+        "nothing is minted to pay it and no MATRA moves"]
+
+
+def test_no_emission_reserve_counts_against_the_lock_of_a_fixed_issuance(mainnet):
+    spec, meta, launch = mainnet
+    assert ("OrinqReceipts", "ValidatorEmissionReserve") in meta.constants
+    assert mainnet_supply(spec, meta, launch, locked(906_500, launch["supply"]["genesis_lock"]["address"])) == []
+
+
+def test_a_fixed_issuance_above_the_cardano_lock_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    assert mainnet_supply(spec, meta, launch, locked(906_499, launch["supply"]["genesis_lock"]["address"])) == [
+        f"[4 supply] Materios issues 906500 at genesis against 906499 cMATRA locked on Cardano at "
+        f"{launch['supply']['genesis_lock']['utxo']}: the difference is MATRA no cMATRA backs"]
+
+
+@A_BYTE_OFF
+@pytest.mark.parametrize("item, width", [("FixedIssuance", 16), ("AttestationThreshold", 4)])
+def test_a_fixed_issuance_or_attestation_threshold_at_another_width_is_an_input_error(mainnet, item, width, change):
+    spec, meta, launch = mainnet
+    stored = spec.uint("OrinqReceipts", item, width)
+    put(spec, "OrinqReceipts", item, stored.to_bytes(width + change, "little"))
+    check = lp.check_supply if item == "FixedIssuance" else lp.check_attestation_committee
+    args = (spec, meta, launch, NO_CARDANO) if item == "FixedIssuance" else (spec, meta, launch)
+    with pytest.raises(lp.InputError, match="^" + re.escape(mis_sized(f"OrinqReceipts.{item}", width + change, width))):
+        check(*args)
+
+
+def test_an_attestation_committee_that_does_not_decode_is_an_input_error(mainnet):
+    spec, meta, launch = mainnet
+    put(spec, "OrinqReceipts", "CommitteeMembers", spec.value("OrinqReceipts", "CommitteeMembers") + bytes(1))
+    with pytest.raises(lp.InputError, match="^OrinqReceipts.CommitteeMembers does not decode as a set of 32-byte "
+                                            "accounts$"):
+        lp.check_attestation_committee(spec, meta, launch)
+
+
+def test_check_needs_the_operators_key_table(tmp_path, capsys):
+    """26 of the 28 keys preprod's genesis names were in no public table before the exposed table, so a check run
+    without the operator's table would pass the keys only that table names."""
+    plain = tmp_path / "plain.json"
+    plain.write_text("{}")
+    with pytest.raises(SystemExit) as refused:
+        lp.main(["check", "--spec", str(plain), "--launch", str(plain), "--signed-manifest", str(plain),
+                 "--kupo", "http://127.0.0.1:9"])
+    assert refused.value.code == 2
+    assert "the following arguments are required: --extra-well-known" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Rule 12: every signer's dust floor
+# ---------------------------------------------------------------------------
+
+def dust_findings(spec, meta, launch) -> list[str]:
+    return messages(lp.check_dust(spec, meta, launch))
+
+
+# The genesis runtime code the dust tests size an upgrade by: 900,000 bytes, of which its length alone is read. The
+# call that carries an upgrade is sized at twice that.
+RUNTIME_BYTES = 900_000
+UPGRADE_BYTES = 2 * RUNTIME_BYTES
+BLOCKS_A_DAY = 14_400
+
+
+@pytest.fixture
+def sized(mainnet):
+    """The mainnet fixture with a genesis runtime code of RUNTIME_BYTES."""
+    spec, meta, launch = mainnet
+    spec.storage[lp.CODE_KEY] = bytes(RUNTIME_BYTES)
+    return spec, meta, launch
+
+
+def lowest_motra(free: int, loads, days: int = 8) -> float:
+    """The lowest MOTRA balance an account that holds `free` MATRA base units reaches over `days` of `loads`, each
+    (calls a day, bytes of one) with its calls evenly spaced from the first block, starting from the balance it
+    settles at: block by block as the runtime's MOTRA pallet moves it under mainnet's parameters, keeping 99.99% of
+    the balance, adding 10^4 a base unit, then paying 10^9 + 10^6 a byte for each call that is due."""
+    generated = free * 10**4
+    balance = lowest = generated / 1e-4
+    due = [0.0] * len(loads)
+    for block in range(days * BLOCKS_A_DAY):
+        balance = balance * 0.9999 + generated
+        for i, (calls, length) in enumerate(loads):
+            while due[i] <= block:
+                balance -= 1e9 + 1e6 * length
+                due[i] += BLOCKS_A_DAY / calls
+        lowest = min(lowest, balance)
+    return lowest
+
+
+# What a key that signs for each role signs in a day, (calls, bytes of one), and whether it also signs an upgrade.
+LOADS = {"sudo": ((24, 512), True), "guardian": ((64, 384), False), "enactor": ((64, 512), True),
+         "anchor_signer": ((1_000, 512), False), "gateway_sponsor": ((2_000, 512), False),
+         "oracle": ((4_800, 512), False), "attestors": ((100, 256), False), "recovery_friends": ((8, 256), False),
+         "recovery_rescuers": ((24, 512), False)}
+SIMULATED = [([load], upgrades) for load, upgrades in LOADS.values()] + [
+    ([LOADS["sudo"][0], LOADS["oracle"][0]], True),
+    ([LOADS["attestors"][0], LOADS["recovery_friends"][0], LOADS["guardian"][0]], False)]
+
+
+def test_the_preflight_sizes_each_role_for_the_load_the_genesis_doc_tables():
+    doc = (HERE.parent.parent / "docs" / "MAINNET-GENESIS.md").read_text()
+    table = doc[doc.index("| Role account | Load sized for | Floor (base units) |"):doc.index("## Refusals")]
+    rows = {cells[0]: cells[1] for cells in ([cell.strip() for cell in line.strip("|").split("|")]
+                                             for line in table.splitlines()[2:] if line.startswith("|"))}
+    named = {"sudo": "sudo keyholder", "guardian": "guardian keyholder", "enactor": "enactor",
+             "anchor_signer": "anchor_signer", "gateway_sponsor": "gateway_sponsor", "oracle": "oracle",
+             "attestors": "attestor", "recovery_friends": "recovery friend", "recovery_rescuers": "recovery rescuer"}
+    tabled = {}
+    for role, name in named.items():
+        calls, length = re.match(r"([\d,]+) \w+ of (\d+) B", rows[name]).groups()
+        tabled[role] = ((int(calls.replace(",", "")), int(length)), "and an upgrade" in rows[name])
+    assert tabled == LOADS
+    assert lp.ROLE_LOADS == {role: load for role, (load, _) in LOADS.items()}
+    assert set(lp.UPGRADE_ROLES) == {role for role, (_, upgrades) in LOADS.items() if upgrades}
+    assert lp.UPGRADE_HEADROOM == 2
+
+
+@pytest.mark.parametrize("loads, upgrades", SIMULATED, ids=[*LOADS, "sudo and oracle", "three roles"])
+def test_working_dust_is_what_keeps_a_signers_motra_above_its_calls_block_by_block(loads, upgrades):
+    """The preflight's closed form against the pallet's rule run block by block: at its working dust an account's
+    MOTRA never runs out under its calls, nor falls below the fee of an upgrade where it signs one, and two percent
+    less dust does."""
+    upgrade_fee = 1e9 + 1e6 * UPGRADE_BYTES if upgrades else 0
+    working = lp.working_dust(loads, UPGRADE_BYTES if upgrades else None, BLOCKS_A_DAY)
+    assert lowest_motra(working, loads) >= upgrade_fee
+    assert lowest_motra(working * 98 // 100, loads) < upgrade_fee
+
+
+def test_the_fee_the_dust_is_sized_for_is_the_runtimes_below_its_congestion_target():
+    """pallet_motra's compute_fee: the minimum fee, the congestion rate's price of the weight, which is nothing at
+    the zero rate genesis starts at, and the price of the bytes."""
+    source = (HERE.parent.parent / "partnerchain" / "pallets" / "motra" / "src" / "lib.rs").read_text()
+    fee = source[source.index("pub fn compute_fee("):source.index("fn normal_budget()")]
+    assert "params.length_fee_per_byte.saturating_mul(len as u128)" in fee
+    assert re.search(r"\.min_fee\s+\.saturating_add\(weight_component\)\s+\.saturating_add\(length_fee\)", fee)
+    assert [lp.motra_fee(0), lp.motra_fee(512)] == [10**9, 10**9 + 512 * 10**6]
+
+
+# Each signer of the fixture with the deposits the runtime's constants reserve from it and the working dust its
+# role's calls take, worked here apart from the preflight. The deposits: a 2-of-3 keyholder's multisig deposit,
+# DepositBase 1,000 + DepositFactor 500 x 2; the sudo account's recovery configuration of 3 friends,
+# ConfigDepositBase 1,000 + FriendDepositFactor 500 x 3; a rescuer's RecoveryDeposit 1,000. The working dust settles
+# at 10^8 MOTRA a base unit, and has to cover each role's fee f over 1 - 0.9999^k for a call every k blocks: 24
+# calls of 512 bytes a day take 260, 64 of 384 take 623, 64 of 512 take 680, 1,000 of 512 take 10,509, 2,000 of 512
+# take 21,010, 4,800 of 512 take 50,413, 100 of 256 take 879 and 8 of 256 take 77; a 1,800,000-byte upgrade takes
+# 18,010 more. The floor is the deposits and, left free, the larger of the existential deposit 500 and the working
+# dust.
+SIGNER_FLOORS = [
+    (("roles", "sudo", 0, "members", 1), "roles.sudo[0].members[1], a keyholder of roles.sudo[0]", 2_000, 18_270),
+    (("roles", "guardian", 0, "members", 2), "roles.guardian[0].members[2], a keyholder of roles.guardian[0]", 2_000,
+     623),
+    (("roles", "sudo", 0), "roles.sudo[0], which reserves the recovery configuration of 3 friends", 2_500, 0),
+    (("roles", "recovery_rescuers", 0), "roles.recovery_rescuers[0]", 1_000, 260),
+    (("roles", "enactor", 0), "roles.enactor[0]", 0, 18_690),
+    (("roles", "anchor_signer", 0), "roles.anchor_signer[0]", 0, 10_509),
+    (("roles", "oracle", 2), "roles.oracle[2]", 0, 50_413),
+    (("roles", "gateway_sponsor", 0), "roles.gateway_sponsor[0]", 0, 21_010),
+    (("roles", "attestors", 1), "roles.attestors[1]", 0, 879),
+    (("roles", "recovery_friends", 0), "roles.recovery_friends[0]", 0, 77),
+]
+
+
+def signer(launch: dict, path: tuple) -> bytes:
+    entry = launch
+    for step in path:
+        entry = entry[step]
+    return lp.role_account(entry)
+
+
+def below_floor(who: str, account: bytes, held: int, reserved: int, working: int, upgrades: bool) -> str:
+    upgrade = f", a {UPGRADE_BYTES}-byte runtime upgrade among them" if upgrades else ""
+    return (f"[12 dust] {who} ({ss58(account)}) holds {held} free at genesis, below its floor of "
+            f"{reserved + max(ED, working)}: the {reserved} its roles reserve and, left free, the larger of the "
+            f"existential deposit 500 and the working dust {working} that generates the MOTRA its calls cost{upgrade}")
+
+
+@pytest.mark.parametrize("path, who, reserved, working", SIGNER_FLOORS, ids=[who for _, who, _, _ in SIGNER_FLOORS])
+def test_a_signer_at_its_dust_floor_passes_and_one_unit_below_is_refused(sized, path, who, reserved, working):
+    spec, meta, launch = sized
+    account, floor = signer(launch, path), reserved + max(ED, working)
+    set_account(spec, account, floor)
+    assert dust_findings(spec, meta, launch) == []
+    set_account(spec, account, floor - 1)
+    upgrades = path[1] == "enactor" or path[1:] == ("sudo", 0, "members", 1)
+    assert dust_findings(spec, meta, launch) == [below_floor(who, account, floor - 1, reserved, working, upgrades)]
+
+
+def test_a_keyholder_left_only_the_existential_deposit_once_its_deposit_is_reserved_is_refused(sized):
+    """The floor before working dust: the existential deposit and the multisig deposit, which leaves a sudo keyholder
+    500 base units free once it opens a call, settling at 5 x 10^10 MOTRA where the upgrade it signs costs 1.8 x
+    10^12."""
+    spec, meta, launch = sized
+    account = signer(launch, ("roles", "sudo", 0, "members", 0))
+    set_account(spec, account, 2_500)
+    assert dust_findings(spec, meta, launch) == [
+        below_floor("roles.sudo[0].members[0], a keyholder of roles.sudo[0]", account, 2_500, 2_000, 18_270, True)]
+
+
+def test_a_longer_genesis_runtime_raises_the_floor_of_those_who_sign_an_upgrade(sized):
+    spec, meta, launch = sized
+    assert dust_findings(spec, meta, launch) == []
+    spec.storage[lp.CODE_KEY] = bytes(6_000_000)
+    found = dust_findings(spec, meta, launch)
+    assert len(found) == 4 and all("a 12000000-byte runtime upgrade among them" in message for message in found)
+    assert [message.split(" (")[0] for message in found] == [
+        f"[12 dust] roles.sudo[0].members[{i}], a keyholder of roles.sudo[0]" for i in range(3)] + [
+        "[12 dust] roles.enactor[0]"]
+
+
+def documented_floors() -> dict[str, int]:
+    """The floor the node's builder holds each role account to, as docs/MAINNET-GENESIS.md tables them."""
+    doc = (HERE.parent.parent / "docs" / "MAINNET-GENESIS.md").read_text()
+    table = doc[doc.index("| Role account | Load sized for | Floor (base units) |"):doc.index("## Refusals")]
+    rows = [[cell.strip() for cell in line.strip("|").split("|")] for line in table.splitlines()[2:]
+            if line.startswith("|")]
+    return {row[0]: int(row[2].replace(",", "")) for row in rows}
+
+
+def test_the_builders_floor_of_each_role_covers_the_preflights_whatever_runtime_a_block_holds(mainnet):
+    """The node's builder sizes an upgrade at a block-long call, 5 MiB, and adds its working dust to the existential
+    deposit; the preflight sizes it at twice the genesis runtime and counts the existential deposit as free dust
+    that generates. So an account at the builder's floor passes rule 12 even where the genesis runtime is as long as
+    a block."""
+    spec, meta, launch = mainnet
+    floors = documented_floors()
+    assert floors == {"sudo keyholder": 107_630, "guardian keyholder": 3_116, "enactor": 106_050,
+                      "anchor_signer": 11_000, "gateway_sponsor": 21_500, "oracle": 50_900, "attestor": 1_373,
+                      "recovery friend": 570, "recovery rescuer": 1_752, "sudo account": 3_000}
+    assert meta.constants[("System", "BlockLength")][4:8] == (5 * 1024 * 1024).to_bytes(4, "little")
+    spec.storage[lp.CODE_KEY] = bytes(5 * 1024 * 1024)
+    roles = launch["roles"]
+    held = {"sudo keyholder": roles["sudo"][0]["members"], "guardian keyholder": roles["guardian"][0]["members"],
+            "enactor": roles["enactor"], "anchor_signer": roles["anchor_signer"],
+            "gateway_sponsor": roles["gateway_sponsor"], "oracle": roles["oracle"], "attestor": roles["attestors"],
+            "recovery friend": roles["recovery_friends"], "recovery rescuer": roles["recovery_rescuers"],
+            "sudo account": roles["sudo"]}
+    for name, entries in held.items():
+        for entry in entries:
+            set_account(spec, lp.role_account(entry), floors[name])
+    assert dust_findings(spec, meta, launch) == []
+
+
+def test_a_signer_with_no_provider_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    enactor, anchor = signer(launch, ("roles", "enactor", 0)), signer(launch, ("roles", "anchor_signer", 0))
+    set_account(spec, enactor, 120_000, providers=0)
+    del spec.storage[account_key(anchor)]
+    assert dust_findings(spec, meta, launch) == [
+        f"[12 dust] roles.anchor_signer[0] ({ss58(anchor)}) has no provider at genesis: it cannot sign, and nothing "
+        "after genesis endows it",
+        f"[12 dust] roles.enactor[0] ({ss58(enactor)}) has no provider at genesis: it cannot sign, and nothing after "
+        "genesis endows it"]
+
+
+def test_a_keyholder_of_two_multisigs_needs_both_deposits_and_carries_both_roles_calls(sized):
+    spec, meta, launch = sized
+    oracle = launch["roles"]["oracle"][0]
+    member = launch["roles"]["sudo"][0]["members"][0]["key"]
+    launch["roles"]["oracle"][0] = msig(2, account_of(member), fresh_account())
+    account = account_of(member)
+    set_account(spec, account, 72_682)
+    assert below_floor("roles.sudo[0].members[0], a keyholder of roles.sudo[0] and roles.oracle[0].members[0], a "
+                       "keyholder of roles.oracle[0]", account, 72_682, 4_000, 68_683, True) \
+        in dust_findings(spec, meta, launch)
+    set_account(spec, account, 72_683)
+    assert not any(ss58(account) in message for message in dust_findings(spec, meta, launch))
+    assert oracle not in json.dumps(launch["roles"]["oracle"])
+
+
+@pytest.mark.parametrize("pallet, constant", [("Balances", "ExistentialDeposit"), ("Multisig", "DepositFactor"),
+                                              ("Recovery", "RecoveryDeposit")])
+def test_a_runtime_that_hides_a_deposit_is_refused(mainnet, pallet, constant):
+    spec, meta, launch = mainnet
+    del meta.constants[(pallet, constant)]
+    assert dust_findings(spec, meta, launch) == [
+        f"[12 dust] the runtime metadata declares no {pallet}.{constant} the preflight can read: the dust each signer "
+        "needs is unknown here"]
+
+
+@pytest.mark.parametrize("hidden", [None, bytes(8)], ids=["undeclared", "zero"])
+def test_a_runtime_that_hides_how_long_a_block_lasts_is_refused(mainnet, hidden):
+    """A day's blocks, by the runtime's slot duration, are what a role's calls a day are spaced over."""
+    spec, meta, launch = mainnet
+    assert lp.uint_constant(meta, "Aura", "SlotDuration", 8) == 6_000
+    if hidden is None:
+        del meta.constants[("Aura", "SlotDuration")]
+    else:
+        meta.constants[("Aura", "SlotDuration")] = hidden
+    assert dust_findings(spec, meta, launch) == [
+        "[12 dust] the runtime metadata declares no Aura.SlotDuration above 0 the preflight can read: the dust each "
+        "signer needs is unknown here"]
+
+
+# ---------------------------------------------------------------------------
+# Rule 9: partner-chain keys, the genesis UTXO and its scripts, the age of the committee datums
+# ---------------------------------------------------------------------------
+
+def test_genesis_grandpa_voters_past_the_runtimes_bound_are_refused(mainnet):
+    spec, meta, launch = mainnet
+    meta.constants[("Grandpa", "MaxAuthorities")] = (3).to_bytes(4, "little")
+    assert committee_findings(spec, meta, launch) == [
+        "[9 committee] genesis Grandpa.Authorities lists 4 voters, more than the runtime's Grandpa.MaxAuthorities 3: "
+        "the runtime cannot decode it and reads no voter, and GRANDPA refuses an empty authority set"]
+    del meta.constants[("Grandpa", "MaxAuthorities")]
+    assert committee_findings(spec, meta, launch) == [
+        "[9 committee] the runtime metadata declares no Grandpa.MaxAuthorities the preflight can read: whether the "
+        "runtime can decode the genesis voters is unknown here"]
+
+
+def test_the_runtime_bounds_its_aura_and_grandpa_authorities_at_its_committee_bound(mainnet):
+    """Aura's bound is in no metadata: the runtime sets it, and GRANDPA's, to the MaxValidators that rule 9 holds
+    the genesis committee, and so both lists, within."""
+    _, meta, _ = mainnet
+    source = (HERE.parent.parent / "partnerchain" / "runtime" / "src" / "lib.rs").read_text()
+    assert source.count("    type MaxAuthorities = MaxValidators;\n") == 2
+    assert ("Aura", "MaxAuthorities") not in meta.constants
+    assert lp.uint_constant(meta, "Grandpa", "MaxAuthorities", 4) \
+        == lp.uint_constant(meta, "SessionCommitteeManagement", "MaxValidators", 4) == 32
+
+
+def test_a_genesis_committee_member_under_another_partner_chain_key_is_refused(mainnet):
+    spec, meta, launch = mainnet
+    _, members = lp.genesis_committee(spec)
+    node = next(node for node in launch["nodes"] if bytes.fromhex(node["aura"][2:]) == members[1][1])
+    node["cross_chain"] = "0x" + fresh_ecdsa_key().hex()
+    assert committee_findings(spec, meta, launch) == [
+        f"[9 committee] genesis SessionCommitteeManagement.CurrentCommittee[1] cross-chain key 0x{members[1][0].hex()} "
+        f"is not the cross_chain key authority {node['name']} declares: genesis seats it under a partner-chain key no "
+        "declared authority holds, and files its session keys under that key's account"]
+
+
+def fixture_candidates(launch: dict) -> list[lp.Candidate]:
+    return [lp.Candidate(bytes.fromhex(node["cross_chain"][2:]), bytes.fromhex(node["aura"][2:]),
+                         bytes.fromhex(node["grandpa"][2:])) for node in launch["nodes"] if node["authority"]]
+
+
+def test_cardano_candidates_under_their_authorities_partner_chain_keys_pass(mainnet):
+    _, _, launch = mainnet
+    cardano = lp.CardanoView(lock=None, candidates=fixture_candidates(launch), d_parameter=(4, 0))
+    assert messages(lp.check_candidate_authorities(launch, cardano)) == []
+
+
+def test_a_cardano_candidate_under_another_partner_chain_key_is_refused(mainnet):
+    _, _, launch = mainnet
+    candidates = fixture_candidates(launch)
+    other = fresh_ecdsa_key()
+    candidates[2] = dataclasses.replace(candidates[2], partner_chains_key=other)
+    cardano = lp.CardanoView(lock=None, candidates=candidates, d_parameter=(4, 0))
+    assert messages(lp.check_candidate_authorities(launch, cardano)) == [
+        f"[9 committee] Cardano permissioned candidate 2 partner chains key 0x{other.hex()} is not the cross_chain key "
+        f"authority {launch['nodes'][2]['name']} declares with its aura key: once the committee is drawn from Cardano "
+        "it seats that authority under a partner-chain key no declared authority holds"]
+
+
+PREPROD_GENESIS_UTXO = "13313ea0119e0c4330f64f1809159064a371a1bbf2050b1fe13d5492280dca50#0"
+
+
+# The vectors partner-chains v1.8.0's get-scripts gives, which the setup kit's derivation and the builder's
+# committee_candidate.rs pin: preprod's genesis UTXO derives the scripts preprod's genesis stores, and the mainnet
+# fixture's the values its manifest names.
+@pytest.mark.parametrize("utxo, committee, d_parameter, candidates", [
+    (PREPROD_GENESIS_UTXO, "fed2f2fdc87b0a9d6e91220cb2788107793413b094e172a414b0a05c",
+     "38dddaf5198b927b19dac9b28226ab29eddad176d5d81c7748bc2c31",
+     "ef2890d1e98247819abcf2df6e891824ed950a4216d36c71ee6f9974"),
+    (f"{PARTNER_CHAIN_UTXO}#0", "89b87902e4f8ac97c257e9fbde79dfabbf97cecb4116f30b9b135171",
+     "bca168784c7086baa491ff876a1e9d6ee2b8a418a841dc0d445a674e",
+     "8d5698c66e509f7758befcca95b5bc1632daf4b864d5fdd049dc40b2"),
+], ids=["preprod", "the mainnet fixture"])
+def test_the_scripts_a_genesis_utxo_derives_are_partner_chains(utxo, committee, d_parameter, candidates):
+    assert [value.hex() for value in lp.partner_chain_scripts(utxo)] == [committee, d_parameter, candidates]
+
+
+def test_preprods_genesis_stores_the_scripts_its_genesis_utxo_derives(spec244):
+    spec, _ = spec244
+    tx, index = PREPROD_GENESIS_UTXO.split("#")
+    assert spec.value("Sidechain", "GenesisUtxo") == bytes.fromhex(tx) + int(index).to_bytes(2, "little")
+    validator, d_policy, candidates_policy = lp.partner_chain_scripts(PREPROD_GENESIS_UTXO)
+    address, stored_d, stored_candidates = lp.main_chain_scripts(spec)
+    assert lp.bech32_decode(address) == ("addr_test", bytes([0x70]) + validator)
+    assert (stored_d, stored_candidates) == (d_policy, candidates_policy)
+
+
+def test_the_mainnet_fixture_names_the_committee_candidate_address_its_genesis_utxo_derives(mainnet):
+    _, _, launch = mainnet
+    validator, _, _ = lp.partner_chain_scripts(launch["partner_chain"]["genesis_utxo"])
+    assert lp.committee_candidate_address(validator) == launch["partner_chain"]["committee_candidate_address"] \
+        == "addr1wxyms7gzunu2e97z2l5lhhnem74ml97wedq3ductnvf4zug6kx8rr"
+
+
+def test_each_genesis_utxo_derives_scripts_of_its_own():
+    tx, _ = PREPROD_GENESIS_UTXO.split("#")
+    other = tx[:-1] + ("1" if tx[-1] != "1" else "2")
+    derived = [lp.partner_chain_scripts(utxo) for utxo in
+               (f"{tx}#0", f"{tx}#1", f"{tx}#300", f"{tx}#32767", f"{other}#0")]
+    assert len({script for scripts in derived for script in scripts}) == 3 * len(derived)
+
+
+def test_the_vendored_committee_candidate_validator_is_the_one_the_builder_applies():
+    source = (HERE.parent.parent / "partnerchain/node/src/chain_spec_mainnet/committee_candidate.rs").read_text()
+    builder = "".join(re.findall(r'"([0-9a-f]+)"', source[source.index("COMMITTEE_CANDIDATE_VALIDATOR"):
+                                                          source.index(");", source.index("hex!("))]))
+    assert lp.partner_chains_scripts()["committee_candidate_validator"].hex() == builder
+
+
+def test_the_utxo_is_the_plutus_data_partner_chains_writes():
+    """Constr 0 [Constr 0 [tx hash], index], each non-empty list of fields of indefinite length."""
+    tx = "ab" * 32
+    data = lp._data_constr(0, [lp._data_constr(0, [lp._data_bytes(bytes.fromhex(tx))]), lp._cbor_head(0, 300)])
+    assert data.hex() == f"d8799fd8799f5820{tx}ff19012cff"
+    assert lp._script_address_data(bytes(28)).hex() == "d8799fd87a9f581c" + "00" * 28 + "ffd87a80ff"
+
+
+@pytest.mark.parametrize("script", [
+    lambda raw: raw + b"\0", lambda raw: raw[:1] + bytes([raw[1] + 1]) + raw[2:] + b"\0", lambda raw: raw[1:],
+    lambda raw: b""], ids=["a byte after it", "a longer length", "no CBOR head", "empty"])
+def test_a_script_that_is_not_one_whole_cbor_byte_string_is_not_applied(script):
+    with pytest.raises(ValueError):
+        lp.apply_data(script(lp.partner_chains_scripts()["committee_candidate_validator"]), b"\0")
+
+
+def partner_chain_findings(spec, launch) -> list[str]:
+    return messages(lp.check_partner_chain(spec, launch))
+
+
+def derives(name: str, given: str, want: str) -> str:
+    return (f"[9 committee] {name} is {given}, not {want}, which {PARTNER_CHAIN_UTXO}#0 derives: the committee is "
+            "drawn through scripts the partner chain's setup did not make")
+
+
+GENESIS_SCRIPTS = "genesis SessionCommitteeManagement.MainChainScriptsConfiguration"
+
+
+@pytest.mark.parametrize("field, index", [("d_parameter_policy_id", 1), ("permissioned_candidates_policy_id", 2)])
+def test_a_committee_policy_other_than_the_genesis_utxo_derives_is_refused(mainnet, field, index):
+    spec, _, launch = mainnet
+    want = launch["partner_chain"][field]
+    other = "0x" + os.urandom(28).hex()
+    launch["partner_chain"][field] = other
+    raw = spec.value("SessionCommitteeManagement", "MainChainScriptsConfiguration")
+    start = len(raw) - 28 * (3 - index)
+    put(spec, "SessionCommitteeManagement", "MainChainScriptsConfiguration",
+        raw[:start] + bytes.fromhex(other[2:]) + raw[start + 28:])
+    assert partner_chain_findings(spec, launch) == [derives(f"partner_chain.{field}", other, want),
+                                                    derives(f"{GENESIS_SCRIPTS} {field}", other, want)]
+
+
+def test_a_committee_candidate_address_other_than_the_genesis_utxo_derives_is_refused(mainnet):
+    spec, _, launch = mainnet
+    want = launch["partner_chain"]["committee_candidate_address"]
+    other = lp.committee_candidate_address(os.urandom(28))
+    launch["partner_chain"]["committee_candidate_address"] = other
+    _, d_policy, candidates_policy = lp.main_chain_scripts(spec)
+    put(spec, "SessionCommitteeManagement", "MainChainScriptsConfiguration",
+        lp.compact(len(other)) + other.encode() + d_policy + candidates_policy)
+    assert partner_chain_findings(spec, launch) == [
+        derives("partner_chain.committee_candidate_address", other, want),
+        derives(f"{GENESIS_SCRIPTS} committee_candidate_address", other, want)]
+
+
+def test_a_genesis_utxo_other_than_the_declared_one_is_refused(mainnet):
+    spec, _, launch = mainnet
+    put(spec, "Sidechain", "GenesisUtxo", bytes.fromhex(PARTNER_CHAIN_UTXO) + (1).to_bytes(2, "little"))
+    assert partner_chain_findings(spec, launch) == [
+        f"[9 committee] genesis Sidechain.GenesisUtxo is 0x{PARTNER_CHAIN_UTXO}0100, not partner_chain.genesis_utxo "
+        f"{PARTNER_CHAIN_UTXO}#0: the chain is another partner chain than the one set up"]
+
+
+def test_a_launch_that_declares_another_genesis_utxo_than_its_scripts_is_refused(mainnet):
+    """The manifest moved to another genesis UTXO, the genesis built from the old one: every value differs."""
+    spec, _, launch = mainnet
+    launch["partner_chain"]["genesis_utxo"] = PREPROD_GENESIS_UTXO
+    found = partner_chain_findings(spec, launch)
+    assert found[0].startswith("[9 committee] genesis Sidechain.GenesisUtxo is 0x09b6fee1")
+    assert len(found) == 7 and all(f"which {PREPROD_GENESIS_UTXO} derives" in message for message in found[1:])
+
+
+def test_a_launch_that_declares_no_partner_chain_is_refused(mainnet):
+    spec, _, launch = mainnet
+    del launch["partner_chain"]
+    assert partner_chain_findings(spec, launch) == [
+        "[9 committee] the launch declares no partner_chain: the genesis UTXO and the Cardano scripts the committee is "
+        "drawn through are unchecked"]
+
+
+# Cardano mainnet's Shelley layout: epoch 208 starts at slot 4,492,800, 2020-07-29T21:44:51Z, and an epoch is 432,000
+# one-second slots.
+def epoch_slot(epoch: int, into: int = 0) -> int:
+    return 4_492_800 + (epoch - 208) * 432_000 + into
+
+
+def test_the_cardano_epoch_of_a_slot_is_mainnets():
+    assert [lp.cardano_epoch(slot) for slot in (4_492_800, 4_924_799, 4_924_800)] == [208, 208, 209]
+    assert lp.cardano_epoch_start(208) == "2020-07-29T21:44:51Z"
+    assert lp.cardano_epoch_start(600) == "2025-12-10T21:44:51Z"
+
+
+def test_a_slot_before_the_shelley_era_is_an_input_error():
+    with pytest.raises(lp.InputError, match="^Cardano slot 4492799 is before Cardano mainnet's Shelley era"):
+        lp.cardano_epoch(4_492_799)
+
+
+def aged(now: int, d_parameter: int, candidates: int) -> lp.CardanoView:
+    return lp.CardanoView(lock=None, candidates=[], d_parameter=(0, 0), tip_slot=epoch_slot(now, 431_999),
+                          created={"D-parameter": epoch_slot(d_parameter, 5),
+                                   "permissioned candidates": epoch_slot(candidates)})
+
+
+# A mainnet session: 600 slots of 6 seconds, an hour, which starts on the hour.
+SESSION_MILLIS = 3_600_000
+
+
+def too_young(what: str, created: int, now: int) -> str:
+    return (f"[9 committee] the {what} output was created in Cardano epoch {created}, and a launch in epoch {now} "
+            f"reads the committee from epoch {now - 2}, when it did not exist: the node's follower finds no {what} "
+            f"and no block is authored. The earliest valid launch is in the first session that starts in epoch "
+            f"{created + 2}, from {lp.cardano_epoch_start(created + 2, SESSION_MILLIS)}")
+
+
+def age_findings(mainnet, cardano: lp.CardanoView) -> list[str]:
+    spec, meta, _ = mainnet
+    return messages(lp.check_committee_age(spec, meta, cardano))
+
+
+def test_committee_datums_two_epochs_old_pass(mainnet):
+    assert age_findings(mainnet, aged(600, 598, 500)) == []
+
+
+@pytest.mark.parametrize("d_parameter, candidates", [(599, 598), (598, 600), (600, 599)])
+def test_a_committee_datum_created_within_two_epochs_of_the_launch_is_refused(mainnet, d_parameter, candidates):
+    assert age_findings(mainnet, aged(600, d_parameter, candidates)) == [
+        too_young(what, created, 600) for what, created in
+        (("D-parameter", d_parameter), ("permissioned candidates", candidates)) if created > 598]
+
+
+def test_the_earliest_valid_launch_is_named_with_the_start_of_its_first_session():
+    assert lp.cardano_epoch_start(601) == "2025-12-15T21:44:51Z"
+    assert too_young("D-parameter", 599, 600).endswith("The earliest valid launch is in the first session that starts "
+                                                       "in epoch 601, from 2025-12-15T22:00:00Z")
+
+
+# A Cardano mainnet epoch starts at 21:44:51 UTC and a session on the hour, so the session that holds the first 909
+# seconds of an epoch started in the epoch before, and block 1 asks for that epoch's committee.
+@pytest.mark.parametrize("into, launch_epoch", [(0, 599), (60, 599), (908, 599), (909, 600), (431_999, 600)])
+def test_the_launch_epoch_is_the_one_the_session_that_holds_the_tip_started_in(mainnet, into, launch_epoch):
+    view = dataclasses.replace(aged(600, 598, 598), tip_slot=epoch_slot(600, into))
+    assert (SHELLEY_START + epoch_slot(600) - 4_492_800) % 3_600 == 44 * 60 + 51
+    assert age_findings(mainnet, view) == [too_young(what, 598, launch_epoch)
+                                           for what in ("D-parameter", "permissioned candidates")
+                                           if launch_epoch == 599]
+    assert age_findings(mainnet, dataclasses.replace(aged(600, 597, 597), tip_slot=epoch_slot(600, into))) == []
+
+
+def test_the_launch_epoch_follows_the_session_length_genesis_stores(mainnet):
+    """A session of 100 slots, ten minutes, that holds the tip a minute into an epoch started 4 minutes 51 seconds
+    before the epoch did."""
+    spec, _, _ = mainnet
+    view = dataclasses.replace(aged(600, 598, 598), tip_slot=epoch_slot(600, 60))
+    put(spec, "Sidechain", "SlotsPerEpoch", (100).to_bytes(4, "little"))
+    assert len(age_findings(mainnet, view)) == 2
+    assert age_findings(mainnet, dataclasses.replace(view, tip_slot=epoch_slot(600, 310))) == []
+
+
+def test_a_session_of_no_length_is_left_to_the_session_rule(mainnet):
+    spec, meta, launch = mainnet
+    put(spec, "Sidechain", "SlotsPerEpoch", bytes(4))
+    assert age_findings(mainnet, aged(600, 600, 600)) == []
+    assert any("genesis Sidechain.SlotsPerEpoch is 0" in message
+               for message in messages(lp.check_sessions(spec, meta, launch)))
+
+
+def test_a_cardano_view_with_no_tip_or_creation_slot_is_an_input_error(mainnet):
+    with pytest.raises(lp.InputError, match="no tip"):
+        age_findings(mainnet, dataclasses.replace(aged(600, 500, 500), tip_slot=None))
+    with pytest.raises(lp.InputError, match="no creation slot for the D-parameter output"):
+        age_findings(mainnet, dataclasses.replace(aged(600, 500, 500), created={"permissioned candidates": 5_000_000}))
+
+
+# ---------------------------------------------------------------------------
+# The exposed keys
+# ---------------------------------------------------------------------------
+
+def preprod_source_keys() -> list[bytes]:
+    """Every 32- or 33-byte key preprod's chain-spec source names in its genesis, read from its byte arrays."""
+    source = (HERE.parent.parent / "partnerchain/node/src/chain_spec_preprod.rs").read_text()
+    body = source[source.index("pub(crate) fn genesis_patch"):source.index("let authority =")]
+    arrays = [bytes(int(byte, 16) for byte in re.findall(r"0x([0-9a-f]{2})", array))
+              for array in re.findall(r"\[\s*((?:0x[0-9a-f]{2},\s*)+)\]", body)]
+    assert arrays and all(len(raw) in (32, 33) for raw in arrays)
+    return arrays
+
+
+def test_every_key_preprods_genesis_names_is_well_known(spec244, preprod_path, known):
+    """Preprod's keys are retired: its genesis accounts and keyholders, authorities' aura, grandpa and cross-chain
+    keys, in its chain-spec source, the spec 244 build and the published v6 spec. Pallet accounts are not keys."""
+    keys = set(preprod_source_keys())
+    for spec in (spec244[0], lp.load_spec(str(preprod_path))):
+        keys |= set(spec.accounts()) | {spec.value("Sudo", "Key")} | set(lp.genesis_aura(spec))
+        keys |= {voter[:32] for voter in lp.genesis_voters(spec)}
+        for cross_chain, aura, grandpa in (lp.genesis_committee(spec) or (0, []))[1]:
+            keys |= {cross_chain, lp.blake2_256(cross_chain), aura, grandpa}
+    keys = {key for key in keys if key is not None and not key.startswith(b"modl")}
+    assert len(keys) >= 20 and keys <= set(known.keys)
+
+
+def test_every_key_preprods_cardano_candidates_ever_named_is_well_known(known):
+    """Every permissioned candidates datum the preprod chain's token was ever held under, as Cardano preprod holds
+    them: the authorities preprod seated through Cardano, its retired validators among them."""
+    outputs = json.loads((FIXTURES / "preprod-permissioned-candidates.json").read_text())["outputs"]
+    keys = {key for output in outputs for candidate in lp.decode_candidates(bytes.fromhex(output["datum"]))
+            for key in candidate.keys}
+    assert len(outputs) == 7 and len(keys) > 12 and keys <= set(known.keys)
+
+
+def test_a_retired_preprod_key_in_a_role_is_refused(spec, meta, known):
+    keyholder = preprod_source_keys()[1]
+    found = dev_key_findings(spec, meta, known, {"roles": {"anchor_signer": [ss58(keyholder)]}})
+    assert "[1 dev-keys] roles.anchor_signer[0]: retired preprod key (sr25519)" in found
+
+
+def test_the_exposed_table_names_no_pallet_account_and_reads_as_a_key_table():
+    table = json.loads(lp.EXPOSED_KEYS.read_text())
+    assert table["keys"] and all(set(row) == {"label", "scheme", "public"} for row in table["keys"])
+    assert not any(bytes.fromhex(row["public"]).startswith(b"modl") for row in table["keys"])
+    assert {row["label"] for row in table["keys"]} == {"retired preprod key"}
 
 
 @pytest.mark.parametrize("item", ["Tasks", "CounterForTasks", "NextTaskId", "PendingGuardianChange", "Approval"])
@@ -4683,11 +5912,131 @@ def test_storage_no_runtime_item_declares_is_refused(spec, meta):
     assert any(m.startswith("[4 supply] genesis sets :heappages (1 entry)") for m in found)
 
 
-def test_runtime_that_hides_its_emission_reserves_is_refused(spec, meta):
-    found = supply_findings(spec, meta, roster(spec), 0)
-    assert found == ["[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve, "
-                     "OrinqReceipts.AttestationRewardReserve: what the runtime mints after genesis is unbounded "
-                     "here, so the supply cannot be checked against the Cardano lock"]
+@pytest.mark.parametrize("pallet, item", [("Sudo", "Key"), ("RootTimelock", "Guardian"),
+                                          ("OrinqReceipts", "FixedIssuance"), ("Balances", "TotalIssuance")])
+@pytest.mark.parametrize("suffix", [b"\x01", bytes(16) + bytes(32)], ids=["a byte", "a map key"])
+def test_a_key_under_a_single_values_key_is_refused(mainnet, pallet, item, suffix):
+    """The runtime reads a storage value at its 32-byte key alone: a longer key that starts with it is storage no
+    runtime code reads, which the genesis hash still covers."""
+    spec, meta, _ = mainnet
+    key = lp.storage_key(pallet, item) + suffix
+    spec.storage[key] = bytes([17]) * 32
+    assert messages(lp.check_genesis_storage(spec, meta)) == [
+        f"[4 supply] genesis sets storage 0x{key.hex()}, a key under {pallet}.{item}'s that the runtime does not "
+        "read, (1 entry), which a mainnet genesis may not set: storage outside the genesis allowlist can hold a "
+        "claim on MATRA that the supply check does not count"]
+
+
+# What build-spec writes for the storage no other rule reads, spelled out here apart from the preflight's table, by
+# the rule that refuses another value: the extrinsic index 0; frame_system's two reference-count flags, set, and
+# its hash of block 0, 32 bytes of 0x45, as the parent hash and as BlockHash[0]; vesting's storage version V1; a
+# native-token observation with no policy, asset name or address; a receipt expiry of 14,400 blocks; settlement's
+# pool utilization of 5,000 and 7,500 basis points over no value, its storage version 5, both legacy cutovers at
+# block 0, and the runtime's default intent lifetime of 600 blocks, claim lifetime of 28,800 and signer threshold
+# of 1; and each pallet's storage version, 5 for Grandpa, 1 for Balances, Motra, Multisig and TeeAttestation, 0 for
+# the rest.
+BLOCK_HASH_0 = lp.storage_key("System", "BlockHash") + lp.twox_64(bytes(4)) + bytes(4)
+PINNED = [
+    ("4 supply", ":extrinsic_index", b":extrinsic_index", "00000000"),
+    ("4 supply", "System.UpgradedToU32RefCount", lp.storage_key("System", "UpgradedToU32RefCount"), "01"),
+    ("4 supply", "System.UpgradedToTripleRefCount", lp.storage_key("System", "UpgradedToTripleRefCount"), "01"),
+    ("4 supply", "System.ParentHash", lp.storage_key("System", "ParentHash"), "45" * 32),
+    ("4 supply", "System.BlockHash[0]", BLOCK_HASH_0, "45" * 32),
+    ("4 supply", "Vesting.StorageVersion", lp.storage_key("Vesting", "StorageVersion"), "01"),
+    ("6 checkpoint", "NativeTokenManagement.MainChainScriptsConfiguration",
+     lp.storage_key("NativeTokenManagement", "MainChainScriptsConfiguration"), "00" * 30),
+    ("2 rewards", "OrinqReceipts.ReceiptExpiryBlocks", lp.storage_key("OrinqReceipts", "ReceiptExpiryBlocks"),
+     "40380000"),
+    ("11 settlement", "IntentSettlement.PoolUtilization", lp.storage_key("IntentSettlement", "PoolUtilization"),
+     "881300004c1d0000" + "00" * 16),
+    ("11 settlement", "IntentSettlement.SettlementStorageVersion",
+     lp.storage_key("IntentSettlement", "SettlementStorageVersion"), "05000000"),
+    ("11 settlement", "IntentSettlement.StcaCutoverBlock", lp.storage_key("IntentSettlement", "StcaCutoverBlock"),
+     "00000000"),
+    ("11 settlement", "IntentSettlement.PolicyExpireCutoverBlock",
+     lp.storage_key("IntentSettlement", "PolicyExpireCutoverBlock"), "00000000"),
+    ("11 settlement", "IntentSettlement.IntentTTL", lp.storage_key("IntentSettlement", "IntentTTL"), "58020000"),
+    ("11 settlement", "IntentSettlement.ClaimTTL", lp.storage_key("IntentSettlement", "ClaimTTL"), "80700000"),
+    ("11 settlement", "IntentSettlement.MinSignerThreshold", lp.storage_key("IntentSettlement", "MinSignerThreshold"),
+     "01000000"),
+] + [("4 supply", f"the storage version of {pallet}",
+      lp.twox_128(pallet.encode()) + lp.twox_128(b":__STORAGE_VERSION__:"),
+      {"Grandpa": "0500", "Balances": "0100", "Motra": "0100", "Multisig": "0100", "TeeAttestation": "0100"}.get(
+          pallet, "0000"))
+     for pallet in ("System", "Timestamp", "Aura", "Grandpa", "Balances", "Sudo", "Multisig", "Utility", "Treasury",
+                    "Vesting", "OrinqReceipts", "Motra", "Sidechain", "SessionCommitteeManagement", "BlockRewards",
+                    "PalletSession", "Session", "NativeTokenManagement", "IntentSettlement", "TeeAttestation",
+                    "Billing", "Oracle", "Recovery", "RootTimelock")]
+PINNED_IDS = [name for _, name, _, _ in PINNED]
+
+
+def pinned_findings(spec, meta) -> list[str]:
+    return messages(lp.check_pinned_storage(spec, meta))
+
+
+def test_the_mainnet_fixture_holds_every_value_the_preflight_pins(mainnet):
+    spec, meta, _ = mainnet
+    assert {key: spec.storage.get(key, b"unset").hex() for _, _, key, _ in PINNED} == {
+        key: value for _, _, key, value in PINNED}
+    assert len(PINNED) == 39 and [name for _, name, _, _, _ in lp.pinned_storage(meta)] == PINNED_IDS
+    assert pinned_findings(spec, meta) == []
+
+
+PINNED_EDITS = {"unset": lambda value: None, "a bit flipped": lambda value: bytes([value[0] ^ 1]) + value[1:],
+                "a byte more": lambda value: value + bytes(1), "empty": lambda value: b"",
+                "all ones": lambda value: bytes([255]) * len(value)}
+
+
+@pytest.mark.parametrize("rule, name, key, value", PINNED, ids=PINNED_IDS)
+@pytest.mark.parametrize("edit", PINNED_EDITS)
+def test_a_value_no_other_rule_reads_that_is_not_the_one_build_spec_writes_is_refused(mainnet, rule, name, key,
+                                                                                      value, edit):
+    spec, meta, _ = mainnet
+    edited = PINNED_EDITS[edit](bytes.fromhex(value))
+    if edited is None:
+        del spec.storage[key]
+    else:
+        spec.storage[key] = edited
+    shown = "sets no" if edited is None else f"stores 0x{edited.hex()} as"
+    found = pinned_findings(spec, meta)
+    assert len(found) == 1 and found[0].startswith(
+        f"[{rule}] genesis {shown} {name}, not the 0x{value} build-spec writes: ")
+
+
+def test_a_storage_version_below_the_code_or_above_it_names_the_migrations_it_misleads(mainnet):
+    spec, meta, _ = mainnet
+    key = lp.twox_128(b"Balances") + lp.twox_128(b":__STORAGE_VERSION__:")
+    for version in (0, 99):
+        spec.storage[key] = version.to_bytes(2, "little")
+        assert pinned_findings(spec, meta) == [
+            f"[4 supply] genesis stores 0x{version.to_bytes(2, 'little').hex()} as the storage version of Balances, "
+            "not the 0x0100 build-spec writes: a later runtime upgrade runs Balances's migrations against storage "
+            "already in its layout, or skips them"]
+
+
+def test_a_block_hash_of_any_block_but_the_first_is_refused(mainnet):
+    spec, meta, _ = mainnet
+    for number in (1, 5):
+        index = number.to_bytes(4, "little")
+        spec.storage[lp.storage_key("System", "BlockHash") + lp.twox_64(index) + index] = bytes([17]) * 32
+    assert pinned_findings(spec, meta) == [
+        "[4 supply] genesis sets 2 System.BlockHash entries besides block 0's, the one build-spec writes: a new "
+        "chain has no earlier block to name"]
+
+
+@pytest.mark.parametrize("item, constant", [("IntentTTL", "DefaultIntentTTL"), ("ClaimTTL", "DefaultClaimTTL"),
+                                            ("MinSignerThreshold", "DefaultMinSignerThreshold")])
+def test_settlements_lifetimes_and_threshold_are_held_to_the_runtimes_own_defaults(mainnet, item, constant):
+    spec, meta, _ = mainnet
+    meta.constants[("IntentSettlement", constant)] = (77).to_bytes(4, "little")
+    stored = spec.value("IntentSettlement", item)
+    assert pinned_findings(spec, meta) == [
+        f"[11 settlement] genesis stores 0x{stored.hex()} as IntentSettlement.{item}, not the 0x4d000000 build-spec "
+        "writes: settlement runs on other parameters than the runtime's defaults, which build-spec writes"]
+    del meta.constants[("IntentSettlement", constant)]
+    assert pinned_findings(spec, meta) == [
+        f"[11 settlement] the runtime metadata declares no default the preflight can read for IntentSettlement.{item}"
+        ": what build-spec writes for it is unknown here"]
 
 
 # ---------------------------------------------------------------------------
@@ -4699,8 +6048,8 @@ class Kupo:
 
     def __init__(self):
         self.routes, self.accept = {}, []
-        self.routes["/health"] = {"connection_status": "connected", "most_recent_checkpoint": 1000,
-                                  "most_recent_node_tip": 1010}
+        self.routes["/health"] = {"connection_status": "connected", "most_recent_checkpoint": KUPO_TIP - 10,
+                                  "most_recent_node_tip": KUPO_TIP}
         kupo = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -4761,7 +6110,7 @@ def genesis_candidates_datum(spec) -> bytes:
     raw = spec.value("Grandpa", "Authorities")
     count, pos = lp.read_compact(raw, 0)
     grandpa = [raw[pos + 40 * i:pos + 40 * i + 32] for i in range(count)]
-    return legacy_datum([(bytes([2]) + fresh_account(), aura, gran) for aura, gran in zip(aura_keys(spec), grandpa)])
+    return legacy_datum([(cross_chain_key(), aura, gran) for aura, gran in zip(aura_keys(spec), grandpa)])
 
 
 def test_cardano_view_reads_the_lock_and_the_candidates_from_kupo(spec, kupo):
@@ -4789,6 +6138,22 @@ COMMITTEE_TOKENS = pytest.mark.parametrize("policy, what", [(0, "D-parameter"), 
 
 def token_route(spec, policy: int) -> str:
     return f"/matches/{lp.committee_policies(spec)[policy].hex()}.*?unspent"
+
+
+def test_cardano_view_reads_kupos_tip_and_when_each_committee_output_was_created(spec, kupo):
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    view = lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+    assert (view.tip_slot, view.created) == (KUPO_TIP, {"D-parameter": CREATED, "permissioned candidates": CREATED})
+
+
+@COMMITTEE_TOKENS
+@pytest.mark.parametrize("created_at", [None, {"slot_no": "1"}, {}], ids=["none", "a string", "no slot"])
+def test_a_committee_output_kupo_gives_no_creation_slot_is_an_input_error(spec, kupo, policy, what, created_at):
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    route = token_route(spec, policy)
+    kupo.routes[route] = [dict(kupo.routes[route][0], created_at=created_at)]
+    with pytest.raises(lp.InputError, match=f"Kupo gives the {what} output .* no created_at slot"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
 
 
 @COMMITTEE_TOKENS
@@ -4819,6 +6184,29 @@ def test_a_committee_token_under_another_asset_name_is_not_read(spec, kupo, poli
     kupo.routes[route] = [dict(held, value={"coins": 2_000_000, "assets": {named: 1}})]
     with pytest.raises(lp.InputError, match=f"no unspent output holding the {what} token"):
         lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+@pytest.mark.parametrize("seconds", [-600, 0, 600])
+def test_a_kupo_whose_nodes_tip_is_within_ten_minutes_of_the_clock_is_read(spec, kupo, monkeypatch, seconds):
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    monkeypatch.setattr(lp, "wall_clock", lambda: SHELLEY_START + KUPO_TIP - 4_492_800 + seconds)
+    assert lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}}).tip_slot == KUPO_TIP
+
+
+@pytest.mark.parametrize("seconds, shown", [(601, "601 seconds behind"), (3 * 86_400, "259200 seconds behind"),
+                                            (-601, "601 seconds ahead of")])
+def test_a_kupo_whose_nodes_tip_is_not_cardanos_now_is_an_input_error(spec, kupo, monkeypatch, seconds, shown):
+    """Kupo within a few slots of a node that has itself stopped following Cardano lists outputs as they stood at
+    that node's tip, and puts the launch in the epoch of that tip."""
+    kupo.serve(spec, None, genesis_candidates_datum(spec))
+    monkeypatch.setattr(lp, "wall_clock", lambda: SHELLEY_START + KUPO_TIP - 4_492_800 + seconds)
+    with pytest.raises(lp.InputError, match=f"^the tip of Kupo's node, slot {KUPO_TIP}, is {shown} this host's "
+                                            "clock, more than 600: its node is not following Cardano mainnet"):
+        lp.cardano_view(kupo.url, spec, {"supply": {"genesis_lock": LOCK}})
+
+
+def test_the_clock_the_tip_is_held_to_is_this_hosts():
+    assert abs(HOST_CLOCK() - time.time()) < 5
 
 
 def test_kupo_behind_its_node_is_an_input_error(spec, kupo):
@@ -4983,6 +6371,9 @@ def test_the_spec244_preprod_timelock_is_refused_on_mainnet(spec244):
     assert spec.value("Sudo", "Key") == lp.multisig_account(PREPROD_KEYHOLDERS, 2)
     launch = timelock_launch(PREPROD_KEYHOLDERS, msig(3, *PREPROD_KEYHOLDERS))
     assert messages(lp.check_guardian(spec, meta, launch, KNOWN)) == [
+        "[7 timelock] roles.guardian[0]: the keys anyone can sign as, at roles.guardian[0].members[0] and "
+        "roles.guardian[0].members[1] and roles.guardian[0].members[2], meet its threshold, so anyone can veto Root's "
+        "queued calls or co-sign them early"] + [
         f"[7 timelock] roles.guardian[0].members[{i}] {ss58(key)} is also roles.sudo[0].members[{i}]{SHARED}"
         for i, key in enumerate(PREPROD_KEYHOLDERS)]
     assert messages(lp.check_delays(spec, meta)) == [
@@ -5710,12 +7101,23 @@ if "log" in KNOBS:
     registrations = os.environ.get("MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE")
     chain_file = next((Path(word.partition("=")[2] or sys.argv[i + 1]) for i, word in enumerate(sys.argv)
                        if word.partition("=")[0] == "--chain"), None)
+    manifest = chain_file and str(chain_file).startswith("mainnet:") and Path(str(chain_file)[len("mainnet:"):])
     with open(KNOBS["log"], "a") as log:
         log.write(json.dumps({"argv": sys.argv, "cwd": os.getcwd(), "cwd_files": os.listdir("."),
                               "env": dict(os.environ),
                               "registrations": registrations and Path(registrations).read_text(),
                               "chain_sha256": chain_file and chain_file.is_file()
-                              and hashlib.sha256(chain_file.read_bytes()).hexdigest()}) + "\\n")
+                              and hashlib.sha256(chain_file.read_bytes()).hexdigest(),
+                              "manifest_sha256": manifest and hashlib.sha256(manifest.read_bytes()).hexdigest()})
+                  + "\\n")
+if sys.argv[1] == "build-spec":
+    chain = sys.argv[sys.argv.index("--chain") + 1]
+    assert chain.startswith("mainnet:") and sys.argv[4:6] == ["--raw", "--disable-default-bootnode"], sys.argv
+    json.loads(Path(chain[len("mainnet:"):]).read_text())
+    if "refuses" in KNOBS:
+        sys.exit('Error: Input("refusing the launch manifest: ' + KNOBS["refuses"] + '")')
+    sys.stdout.write(KNOBS["prints"] if "prints" in KNOBS else Path(KNOBS["built"]).read_text())
+    sys.exit(0)
 if sys.argv[1] == "chain-id":
     if KNOBS.get("no_chain_id"):
         sys.exit("error: unrecognized subcommand 'chain-id'")
@@ -5785,6 +7187,9 @@ Path(out).write_bytes(bytes.fromhex(KNOBS["export"]) if "export" in KNOBS
 
 
 def fake_node(tmp_path: Path, **knobs) -> Path:
+    """A stand-in for materios-node. Its build-spec prints the raw chain spec the file node-built-raw.json holds, the
+    one the node builds from any launch manifest, unless the test has it refuse the manifest or print other text."""
+    knobs.setdefault("built", str(tmp_path / "node-built-raw.json"))
     path = tmp_path / ("fake-node-" + hashlib.sha256(repr(sorted(knobs.items())).encode()).hexdigest()[:12])
     path.write_text(FAKE_NODE.replace("@PYTHON@", sys.executable).replace("@HERE@", repr(str(HERE)))
                     .replace("@KNOBS@", repr(knobs)))
@@ -6498,6 +7903,223 @@ def test_a_capture_that_is_not_a_path_is_an_input_error(field):
 
 
 # ---------------------------------------------------------------------------
+# Rule 8: the chain spec each authority's own node binary builds from the launch manifest
+# ---------------------------------------------------------------------------
+
+MANIFEST = b'{"the launch manifest": "as its file holds it,\\u0020byte for byte"}\n'
+
+
+def raw_doc(spec: lp.Spec) -> dict:
+    """A spec's document with its storage as its raw top."""
+    return dict(spec.doc, genesis={"raw": {"top": {"0x" + key.hex(): "0x" + value.hex()
+                                                   for key, value in spec.storage.items()}, "childrenDefault": {}}})
+
+
+def pinned_to(exe: Path, name: str = "val0") -> dict:
+    """An authority pinned to the node binary it runs."""
+    return dict(authority(["materios-node", "--chain", "x"], name, name), exe=str(exe), exe_sha256=sha256_pin(exe))
+
+
+@pytest.fixture
+def built(mainnet, tmp_path):
+    """The mainnet fixture, which the fake node builds from any manifest as the fixture stands now: a test edits
+    the checked spec after."""
+    spec, meta, _ = mainnet
+    spec.doc = raw_doc(spec)
+    (tmp_path / "node-built-raw.json").write_text(json.dumps(spec.doc))
+    return spec, meta
+
+
+def build_findings(spec, meta, *nodes, manifest: bytes = MANIFEST) -> list[str]:
+    return messages(lp.check_node_build(spec, meta, {"nodes": list(nodes)}, manifest))
+
+
+NOT_THE_BUILD = ("[8 node] authority val0: the checked chain spec is not the one its node binary builds from the "
+                 "launch manifest: ")
+
+
+def test_a_spec_that_is_its_nodes_build_of_the_launch_manifest_passes(built, tmp_path):
+    """The pinned binary runs offline, once, on build-spec --chain mainnet:<manifest> --raw, in an empty directory,
+    with no environment, on a base path of its own, and reads the manifest the check was given, byte for byte."""
+    spec, meta = built
+    log = tmp_path / "calls.jsonl"
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path, log=str(log)))) == []
+    (call,) = node_calls(log)
+    chain, base = call["argv"][3], call["argv"][7]
+    assert call["argv"][1:] == ["build-spec", "--chain", chain, "--raw", "--disable-default-bootnode", "--base-path",
+                                base]
+    assert chain.startswith("mainnet:/") and call["manifest_sha256"] == hashlib.sha256(MANIFEST).hexdigest()
+    assert set(call["env"]) <= {"LC_CTYPE"} and call["cwd_files"] == [] and base.startswith(call["cwd"] + "/")
+
+
+def test_authorities_pinned_to_one_binary_share_its_build_and_another_binary_builds_again(built, tmp_path):
+    spec, meta = built
+    log = tmp_path / "calls.jsonl"
+    one, other = fake_node(tmp_path, log=str(log)), fake_node(tmp_path, log=str(log), tamper=True)
+    nodes = [pinned_to(one, "val0"), pinned_to(one, "val1"), pinned_to(other, "val2"), pinned_to(one, "val3")]
+    assert build_findings(spec, meta, *nodes) == []
+    assert len(node_calls(log)) == 2
+
+
+def test_a_binary_that_is_not_the_pinned_one_and_a_node_that_is_no_authority_are_not_run(built, tmp_path):
+    spec, meta = built
+    log = tmp_path / "calls.jsonl"
+    exe = fake_node(tmp_path, log=str(log))
+    unpinned = dict(pinned_to(exe), exe_sha256="0x" + hashlib.sha256(b"the release binary").hexdigest())
+    edge = {"name": "edge", "host": "edge", "authority": False}
+    assert build_findings(spec, meta, unpinned, edge) == []
+    assert node_calls(log) == []
+
+
+def test_a_node_that_refuses_the_launch_manifest_builds_no_such_spec(built, tmp_path):
+    spec, meta = built
+    refusal = "dust.oracle endows an account the builder sizes no dust for"
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path, refuses=refusal))) == [
+        "[8 node] authority val0: its node binary builds no mainnet chain spec from the launch manifest "
+        f'(Error: Input("refusing the launch manifest: {refusal}")): the checked chain spec is not one the node '
+        "builds from it"]
+
+
+@pytest.mark.parametrize("printed", ["", "not JSON", "[]", '{"genesis": {"raw": {}}}',
+                                     '{"genesis": {"raw": {"top": []}}}',
+                                     '{"name": 1, "name": 2, "genesis": {"raw": {"top": {}}}}'],
+                         ids=["nothing", "not JSON", "a list", "no top", "top a list", "a key twice"])
+def test_a_build_spec_that_prints_no_raw_chain_spec_is_an_input_error(built, tmp_path, printed):
+    spec, meta = built
+    with pytest.raises(lp.InputError, match="^authority val0: its node's build-spec printed no raw chain spec: "):
+        build_findings(spec, meta, pinned_to(fake_node(tmp_path, prints=printed)))
+
+
+def account_entry(account: bytes) -> str:
+    return f"System.Account[0x{account_key(account)[32:].hex()}]"
+
+
+def set_code(spec: lp.Spec) -> str:
+    spec.storage[lp.CODE_KEY] = b"another runtime"
+    return (f"genesis :code (blake2-256 {lp.blake2_256(b'another runtime').hex()}) is not the runtime its node binary "
+            f"embeds and builds mainnet with ({lp.blake2_256(b'').hex()})")
+
+
+def no_code(spec: lp.Spec) -> str:
+    del spec.storage[lp.CODE_KEY]
+    return ("genesis :code (blake2-256 none) is not the runtime its node binary embeds and builds mainnet with "
+            f"({lp.blake2_256(b'').hex()})")
+
+
+def unset(pallet: str, item: str):
+    def edit(spec: lp.Spec) -> str:
+        del spec.storage[lp.storage_key(pallet, item)]
+        return f"genesis storage differs at 1 key: {pallet}.{item}, which only the node's build sets"
+    return edit
+
+
+def under_sudo(spec: lp.Spec) -> str:
+    spec.storage[lp.storage_key("Sudo", "Key") + b"\x01"] = bytes(32)
+    return "genesis storage differs at 1 key: Sudo.Key[0x01], which only the checked spec sets"
+
+
+def frozen_treasury(spec: lp.Spec) -> str:
+    spec.storage[account_key(TREASURY)] = account_info(ED, frozen=1)
+    return f"genesis storage differs at 1 key: {account_entry(TREASURY)}, whose value differs"
+
+
+def three_kinds(spec: lp.Spec) -> str:
+    put(spec, "Motra", "Params", bytes(108))
+    del spec.storage[b":extrinsic_index"]
+    spec.storage[lp.twox_128(b"Balances") + lp.twox_128(b":__STORAGE_VERSION__:")] = bytes(2)
+    spec.storage[bytes([255]) * 40] = b"\x01"
+    spec.storage[b":heappages"] = bytes(8)
+    return ("genesis storage differs at 5 keys: :extrinsic_index, which only the node's build sets; :heappages, which "
+            "only the checked spec sets; the storage version of Balances, whose value differs; Motra.Params, whose "
+            f"value differs; storage 0x{'ff' * 40}, which only the checked spec sets")
+
+
+def twenty_accounts(spec: lp.Spec) -> str:
+    accounts = spec.accounts()[:20]
+    for account in accounts:
+        del spec.storage[account_key(account)]
+    named = "; ".join(f"{account_entry(account)}, which only the node's build sets" for account in accounts[:16])
+    return f"genesis storage differs at 20 keys: {named}; and 4 more"
+
+
+STORAGE_APART = [set_code, no_code, unset("Grandpa", "CurrentSetId"), unset("PalletSession", "Validators"),
+                 unset("System", "LastRuntimeUpgrade"), under_sudo, frozen_treasury, three_kinds, twenty_accounts]
+
+
+@pytest.mark.parametrize("edit", STORAGE_APART, ids=["another code", "no code", "no set id", "no session validators",
+                                                    "no last upgrade", "a key under Sudo.Key", "a frozen Treasury",
+                                                    "set, unset and changed", "twenty accounts"])
+def test_genesis_storage_the_node_does_not_build_is_refused_naming_each_key(built, tmp_path, edit):
+    spec, meta = built
+    difference = edit(spec)
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path))) == [NOT_THE_BUILD + difference]
+
+
+FORK_BLOCK = [[1, "0x" + "ab" * 32]]
+BOOT_NODE = "/dns/boot.example/tcp/30333/p2p/12D3KooWEyoppNCUx8Yx66oV9fJnriXwCcXwDDUA2kj6vnc6iDEp"
+FIELDS_APART = [
+    ("codeSubstitutes", {"1": "0x00"}, 'its codeSubstitutes is {"1": "0x00"}, where the node\'s build gives {}'),
+    ("name", "Materios ", 'its name is "Materios ", where the node\'s build gives "Materios"'),
+    ("id", "materios", 'its id is "materios", where the node\'s build gives "materios_mainnet"'),
+    ("chainType", "Local", 'its chainType is "Local", where the node\'s build gives "Live"'),
+    ("protocolId", None, 'its protocolId is null, where the node\'s build gives "materios"'),
+    ("properties", {"ss58Format": 42, "tokenDecimals": 12, "tokenSymbol": "MATRA"},
+     'its properties is {"ss58Format": 42, "tokenDecimals": 12, "tokenSymbol": "MATRA"}, where the node\'s build '
+     'gives {"ss58Format": 42, "tokenDecimals": 6, "tokenSymbol": "MATRA"}'),
+    ("telemetryEndpoints", [["wss://telemetry.example/submit", 0]],
+     'its telemetryEndpoints is [["wss://telemetry.example/submit", 0]], where the node\'s build gives null'),
+] + [(field, value, f"it gives {field}, which the node's build does not: the node reads a code substitute, a fork "
+                    "id, a fork or bad block and other fields a build never writes")
+     for field, value in (("forkBlocks", FORK_BLOCK), ("badBlocks", ["0x" + "ab" * 32]), ("forkId", "fork"),
+                          ("lightSyncState", {}), ("consensusEngine", None), ("anything", 1))]
+
+
+@pytest.mark.parametrize("field, value, difference", FIELDS_APART, ids=[field for field, _, _ in FIELDS_APART])
+def test_a_chain_spec_field_the_node_does_not_build_is_refused(built, tmp_path, field, value, difference):
+    spec, meta = built
+    spec.doc[field] = value
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path))) == [NOT_THE_BUILD + difference]
+
+
+def test_a_chain_spec_without_a_field_the_node_builds_is_refused(built, tmp_path):
+    spec, meta = built
+    del spec.doc["codeSubstitutes"]
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path))) == [
+        NOT_THE_BUILD + "it has no codeSubstitutes, which the node's build gives as {}"]
+
+
+@pytest.mark.parametrize("edit", [
+    lambda doc: doc["genesis"]["raw"].pop("childrenDefault"),
+    lambda doc: doc["genesis"]["raw"].update(childrenDefault={"0x00": {"0x01": "0x02"}}),
+    lambda doc: doc["genesis"]["raw"].update(extra=1),
+    lambda doc: doc["genesis"].update(runtimeGenesis={"patch": {}}),
+], ids=["no child storage", "child storage", "another raw field", "another genesis field"])
+def test_a_genesis_that_holds_other_than_the_top_storage_the_node_builds_is_refused(built, tmp_path, edit):
+    spec, meta = built
+    edit(spec.doc)
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path))) == [
+        NOT_THE_BUILD + "its genesis holds other than the top storage and the empty child storage the node's build "
+                        "holds"]
+
+
+def test_the_boot_nodes_are_the_operators_to_give(built, tmp_path):
+    spec, meta = built
+    spec.doc["bootNodes"] = [BOOT_NODE]
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path))) == []
+    del spec.doc["bootNodes"]
+    assert build_findings(spec, meta, pinned_to(fake_node(tmp_path))) == []
+
+
+def test_a_storage_key_is_named_by_what_the_metadata_declares(mainnet):
+    _, meta, _ = mainnet
+    sudo, version = lp.storage_key("Sudo", "Key"), lp.twox_128(b"Motra") + lp.twox_128(b":__STORAGE_VERSION__:")
+    assert [meta.entry(key) for key in (b":code", b":heappages", sudo, sudo + b"\x07", version, bytes(32),
+                                        account_key(TREASURY))] == [
+        ":code", ":heappages", "Sudo.Key", "Sudo.Key[0x07]", "the storage version of Motra", f"storage 0x{'00' * 32}",
+        account_entry(TREASURY)]
+
+
+# ---------------------------------------------------------------------------
 # End to end through the CLI, with the real subwasm
 # ---------------------------------------------------------------------------
 
@@ -6508,63 +8130,58 @@ def subwasm() -> str:
 
 
 class Launch:
-    """A clean launch: the preprod genesis with //Alice removed, Root held by a
-    multisig of fresh keys and its timelock guarded by a multisig of other fresh
-    keys at the mainnet delays, the tuned rewards stored, one attestor endowed at
-    the floor, the chain renamed, every account and authority declared, the
-    authorities seated as the genesis committee, Cardano holding the lock and
-    those authorities as the candidates, settlement bound to Cardano mainnet and
-    the Aegis policy declared deployed there, a public RPC URL that serves only safe
-    methods, and authorities that load the spec from its own file, pinned to a
-    node binary that builds the genesis the preflight computes. Every rule
-    accepts it."""
+    """A clean launch: the mainnet genesis the node builds from fixtures/mainnet-launch.json, its fixed issuance of
+    dust and its attestation committee among it, with the preprod v6 runtime as its code and the LastRuntimeUpgrade
+    build-spec writes for that code; Root and its timelock guardian moved to multisigs of fresh keys whose holders
+    the tests sign as, and settlement bound to an Aegis policy deployed on Cardano mainnet; Cardano holding the lock
+    and the authorities as the candidates, in outputs older than two epochs; a public RPC URL that serves only safe
+    methods, and authorities that load the spec from its own file, pinned to a node binary that builds the genesis
+    the preflight computes. Every rule accepts it."""
 
     def __init__(self, preprod_path, tmp_path, kupo, endpoint):
-        spec = lp.load_spec(str(preprod_path))
-        del spec.storage[account_key(ALICE)]
-        spec.doc.update({"name": "Materios", "id": "materios"})
-        put(spec, "OrinqReceipts", "AttestationRewardPerSigner", (1 * MATRA).to_bytes(16, "little"))
-        put(spec, "OrinqReceipts", "EraCapBaselineAttestorCount", (32).to_bytes(4, "little"))
-        self.sudo_members = [fresh_account() for _ in range(3)]
-        put(spec, "Sudo", "Key", lp.multisig_account(self.sudo_members, 2))
-        guardian_members = [fresh_account() for _ in range(3)]
-        put(spec, "RootTimelock", "Guardian", lp.multisig_account(guardian_members, 2))
-        put(spec, "RootTimelock", "Delays", delays(*MAINNET_DELAYS))
-        self.attestor = fresh_account()
-        endow(spec, self.attestor, FLOOR)
-        prefix = lp.storage_key("System", "Account")
-        issuance = sum(int.from_bytes(v[16:32], "little") for k, v in spec.storage.items() if k.startswith(prefix))
-        put(spec, "Balances", "TotalIssuance", issuance.to_bytes(16, "little"))
-        self.members = genesis_members(spec)
-        seat(spec, self.members)
+        spec = lp.load_spec(str(FIXTURES / "mainnet-launch-raw.json"))
+        preprod = lp.load_spec(str(preprod_path))
+        spec.storage[lp.CODE_KEY] = preprod.code
+        put(spec, "System", "LastRuntimeUpgrade", preprod.value("System", "LastRuntimeUpgrade"))
+        launch = json.loads((FIXTURES / "mainnet-launch.json").read_text())
+        held = {}
+        for role in ("sudo", "guardian"):
+            entry = launch["roles"][role][0]
+            fresh = [fresh_account() for _ in entry["members"]]
+            for member, key in zip(entry["members"], fresh):
+                held[member["key"]] = key
+            launch["roles"][role] = [msig(entry["threshold"], *fresh)]
+        old_sudo = ss58(spec.value("Sudo", "Key"))
+        self.sudo_members = [lp.decode_public_key(member) for member in launch["roles"]["sudo"][0]["members"]]
+        sudo = lp.multisig_account(self.sudo_members, 2)
+        held[old_sudo] = sudo
+        for old, new in held.items():
+            move_account(spec, lp.decode_public_key(old), new)
+        put(spec, "Sudo", "Key", sudo)
+        put(spec, "RootTimelock", "Guardian", lp.role_account(launch["roles"]["guardian"][0]))
+        launch["roles"]["endowed"] = [ss58(held[name]) for name in launch["roles"]["endowed"]]
+        launch["dust"] = {role: {ss58(held[name]) if name in held else name: amount for name, amount in accounts.items()}
+                          for role, accounts in launch["dust"].items()}
         settles_on_mainnet(spec)
+        self.attestor = lp.decode_public_key(launch["roles"]["attestors"][0])
+        self.members = lp.genesis_committee(spec)[1]
         self.spec = spec
         self.tmp_path, self.kupo = tmp_path, kupo
         conf = tmp_path / "rpc.conf"
         conf.write_text("location / { proxy_pass http://rpc-node:9944; }")
-        sudo = lp.multisig_account(self.sudo_members, 2)
-        self.launch = {
-            "roles": {"sudo": [msig(2, *self.sudo_members)], "guardian": [msig(2, *guardian_members)],
-                      "anchor_signer": [ss58(fresh_account())],
-                      "attestors": [ss58(self.attestor)], "oracle": [],
-                      "endowed": [ss58(a) for a in genesis_accounts(spec) if a not in (self.attestor, sudo)]},
-            "economics": dict(TUNED, fee_buffer=100 * MATRA),
-            "supply": {"genesis_lock": LOCK},
-            "slots_per_epoch": PREPROD_SLOTS_PER_EPOCH,
-            "cardano_follower": dict(MAINNET_FOLLOWER),
-            "settlement": dict(SETTLEMENT),
-            "nodes": [{"name": "edge", "host": "edge", "authority": False}],
-            "rpc_proxies": [{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
-                             "other_targets": ["rpc-node:9944"]}],
-            "public_rpc": [endpoint.url],
-        }
+        self.launch = dict(
+            launch, supply={"genesis_lock": LOCK}, settlement=dict(SETTLEMENT),
+            nodes=[{"name": "edge", "host": "edge", "authority": False}],
+            rpc_proxies=[{"name": "public-rpc", "node": "edge", "kind": "nginx", "config": str(conf),
+                          "other_targets": ["rpc-node:9944"]}],
+            public_rpc=[endpoint.url])
         self.endpoint = endpoint
-        self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + 200_000_000 * MATRA})
+        self.lock_output = kupo_output(assets={lp.CMATRA_UNIT: lp.MATRA})
         # None serves this genesis hash as the lock's inline datum.
         self.lock_datum = None
         self.node_exe = fake_node(tmp_path)
-        self.launch["nodes"][:0] = [self.authority(f"val{i}", aura, gran)
-                                    for i, (_, aura, gran) in enumerate(self.members)]
+        self.launch["nodes"][:0] = [self.authority(f"val{i}", aura, gran, cross_chain)
+                                    for i, (cross_chain, aura, gran) in enumerate(self.members)]
         # The argv each authority's node process runs with, where a test gives one other than its launch argv.
         self.running = {}
         # The bytes of the file each authority's --chain names, where a test gives other than the checked spec.
@@ -6576,14 +8193,43 @@ class Launch:
         self.answers = {}
         # The ctime of a step of each authority's --chain path, where a test gives one other than SET_UP.
         self.changed = {}
+        # The raw chain spec the node binary builds from the launch manifest, where a test gives other than the
+        # checked spec.
+        self.built = None
         self.launch_key = signing.SigningKey.generate()
         self.candidates = legacy_datum(self.members)
         self.d_parameter = d_parameter_datum(len(self.members))
 
-    def authority(self, name: str, aura: bytes, grandpa: bytes) -> dict:
+    def hold(self, role: str, entry) -> None:
+        """Hand roles.<role>, sudo or guardian, to `entry`: genesis names its account as Sudo.Key or the timelock
+        guardian, the sudo account keeps its dust, and the old entry's keyholders give way to the new one's. Each new
+        keyholder a test can sign as, and each nested multisig, holds a keyholder's dust, declared under endowed."""
+        item = {"sudo": ("Sudo", "Key"), "guardian": ("RootTimelock", "Guardian")}[role]
+        old, account = self.launch["roles"][role][0], lp.role_account(entry)
+        if role == "sudo":
+            dust = self.launch["dust"]["sudo"]
+            dust[ss58(account)] = dust.pop(ss58(self.spec.value(*item)))
+            move_account(self.spec, self.spec.value(*item), account)
+        put(self.spec, *item, account)
+        for _, keyholder in list(lp.role_accounts(old, ""))[1:]:
+            if ss58(keyholder) in self.launch["roles"]["endowed"]:
+                drop_account(self.spec, keyholder)
+                del self.launch["dust"]["endowed"][ss58(keyholder)]
+                self.launch["roles"]["endowed"].remove(ss58(keyholder))
+        nested = {path for path, _ in lp.role_multisigs(entry, "")}
+        keys = {where: lp.key_text(leaf) for where, _, leaf in lp.role_leaves(entry, "")}
+        for where, keyholder in list(lp.role_accounts(entry, ""))[1:]:
+            seated = where in nested or (where in keys and held(keys[where]) is not None)
+            if seated and ss58(keyholder) not in self.launch["roles"]["endowed"]:
+                set_account(self.spec, keyholder, KEYHOLDER_DUST[role])
+                self.launch["dust"]["endowed"][ss58(keyholder)] = KEYHOLDER_DUST[role]
+                self.launch["roles"]["endowed"].append(ss58(keyholder))
+        self.launch["roles"][role] = [entry]
+
+    def authority(self, name: str, aura: bytes, grandpa: bytes, cross_chain: bytes) -> dict:
         """An authority that runs the fake node, pinned to it, on the spec from its own file."""
         node = authority(["materios-node", "--validator", "--chain", authority_chain(self.tmp_path), "--rpc-methods",
-                          "safe"], name, name, aura)
+                          "safe"], name, name, aura, cross_chain)
         return dict(node, grandpa="0x" + grandpa.hex(), env=dict(MAINNET_FOLLOWER),
                     cmdline=str(self.tmp_path / f"{name}.cmdline"), exe=str(self.node_exe),
                     exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"),
@@ -6598,12 +8244,17 @@ class Launch:
         path.write_text(json.dumps(self.spec.doc))
         return path
 
+    def node_builds_this(self) -> None:
+        """The node binary builds the spec as it stands now, whatever the test makes of the checked spec after."""
+        self.built = self.spec_path().read_text()
+
     def prepare(self) -> Path:
         """Write each authority's captures and the spec, serve Cardano for that spec, and return its path."""
         for node in self.launch["nodes"]:
             if node["authority"] and isinstance(node.get("argv"), list) and "cmdline" in node:
                 capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
         spec_path = self.spec_path()
+        (self.tmp_path / "node-built-raw.json").write_text(spec_path.read_text() if self.built is None else self.built)
         for node in self.launch["nodes"]:
             if node["authority"] and "chain_spec" in node:
                 Path(node["chain_spec"]).write_bytes(self.chain_files.get(node["name"], spec_path.read_bytes()))
@@ -6635,6 +8286,35 @@ class Launch:
         return sign_and_check(self.tmp_path, spec_path, self.launch, capsys, self.kupo.url, self.launch_key)
 
 
+def no_provider(role: str, index: int, key: bytes) -> str:
+    """Rule 12 on a keyholder of the clean launch's sudo or guardian multisig that genesis does not endow."""
+    return (f"[12 dust] roles.{role}[0].members[{index}], a keyholder of roles.{role}[0] ({ss58(key)}) has no provider "
+            "at genesis: it cannot sign, and nothing after genesis endows it")
+
+
+# What the clean launch endows a keyholder it seats, by the role it holds: above the floor of a keyholder of
+# multisigs whose thresholds take up to 6,000 in deposits, with the working dust of its role's calls left free, 623
+# for the guardian's vetoes and 10,806 for Root's calls and an upgrade of twice the clean launch's runtime.
+KEYHOLDER_DUST = {"sudo": 30_000, "guardian": 8_000}
+
+
+def drop_account(spec: lp.Spec, account: bytes) -> None:
+    """Take an account out of genesis, its System.Account and its Motra.AccrualCheckpoint, and its balance out of the
+    issuance and the fixed issuance."""
+    set_account(spec, account, 0)
+    for pallet, item in (("System", "Account"), ("Motra", "AccrualCheckpoint")):
+        spec.storage.pop(lp.storage_key(pallet, item) + hashlib.blake2b(account, digest_size=16).digest() + account,
+                         None)
+
+
+def move_account(spec: lp.Spec, old: bytes, new: bytes) -> None:
+    """Give an account's genesis entries, its System.Account and its Motra.AccrualCheckpoint, to another account."""
+    for pallet, item in (("System", "Account"), ("Motra", "AccrualCheckpoint")):
+        prefix = lp.storage_key(pallet, item)
+        spec.storage[prefix + hashlib.blake2b(new, digest_size=16).digest() + new] = spec.storage.pop(
+            prefix + hashlib.blake2b(old, digest_size=16).digest() + old)
+
+
 def pin_launch_keys(monkeypatch, tmp_path, *keys: bytes) -> None:
     path = tmp_path / "launch_keys.json"
     path.write_text(json.dumps({"keys": ["0x" + key.hex() for key in keys]}))
@@ -6644,8 +8324,13 @@ def pin_launch_keys(monkeypatch, tmp_path, *keys: bytes) -> None:
 def sign_and_check(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=None, manifest_key=None,
                    extra=(), signed_launch=None) -> tuple[int, int, str]:
     """Sign with `key`, then check against the pinned launch keys, or against
-    `manifest_key` given on the command line. Returns both exit codes and what
-    the check printed."""
+    `manifest_key` given on the command line, with the operator's key tables
+    `extra` gives or else an empty one. Returns both exit codes and what the
+    check printed."""
+    if "--extra-well-known" not in extra:
+        operator = tmp_path / "operator-keys.json"
+        operator.write_text(json.dumps({"keys": []}))
+        extra = (*extra, "--extra-well-known", str(operator))
     key = key or signing.SigningKey.generate()
     seed = tmp_path / "launch.key"
     seed.write_text("0x" + key.encode().hex() + "\n")
@@ -6670,24 +8355,12 @@ def run_cli(tmp_path, spec_path: Path, launch: dict, capsys, kupo_url: str, key=
     return code, out
 
 
-def with_timelock(metadata_v14: dict) -> dict:
-    """The fixture metadata plus spec 244's RootTimelock pallet: its storage
-    and the delay constants rule 7 reads."""
-    v14 = copy.deepcopy(metadata_v14)
-    spec244 = json.loads((FIXTURES / "spec244-metadata.json").read_text())["V14"]
-    v14["pallets"].append(next(p for p in spec244["pallets"] if p["name"] == "RootTimelock"))
-    return v14
-
-
 @pytest.fixture
-def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch, metadata_v14):
-    """The spec's code is the preprod v6 runtime, which declares neither its
-    emission reserves nor its validator reward per era, has no Root timelock
-    and stores no Cardano network for settlement, so the extractor returns its
-    metadata with both declared, spec 244's timelock and the Cardano ids item
-    added."""
-    monkeypatch.setattr(lp, "subwasm_metadata",
-                        lambda code, subwasm: with_cardano_ids(with_timelock(with_constants(metadata_v14))))
+def clean(preprod_path, tmp_path, kupo, endpoint, monkeypatch):
+    """The spec's code is the preprod v6 runtime, which is not the spec 244 runtime that built the genesis, so the
+    extractor returns spec 244's metadata."""
+    v14 = json.loads((FIXTURES / "spec244-metadata.json").read_text())["V14"]
+    monkeypatch.setattr(lp, "subwasm_metadata", lambda code, subwasm: v14)
     launch = Launch(preprod_path, tmp_path, kupo, endpoint)
     pin_launch_keys(monkeypatch, tmp_path, pub(launch.launch_key))
     return launch
@@ -6709,8 +8382,8 @@ def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path,
     assert "[1 dev-keys] Sudo.Key 5D1Anh" in out
     assert "[2 rewards] OrinqReceipts.AttestationRewardPerSigner stores 10000000, declared 1000000" in out
     assert "[3 rpc] genesis Aura.Authorities[0]" in out
-    assert "[4 supply] roles.attestors[0] is endowed 100000000" in out
-    assert "[4 supply] the runtime metadata does not declare OrinqReceipts.ValidatorEmissionReserve" in out
+    assert "[4 supply] genesis sets no OrinqReceipts.FixedIssuance" in out
+    assert "base units, at least one MATRA (1000000)" in out
     assert NO_GUARDIAN in out
     assert HIDDEN_BOUNDS in out
 
@@ -6719,6 +8392,194 @@ def test_cli_passes_a_clean_launch(clean, capsys):
     code, out = clean.run(capsys)
     assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
+
+
+def test_cli_gives_each_pinned_node_binary_the_launch_manifest_it_was_given(clean, capsys):
+    log = clean.tmp_path / "calls.jsonl"
+    exe = fake_node(clean.tmp_path, log=str(log))
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node.update(exe=str(exe), exe_sha256=sha256_pin(exe))
+    code, out = clean.run(capsys)
+    assert code == 0, out
+    builds = [call for call in node_calls(log) if call["argv"][1] == "build-spec"]
+    assert [call["manifest_sha256"] for call in builds] == [
+        hashlib.sha256((clean.tmp_path / "launch.json").read_bytes()).hexdigest()]
+
+
+def only_reason(out: str, reason: str) -> bool:
+    return out == f"MAINNET LAUNCH PREFLIGHT: REFUSE (1 reasons)\n  {reason}\n"
+
+
+# Storage no rule but the node's own build holds to a value: a GRANDPA set id, session validators and a last runtime
+# upgrade that genesis leaves unset read as the values build-spec writes.
+@pytest.mark.parametrize("pallet, item", [("Grandpa", "CurrentSetId"), ("PalletSession", "Validators"),
+                                          ("PalletSession", "QueuedKeys"), ("System", "LastRuntimeUpgrade")])
+def test_cli_refuses_genesis_storage_the_pinned_node_does_not_build(clean, capsys, pallet, item):
+    clean.node_builds_this()
+    del clean.spec.storage[lp.storage_key(pallet, item)]
+    code, out = clean.run(capsys)
+    assert code == 1 and only_reason(out, f"{NOT_THE_BUILD}genesis storage differs at 1 key: {pallet}.{item}, which "
+                                          "only the node's build sets"), out
+
+
+@pytest.mark.parametrize("field, value", [("forkBlocks", FORK_BLOCK), ("badBlocks", ["0x" + "ab" * 32]),
+                                          ("forkId", "fork")])
+def test_cli_refuses_a_chain_spec_field_the_pinned_node_does_not_build(clean, capsys, field, value):
+    clean.node_builds_this()
+    clean.spec.doc[field] = value
+    code, out = clean.run(capsys)
+    assert code == 1 and only_reason(out, f"{NOT_THE_BUILD}it gives {field}, which the node's build does not: the "
+                                          "node reads a code substitute, a fork id, a fork or bad block and other "
+                                          "fields a build never writes"), out
+
+
+def test_cli_refuses_a_runtime_the_pinned_node_does_not_embed(clean, capsys):
+    """The node builds mainnet with the runtime it embeds: a spec that carries another, here one more custom section
+    after the same code, is no build of it."""
+    clean.node_builds_this()
+    code = lp.decompressed_code(clean.spec.code) + custom_section(b"note", b"another build")
+    clean.spec.storage[lp.CODE_KEY] = code
+    exit_code, out = clean.run(capsys)
+    assert exit_code == 1 and f"{NOT_THE_BUILD}genesis :code (blake2-256 {lp.blake2_256(code).hex()}) is not the " \
+        "runtime its node binary embeds and builds mainnet with (" in out, out
+
+
+def test_cli_refuses_a_launch_manifest_the_pinned_node_builds_nothing_from(clean, capsys):
+    exe = fake_node(clean.tmp_path, refuses="roles.oracle names 1 oracles")
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node.update(exe=str(exe), exe_sha256=sha256_pin(exe))
+    code, out = clean.run(capsys)
+    assert code == 1 and only_reason(
+        out, "[8 node] authority val0: its node binary builds no mainnet chain spec from the launch manifest (Error: "
+             'Input("refusing the launch manifest: roles.oracle names 1 oracles")): the checked chain spec is not one '
+             "the node builds from it"), out
+
+
+def test_cli_passes_a_spec_that_differs_from_the_pinned_nodes_build_in_its_boot_nodes_alone(clean, capsys):
+    clean.node_builds_this()
+    clean.spec.doc["bootNodes"] = [BOOT_NODE]
+    code, out = clean.run(capsys)
+    assert code == 0, out
+
+
+def keyholders(clean) -> list[bytes]:
+    return [lp.role_account(member) for role in ("sudo", "guardian")
+            for member in clean.launch["roles"][role][0]["members"]]
+
+
+def reshape(clean, accounts, **fields) -> None:
+    for account in accounts:
+        clean.spec.storage[account_key(account)] = account_info(clean.spec.balance(account)[0], **fields)
+
+
+def frozen_keyholders(clean) -> list[str]:
+    """Every sudo and guardian keyholder and rescuer with its whole balance frozen: none can reserve the deposit of
+    a multisig call or a recovery, so Root, its veto and its recovery are held by no one."""
+    reshape(clean, keyholders(clean) + [lp.role_account(entry) for entry in clean.launch["roles"]["recovery_rescuers"]],
+            frozen=2**128 - 1)
+    return [f"[4 supply] genesis System.Account of {ss58(account)} holds nonce 0, consumers 0, providers 1, "
+            f"sufficients 0, frozen {2**128 - 1} and flags 0x80000000000000000000000000000000, not the nonce 0"
+            for account in keyholders(clean)]
+
+
+def used_keyholders(clean) -> list[str]:
+    reshape(clean, keyholders(clean), nonce=2**32 - 1, consumers=3, sufficients=9, providers=7, flags=0)
+    return [f"[4 supply] genesis System.Account of {ss58(account)} holds nonce 4294967295, consumers 3, providers 7, "
+            "sufficients 9, frozen 0 and flags 0x00000000000000000000000000000000, not the nonce 0"
+            for account in keyholders(clean)]
+
+
+def committee_past_its_bound(clean) -> list[str]:
+    members = lp.fixed_list(clean.spec.value("OrinqReceipts", "CommitteeMembers"), 32, "the clean committee")
+    listed = members + [members[0]] * (97 - len(members))
+    put(clean.spec, "OrinqReceipts", "CommitteeMembers", lp.compact(97) + b"".join(listed))
+    return [not_a_set(97, 3), "[1 dev-keys] genesis OrinqReceipts.CommitteeMembers lists 97 attestors, and the "
+                              "runtime's OrinqReceipts.MaxCommitteeSize is 96"]
+
+
+def motra_params_of_ones(clean) -> list[str]:
+    put(clean.spec, "Motra", "Params", bytes([255]) * 108)
+    return [f"[12 dust] genesis stores Motra.Params with min_fee {2**128 - 1} for 1000000000, congestion_rate"]
+
+
+def no_motra_params(clean) -> list[str]:
+    del clean.spec.storage[lp.storage_key("Motra", "Params")]
+    return [f"[12 dust] genesis sets no Motra.Params, which the runtime reads as all zero: {MOTRA_SIZED_FOR}"]
+
+
+def checkpoints(clean) -> list[bytes]:
+    return [key for key in clean.spec.storage if key.startswith(lp.storage_key("Motra", "AccrualCheckpoint"))]
+
+
+def no_checkpoints(clean) -> list[str]:
+    for key in checkpoints(clean):
+        del clean.spec.storage[key]
+    return [f"[12 dust] genesis sets no Motra.AccrualCheckpoint for {ss58(account)}, not the "
+            f"{clean.spec.balance(account)[0]} it holds free" for account in clean.spec.accounts()]
+
+
+def empty_checkpoints(clean) -> list[str]:
+    for key in checkpoints(clean):
+        clean.spec.storage[key] = bytes(20)
+    return [f"[12 dust] genesis checkpoints 0 MATRA base units held since block 0 for {ss58(account)}, not the "
+            f"{clean.spec.balance(account)[0]} it holds free" for account in clean.spec.accounts()]
+
+
+def backup_signers(clean) -> list[str]:
+    put(clean.spec, "OrinqReceipts", "BackupSigners", clean.spec.value("OrinqReceipts", "CommitteeMembers"))
+    put(clean.spec, "OrinqReceipts", "BackupSignerDelay", (2**31).to_bytes(4, "little"))
+    return [f"[4 supply] genesis sets OrinqReceipts.{item} (1 entry), which a mainnet genesis may not set"
+            for item in ("BackupSignerDelay", "BackupSigners")]
+
+
+def no_receipt_expiry(clean) -> list[str]:
+    put(clean.spec, "OrinqReceipts", "ReceiptExpiryBlocks", bytes(4))
+    return ["[2 rewards] genesis stores 0x00000000 as OrinqReceipts.ReceiptExpiryBlocks, not the 0x40380000 "
+            "build-spec writes"]
+
+
+def key_under_sudo(clean) -> list[str]:
+    key = lp.storage_key("Sudo", "Key") + b"\x01"
+    clean.spec.storage[key] = bytes([17]) * 32
+    return [f"[4 supply] genesis sets storage 0x{key.hex()}, a key under Sudo.Key's that the runtime does not read, "
+            "(1 entry)"]
+
+
+def balances_at_version_0(clean) -> list[str]:
+    clean.spec.storage[lp.twox_128(b"Balances") + lp.twox_128(b":__STORAGE_VERSION__:")] = bytes(2)
+    return ["[4 supply] genesis stores 0x0000 as the storage version of Balances, not the 0x0100 build-spec writes"]
+
+
+def no_settlement_signer(clean) -> list[str]:
+    put(clean.spec, "IntentSettlement", "MinSignerThreshold", bytes(4))
+    return ["[11 settlement] genesis stores 0x00000000 as IntentSettlement.MinSignerThreshold, not the 0x01000000 "
+            "build-spec writes"]
+
+
+NO_NODES_BUILD = [frozen_keyholders, used_keyholders, committee_past_its_bound, motra_params_of_ones, no_motra_params,
+                  no_checkpoints, empty_checkpoints, backup_signers, no_receipt_expiry, key_under_sudo,
+                  balances_at_version_0, no_settlement_signer]
+
+
+# Raw specs no build-spec writes, each of which the rules that read the spec apart from the node's builder refuse
+# by themselves: the fake node here builds whatever spec is checked.
+@pytest.mark.parametrize("edit", NO_NODES_BUILD, ids=[edit.__name__ for edit in NO_NODES_BUILD])
+def test_cli_refuses_a_raw_spec_no_build_spec_writes(clean, capsys, edit):
+    reasons = edit(clean)
+    code, out = clean.run(capsys)
+    assert code == 1, out
+    assert [reason for reason in reasons if f"\n  {reason}" not in out] == [], out
+    assert "[8 node]" not in out
+
+
+def test_cli_refuses_such_a_spec_by_the_pinned_nodes_build_too(clean, capsys):
+    clean.node_builds_this()
+    reasons = frozen_keyholders(clean)
+    code, out = clean.run(capsys)
+    assert code == 1 and all(f"\n  {reason}" in out for reason in reasons), out
+    assert f"\n  {NOT_THE_BUILD}genesis storage differs at {len(reasons) + 1} keys: System.Account[0x" in out, out
 
 
 def test_cli_refuses_a_launch_whose_genesis_settles_against_cardano_preprod(clean, capsys):
@@ -6785,7 +8646,7 @@ def test_cli_refuses_a_cardano_datum_that_leaves_out_declared_authorities(clean,
 
 def test_cli_refuses_a_cardano_candidate_that_votes_with_a_key_no_authority_declares(clean, capsys):
     outsider = fresh_account()
-    clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), aura, outsider if i == 0 else gran)
+    clean.candidates = legacy_datum([(cross_chain_key(), aura, outsider if i == 0 else gran)
                                      for i, (aura, gran) in enumerate(zip(aura_keys(clean.spec),
                                                                           grandpa_keys(clean.spec)))])
     code, out = clean.run(capsys)
@@ -6968,19 +8829,22 @@ def respell_timelock(misspell):
 # which the node loads as another guardian and delays past MaxDelay (a space after 0x, or no 0x and a leading byte),
 # or as no guardian at all (trailing spaces make the node file it under the key followed by a zero byte).
 TIMELOCK_EXPLOITS = {
-    "a space after 0x": (respell_timelock(MISSPELLINGS["a space after 0x"]), f"value at {GUARDIAN_KEY}"),
+    "a space after 0x": (respell_timelock(MISSPELLINGS["a space after 0x"]),
+                         (f"value at {GUARDIAN_KEY}", f"value at {DELAYS_KEY}")),
     "no 0x and a leading byte": (respell_timelock(MISSPELLINGS["no 0x and a leading byte"]),
-                                 f"value at {GUARDIAN_KEY}"),
+                                 (f"value at {GUARDIAN_KEY}", f"value at {DELAYS_KEY}")),
     "spaces after the guardian key": (lambda top: top.update({GUARDIAN_KEY + "  ": top.pop(GUARDIAN_KEY)}),
-                                      f"key '{GUARDIAN_KEY}  '"),
+                                      (f"key '{GUARDIAN_KEY}  '",)),
 }
 
 
-@pytest.mark.parametrize("respell, entry", TIMELOCK_EXPLOITS.values(), ids=TIMELOCK_EXPLOITS.keys())
-def test_cli_refuses_a_timelock_the_node_would_load_as_other_bytes(clean, capsys, respell, entry):
+@pytest.mark.parametrize("respell, entries", TIMELOCK_EXPLOITS.values(), ids=TIMELOCK_EXPLOITS.keys())
+def test_cli_refuses_a_timelock_the_node_would_load_as_other_bytes(clean, capsys, respell, entries):
+    """The preflight refuses the first respelt value it reads, of either item."""
     signing_code, code, out = clean.run_respelled(capsys, respell)
     assert (signing_code, code) == (2, 2), out
-    assert f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) chain spec raw storage {entry} {MISSPELLED}" in out
+    assert any(f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) chain spec raw storage {entry} {MISSPELLED}" in out
+               for entry in entries), out
 
 
 def test_cli_refuses_a_balance_the_node_would_load_4096_times_larger(clean, capsys):
@@ -6989,8 +8853,6 @@ def test_cli_refuses_a_balance_the_node_would_load_4096_times_larger(clean, caps
     extra = fresh_account()
     endow(clean.spec, extra, int.from_bytes(bytes([0x0F] * 9), "little"))
     clean.launch["roles"]["endowed"].append(ss58(extra))
-    issuance = int.from_bytes(clean.spec.value("Balances", "TotalIssuance"), "little")
-    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance + sum(RESERVES.values())})
     key = "0x" + account_key(extra).hex()
     signing_code, code, out = clean.run_respelled(capsys, lambda top: top.update({key: "0x " + top[key][2:]}))
     assert (signing_code, code) == (2, 2), out
@@ -7039,14 +8901,9 @@ def test_cli_refuses_the_red_teams_short_scale_genesis(clean, capsys):
     assert "MAINNET LAUNCH PREFLIGHT: REFUSE (input) chain spec raw storage: " in out
 
 
-def set_guardian(clean, entry) -> None:
-    put(clean.spec, "RootTimelock", "Guardian", lp.role_account(entry))
-    clean.launch["roles"]["guardian"] = [entry]
-
-
 def test_cli_refuses_a_guardian_one_keyholder_runs_through_a_nested_multisig(clean, capsys):
     entry, [(key, paths)] = repeated_member()
-    set_guardian(clean, entry)
+    clean.hold("guardian", entry)
     code, out = clean.run(capsys)
     assert code == 1
     assert lone_holder("7 timelock", "roles.guardian[0]", key, paths, GUARDIAN_POWER) in out
@@ -7054,8 +8911,7 @@ def test_cli_refuses_a_guardian_one_keyholder_runs_through_a_nested_multisig(cle
 
 def test_cli_refuses_root_one_keyholder_runs_through_a_nested_multisig(clean, capsys):
     entry, [(key, paths)] = repeated_member()
-    put(clean.spec, "Sudo", "Key", lp.role_account(entry))
-    clean.launch["roles"]["sudo"] = [entry]
+    clean.hold("sudo", entry)
     code, out = clean.run(capsys)
     assert code == 1
     assert lone_holder("1 dev-keys", "roles.sudo[0]", key, paths, SUDO_POWER) in out
@@ -7063,7 +8919,7 @@ def test_cli_refuses_root_one_keyholder_runs_through_a_nested_multisig(clean, ca
 
 @pytest.mark.parametrize("count, code", [(10, 0), (11, 1)])
 def test_cli_bounds_the_guardian_by_the_runtime_max_signatories(clean, capsys, count, code):
-    set_guardian(clean, msig(2, *(fresh_account() for _ in range(count))))
+    clean.hold("guardian", msig(2, *(fresh_account() for _ in range(count))))
     exit_code, out = clean.run(capsys)
     assert exit_code == code, out
     assert (too_many_signatories("7 timelock", "roles.guardian[0]", count) in out) == (code == 1)
@@ -7072,8 +8928,7 @@ def test_cli_bounds_the_guardian_by_the_runtime_max_signatories(clean, capsys, c
 @pytest.mark.parametrize("threshold", [1, 2])
 def test_cli_refuses_root_held_by_a_multisig_with_a_dev_member(clean, capsys, threshold):
     members = [ALICE, *clean.sudo_members[:2]]
-    put(clean.spec, "Sudo", "Key", lp.multisig_account(members, threshold))
-    clean.launch["roles"]["sudo"] = [msig(threshold, *members)]
+    clean.hold("sudo", msig(threshold, *members))
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] roles.sudo[0].members[0]: //Alice (sr25519)" in out
@@ -7081,8 +8936,7 @@ def test_cli_refuses_root_held_by_a_multisig_with_a_dev_member(clean, capsys, th
 
 def test_cli_refuses_root_declared_by_its_flat_address(clean, capsys):
     hidden = lp.multisig_account([ALICE, *clean.sudo_members[:2]], 1)
-    put(clean.spec, "Sudo", "Key", hidden)
-    clean.launch["roles"]["sudo"] = [ss58(hidden)]
+    clean.hold("sudo", ss58(hidden))
     code, out = clean.run(capsys)
     assert code == 1
     assert SUDO_FLAT in out
@@ -7102,30 +8956,29 @@ PASS = "MAINNET LAUNCH PREFLIGHT: PASS"
 def test_cli_passes_root_held_by_a_nested_multisig_whose_every_key_proves_possession(clean, capsys):
     entry = nested_multisig()
     entry["members"][2]["members"][0] = role_key(fresh_ecdsa_key())
-    put(clean.spec, "Sudo", "Key", lp.role_account(entry))
-    clean.launch["roles"]["sudo"] = [entry]
+    clean.hold("sudo", entry)
     code, out = clean.run(capsys)
     assert (code, out.strip()) == (0, PASS)
 
 
 def test_cli_refuses_a_multisig_member_whose_holder_gave_no_pop(clean, capsys):
     members = [*clean.sudo_members[:2], stranger()]
-    put(clean.spec, "Sudo", "Key", lp.multisig_account(members, 2))
-    clean.launch["roles"]["sudo"] = [{"threshold": 2, "members": [*map(ss58, members[:2]), {"key": ss58(members[2])}]}]
+    clean.hold("sudo", {"threshold": 2, "members": [*map(ss58, members[:2]), {"key": ss58(members[2])}]})
     code, out = clean.run(capsys)
     assert code == 1
-    assert out.splitlines()[1:] == ["  " + no_pop("roles.sudo[0].members[2]", "sudo", "0 2")], out
+    assert out.splitlines()[1:] == ["  " + no_pop("roles.sudo[0].members[2]", "sudo", "0 2"),
+                                    "  " + no_provider("sudo", 2, members[2])], out
 
 
-@pytest.mark.parametrize("role, item", [("sudo", ("Sudo", "Key")), ("guardian", ("RootTimelock", "Guardian"))])
-def test_cli_refuses_a_multisig_member_that_is_the_all_zero_key_with_its_no_secret_pop(clean, capsys, role, item):
+@pytest.mark.parametrize("role", ["sudo", "guardian"])
+def test_cli_refuses_a_multisig_member_that_is_the_all_zero_key_with_its_no_secret_pop(clean, capsys, role):
     members = [fresh_account(), fresh_account(), ZERO_KEY]
-    put(clean.spec, *item, lp.multisig_account(members, 2))
-    clean.launch["roles"][role] = [{"threshold": 2, "members": [
-        *map(ss58, members[:2]), {"key": ss58(ZERO_KEY), "pop": "0x" + NO_SECRET_POP.hex()}]}]
+    clean.hold(role, {"threshold": 2, "members": [
+        *map(ss58, members[:2]), {"key": ss58(ZERO_KEY), "pop": "0x" + NO_SECRET_POP.hex()}]})
     code, out = clean.run(capsys)
     where = f"roles.{role}[0].members[2]"
-    assert (code, out.splitlines()[1:]) == (1, ["  " + all_zero(where), "  " + no_secret(where)]), out
+    assert (code, out.splitlines()[1:]) == (1, ["  " + all_zero(where), "  " + no_secret(where),
+                                                "  " + no_provider(role, 2, ZERO_KEY)]), out
 
 
 # The red team's proof of concept: one authority's aura key replaced by the all-zero key, or its grandpa key by
@@ -7151,10 +9004,12 @@ def test_cli_refuses_an_authority_key_anyone_can_sign_for_wherever_the_launch_na
 def test_cli_refuses_root_whose_other_member_anyone_holds(clean, capsys, label, pair):
     KEYHOLDERS[pair[0]] = lambda message: sr25519.sign(pair, message)
     members = [clean.sudo_members[0], pair[0]]
-    put(clean.spec, "Sudo", "Key", lp.multisig_account(members, 2))
-    clean.launch["roles"]["sudo"] = [msig(2, *members)]
+    clean.hold("sudo", msig(2, *members))
     code, out = clean.run(capsys)
     assert (code, out.splitlines()[1:]) == (1, [
+        f"  [1 dev-keys] System.Account: {label} (sr25519) is in genesis",
+        f"  [1 dev-keys] Motra.AccrualCheckpoint: {label} (sr25519) is in genesis",
+        f"  [1 dev-keys] roles.endowed[4]: {label} (sr25519)",
         f"  [1 dev-keys] roles.sudo[0].members[1]: {label} (sr25519)",
         "  " + helped_holder("1 dev-keys", "roles.sudo[0]", members[0], "members[0]", ["members[1]"], SUDO_POWER)]), out
 
@@ -7379,26 +9234,24 @@ def test_cli_refuses_a_lock_with_no_datum(clean, capsys):
 
 
 def test_cli_refuses_a_lock_smaller_than_what_materios_can_issue(clean, capsys):
-    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 975_000 * MATRA})
+    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: issuance_of(clean.spec) - 1})
     code, out = clean.run(capsys)
     assert code == 1
-    assert "counted both as cMATRA and as MATRA" in out
+    assert "the difference is MATRA no cMATRA backs" in out
 
 
 def test_cli_refuses_a_pending_withdrawal_planted_in_raw_genesis(clean, capsys):
     clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 10**30})
-    stray = lp.storage_key("Billing", "PendingWithdrawals")
     clean.spec.storage[map_key("Billing", "PendingWithdrawals", fresh_account())] = \
         (10**30).to_bytes(16, "little") + bytes(4)
     code, out = clean.run(capsys)
     assert code == 1
-    assert f"[4 supply] genesis sets storage 0x{stray.hex()} (1 entry), which a mainnet genesis may not set" in out
+    assert "[4 supply] genesis sets Billing.PendingWithdrawals (1 entry), which a mainnet genesis may not set" in out
 
 
-def test_cli_refuses_a_negative_fee_buffer_that_would_lower_the_endowment_floor(clean, capsys):
-    endow(clean.spec, clean.attestor, 0)
+def test_cli_refuses_a_negative_economics_value_as_unreadable(clean, capsys):
     signed = copy.deepcopy(clean.launch)
-    clean.launch["economics"]["fee_buffer"] = -FLOOR
+    clean.launch["economics"]["fee_buffer"] = -1
     code, out = clean.run(capsys, signed_launch=signed)
     assert code == 2 and "economics.fee_buffer must be a non-negative integer" in out
 
@@ -7451,8 +9304,9 @@ def test_cli_refuses_a_local_chain_type(clean, capsys):
 
 
 def test_cli_refuses_a_dev_key_in_the_cardano_committee(clean, capsys):
-    clean.candidates = legacy_datum([(bytes([2]) + fresh_account(), ALICE, fresh_account())])
-    clean.launch["nodes"].append(clean.authority("val9", ALICE, fresh_account()))
+    cross_chain = cross_chain_of(ALICE)
+    clean.candidates = legacy_datum([(cross_chain, ALICE, fresh_account())])
+    clean.launch["nodes"].append(clean.authority("val9", ALICE, fresh_account(), cross_chain))
     code, out = clean.run(capsys)
     assert code == 1
     assert "[1 dev-keys] Cardano permissioned candidate 0 aura: //Alice (sr25519)" in out
@@ -7616,7 +9470,8 @@ def test_cli_refuses_a_non_raw_spec_as_an_input_error(tmp_path, capsys):
     plain = tmp_path / "plain.json"
     plain.write_text(json.dumps({"genesis": {"runtimeGenesis": {"patch": {}}}}))
     code = lp.main(["check", "--spec", str(plain), "--launch", str(plain), "--signed-manifest", str(plain),
-                    "--manifest-key", "0x00", "--kupo", "http://127.0.0.1:9", "--subwasm", "subwasm"])
+                    "--manifest-key", "0x00", "--kupo", "http://127.0.0.1:9", "--subwasm", "subwasm",
+                    "--extra-well-known", str(plain)])
     assert code == 2
     assert "needs the raw chain spec" in capsys.readouterr().err
 

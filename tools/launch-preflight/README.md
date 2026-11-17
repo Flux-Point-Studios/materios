@@ -12,8 +12,12 @@ It reads:
   [subwasm](https://github.com/chevdor/subwasm) v0.21.3;
 - **Cardano mainnet through a Kupo index**: the cMATRA lock that backs genesis,
   and the D-parameter and permissioned candidates datums, which the runtime
-  draws the committee from at each rotation. A draw that fails, as a fresh
-  chain's first one does, seats the genesis committee again (rule 9);
+  draws the committee from at each rotation, with the slot each was created in
+  and the slot Kupo's node is at. A draw that fails, as a fresh chain's first
+  one does, seats the genesis committee again (rule 9);
+- the **partner-chains-smart-contracts v8.1.0 scripts** the genesis UTXO
+  parameterises, vendored in `partner_chains_scripts.json` (see
+  [Partner chain scripts](#partner-chain-scripts));
 - **each public RPC URL, live**: the methods it lists and whether it answers
   an unsafe one, over HTTP and over a WebSocket;
 - **each authority's running node argv**: a copy of its
@@ -42,17 +46,18 @@ It reads:
 
 | Rule | Refuses when |
 |---|---|
-| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. A role, or any member of a role's multisig, is the all-zero key, whose sr25519 signature of any message needs no secret (see [Proof of possession](#proof-of-possession)), or an ed25519 key of small order, whose ed25519 signature of any message needs none either, so anyone can sign as its account. An authority key anyone can sign for (see [Keys anyone can sign for](#keys-anyone-can-sign-for)): an aura key that is the all-zero key, or a grandpa key that is an ed25519 key of small order, in genesis `Aura.Authorities`, `Grandpa.Authorities`, `SessionCommitteeManagement.CurrentCommittee` or `Session.ValidatorsAndKeys`, as a declared authority's `aura` or `grandpa`, or as a Cardano permissioned candidate's `aura` or `gran`. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` does not need two keyholders to act (see [Multisig roles](#multisig-roles)), or a genesis account is not the account of any declared role, so who holds it is unchecked. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
-| 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. |
+| 1 dev-keys | A well-known key appears in genesis storage, in the runtime code, in a role or any member of a role's multisig, in a Cardano permissioned candidate, in a node's launch command or environment (`--alice`, `--dev`, any bare `//Path` URI such as `//Bob` or `//Oracle`, with or without a `///password`, a setting named for a secret URI (`SIGNER_URI`, `--suri`: a name holding uri, seed, mnemonic, phrase or secret, and not ending in file, path or dir) whose value has no phrase, such as the soft path `/Attestor0`, the dev mnemonic, or the dev seed in 0x-hex), or as the manifest signing key. A role, or any member of a role's multisig, is the all-zero key, whose sr25519 signature of any message needs no secret (see [Proof of possession](#proof-of-possession)), or an ed25519 key of small order, whose ed25519 signature of any message needs none either, so anyone can sign as its account. An authority key anyone can sign for (see [Keys anyone can sign for](#keys-anyone-can-sign-for)): an aura key that is the all-zero key, or a grandpa key that is an ed25519 key of small order, in genesis `Aura.Authorities`, `Grandpa.Authorities`, `SessionCommitteeManagement.CurrentCommittee` or `Session.ValidatorsAndKeys`, as a declared authority's `aura` or `grandpa`, or as a Cardano permissioned candidate's `aura` or `gran`. A role key of 33 bytes, or a multisig member's, whose first byte is not `0x02` or `0x03`, or whose other 32 are the x of no point on secp256k1, as about half of all values are: it is no compressed ECDSA key, and its account, blake2-256 of those bytes, is one no key signs as. An authority's `cross_chain` key that is no such point refuses as unreadable, and a Cardano permissioned candidate's partner chains key under rule 9. The curve test is the preflight's own arithmetic (x below the field prime, x³ + 7 a square), which a test holds to libsecp256k1. `Sudo.Key` is not the account `roles.sudo` declares, `roles.sudo` does not need two keyholders to act (see [Multisig roles](#multisig-roles)), or a genesis account is not the account of any declared role or the Treasury's (the `modl` account of the runtime's `Treasury.PalletId`, which the Treasury's genesis endows its existential deposit), so who holds it is unchecked. Genesis `OrinqReceipts.CommitteeMembers`, the attestation committee seated from block zero, is not exactly the accounts `roles.attestors` declares, written as SCALE encodes a set and build-spec writes it, a compact count and then each account once in ascending order with nothing after, or lists more entries than the runtime's `OrinqReceipts.MaxCommitteeSize`: the runtime counts every listed entry against that bound before it drops the repeats, so 97 entries of three attestors decode as no committee at all, and no receipt is certified; or `OrinqReceipts.AttestationThreshold` is not the declared `attestation_threshold`, is unset, or is outside 1 to the committee's size; or the launch declares no `attestation_threshold`. A role in `sudo`, `anchor_signer`, `attestors`, `oracle` is not declared, or `anchor_signer` or `attestors` is empty. The chain spec's `chainType` is not `Live`, or its name reads as a test network: the anchor worker would then accept a dev signer. |
+| 2 rewards | `economics` does not declare the attestor reward per signer, era cap base and era cap baseline, or genesis does not store exactly those values; or it does not declare the validator reward per era and the treasury emission share (perbill), or they differ from the runtime constants `OrinqReceipts.ValidatorRewardPerEra` and `OrinqReceipts.TreasuryEmissionShare`. Genesis `OrinqReceipts.ReceiptExpiryBlocks` is not the 14,400 blocks, a day, that the runtime's genesis writes (see [Genesis values no other rule reads](#genesis-values-no-other-rule-reads)). |
 | 3 rpc | A public RPC URL, probed live, lists in `rpc_methods` a method outside the safe set or answers `system_peers`, an unsafe method that changes nothing (see [Public RPC probe](#public-rpc-probe)); the launch does not declare `public_rpc`; an authority's running node process, read from its `cmdline` capture, serves unsafe RPC methods (`unsafe`, or the `auto` default on a loopback listener) on an external listener or behind a proxy route; a node runs `--validator` without being declared an authority; or a block author (a genesis `Aura.Authorities` key or a Cardano permissioned candidate's aura key) has no authority node in the manifest, so its listeners go unchecked. Every listener counts: the default one (`--rpc-port`, `--rpc-external`, `--rpc-methods`) and each `--experimental-rpc-endpoint listen-addr=...,methods=...`, including every value one `--experimental-rpc-endpoint` takes up to the next option, with each option trimmed as the node trims it. |
-| 4 supply | `roles.attestors` is empty, an attestor is endowed below `BondRequirement + ExistentialDeposit + fee_buffer`, `Balances.TotalIssuance` differs from what the genesis accounts hold (free plus reserved), or genesis issuance plus the runtime's emission reserves exceeds the cMATRA the genesis lock holds on Cardano: the reserve would be counted both as cMATRA and as MATRA. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. The reserves are read from the metadata constants `OrinqReceipts.ValidatorEmissionReserve` and `OrinqReceipts.AttestationRewardReserve`; a runtime that does not declare them is refused, since what it mints after genesis cannot be bounded. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. |
+| 4 supply | Genesis does not fix its issuance: it sets no `OrinqReceipts.FixedIssuance`, so the runtime would mint its emission reserves after genesis. `OrinqReceipts.FixedIssuance` differs from `Balances.TotalIssuance`, `Balances.TotalIssuance` from what the genesis accounts hold (free plus reserved), or the fixed issuance from what the launch declares genesis endows: the launch's `dust` and the Treasury's existential deposit. A genesis account holds other than its declared dust, free and with nothing reserved, the Treasury other than `Balances.ExistentialDeposit`, an account no `dust` entry declares holds anything, or a `dust` entry names a role the launch does not declare, an account that is no entry of its role, or an account another entry endows, or endows less than `Balances.ExistentialDeposit`, under which the Balances genesis endows no account; the launch declares no `dust`. The rest of a genesis account's `System.Account` is not what the Balances genesis writes for an account it endows: nonce 0, no consumer, one provider, no sufficient, nothing frozen, and the flags `0x80000000000000000000000000000000` (pallet_balances' new-logic flag alone). A keyholder whose balance is frozen can reserve no multisig deposit, so its multisig never acts; a nonce refuses its first calls; and a reference count nothing took keeps or drops the account apart from its balance. Genesis issues one MATRA (10^6 base units, the runtime's `MATRA`) or more: a mainnet genesis issues dust. `OrinqReceipts.AttestationRewardPerSigner`, `ReceiptSubmissionFee`, `ReceiptSubmissionFeeFloor` or `BondRequirement` is unset or other than 0, as a fixed-issuance genesis stores them. The issuance exceeds the cMATRA the genesis lock holds on Cardano; no emission reserve counts against the lock, since a fixed issuance mints none. The lock must be an unspent output at the declared mainnet address, which pays to the declared native script; that script must need at least two key holders to spend it (a well-known key counts as anyone's, a time bound as met), and the output's inline datum must be this genesis hash, so one lock cannot back two genesis attempts. A Plutus lock is refused: the preflight cannot evaluate one. Genesis sets storage outside `GENESIS_STORAGE`, each pallet's storage version and `:code`/`:extrinsic_index`: any other item (a billing withdrawal, a credit entry, a key no runtime item declares) can hold a claim on MATRA the bound does not count. `OrinqReceipts.BackupSigners` and `BackupSignerDelay` are outside it: build-spec writes neither, and Root names backup signers after genesis. So is a key that starts with the 32-byte key of an allowlisted item that is no map, such as `Sudo.Key` followed by another byte: the runtime reads a storage value at its own key alone. A pallet's storage version, or another value no rule reads, is not the one build-spec writes (see [Genesis values no other rule reads](#genesis-values-no-other-rule-reads)). |
 | 5 pallets | `PerpEngine` is in the runtime metadata, under its own name or any other (its `pallet_perp_engine` types give it away). |
-| 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Genesis may store `System.LastRuntimeUpgrade` only as build-spec writes it for its code, that code's spec version and spec name, or not at all: frame-executive runs a runtime's migrations when its spec version is above the stored one or its name differs, so another value runs them at block 1 or skips them at a later upgrade. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
+| 6 checkpoint | The genesis hash, runtime code hash, chain-spec hash or launch manifest hash differs from the signed launch manifest, the signature does not verify under a key `launch_keys.json` pins (or no key is pinned, or the key given with `--manifest-key` is not pinned), the spec carries `codeSubstitutes`, or an authority runs `--wasm-runtime-overrides`, which would replace the signed code. Genesis may store `System.LastRuntimeUpgrade` only as build-spec writes it for its code, that code's spec version and spec name, or not at all: frame-executive runs a runtime's migrations when its spec version is above the stored one or its name differs, so another value runs them at block 1 or skips them at a later upgrade. Also refuses a genesis that sets the `NativeTokenManagement` observation scripts, or stores them as anything but the empty configuration build-spec writes. The launch plan's checkpoint canary runs the real observation from the genesis checkpoint and requires zero transfers from the genesis-lock transaction and at least one from a canary deposit made after it. This runtime's observation has no checkpoint: until its first non-zero transfer it asks for every transfer since Cardano genesis, so it would count the genesis lock and the canary cannot pass. |
 | 7 timelock | Genesis sets no `RootTimelock.Guardian`, or one that is `Sudo.Key`; `roles.guardian` does not declare exactly one guardian whose account is the genesis guardian, or that guardian does not need two keyholders to act or has a multisig as a member (see [Multisig roles](#multisig-roles)); or any account in the guardian, the multisig or a member at any depth, is also the sudo multisig, one of its members or `Sudo.Key`: the guardian vetoes the sudo key's queued Root calls, so its keyholders must be apart from the sudo key's. Genesis sets no `RootTimelock.Delays`, or a delay below the runtime's mainnet delay for its class (`RootTimelock.DefaultDelays`: 1, 7 and 30 days), a long delay above `RootTimelock.MaxDelay` (90 days), or delays out of the runtime's order 0 < recovery <= standard <= long. Both constants are read from the runtime metadata; a runtime that does not declare them is refused. The preprod genesis fails this rule: its delays are minutes, and its guardian is the sudo keyholders' 3-of-3. |
-| 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). Its running node answers `system_chain`, `system_chainType` or `system_properties` with other than the checked spec's name, chain type (`Live` when the spec names none) or properties (none as `{}`), or a step of its `--chain` path (a directory on it, or the file) last changed less than a full second before its node process started: the node reads its spec once, at its start, and keeps it when the file is replaced, and a spec can hold the checked genesis under another name, or with a code substitute that runs other code. An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. Also refuses a spec whose runtime, run by the authority's node binary at block one, holds a chain id other than the genesis hash: any metadata constant whose name holds `ChainId` or `GenesisHash`; or whose genesis `IntentSettlement.CardanoIds`, as that node reads it with the runtime's own types, is not what the preflight reads from the raw spec, so rule 11 would have checked other ids than the chain binds. See [Node attestation](#node-attestation). |
-| 9 committee | Genesis `SessionCommitteeManagement.CurrentCommittee` is not exactly the declared authorities' `aura` and `grandpa` key pairs, each once, two of its members share a cross-chain key, or it lists more members than the runtime's `SessionCommitteeManagement.MaxValidators`, read from the runtime metadata (a runtime that does not declare it is refused). The runtime seats this committee at every rotation whose Cardano draw fails, and a fresh chain's first draw fails, since the live-quorum floor counts no candidate that has not authored yet: an empty committee halts the chain there (GRANDPA refuses an empty authority set), an undeclared member authors and finalizes unchecked, and a committee past MaxValidators does not decode and reads as empty. The committee serves another epoch than the 0 build-spec writes: the node takes only an epoch-0 committee as the genesis one, and otherwise asks Cardano at block 1 for the committee of the epoch after it instead of the current one's, which it cannot derive for an epoch that began before Cardano's first, so the chain never authors block 1. Genesis `Aura.Authorities` or `Grandpa.Authorities` is not exactly the declared authorities' `aura` or `grandpa` keys, each once, a voter at weight 1 as build-spec writes them: a key listed twice, or a weight above 1, counts as several authors or voters. Genesis `Grandpa.CurrentSetId` is set and not 0, or `Grandpa.SetIdSession` is not build-spec's one entry, set 0 beginning in session 0: every GRANDPA client starts the genesis authority set at set id 0, and a node that warp- or state-syncs takes the runtime's set id instead, so it would hold another set id than the one its peers sign votes and justifications under. `Session.ValidatorsAndKeys` is not the committee as the session genesis writes it (each member's account, blake2-256 of its cross-chain key, with its session keys, in the committee's order), or `PalletSession.QueuedKeys` or `PalletSession.Validators` is not the empty list build-spec writes: the session keys they hold would go unchecked. Two authorities declare the same `aura` or `grandpa` key: two nodes that sign with one key equivocate. A Cardano permissioned candidate's `gran` key is not the `grandpa` key that the authority with its `aura` key declares: the candidates vote on finality with those keys once the committee is drawn from Cardano. A declared authority's `aura` key is on no permissioned candidate: Ariadne seats every candidate when all fit, so the first committee drawn from Cardano leaves that authority out, and a datum of 2 of 4 authorities seats a committee of 2, which GRANDPA needs both of to finalize, so it tolerates no fault. The permissioned candidates datum holds a candidate Ariadne drops (a partner chains key not 33 bytes, an `aura` or `gran` key not 32), one that repeats an earlier candidate's key (the runtime keeps the first), or fewer than two candidates the runtime can seat: from fewer than two it draws no committee, and every rotation seats the genesis committee again. The D-parameter seats registered candidates (a Cardano stake pool that registers would join the committee, and the preflight reads no registration), fewer permissioned seats than the datum's candidates (Ariadne would draw the seats at random, with repeats, so a declared authority could be left out), or more than `MaxValidators` (the runtime refuses a whole draw past a cap of its own that its metadata does not declare). The node reads both datums with partner-chains v1.5.1's decoder: a legacy datum or version 0 of the versioned one; any other version refuses as unreadable. The launch declares no `slots_per_epoch`, genesis `Sidechain.SlotsPerEpoch` is absent (the runtime then reads partner-chains' default of 60) or not that declared length, it is 0 (the runtime divides each block's slot by it as it initializes the block, so block 1 traps), or a session of that many slots of the runtime's `Aura.SlotDuration` does not divide Cardano's 432,000-second epoch, as partner-chains' sidechain-slots requires: a session longer than a Cardano epoch skips the committees Cardano holds for the epochs it spans, and in a session that began before Cardano's first epoch, as one of 2^32-1 slots did, the node cannot draw block 1's committee, so the chain never authors it. A runtime whose metadata declares no `Aura.SlotDuration` is refused. The launch declares no `cardano_follower`, or one other than Cardano mainnet's (see [Launch manifest](#launch-manifest)); or an authority does not set each of those settings, or sets one, in its `env` or anywhere in its launch, to any other value or spelling than the declared one: every node derives Cardano's epochs and slots, and which Cardano blocks are stable, from them, so an authority whose settings differ from its peers' draws another committee or judges another Cardano block stable, and refuses the committee changes and blocks they make. A launch that declares none is held to Cardano mainnet's. |
+| 8 node | An authority's running node serves another genesis than the one the preflight computes, which the manifest signs and the lock's datum binds; its own node binary, run offline on the options its node process runs with, builds another genesis than that one; the binary is not the one `exe_sha256` pins; the file its `--chain` names, as captured, is not the checked spec byte for byte; or its `--chain` names a chain built into the node, or is not given (the node then loads its built-in `local`, or `dev` under `--dev`). Its running node answers `system_chain`, `system_chainType` or `system_properties` with other than the checked spec's name, chain type (`Live` when the spec names none) or properties (none as `{}`), or a step of its `--chain` path (a directory on it, or the file) last changed less than a full second before its node process started: the node reads its spec once, at its start, and keeps it when the file is replaced, and a spec can hold the checked genesis under another name, or with a code substitute that runs other code. An option the preflight does not know, a node that cannot run here or builds no genesis from the checked spec, and a spec that names `telemetryEndpoints` refuse as unreadable. Also refuses a spec whose runtime, run by the authority's node binary at block one, holds a chain id other than the genesis hash: any metadata constant whose name holds `ChainId` or `GenesisHash`; or whose genesis `IntentSettlement.CardanoIds`, as that node reads it with the runtime's own types, is not what the preflight reads from the raw spec, so rule 11 would have checked other ids than the chain binds. The checked spec is not the one the authority's pinned node binary builds from the launch manifest, run offline on `build-spec --chain mainnet:<manifest> --raw`: a genesis storage key or value differs (each named, by pallet and item), the runtime code is not the one the binary embeds, genesis holds child storage or anything besides its top storage, or a field other than `bootNodes` differs or is one the node's build does not write (`codeSubstitutes`, `forkBlocks`, `badBlocks`, `forkId` among them); or the binary refuses the manifest. See [Node attestation](#node-attestation) and [The node's own build](#the-nodes-own-build). |
+| 9 committee | Genesis `SessionCommitteeManagement.CurrentCommittee` is not exactly the declared authorities' `aura` and `grandpa` key pairs, each once, two of its members share a cross-chain key, or it lists more members than the runtime's `SessionCommitteeManagement.MaxValidators`, read from the runtime metadata (a runtime that does not declare it is refused). The runtime seats this committee at every rotation whose Cardano draw fails, and a fresh chain's first draw fails, since the live-quorum floor counts no candidate that has not authored yet: an empty committee halts the chain there (GRANDPA refuses an empty authority set), an undeclared member authors and finalizes unchecked, and a committee past MaxValidators does not decode and reads as empty. The committee serves another epoch than the 0 build-spec writes: the node takes only an epoch-0 committee as the genesis one, and otherwise asks Cardano at block 1 for the committee of the epoch after it instead of the current one's, which it cannot derive for an epoch that began before Cardano's first, so the chain never authors block 1. Genesis `Aura.Authorities` or `Grandpa.Authorities` is not exactly the declared authorities' `aura` or `grandpa` keys, each once, a voter at weight 1 as build-spec writes them: a key listed twice, or a weight above 1, counts as several authors or voters. Genesis `Grandpa.CurrentSetId` is set and not 0, or `Grandpa.SetIdSession` is not build-spec's one entry, set 0 beginning in session 0: every GRANDPA client starts the genesis authority set at set id 0, and a node that warp- or state-syncs takes the runtime's set id instead, so it would hold another set id than the one its peers sign votes and justifications under. `Session.ValidatorsAndKeys` is not the committee as the session genesis writes it (each member's account, blake2-256 of its cross-chain key, with its session keys, in the committee's order), or `PalletSession.QueuedKeys` or `PalletSession.Validators` is not the empty list build-spec writes: the session keys they hold would go unchecked. Two authorities declare the same `aura` or `grandpa` key: two nodes that sign with one key equivocate. A Cardano permissioned candidate's `gran` key is not the `grandpa` key that the authority with its `aura` key declares: the candidates vote on finality with those keys once the committee is drawn from Cardano. A declared authority's `aura` key is on no permissioned candidate: Ariadne seats every candidate when all fit, so the first committee drawn from Cardano leaves that authority out, and a datum of 2 of 4 authorities seats a committee of 2, which GRANDPA needs both of to finalize, so it tolerates no fault. The permissioned candidates datum holds a candidate Ariadne drops (a partner chains key not 33 bytes, an `aura` or `gran` key not 32), one that repeats an earlier candidate's key (the runtime keeps the first), or fewer than two candidates the runtime can seat: from fewer than two it draws no committee, and every rotation seats the genesis committee again. The D-parameter seats registered candidates (a Cardano stake pool that registers would join the committee, and the preflight reads no registration), fewer permissioned seats than the datum's candidates (Ariadne would draw the seats at random, with repeats, so a declared authority could be left out), or more than `MaxValidators` (the runtime refuses a whole draw past a cap of its own that its metadata does not declare). The node reads both datums with partner-chains v1.5.1's decoder: a legacy datum or version 0 of the versioned one; any other version refuses as unreadable. A genesis committee member's cross-chain key, or a Cardano permissioned candidate's partner chains key, is not the `cross_chain` key the authority with its aura and grandpa keys (a candidate: its aura key) declares: genesis would seat it under a partner-chain key no declared authority holds, and file its session keys under that key's account, and a committee drawn from Cardano would seat it so. The launch declares no `partner_chain`, genesis `Sidechain.GenesisUtxo` is not its `genesis_utxo`, or `partner_chain.committee_candidate_address`, `d_parameter_policy_id` or `permissioned_candidates_policy_id`, or genesis `SessionCommitteeManagement.MainChainScriptsConfiguration`'s address or policies, are not what the genesis UTXO derives (see [Partner chain scripts](#partner-chain-scripts)): a genesis that names other scripts draws its committee from datums the setup never made. The D-parameter or permissioned candidates output was created in a Cardano epoch later than two before the launch epoch: the followers serve an epoch's committee from the data of the epoch two before it, so for a chain whose first block is authored now the output is not there, the follower finds no data and no node authors block 1 until Cardano reaches the output's epoch plus two. The launch epoch is the one in which the session that holds the tip of Kupo's node started: block 1 asks for the committee of the Cardano epoch its session started in, and a session, genesis `Sidechain.SlotsPerEpoch` slots of the runtime's `Aura.SlotDuration`, starts at a multiple of its length since the Unix epoch. A Cardano epoch starts at 21:44:51 UTC and an hour's session on the hour, so for the first 909 seconds of an epoch the launch epoch is the one before the tip's. The refusal names the earliest valid launch epoch and when its first session starts. A candidate's partner chains key that is 33 bytes and no compressed secp256k1 point refuses: its seat would be filed under an account no one holds. Epochs are Cardano mainnet's Shelley layout (epoch 208 from slot 4,492,800 at 2020-07-29T21:44:51Z, 432,000 one-second slots each); a slot before it refuses as unreadable, and so does a committee output Kupo gives no `created_at` slot for. The launch declares no `slots_per_epoch`, genesis `Sidechain.SlotsPerEpoch` is absent (the runtime then reads partner-chains' default of 60) or not that declared length, it is 0 (the runtime divides each block's slot by it as it initializes the block, so block 1 traps), or a session of that many slots of the runtime's `Aura.SlotDuration` does not divide Cardano's 432,000-second epoch, as partner-chains' sidechain-slots requires: a session longer than a Cardano epoch skips the committees Cardano holds for the epochs it spans, and in a session that began before Cardano's first epoch, as one of 2^32-1 slots did, the node cannot draw block 1's committee, so the chain never authors it. A runtime whose metadata declares no `Aura.SlotDuration` is refused. The launch declares no `cardano_follower`, or one other than Cardano mainnet's (see [Launch manifest](#launch-manifest)); or an authority does not set each of those settings, or sets one, in its `env` or anywhere in its launch, to any other value or spelling than the declared one: every node derives Cardano's epochs and slots, and which Cardano blocks are stable, from them, so an authority whose settings differ from its peers' draws another committee or judges another Cardano block stable, and refuses the committee changes and blocks they make. A launch that declares none is held to Cardano mainnet's. |
 | 10 possession | A member of a multisig, in any role and at any depth, is not proven held: it is a bare key or the all-zero key, it gives no `pop`, or its `pop` is not its key's signature (sr25519, or ECDSA for a 33-byte key) of its challenge, which binds the domain, the chain spec's name and id, the genesis hash, the launch manifest hash, its role and its position. A member no one proves to hold can be the address of a multisig no one declared, which no secret signs for, so the multisig it is in needs fewer keyholders, or other ones, than it reads. See [Proof of possession](#proof-of-possession). |
-| 11 settlement | Genesis `IntentSettlement.CardanoIds`, the Cardano network settlement binds, is absent (settlement then refuses every voucher, settlement and expiry), holds a network magic other than Cardano mainnet's 764824073 or a Shelley genesis hash other than mainnet's `1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81`, or binds an `aegis_policy_v1` script hash other than the one `settlement.aegis_policy_v1_script_hash` declares, none where it declares one, or any where it declares null; or the launch declares neither. The policy takes the chain's genesis hash as a parameter, so a launch may bind it only after genesis: it declares null, genesis binds none, and Root binds the deployed hash with `IntentSettlement.bind_aegis_policy_v1`, which binds one only while none is bound; until then settlement refuses every voucher, settlement and expiry on Cardano mainnet. Every voucher the committee signs commits to the network magic and the Aegis policy, and all settlement and expiry evidence must name the Shelley genesis, so a chain launched with another network's ids settles against that network. The preflight holds every launch to Cardano mainnet (rule 9). Mainnet's ids are those its published environment gives (book.world.dev.cardano.org/environments/mainnet): the `networkMagic` of its `shelley-genesis.json`, and that file's blake2b-256, which its `config.json` publishes as `ShelleyGenesisHash`; `fixtures/cardano-mainnet-*.json` are those files, and a test holds the preflight to them. |
+| 11 settlement | Genesis `IntentSettlement.CardanoIds`, the Cardano network settlement binds, is absent (settlement then refuses every voucher, settlement and expiry), holds a network magic other than Cardano mainnet's 764824073 or a Shelley genesis hash other than mainnet's `1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81`, or binds an `aegis_policy_v1` script hash other than the one `settlement.aegis_policy_v1_script_hash` declares, none where it declares one, or any where it declares null; or the launch declares neither. The policy takes the chain's genesis hash as a parameter, so a launch may bind it only after genesis: it declares null, genesis binds none, and Root binds the deployed hash with `IntentSettlement.bind_aegis_policy_v1`, which binds one only while none is bound; until then settlement refuses every voucher, settlement and expiry on Cardano mainnet. Every voucher the committee signs commits to the network magic and the Aegis policy, and all settlement and expiry evidence must name the Shelley genesis, so a chain launched with another network's ids settles against that network. The preflight holds every launch to Cardano mainnet (rule 9). Mainnet's ids are those its published environment gives (book.world.dev.cardano.org/environments/mainnet): the `networkMagic` of its `shelley-genesis.json`, and that file's blake2b-256, which its `config.json` publishes as `ShelleyGenesisHash`; `fixtures/cardano-mainnet-*.json` are those files, and a test holds the preflight to them. Genesis `IntentSettlement.IntentTTL`, `ClaimTTL` or `MinSignerThreshold` is not the runtime's own default (its metadata constants `DefaultIntentTTL`, `DefaultClaimTTL` and `DefaultMinSignerThreshold`, which its genesis stores), or `PoolUtilization`, `SettlementStorageVersion`, `StcaCutoverBlock` or `PolicyExpireCutoverBlock` is not what the settlement genesis writes (see [Genesis values no other rule reads](#genesis-values-no-other-rule-reads)). |
+| 12 dust | A role signer has no provider at genesis (no `System.Account`, or one with no provider), or holds free less than its floor: the deposits its roles reserve, each read from the runtime metadata (`Multisig.DepositBase` and `DepositFactor`, `Recovery.ConfigDepositBase`, `FriendDepositFactor` and `RecoveryDeposit`), and, left free once they are reserved, the larger of `Balances.ExistentialDeposit`, which keeps the account, and its working dust, which generates the MOTRA its role's calls cost, a runtime upgrade among a sudo keyholder's and the enactor's (see [MOTRA and working dust](#motra-and-working-dust)). A runtime that does not declare one of those constants, or `Aura.SlotDuration`, is refused. The signers are each keyholder, at any depth, of a `sudo` or `guardian` multisig, or of a multisig entry of a signing role, who reserves `DepositBase + DepositFactor x threshold` when it opens a call; the sudo account, which reserves `ConfigDepositBase + FriendDepositFactor x friends` for its recovery configuration when the launch names `recovery_friends`; each `recovery_rescuers` entry, which reserves `RecoveryDeposit`; and each `anchor_signer`, `attestors`, `oracle`, `enactor`, `gateway_sponsor` and `recovery_friends` entry. An account in several needs all their deposits and carries all their calls. No signed call moves MATRA and none is minted after genesis, so a signer below its floor can never sign, never pay its role's deposit, or never pay for its role's calls. Genesis `Motra.Params` is not mainnet's, byte for byte, or genesis does not hold a `Motra.AccrualCheckpoint` for exactly the accounts it endows, each the account's free balance held since block 0: the runtime generates an account's MOTRA from its checkpoint, so an account with none generates nothing. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal), including hex in
@@ -61,7 +66,9 @@ than its type (see [Stored numbers](#stored-numbers)), a node option the
 preflight does not know or a node that builds no genesis from the checked spec
 (see [Node attestation](#node-attestation)), a proxy
 config with no route the preflight can read, a Kupo that is unreachable,
-behind its node or does not index the permissioned candidates token, genesis
+behind its node, whose node's tip is not Cardano's now, or that does not index
+the permissioned candidates token, a node binary that prints no raw chain spec
+for the launch manifest (see [The node's own build](#the-nodes-own-build)), genesis
 committee scripts the runtime cannot decode (see [Usage](#usage)), and a
 public RPC URL whose answers the probe cannot resolve.
 
@@ -82,11 +89,15 @@ python3 launch_preflight.py check --spec mainnet-raw.json --launch launch.json \
     --extra-well-known ~/exposed-keys.json
 ```
 
+`--extra-well-known` is required: a mainnet launch is checked against the
+operator's table of exposed keys (see [Well-known keys](#well-known-keys)),
+and a table of no keys, `{"keys": []}`, is given as one when there is none.
+
 `sign` reads only the spec and the manifest, so the manifest can be signed
 before the nodes start, with each authority's node binary pinned by its sha256. Its `--key` file holds the 32-byte ed25519 seed as
 0x-hex, and at most the newline that ends its line. `check` also reads each
 authority's `cmdline`, `exe`, `chain_spec` and `served_genesis` captures, runs each authority's
-node binary offline, and calls each URL in `public_rpc`, so it runs once the
+node binary offline (on `export-blocks`, `chain-id` and `build-spec`), and calls each URL in `public_rpc`, so it runs once the
 launch's nodes and proxies are up, on a machine that can run each authority's
 binary (the same architecture, or one with qemu-user binfmt for it).
 
@@ -130,7 +141,14 @@ kupo --match <lock address> --match '<D-parameter policy>.*' \
 ```
 
 The preflight trusts that Kupo for what Cardano holds, and refuses when it is
-more than 300 slots behind its node. It reads each committee datum from the one
+more than 300 slots behind its node, or when its node's tip is more than 600
+seconds from the clock of the host `check` runs on, either way: a Kupo in step
+with a node that has itself stopped following Cardano lists every output as it
+stood at that node's tip. Cardano makes a block every 20 seconds on average, so
+a tip ten minutes old is a stopped node or a wrong clock; keep the host's clock
+set. The session that holds its node's tip gives the epoch rule 9 takes a
+launch to start in, so a committee output must be two epochs older than it:
+run `check` in the epoch the chain starts. It reads each committee datum from the one
 unspent output that holds its policy's token under the empty asset name; a
 token held by no unspent output, or by several, refuses as unreadable. The
 node's follower reads the output created last that holds the token, spent or
@@ -185,6 +203,122 @@ length is written in more bytes as undecodable, so as its default, and an
 empty genesis committee or no authors would launch where the preflight read
 the declared ones. Such a list refuses as unreadable.
 
+## Genesis values no other rule reads
+
+Rule 4's allowlist says which items genesis may set, and the other rules read
+what most of them hold. The rest are values the runtime's genesis builds
+hard-code, or its own defaults. Every node's genesis hash covers them, and a
+runtime upgrade reads the storage versions, so genesis must hold each one as
+build-spec writes it; a value that is absent, or of another length, refuses
+like another value.
+
+| Storage | Value build-spec writes | Rule |
+|---|---|---|
+| `:extrinsic_index` | 0, a u32 | 4 |
+| `System.UpgradedToU32RefCount`, `System.UpgradedToTripleRefCount` | set (`0x01`) | 4 |
+| `System.ParentHash`, `System.BlockHash[0]` | 32 bytes of `0x45`, frame_system's hash of block 0; `BlockHash` holds no other entry | 4 |
+| `Vesting.StorageVersion` | V1 (`0x01`) | 4 |
+| each pallet's `:__STORAGE_VERSION__:` | 5 for `Grandpa`; 1 for `Balances`, `Motra`, `Multisig` and `TeeAttestation`; 0 for every other pallet the metadata lists, as a u16 | 4 |
+| `NativeTokenManagement.MainChainScriptsConfiguration` | no policy, asset name or address: 30 zero bytes | 6 |
+| `OrinqReceipts.ReceiptExpiryBlocks` | 14,400, a day of blocks | 2 |
+| `IntentSettlement.IntentTTL`, `ClaimTTL`, `MinSignerThreshold` | the runtime metadata's `DefaultIntentTTL` (600), `DefaultClaimTTL` (28,800) and `DefaultMinSignerThreshold` (1) | 11 |
+| `IntentSettlement.PoolUtilization` | target 5,000 and cap 7,500 basis points, over a pool value and an outstanding coverage of 0 | 11 |
+| `IntentSettlement.SettlementStorageVersion` | 5 | 11 |
+| `IntentSettlement.StcaCutoverBlock`, `PolicyExpireCutoverBlock` | block 0, which closes the legacy settle and expire calls | 11 |
+
+A storage version below the one a pallet's code declares makes a later runtime
+upgrade run that pallet's migrations against storage already in the new
+layout, and one above it skips them. The versions are the preflight's own
+table: a runtime that bumps one is a new runtime to pin here. A test holds the
+table to the fixture the node builds, and a node test to the build of the
+real binary, read with that runtime's whole metadata.
+
+## MOTRA and working dust
+
+A signed call is paid in MOTRA, which an account's free MATRA generates.
+Rule 12 holds genesis `Motra.Params` to mainnet's parameters, byte for byte,
+since every dust floor is worked under them:
+
+| Field | Value |
+|---|---|
+| `min_fee` | 10^9 MOTRA base units (15 decimals), a u128 |
+| `congestion_rate` | 0, a u128: the weight of a call costs nothing until blocks run more than half full |
+| `target_fullness` | 500,000,000 parts per billion, a u32 |
+| `decay_rate_per_block` | 999,900,000 parts per billion, a u32: a balance keeps 99.99% a block |
+| `generation_per_matra_per_block` | 10^10, a u128: one MATRA (10^6 base units) generates 10^10 a block, a base unit 10^4 |
+| `max_balance` | 10^18, a u128 |
+| `max_congestion_step` | 10^9, a u128 |
+| `length_fee_per_byte` | 10^6, a u128 |
+| `congestion_smoothing` | 100,000,000 parts per billion, a u32 |
+
+These are `MotraParams::default()` with the generation a mainnet launch runs
+on; an absent `Motra.Params` reads as all zero, which generates nothing. The
+runtime generates an account's MOTRA from its `Motra.AccrualCheckpoint`, the
+free MATRA it has held since a block, so genesis must hold one for exactly the
+accounts it endows, the Treasury among them, each the account's free balance
+held since block 0, as the Balances genesis writes it. A missing checkpoint
+generates nothing; a lower one generates less than the dust does.
+
+Under those parameters a call of n bytes costs `10^9 + 10^6 x n` while the
+congestion rate is the 0 it starts at, and a balance that generates g a block
+settles at `g / (1 - 0.9999)`: 10^8 MOTRA for each free base unit of MATRA.
+MOTRA comes of free MATRA alone, so the preflight counts what an account has
+left once its deposits are reserved, the existential deposit included, and
+requires that its MOTRA never runs out under its role's calls, evenly spaced
+over a day of the runtime's blocks, and, for a key that signs an upgrade,
+never falls below the fee of the call that carries one. A fee f paid every k
+blocks holds a balance below where it settles by at most `f / (1 - 0.9999^k)`,
+right after a call; several roles' calls by at most the sum. The preflight
+bounds that in whole fractions (`0.9999^k <= 1 - x + x²/2` for `x = k / 10^4`,
+and a call may land a block early), and a test runs the pallet's rule block by
+block against it: at the working dust the balance holds, at 2% less it does
+not. Each key that signs for a role carries the role's calls: the entry's own
+key, or each key of its multisig at any depth, since the key that signs pays
+the fee of a call its multisig makes.
+
+| A key that signs for | Calls a day, bytes of one | Working dust (base units) |
+|---|---|---|
+| `sudo` | 24 of 512, and an upgrade | 260 and the upgrade's |
+| `guardian` | 64 of 384 | 623 |
+| `enactor` | 64 of 512, and an upgrade | 680 and the upgrade's |
+| `anchor_signer` | 1,000 of 512 | 10,509 |
+| `gateway_sponsor` | 2,000 of 512 | 21,010 |
+| `oracle` | 4,800 of 512 | 50,413 |
+| `attestors` | 100 of 256 (attests are feeless) | 879 |
+| `recovery_friends` | 8 of 256 | 77 |
+| `recovery_rescuers` | 24 of 512 | 260 |
+
+The loads are the ones `docs/MAINNET-GENESIS.md` sizes each role's dust for.
+The call that carries an upgrade is sized at twice the genesis runtime code,
+as genesis stores it, so a later runtime may be twice as long: for a code of
+886,000 bytes that is a fee of 1.773 x 10^12 and 17,730 base units, a sudo
+keyholder's working dust 17,990 and the enactor's 18,410. A floor is the
+deposits and, left free, the larger of the existential deposit (500) and the
+working dust: a 2-of-n sudo keyholder's is 2,000 + 17,990 there. Before this
+rule counted working dust a keyholder at its floor was left 500 base units
+free once its deposit was reserved, which settle at 5 x 10^10 MOTRA, a
+thirty-fifth of that upgrade's fee.
+
+The node's builder sizes the same loads another way (a day's fees generated
+in a day, on top of the existential deposit, and twice the fee of a 5 MiB
+call, the longest a block takes, for an upgrade), and its floors cover the
+preflight's for every role, whatever runtime a block can hold: a test sets
+each role account to the floor `docs/MAINNET-GENESIS.md` tables, with a 5 MiB
+genesis runtime, and rule 12 passes.
+
+| Role account | Builder's floor | Preflight's floor, 886,000-byte runtime | Preflight's floor, 5 MiB runtime |
+|---|---|---|---|
+| sudo keyholder (2-of-n) | 107,630 | 19,990 | 107,128 |
+| guardian keyholder (2-of-n) | 3,116 | 2,623 | 2,623 |
+| enactor | 106,050 | 18,410 | 105,548 |
+| anchor_signer | 11,000 | 10,509 | 10,509 |
+| gateway_sponsor | 21,500 | 21,010 | 21,010 |
+| oracle | 50,900 | 50,413 | 50,413 |
+| attestor | 1,373 | 879 | 879 |
+| recovery friend | 570 | 500 | 500 |
+| recovery rescuer | 1,752 | 1,500 | 1,500 |
+| sudo account, 3 friends | 3,000 | 3,000 | 3,000 |
+
 ## Runtime code
 
 `:code` is the runtime WASM, or that WASM compressed as one whole zstd frame
@@ -216,12 +350,12 @@ state version but 0 as V1. A version section the node cannot decode refuses.
                                                       {"key": "5B...", "pop": "0x..."}]}]
   },
   "economics": {
-    "attestation_reward_per_signer": 1000000,
-    "era_cap_base": 50000000000,
+    "attestation_reward_per_signer": 0,
+    "era_cap_base": 0,
     "era_cap_baseline_attestor_count": 32,
     "validator_reward_per_era": 102739726,
     "treasury_emission_share_perbill": 150000000,
-    "fee_buffer": 100000000
+    "fee_buffer": 0
   },
   "supply": {
     "genesis_lock": {"utxo": "<tx id>#<index>", "address": "addr1w...", "native_script": "0x8303..."}
@@ -236,6 +370,7 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   "nodes": [
     {"name": "val-1", "host": "val-1", "addresses": ["10.0.0.11"], "authority": true,
      "aura": "0x<aura public key>", "grandpa": "0x<grandpa public key>",
+     "cross_chain": "0x<33-byte compressed ECDSA partner-chain key>",
      "argv": ["materios-node", "--validator", "--chain", "/srv/materios/mainnet-raw.json", "--rpc-methods", "safe"],
      "exe_sha256": "0x<sha256 of the node binary>",
      "cmdline": "captures/val-1.cmdline", "exe": "captures/val-1.exe", "chain_spec": "captures/val-1.chain.json",
@@ -249,9 +384,16 @@ state version but 0 as V1. A version section the node cannot decode refuses.
     {"name": "public-rpc", "node": "edge-1", "kind": "nginx-dump", "config": "nginx-T.txt",
      "other_targets": ["status.example.org:443"]}
   ],
-  "public_rpc": ["https://rpc.example.org/rpc"]
+  "public_rpc": ["https://rpc.example.org/rpc"],
+  "dust": {"anchor_signer": {"5J...": 20000}, "attestors": {"5K...": 5000}, "endowed": {"5L...": 5000}},
+  "attestation_threshold": 1,
+  "partner_chain": {"genesis_utxo": "<tx id>#<index>", "committee_candidate_address": "addr1w...",
+                    "d_parameter_policy_id": "0x<28 bytes>", "permissioned_candidates_policy_id": "0x<28 bytes>"}
 }
 ```
+
+`fixtures/mainnet-launch.json` is a complete manifest the node builds a
+mainnet genesis from (see `docs/MAINNET-GENESIS.md`).
 
 - `roles` maps a role name to entries. An entry is a public key (SS58, or
   0x-hex 32-byte account or 33-byte ECDSA key), never a secret URI, or a
@@ -263,17 +405,38 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   [Proof of possession](#proof-of-possession)). Rule 10 refuses a member given
   as a bare key, so a multisig written as the address a wallet shows refuses
   until it is declared by its members. An entry that is no multisig asserts
-  one key its holder alone controls. `sudo`, `anchor_signer`, `attestors` and `oracle`
+  one key its holder alone controls. The roles are `sudo`, `guardian`,
+  `anchor_signer`, `attestors`, `oracle`, `enactor`, `gateway_sponsor`,
+  `recovery_friends`, `recovery_rescuers`, `endowed` and `dust_pool`, what
+  the node's mainnet builder gives a meaning; any other refuses as
+  unreadable. `sudo`, `anchor_signer`, `attestors` and `oracle`
   must be present; an empty `oracle` states that no oracle signer runs.
   `roles.sudo` must name exactly the genesis `Sudo.Key` (or be empty when
   genesis sets none), and `roles.guardian` exactly the genesis
   `RootTimelock.Guardian`, each as a multisig role (below); no account in
   the guardian, at any depth, may also be in `roles.sudo` or be `Sudo.Key`. Every
-  genesis account must be the account of some entry; `endowed` holds the ones
-  no other role names. `attestors` are the accounts that bond at genesis and
-  get the endowment floor check.
+  genesis account must be the account of some entry, or the Treasury's;
+  `endowed` holds the ones no other role names, a multisig's keyholders among
+  them, since a multisig member is no entry. `attestors` are the attestation
+  committee genesis seats (rule 1), and every signing role's entry and every
+  multisig keyholder holds its dust floor (rule 12).
+- `dust` maps a role to the accounts of its entries, each named by its key
+  (SS58 or 0x-hex) or, for a multisig entry, by its account, and to the base
+  units it holds at genesis, a u128. Rule 4 holds every genesis account to it.
+  Another shape refuses as unreadable.
+- `attestation_threshold` is how many of `roles.attestors` certify a
+  receipt, a u32 genesis `OrinqReceipts.AttestationThreshold` must store.
+- `partner_chain` holds exactly `genesis_utxo` (`<64 lowercase hex>#<index>`,
+  the index in decimal with no leading zero and at most 32767, the most
+  partner-chains' `UtxoIndex` reads), `committee_candidate_address`, and
+  `d_parameter_policy_id` and `permissioned_candidates_policy_id` (0x-hex,
+  28 bytes): what partner-chains' setup spent and derived on Cardano (rule
+  9). Another shape refuses as unreadable.
 - Every `economics` value is a non-negative integer in the smallest unit; an
-  unknown field or any other value refuses as unreadable.
+  unknown field or any other value refuses as unreadable. Genesis stores the
+  attestation reward as 0 (rule 4), so the declared one is 0 (rule 2).
+  `fee_buffer` is accepted and read by no rule: a signer's floor is the
+  deposits the runtime reserves and its working dust (rule 12).
 - `supply.genesis_lock` is the Cardano output holding the cMATRA that backs
   Materios issuance, and `native_script` the CBOR of the native script its
   address pays to, as 0x-hex. The backing is the cMATRA amount Kupo reports at
@@ -314,7 +477,10 @@ state version but 0 as V1. A version section the node cannot decode refuses.
   `+208`) refuses too.
 - `nodes` lists every machine that runs a launch process or a proxy. Each
   declares `authority` as `true` or `false`, and an authority its `aura` and
-  `grandpa` public keys. The authorities are the genesis committee (rule 9). `argv` is a list: the words the process receives, as
+  `grandpa` public keys, and its `cross_chain` key, the ECDSA partner-chain key
+  genesis seats it under, 33 bytes compressed (`0x02` or `0x03` first) as
+  0x-hex; a node that is no authority takes none. A field no reader of the
+  manifest knows refuses as unreadable. The authorities are the genesis committee (rule 9). `argv` is a list: the words the process receives, as
   `/proc/<pid>/cmdline` lists them. A command line given as one string
   refuses as unreadable, since systemd rewrites an `ExecStart` line before
   it runs it (`\xNN` escapes, `%` specifiers such as `%i`, an `@` prefix, a
@@ -688,6 +854,53 @@ checked spec refuses as unreadable. The tests in `test_node_attestation.py`
 run the real binary (`MATERIOS_NODE`), which CI builds from this tree, and
 check `NODE_OPTIONS` against its `--help`.
 
+### The node's own build
+
+The rules read the launch manifest and the raw spec apart from the node's
+chain-spec builder (`partnerchain/node/src/chain_spec_mainnet.rs`) and share
+no code with it, so a builder that writes a wrong genesis is held to the
+manifest. Whatever the rules do not read, the builder is held to instead. For
+each binary the authorities pin, `check` runs
+
+```
+materios-node build-spec --chain mainnet:<launch manifest> --raw --disable-default-bootnode --base-path <fresh>
+```
+
+offline (an empty working directory, no environment), on the launch manifest
+file as `check` was given it, byte for byte, and refuses a checked spec that
+is not what the node prints:
+
+- genesis storage must be the same, key for key and value for value. A refusal
+  names each key that differs, the first 16 of them, by pallet and item where
+  the runtime metadata declares them (`Motra.Params`, `System.Account[0x...]`
+  for an entry of a map, `the storage version of Balances`,
+  `:extrinsic_index`), and says whether only the checked spec sets it, only
+  the node's build does, or their values differ;
+- `:code` must be the runtime the binary embeds, which a refusal names apart,
+  with both hashes;
+- genesis may hold nothing besides that top storage and the empty child
+  storage the build writes;
+- every other field of the spec must be the build's: `name`, `id`,
+  `chainType`, `protocolId`, `properties`, `telemetryEndpoints` and
+  `codeSubstitutes`, and no field only one of the two has, so a `forkBlocks`,
+  `badBlocks`, `forkId` or `lightSyncState`, which a node may read, refuses,
+  and so does a field it would ignore. `bootNodes` alone is the operator's to
+  give.
+
+A manifest the node's builder refuses is a refusal that carries the builder's
+reason: no node builds a genesis from it. A binary that prints no raw chain
+spec refuses as unreadable. An authority whose binary is not its pinned one is
+not run; rule 8 refuses it above. A multisig member's `pop` does not change
+the build: the builder reads the key and not its proof, and a manifest in
+another order builds the same spec.
+
+The spec to check is therefore the node's own output, with at most the boot
+nodes added:
+
+```
+materios-node build-spec --chain mainnet:launch.json --raw --disable-default-bootnode > mainnet-raw.json
+```
+
 ### The spec a running node read
 
 A node reads its chain spec once, at its start. It keeps what it read when
@@ -743,14 +956,46 @@ so on (secp256k1 takes neither zero nor `0xff..ff` as a secret key). A key
 already in a row keeps that row's label: partner-chains commits the seeds of
 the ECDSA scalars 1 and 513 to 517 as test keys.
 
+`exposed_keys.json` holds retired keys whose secrets were exposed, each with a
+neutral label: every key preprod's genesis names (its accounts and keyholders,
+in its chain-spec source, its spec 244 build and the published v6 spec, and
+its authorities' aura, grandpa and cross-chain keys), and every key a
+permissioned candidates datum of preprod's ever named on Cardano preprod
+(`fixtures/preprod-permissioned-candidates.json`, read from Koios), but pallet
+accounts, which are no key. Rule 1 reads it with the public table, so a launch
+that reuses one refuses like one naming a dev key. Tests hold it to every key
+the preprod genesis and those datums name.
+
 A key whose exposure is not yet public knowledge must not be named here; list
 it in an operator table kept outside the repo and pass it with
-`--extra-well-known` (repeatable). That table has the same shape, each key in
+`--extra-well-known`, which `check` requires (repeatable; a table of no keys
+when the operator has none). That table has the same shape, each key in
 lowercase hex with no `0x`:
 
 ```json
-{"keys": [{"label": "exposed multisig member", "scheme": "sr25519", "public": "<32 or 33 bytes of hex>"}]}
+{"keys": [{"label": "exposed multisig member", "scheme": "sr25519", "public": "<32 bytes of hex>"},
+          {"label": "exposed multisig member", "scheme": "ed25519", "public": "<32 bytes of hex>"},
+          {"label": "exposed multisig member", "scheme": "ecdsa", "public": "<33 bytes of hex>"}]}
 ```
+
+A table names public keys, and a secret is not one key: a phrase or a seed
+derives an sr25519, an ed25519 and an ECDSA key, and whoever holds an exposed
+one can sign under each. So list all three for every exposed secret, as above:
+`subkey inspect --scheme sr25519`, `--scheme ed25519` and `--scheme ecdsa` of
+the secret print them. The public table does so for every secret its generator
+derives from (the dev phrase and each path of it, every phrase and seed a
+public repo commits), which a test holds it to; the exceptions are a small
+scalar, which is a secret key of sr25519 and secp256k1 only, and the
+mini-secrets of `0x00` and `0xff` bytes, which secp256k1 takes as no key.
+
+Two sets of rows cannot be completed here, because the repo holds their public
+keys and not their secrets: the `retired validator key, mnemonic published
+on-chain` rows of the public table (the sr25519 and ed25519 keys it ran
+under), and `exposed_keys.json` (each retired preprod key under the one scheme
+it was used with). The other schemes' keys of those secrets are in no table,
+so a launch that reused one of those secrets under another scheme would pass
+rule 1. Whoever holds a retired secret derives its other two public keys and
+adds them to the operator table before a mainnet launch is checked.
 
 A 33-byte ECDSA key also matches the blake2-256 account it maps to. Rules 1 and
 7 count a multisig member that a table names as a key anyone can sign as (see
@@ -793,6 +1038,27 @@ RFC 9496's multiples of the ristretto generator and SEC 2's G, to every k·B and
 k·G (as py-sr25519-bindings and libsecp256k1 compute them), and to the trivial
 mini-secrets' keys as subkey 20.0.0 derives them.
 
+## Partner chain scripts
+
+The committee candidate validator, the D-parameter policy and the permissioned
+candidates policy are functions of the partner chain's genesis UTXO, derived as
+partner-chains v1.8.0 derives them (`get-scripts`), from the scripts of
+partner-chains-smart-contracts v8.1.0 `raw-scripts` (commit `08bc5346`), which
+`partner_chains_scripts.json` vendors byte for byte. The preflight applies each
+script to its parameters as Plutus data, as the uplc crate partner-chains links
+applies them (`[term (con data ...)]`, flat-encoded): the genesis UTXO as
+`Constr 0 [Constr 0 [tx hash], index]` to every script; the version oracle
+policy then the version oracle validator's address; the D-parameter and
+permissioned candidates validators then the version oracle policy's id; and
+their policies the version oracle policy's id and their validator's address,
+an address being `Constr 0 [Constr 1 [script hash], Constr 1 []]`. Each script
+hash is blake2b-224 of `0x02` and the applied script, a Plutus V2 script's. The
+committee candidate address is Cardano mainnet's enterprise script address
+(header `0x71`) of the validator. Preprod's genesis UTXO derives the scripts
+preprod's genesis stores, and the mainnet fixture's genesis UTXO the values its
+manifest names; the tests pin both, and the vendored committee candidate
+validator to the one the node's builder applies.
+
 ## Keys anyone can sign for
 
 Two kinds of key verify a signature of any message that took no secret, so
@@ -830,12 +1096,23 @@ SUBWASM=./subwasm python3 -m pytest test_launch_preflight.py
 
 The CLI tests run the real subwasm, a local server that answers like Kupo, one
 that answers JSON-RPC over HTTP and a WebSocket like a node or a filter, and a
-script that answers `export-blocks` like the node. Every `pop` in the tests is
+script that answers `export-blocks`, `chain-id` and `build-spec` like the node:
+its `build-spec` prints the checked spec, as a node that builds it would,
+unless a test has it build another or refuse the manifest. The host's clock
+reads five seconds after the tip the Kupo stand-in serves. Every `pop` in the tests is
 signed by an sr25519 or ECDSA key the test generates, never a dev or well-known
 key, over a challenge the tests build apart from the preflight, and the CLI
-tests' launches carry one for each multisig member. The tests against the real
-node take its path: rule 8's, and the clean launch carrying the runtime this
-tree builds, which rule 1 scans for well-known keys:
+tests' launches carry one for each multisig member. The CLI tests' clean launch
+is the mainnet genesis the node builds from `fixtures/mainnet-launch.json`, with
+the preprod v6 runtime as its code and spec 244's metadata, its Root and
+guardian moved to multisigs of keys the tests generate, so their holders can
+sign. The tests against the real
+node take its path: rule 8's, on its `export-blocks`, `chain-id` and
+`build-spec`; every rule that reads only the spec, on the mainnet spec that
+binary builds from the fixture manifest, with its runtime's whole metadata;
+and the whole launch end to end, where the binary builds the spec from the
+clean launch's manifest, the tests' keyholders sign for that genesis, and
+`check` passes it, then refuses it with one value unset:
 
 ```
 MATERIOS_NODE=../../partnerchain/target/debug/materios-node SUBWASM=./subwasm \
@@ -851,8 +1128,7 @@ The spec 244 fixtures are the preprod genesis that spec 244 (transaction version
 settlement's Cardano ids in genesis storage, no PerpEngine) builds, without
 its code, and that runtime's metadata, trimmed to what the preflight reads.
 A test holds both fixtures to the spec and transaction versions the runtime
-source declares. MOTRA checkpoints are allowed only under canonical account keys,
-at block zero, and with holdings no greater than the account's free MATRA.
+source declares.
 From `partnerchain/`, with subwasm v0.21.3 and jq
 (`build-spec` runs offline, and the scratch base path takes the network key it
 writes):
@@ -875,9 +1151,9 @@ The same trim of the preprod v6 runtime's metadata gives
 public keys with the fields the node's mainnet chain-spec builder reads, and
 `fixtures/mainnet-launch-raw.json` the raw spec the node builds from it (see
 `docs/MAINNET-GENESIS.md`), without its code; a node test holds it to the
-spec this source builds. The rules that read only the spec, its metadata and
-the manifest are run on it, and the findings left are the rule changes a
-fixed-issuance mainnet needs:
+spec this source builds. Every rule that reads only the spec, its metadata and
+the manifest passes it, and the tests of rules 1, 2, 4, 9, 11 and 12 change it one
+value at a time:
 
 ```
 materios-node build-spec --chain mainnet:../tools/launch-preflight/fixtures/mainnet-launch.json --raw \
@@ -887,7 +1163,7 @@ jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > ../tools/launch-preflight/
 
 The historical preprod v6 fixture leaves
 `SessionCommitteeManagement.CurrentCommittee` empty and seeds Aura and GRANDPA
-directly, and rule 9 refuses that. The spec-244 fixture and the CLI tests' clean
-launch seat their authorities as the genesis committee:
+directly, and rule 9 refuses that. The spec-244 fixture and the mainnet fixture
+seat their authorities as the genesis committee:
 the committee, then the Aura authors, GRANDPA voters and session validators
 the session genesis takes from it.

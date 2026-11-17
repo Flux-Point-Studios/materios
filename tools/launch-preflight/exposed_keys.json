@@ -1,0 +1,144 @@
+{
+ "keys": [
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "02ec64822300713585d9b0c3eb1456bb99c3cc42d79f4ab8e53538e50c9bed0a61"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "03082ce10d4020da6a58d16852a1e02215374e8b8bb3acedbccb99ad33d5d0e000"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "0316acb17138d708413136b2b30b665bf7ac4a7bf4b6c215c3ea6279bb50e77494"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "03477fc2a5b7b287ed89ec47556e0002aa0d7cf88b1fbd6fbe1722eb1ef7873599"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "034f293c281c59b8200ea316d1c8d7154c1b06a9ed2603251049b9fda63f2ed6ce"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "037c019d4e11c8f854bd64e7e08b720c90ae659fbd9d1b30974e026c2a8d410864"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "03f2c1c50d62f023c637afe79996843157c6914e929605cde3c53de47a6896fc0e"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ecdsa",
+   "public": "03fd3eebfad926c785f8ffe4b960e4565dd0b6a6ddd649f691e430358596a1cad7"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ed25519",
+   "public": "4558853422164939eca690f21f76a614f7957352e01a448a4986ca3d55d98f23"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ed25519",
+   "public": "4dc9c8f9bd37df2bb9223458c897b000fe4362958da6eeb6413b93dcfbabe2ba"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ed25519",
+   "public": "750d4ba2a831a30d419009f2d8bc1ef1e6fc6f673c7a2b5b500a2b7f2a68458e"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ed25519",
+   "public": "90ca78c51613f9cafe2d3b19e1198f0707c914698dad44cbf87543a6a8e9f481"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ed25519",
+   "public": "a41fb307bb11b666108b7e47956b77109a08b652631719c32c9b9e90987b0538"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ed25519",
+   "public": "c05b56dab7a8701871a8be75aed6e2ad8c5eb5ff935ddd2b00eeca7299af35b1"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "ed25519",
+   "public": "c747ed0255ac5a355640ac111afd7ad8b9ccafa82ed2ff01b54e06cdc12a9de2"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "20cdba0a5d368c5eb0ee119d25f440f8c261ebd50f2363dae4eb3ed607f64c08"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "2989e974ed4960137c9d16234524a7f5178d1a680483453dcd3f3209e63af692"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "3a57a607d5554b81db0e0a2bfc7557a2b62c4ba477e8dbd094bcd0c082980047"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "44d1c084f7a17e2beb080cd51c85bc2e214cfce1914b0ad384bb4eed99e79776"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "44f3bafbc393f24fcfabbf57d4ca73a6a6b5df358cdaa9480a517a97f189964b"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "5678cd421ed824dd2f8860b54da0e44b41acfd646fd813644722efd65aa65b5b"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "64964344fff93f562d94488c5fc340408817de10c4a4783e5e0dde6c8a4ba53e"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "8ed446c7114fbeb751866e6752dedf36fba9b3d2832a9fc50a005e00ed0ab124"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "925fe8605fe32a53a7b391498fc1b0ab91d3af7319607bd70b850b4f5fa9d255"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "a43bc8672f04ad568968cad7ba444eb88583d72b271806ff705c82e4ad2ff263"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "cc01e4881348014cc414cd33c9a397d5d6edb11c6c9d929e37b6af7608932f71"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "db08a8a079d753df7b938c3cc1c5a1960987dbd491844d64c58b943872e9dc86"
+  },
+  {
+   "label": "retired preprod key",
+   "scheme": "sr25519",
+   "public": "ea7ea02ece50453978981b20bef4ec39181349122996534d8aceb01da22f4400"
+  }
+ ]
+}
