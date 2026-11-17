@@ -22,8 +22,10 @@ Rules, each of which refuses on its own:
                  a key whose signature needs no secret (the all-zero sr25519
                  key, an ed25519 key of small order) as a role or a member of a
                  role's multisig, or as an aura or grandpa key that genesis,
-                 the launch or the Cardano candidates seat; Sudo.Key or a
-                 genesis account that no declared role accounts for, or Root
+                 the launch or the Cardano candidates seat; a 33-byte role key
+                 that is no compressed ECDSA key; Sudo.Key, the attestation
+                 committee or its threshold, or a genesis account that no
+                 declared role (or the Treasury) accounts for, or Root
                  not a multisig of threshold 2 or more, or one that a
                  keyholder, or the keys anyone can sign as, meet alone; an
                  off-chain role left
@@ -35,10 +37,12 @@ Rules, each of which refuses on its own:
   3 rpc          an authority's running node process serves unsafe RPC methods
                  on an external or proxied listener, a public RPC URL lists or
                  answers an unsafe method, or an authority has no launch entry
-  4 supply       an attestor endowment below bond + existential deposit + fee
-                 buffer; genesis issuance plus the runtime's emission reserves
-                 above the cMATRA the lock holds on Cardano (the reserve counted
-                 both on Cardano and on Materios); a lock fewer than two key
+  4 supply       a genesis that does not fix its issuance, or fixes another
+                 than it holds, the launch's dust and the Treasury's
+                 existential deposit sum to, or one MATRA or more; an account
+                 holding other than its declared dust; an attestation reward,
+                 receipt fee, fee floor or bond other than zero; issuance above
+                 the cMATRA the lock holds on Cardano; a lock fewer than two key
                  holders can spend, or not bound to this genesis by its datum;
                  genesis storage outside the allowlist
   5 pallets      PerpEngine in the runtime metadata, under any name
@@ -84,7 +88,13 @@ Rules, each of which refuses on its own:
                  do not divide Cardano's epoch; an authority whose Cardano
                  follower settings (the MC__ epoch layout, k and f) are not
                  the declared cardano_follower, or one other than Cardano
-                 mainnet's
+                 mainnet's; a committee member or Cardano candidate whose
+                 partner-chain key is not the cross_chain key its authority
+                 declares; a genesis UTXO, committee candidate address or
+                 committee policy, declared or in genesis, other than the
+                 genesis UTXO and the scripts it derives; a D-parameter or
+                 candidates output created later than two Cardano epochs
+                 before the launch's
  10 possession   a member of a multisig in any role, at any depth, that is a
                  bare key or the all-zero key, gives no proof of possession,
                  or gives one that is not its key's signature (sr25519, or
@@ -96,10 +106,16 @@ Rules, each of which refuses on its own:
                  mainnet's network magic and Shelley genesis hash, or an Aegis
                  policy hash other than the one the launch declares, or any
                  where it declares the policy bound after genesis (null)
+ 12 dust         a role signer (a sudo or guardian keyholder, the sudo
+                 account with recovery friends, an anchor signer, attestor,
+                 oracle, enactor, gateway sponsor, recovery friend or
+                 rescuer) with no provider at genesis, or holding less than
+                 the existential deposit and the deposits its roles reserve
 
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
-        [--manifest-key 0x<ed25519 pubkey>] [--extra-well-known exposed.json ...] [--subwasm PATH]
+        --extra-well-known exposed.json [--extra-well-known ...] [--manifest-key 0x<ed25519 pubkey>] \\
+        [--subwasm PATH]
     launch_preflight.py sign --spec raw.json --launch launch.json --key <ed25519 seed file> --out signed.json
     launch_preflight.py challenge --spec raw.json --launch launch.json --role sudo --index 0 1
 
@@ -109,6 +125,7 @@ Exit 0 only when every rule passes; 1 with every reason when any refuses;
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import functools
 import glob
 import hashlib
@@ -143,9 +160,11 @@ from websockets.sync.client import connect as ws_connect
 HERE = Path(__file__).resolve().parent
 # The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
 LAUNCH_KEYS = HERE / "launch_keys.json"
-KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE, COMMITTEE, POSSESSION, SETTLEMENT = (
+# Retired keys whose secrets were exposed, which no launch may use, labelled with what they were.
+EXPOSED_KEYS = HERE / "exposed_keys.json"
+KEYS, REWARDS, RPC, SUPPLY, PALLETS, CHECKPOINT, TIMELOCK, NODE, COMMITTEE, POSSESSION, SETTLEMENT, DUST = (
     "1 dev-keys", "2 rewards", "3 rpc", "4 supply", "5 pallets", "6 checkpoint", "7 timelock", "8 node", "9 committee",
-    "10 possession", "11 settlement")
+    "10 possession", "11 settlement", "12 dust")
 CODE_KEY = b":code"
 # sp_api's id of the Core API, blake2_64 of its name; an API entry is the 8-byte id and a u32 version.
 CORE_API = hashlib.blake2b(b"Core", digest_size=8).digest()
@@ -178,7 +197,12 @@ BLOCK = 8
 HASH_FIELDS = ("genesis_hash", "code_hash", "chain_spec_hash", "launch_manifest_hash")
 # Pallet name in construct_runtime, and the crate its types keep under any name.
 FORBIDDEN_PALLETS = {"PerpEngine": "pallet_perp_engine"}
-EMISSION_RESERVES = ("ValidatorEmissionReserve", "AttestationRewardReserve")
+# The runtime's MATRA in base units (MATRA_DECIMALS 6): a mainnet genesis issues less than one.
+MATRA = 10**6
+# What a genesis that fixes its issuance stores as zero, and the runtime keeps at zero: nothing mints to pay an
+# attestor, and no receipt fee, fee floor or bond moves MATRA.
+FIXED_ISSUANCE_ZEROS = ("AttestationRewardPerSigner", "ReceiptSubmissionFee", "ReceiptSubmissionFeeFloor",
+                        "BondRequirement")
 # The storage a mainnet genesis may set, besides each pallet's storage version.
 # Anything else (a pending withdrawal, a credit ledger entry) can hold a claim
 # on MATRA that the supply check does not count.
@@ -193,6 +217,9 @@ GENESIS_STORAGE = frozenset({
     # The committee members that certify unpaid and how long they wait first
     # hold no MATRA. A genesis that names none stores neither.
     "OrinqReceipts.BackupSigners", "OrinqReceipts.BackupSignerDelay",
+    # The issuance a genesis fixes, which rule 4 holds to what genesis endows, and the attestation committee and its
+    # threshold, which rule 1 holds to the declared attestors: none holds MATRA.
+    "OrinqReceipts.FixedIssuance", "OrinqReceipts.CommitteeMembers", "OrinqReceipts.AttestationThreshold",
     "Motra.Params", "Motra.AccrualCheckpoint",
     "Sidechain.GenesisUtxo", "Sidechain.SlotsPerEpoch",
     "SessionCommitteeManagement.CurrentCommittee", "SessionCommitteeManagement.MainChainScriptsConfiguration",
@@ -252,6 +279,20 @@ EMPTY_COMMITTEE = ("the runtime seats the genesis committee at every rotation wh
 # Every launch names who holds these; the ones that always run must name a key.
 REQUIRED_ROLES = ("sudo", "anchor_signer", "attestors", "oracle")
 RUNNING_ROLES = ("anchor_signer", "attestors")
+# The roles whose entries sign calls, each needing a provider and its dust floor (rule 12), and the roles that hold
+# Root and its veto, whose keyholders sign through pallet_multisig. `endowed` and `dust_pool` sign nothing.
+SIGNING_ROLES = ("anchor_signer", "attestors", "oracle", "enactor", "gateway_sponsor", "recovery_friends",
+                 "recovery_rescuers")
+KEYHOLDER_ROLES = ("sudo", "guardian")
+ROLES = frozenset({*REQUIRED_ROLES, *SIGNING_ROLES, *KEYHOLDER_ROLES, "endowed", "dust_pool"})
+# The deposits a role's account reserves, as (pallet, constant) of the runtime metadata: a rescuer's recovery
+# deposit; the sudo account's recovery configuration, a base and a factor per friend; a multisig keyholder's deposit
+# when it opens a call, a base and a factor per approval its threshold needs.
+RECOVERY_DEPOSIT = ("Recovery", "RecoveryDeposit")
+RECOVERY_CONFIG = (("Recovery", "ConfigDepositBase"), ("Recovery", "FriendDepositFactor"))
+MULTISIG_DEPOSIT = (("Multisig", "DepositBase"), ("Multisig", "DepositFactor"))
+# A pallet's account, as frame_support's PalletId derives it: this prefix and the pallet's id, zero-padded.
+PALLET_ACCOUNT_PREFIX = b"modl"
 MULTISIG_ENTROPY = b"modlpy/utilisuba"
 # The Root timelock's call classes, in the order its DelayTable stores their delays.
 DELAY_CLASSES = ("recovery", "standard", "long")
@@ -387,7 +428,11 @@ STAT_LINE = re.compile(r"(\d+) ([0-9a-f]+) (.*)")
 GENESIS_HEADER = 32 + 1 + 32 + 32 + 1
 GENESIS_EXPORT = 8 + GENESIS_HEADER + 2
 LAUNCH_FIELDS = {"roles", "economics", "supply", "slots_per_epoch", "cardano_follower", "settlement", "nodes",
-                 "rpc_proxies", "public_rpc"}
+                 "rpc_proxies", "public_rpc", "dust", "attestation_threshold", "partner_chain"}
+NODE_FIELDS = {"name", "host", "authority", "addresses", "argv", "env", "exe_sha256", "aura", "grandpa", "cross_chain",
+               "cmdline", *CAPTURES}
+PARTNER_CHAIN_FIELDS = {"genesis_utxo", "committee_candidate_address", "d_parameter_policy_id",
+                        "permissioned_candidates_policy_id"}
 PROXY_KINDS = ("nginx", "nginx-dump", "cloudflared")
 PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
 # What a node built from polkadot-stable2409-4 serves under --rpc-methods safe: its rpc_methods less each method whose
@@ -472,6 +517,18 @@ KUPO_TIMEOUT = 30
 KUPO_LIMIT = 16 * 1024 * 1024
 # Five minutes of slots: a synced Kupo trails its node by a block or two.
 KUPO_MAX_LAG_SLOTS = 300
+# The node's followers serve a Cardano epoch's committee from the data of the epoch this many before it, so a datum
+# created later than that epoch is not there for a chain's first block.
+COMMITTEE_DATA_LAG_EPOCHS = 2
+# partner-chains' UtxoIndex reads a genesis UTXO's output index as a u16 that is also an i16.
+MAX_GENESIS_UTXO_INDEX = 2**15 - 1
+GENESIS_UTXO = re.compile(r"([0-9a-f]{64})#(0|[1-9][0-9]{0,4})")
+# The partner-chains-smart-contracts v8.1.0 scripts partner-chains v1.8.0 sets a chain up with on Cardano, which the
+# genesis UTXO parameterises; a Plutus V2 script's hash covers this language tag before the script.
+PARTNER_CHAINS_SCRIPTS = HERE / "partner_chains_scripts.json"
+PLUTUS_V2 = b"\x02"
+# Cardano mainnet's enterprise script address header: address type 7, a script hash and no stake part, on network 1.
+MAINNET_SCRIPT_ADDRESS = 0x71
 # Hex is read in the one spelling its writer writes: lowercase digits, two a byte, after 0x in the raw spec (as
 # build-spec writes it), the manifests and the launch keys, and with no 0x in the key tables (as
 # gen_well_known_keys.py writes them and the anchor worker reads them) and from Kupo. The node reads a raw spec with
@@ -722,10 +779,15 @@ class Spec:
                                  "a 32-byte account followed by that account, the one key the runtime reads it at")
         return [key[-32:] for key in keys]
 
+    def account_info(self, account: bytes) -> tuple[int, ...] | None:
+        """An account's AccountInfo at genesis (nonce, consumers, providers, sufficients, free, reserved, frozen,
+        flags), or None if genesis does not endow it."""
+        key = account_key(account)
+        return self.uints(key, ACCOUNT_INFO, f"System.Account value at 0x{key.hex()}")
+
     def balance(self, account: bytes) -> tuple[int, int]:
         """An account's free and reserved balance at genesis, none if genesis does not endow it."""
-        key = account_key(account)
-        info = self.uints(key, ACCOUNT_INFO, f"System.Account value at 0x{key.hex()}")
+        info = self.account_info(account)
         return (0, 0) if info is None else info[4:6]
 
 
@@ -933,12 +995,13 @@ class WellKnown:
 
 
 def load_well_known(extra: list[Path] = ()) -> WellKnown:
-    """The public table plus operator tables of keys whose exposure must not be
-    named in a public repo. A 33-byte ECDSA key also matches the blake2-256
-    account it maps to. The dev phrase and its seed are held by their hashes."""
+    """The public table, the table of retired keys whose secrets were exposed,
+    and operator tables of keys whose exposure must not be named in a public
+    repo. A 33-byte ECDSA key also matches the blake2-256 account it maps to.
+    The dev phrase and its seed are held by their hashes."""
     base = HERE / "well_known_keys.json"
     keys: dict[bytes, KnownKey] = {}
-    for path in (base, *extra):
+    for path in (base, EXPOSED_KEYS, *extra):
         try:
             entries = json.loads(Path(path).read_text(), object_pairs_hook=unique_keys)["keys"]
         except (OSError, ValueError, KeyError, TypeError) as e:
@@ -1164,6 +1227,12 @@ def lone_holders(entry, anyone: set[bytes]) -> list[bytes]:
                   if acts_as(entry, {key, *anyone}))
 
 
+def treasury_account(meta: Metadata) -> bytes | None:
+    """The Treasury's account, from the runtime's Treasury.PalletId: its genesis endows it the existential deposit."""
+    pallet_id = meta.constants.get(("Treasury", "PalletId"))
+    return (PALLET_ACCOUNT_PREFIX + pallet_id).ljust(32, b"\0") if pallet_id is not None else None
+
+
 def uint_constant(meta: Metadata, pallet: str, name: str, width: int) -> int | None:
     """An unsigned constant of `width` bytes the runtime metadata declares, or None if it declares none of that
     width."""
@@ -1235,6 +1304,10 @@ class CardanoView:
     candidates: list[Candidate]
     d_parameter: tuple[int, int]
     lock_datum: bytes | None = None
+    # The slot of the Cardano block Kupo's node is at, and the slot each committee datum's output was created in, by
+    # what it holds ("D-parameter", "permissioned candidates").
+    tip_slot: int | None = None
+    created: dict[str, int] = dataclasses.field(default_factory=dict)
 
 
 def kupo_get(base: str, path: str):
@@ -1264,8 +1337,13 @@ def unspent(matches, what: str) -> list[dict]:
 def committee_policies(spec: Spec) -> tuple[bytes, bytes]:
     """The Cardano policies whose tokens mark the D-parameter and the
     permissioned candidates datums, from genesis
-    SessionCommitteeManagement.MainChainScriptsConfiguration: the committee
-    candidate address, then those two policy ids."""
+    SessionCommitteeManagement.MainChainScriptsConfiguration."""
+    return main_chain_scripts(spec)[1:]
+
+
+def main_chain_scripts(spec: Spec) -> tuple[str, bytes, bytes]:
+    """Genesis SessionCommitteeManagement.MainChainScriptsConfiguration: the committee candidate address, as the text
+    the node's follower looks registrations up by, then the D-parameter and permissioned candidates policy ids."""
     raw = spec.value("SessionCommitteeManagement", "MainChainScriptsConfiguration")
     if raw is None:
         raise InputError("genesis sets no SessionCommitteeManagement.MainChainScriptsConfiguration: "
@@ -1297,7 +1375,7 @@ def committee_policies(spec: Spec) -> tuple[bytes, bytes]:
         raise InputError("SessionCommitteeManagement.MainChainScriptsConfiguration holds a committee candidate address "
                          "with a NUL byte, which the node's Cardano follower cannot pass to its Postgres query: every "
                          "block's committee inputs fail and no block is authored")
-    return policies
+    return address, *policies
 
 
 def versioned_appendix(data, what: str):
@@ -1340,10 +1418,10 @@ def decode_d_parameter(raw: bytes) -> tuple[int, int]:
     return seats[0], seats[1]
 
 
-def committee_datum(kupo: str, policy: bytes, what: str) -> bytes:
+def committee_datum(kupo: str, policy: bytes, what: str) -> tuple[bytes, int]:
     """The datum of the unspent output that holds `policy`'s token under the empty asset name, which the node's
-    follower reads its committee configuration from. The follower reads the output that holds it created last; the
-    preflight reads one only when it is the only unspent one."""
+    follower reads its committee configuration from, and the slot the output was created in. The follower reads the
+    output that holds it created last; the preflight reads one only when it is the only unspent one."""
     token = policy.hex()
     outputs = [output for output in unspent(kupo_get(kupo, f"/matches/{token}.*?unspent"), f"the {what} token")
                if isinstance((output.get("value") or {}).get("assets"), dict)
@@ -1355,8 +1433,13 @@ def committee_datum(kupo: str, policy: bytes, what: str) -> bytes:
         raise InputError(f"Kupo has {len(outputs)} unspent outputs holding the {what} token {token}: the node's "
                          "follower reads the one created last, which the preflight does not tell apart")
     output = outputs[0]
-    return kupo_datum(kupo, output.get("datum_hash"),
-                      f"the {what} output {output.get('transaction_id')}#{output.get('output_index')}")
+    where = f"the {what} output {output.get('transaction_id')}#{output.get('output_index')}"
+    created_at = output.get("created_at")
+    created = created_at.get("slot_no") if isinstance(created_at, dict) else None
+    if type(created) is not int:
+        raise InputError(f"Kupo gives {where} no created_at slot: whether the node's follower reads it at the "
+                         "chain's first block is unknown")
+    return kupo_datum(kupo, output.get("datum_hash"), where), created
 
 
 def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
@@ -1381,9 +1464,10 @@ def cardano_view(kupo: str, spec: Spec, launch: dict) -> CardanoView:
     if lock is not None and lock.get("datum_type") == "inline":
         lock_datum = kupo_datum(kupo, lock.get("datum_hash"), "the genesis lock")
     d_policy, candidates_policy = committee_policies(spec)
-    candidates = decode_candidates(committee_datum(kupo, candidates_policy, "permissioned candidates"))
-    d_parameter = decode_d_parameter(committee_datum(kupo, d_policy, "D-parameter"))
-    return CardanoView(lock, candidates, d_parameter, lock_datum)
+    candidates_datum, candidates_created = committee_datum(kupo, candidates_policy, "permissioned candidates")
+    d_parameter_datum, d_parameter_created = committee_datum(kupo, d_policy, "D-parameter")
+    return CardanoView(lock, decode_candidates(candidates_datum), decode_d_parameter(d_parameter_datum), lock_datum,
+                       tip, {"D-parameter": d_parameter_created, "permissioned candidates": candidates_created})
 
 
 def kupo_datum(kupo: str, datum_hash, what: str) -> bytes:
@@ -1428,6 +1512,258 @@ def bech32_decode(text: str) -> tuple[str, bytes]:
     if bits >= 5 or acc & ((1 << bits) - 1):
         raise ValueError("is not a valid bech32 address")
     return hrp, bytes(out)
+
+
+def bech32_encode(hrp: str, data: bytes) -> str:
+    """`data` as bech32 under `hrp`, as Cardano writes an address."""
+    values, acc, bits = [], 0, 0
+    for byte in data:
+        acc, bits = (acc << 8) | byte, bits + 8
+        while bits >= 5:
+            bits -= 5
+            values.append((acc >> bits) & 31)
+    if bits:
+        values.append((acc << (5 - bits)) & 31)
+    expanded = [ord(c) >> 5 for c in hrp] + [0] + [ord(c) & 31 for c in hrp]
+    checksum = bech32_polymod(expanded + values + [0] * 6) ^ 1
+    values += [(checksum >> 5 * (5 - i)) & 31 for i in range(6)]
+    return hrp + "1" + "".join(BECH32_CHARSET[value] for value in values)
+
+
+# ---------------------------------------------------------------------------
+# The partner chain's Cardano scripts, derived from its genesis UTXO as
+# partner-chains v1.8.0 derives them
+# ---------------------------------------------------------------------------
+
+def _cbor_head(major: int, n: int) -> bytes:
+    if n < 24:
+        return bytes([major << 5 | n])
+    size = next(size for size in (1, 2, 4, 8) if n < 1 << 8 * size)
+    return bytes([major << 5 | {1: 24, 2: 25, 4: 26, 8: 27}[size]]) + n.to_bytes(size, "big")
+
+
+def _data_bytes(raw: bytes) -> bytes:
+    """A Plutus data byte string of at most 64 bytes, which CBOR writes whole."""
+    return _cbor_head(2, len(raw)) + raw
+
+
+def _data_constr(index: int, fields: list[bytes]) -> bytes:
+    """Plutus data `Constr index fields` as the uplc crate writes it: a non-empty list of fields of indefinite
+    length, an empty one as the empty array."""
+    return _cbor_head(6, 121 + index) + (b"\x9f" + b"".join(fields) + b"\xff" if fields else b"\x80")
+
+
+def _script_address_data(script_hash: bytes) -> bytes:
+    """An enterprise script address as Plutus data: a script payment credential and no stake credential."""
+    return _data_constr(0, [_data_constr(1, [_data_bytes(script_hash)]), _data_constr(1, [])])
+
+
+# A UPLC constant's type tag and how flat encodes a value of it: a string and a Plutus data value (its CBOR) are byte
+# strings in flat, as bytes are.
+FLAT_SIMPLE_TYPES = {0: "integer", 1: "bytes", 2: "bytes", 3: "unit", 4: "bool", 8: "bytes"}
+
+
+class _Flat:
+    """A flat-encoded UPLC 1.0 program read bit by bit and copied to `out`, shifted by what is put before it."""
+
+    def __init__(self, program: bytes):
+        self.program, self.read, self.out, self.written = program, 0, bytearray(), 0
+
+    def take(self, bits: int) -> int:
+        value = 0
+        for _ in range(bits):
+            if self.read >= 8 * len(self.program):
+                raise ValueError("the program ends early")
+            value = value << 1 | self.program[self.read // 8] >> (7 - self.read % 8) & 1
+            self.read += 1
+        return value
+
+    def put(self, value: int, bits: int) -> None:
+        for bit in reversed(range(bits)):
+            if self.written % 8 == 0:
+                self.out.append(0)
+            if value >> bit & 1:
+                self.out[self.written // 8] |= 0x80 >> self.written % 8
+            self.written += 1
+
+    def copy(self, bits: int) -> int:
+        value = self.take(bits)
+        self.put(value, bits)
+        return value
+
+    def copy_natural(self) -> None:
+        """Seven bits a byte, each byte's top bit saying another follows."""
+        while self.copy(8) & 0x80:
+            pass
+
+    def skip_filler(self) -> None:
+        while not self.take(1):
+            pass
+        if self.read % 8:
+            raise ValueError("the program's filler ends off a byte boundary")
+
+    def put_filler(self) -> None:
+        while self.written % 8 != 7:
+            self.put(0, 1)
+        self.put(1, 1)
+
+    def copy_bytes(self) -> None:
+        """A byte string: a filler that moves with where it starts, then chunks of at most 255 bytes, each after its
+        length, and an empty chunk."""
+        self.skip_filler()
+        self.put_filler()
+        while length := self.copy(8):
+            for _ in range(length):
+                self.copy(8)
+
+    def put_bytes(self, raw: bytes) -> None:
+        self.put_filler()
+        for start in range(0, len(raw), 255):
+            chunk = raw[start:start + 255]
+            self.put(len(chunk), 8)
+            for byte in chunk:
+                self.put(byte, 8)
+        self.put(0, 8)
+
+    def constant_type(self, tags) -> tuple:
+        """A constant's type from its list of type tags: integer, a byte string (bytes, string or data), unit,
+        bool, or a list or pair applied to its types."""
+        tag = next(tags, None)
+        if tag in FLAT_SIMPLE_TYPES:
+            return (FLAT_SIMPLE_TYPES[tag],)
+        if tag == 7:
+            applied = next(tags, None)
+            if applied == 5:
+                return "list", self.constant_type(tags)
+            if applied == 7 and next(tags, None) == 6:
+                return "pair", self.constant_type(tags), self.constant_type(tags)
+        raise ValueError("the program holds a constant type the preflight cannot read")
+
+    def copy_value(self, of: tuple) -> None:
+        kind = of[0]
+        if kind == "integer":
+            self.copy_natural()
+        elif kind == "bytes":
+            self.copy_bytes()
+        elif kind == "bool":
+            self.copy(1)
+        elif kind == "list":
+            while self.copy(1):
+                self.copy_value(of[1])
+        elif kind == "pair":
+            self.copy_value(of[1])
+            self.copy_value(of[2])
+
+    def copy_term(self) -> None:
+        """One term with its subterms: a variable, delay, lambda, application, constant, force, error or builtin."""
+        pending = 1
+        while pending:
+            pending -= 1
+            tag = self.copy(4)
+            if tag == 0:
+                self.copy_natural()
+            elif tag in (1, 2, 5):
+                pending += 1
+            elif tag == 3:
+                pending += 2
+            elif tag == 4:
+                tags = []
+                while self.copy(1):
+                    tags.append(self.copy(4))
+                listed = iter(tags)
+                of = self.constant_type(listed)
+                if next(listed, None) is not None:
+                    raise ValueError("a constant's type list goes on after its type")
+                self.copy_value(of)
+            elif tag == 7:
+                self.copy(7)
+            elif tag != 6:
+                raise ValueError(f"the program holds term tag {tag}, which UPLC 1.0 does not")
+
+
+def _cbor_byte_string(script: bytes) -> bytes:
+    """The bytes a CBOR byte string holds, which must be all of `script`."""
+    head = script[0] if script else None
+    if head is not None and 0x40 <= head <= 0x57:
+        length, start = head & 0x1F, 1
+    elif head in (0x58, 0x59) and len(script) > head - 0x57:
+        start = head - 0x56
+        length = int.from_bytes(script[1:start], "big")
+    else:
+        raise ValueError("the script is not a CBOR byte string")
+    if len(script) != start + length:
+        raise ValueError("the script's CBOR byte string is not the whole script")
+    return script[start:]
+
+
+def apply_data(script: bytes, data: bytes) -> bytes:
+    """A script, a CBOR byte string holding a flat-encoded program, applied to the Plutus data `data` (CBOR) as the
+    uplc crate partner-chains links applies it: the program `[term (con data data)]` at the script's version."""
+    program = _cbor_byte_string(script)
+    flat = _Flat(program)
+    for _ in range(3):
+        flat.copy_natural()
+    flat.put(3, 4)
+    flat.copy_term()
+    flat.skip_filler()
+    if flat.read != 8 * len(program):
+        raise ValueError("the program goes on after its term")
+    flat.put(4, 4)
+    flat.put(1, 1)
+    flat.put(8, 4)
+    flat.put(0, 1)
+    flat.put_bytes(data)
+    flat.put_filler()
+    return _cbor_head(2, len(flat.out)) + bytes(flat.out)
+
+
+def plutus_v2_hash(script: bytes) -> bytes:
+    return hashlib.blake2b(PLUTUS_V2 + script, digest_size=28).digest()
+
+
+@functools.cache
+def partner_chains_scripts() -> dict[str, bytes]:
+    try:
+        table = json.loads(PARTNER_CHAINS_SCRIPTS.read_text(), object_pairs_hook=unique_keys)["scripts"]
+        return {name: hex_bytes(code, f"{PARTNER_CHAINS_SCRIPTS.name}: {name}", prefix="")
+                for name, code in table.items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        raise InputError(f"cannot read the partner chain scripts {PARTNER_CHAINS_SCRIPTS}: {e}") from e
+
+
+def partner_chain_scripts(genesis_utxo: str) -> tuple[bytes, bytes, bytes]:
+    """The committee candidate validator's script hash, the D-parameter policy id and the permissioned candidates
+    policy id of the partner chain whose genesis UTXO is `<tx hash>#<index>`. Each script takes the UTXO as Plutus
+    data, Constr 0 [Constr 0 [tx hash], index]; the D-parameter and permissioned candidates scripts then the version
+    oracle policy's id, and their policies their validator's address."""
+    tx, _, index = genesis_utxo.partition("#")
+    scripts = partner_chains_scripts()
+    utxo = _data_constr(0, [_data_constr(0, [_data_bytes(bytes.fromhex(tx))]), _cbor_head(0, int(index))])
+
+    def applied(name: str, *params: bytes) -> bytes:
+        script = scripts[name]
+        for param in params:
+            script = apply_data(script, param)
+        return script
+
+    try:
+        oracle_validator = plutus_v2_hash(applied("version_oracle_validator", utxo))
+        oracle = _data_bytes(plutus_v2_hash(applied("version_oracle_policy", utxo,
+                                                     _script_address_data(oracle_validator))))
+        policies = []
+        for kind in ("d_parameter", "permissioned_candidates"):
+            validator = plutus_v2_hash(applied(f"{kind}_validator", utxo, oracle))
+            policies.append(plutus_v2_hash(applied(f"{kind}_policy", utxo, oracle, _script_address_data(validator))))
+        committee = plutus_v2_hash(applied("committee_candidate_validator", utxo))
+    except (KeyError, ValueError) as e:
+        raise InputError(f"the partner chain scripts {PARTNER_CHAINS_SCRIPTS} cannot be applied to "
+                         f"{genesis_utxo}: {e}") from e
+    return committee, policies[0], policies[1]
+
+
+def committee_candidate_address(validator: bytes) -> str:
+    """Cardano mainnet's enterprise address of the committee candidate validator whose script hash is `validator`."""
+    return bech32_encode("addr", bytes([MAINNET_SCRIPT_ADDRESS]) + validator)
 
 
 def lock_script_hash(address: str) -> bytes:
@@ -1587,6 +1923,10 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
                     decoded = False
                     continue
                 findings += [Finding(KEYS, f"{leaf}: {hit}") for hit in well_known.found_in(raw)]
+                if len(raw) == 33 and raw[0] not in (2, 3):
+                    findings.append(Finding(KEYS, f"{leaf} is 33 bytes whose first is 0x{raw[0]:02x}, not a compressed "
+                                                  "ECDSA key (0x02 or 0x03): its account is blake2-256 of bytes no "
+                                                  "ECDSA key signs as"))
                 if reason := no_secret(raw, "sr25519"):
                     findings.append(Finding(KEYS, f"{leaf}: {reason}"))
                 elif reason := no_secret(raw, "ed25519"):
@@ -1608,7 +1948,7 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
     elif sudo != [sudo_key]:
         findings.append(Finding(KEYS, f"Sudo.Key {ss58(sudo_key, spec.ss58_prefix)} is not the account roles.sudo "
                                       "declares: who holds Root is unchecked"))
-    declared = {account for role_accounts in accounts.values() for account in role_accounts}
+    declared = {account for role_accounts in accounts.values() for account in role_accounts} | {treasury_account(meta)}
     for account in spec.accounts():
         if account not in declared:
             findings.append(Finding(KEYS, f"genesis account {ss58(account, spec.ss58_prefix)} is not declared in "
@@ -1638,6 +1978,49 @@ def check_dev_keys(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoVie
         findings += dict.fromkeys(node_findings)
     for launch_key in launch_keys:
         findings += [Finding(KEYS, f"manifest signing key: {hit}") for hit in well_known.found_in(launch_key)]
+    return findings
+
+
+def check_attestation_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
+    """The receipt attestation committee genesis seats from block zero: OrinqReceipts.CommitteeMembers must be the
+    accounts roles.attestors declares, no more than the runtime's MaxCommitteeSize, which it reads a longer set past
+    as none, and OrinqReceipts.AttestationThreshold the declared attestation_threshold, from 1 to the committee's
+    size: a member no role declares certifies receipts unchecked."""
+    try:
+        attestors = [role_account(entry) for entry in launch.get("roles", {}).get("attestors", [])]
+    except ValueError:
+        return []  # rule 1 refuses a role key that does not decode
+    raw = spec.value("OrinqReceipts", "CommitteeMembers")
+    members = set(fixed_list(raw, 32, "OrinqReceipts.CommitteeMembers does not decode as a set of 32-byte accounts")
+                  if raw is not None else [])
+    findings = [Finding(KEYS, f"genesis OrinqReceipts.CommitteeMembers seats {ss58(member, spec.ss58_prefix)}, which "
+                              "roles.attestors does not declare: it certifies receipts unchecked")
+                for member in sorted(members - set(attestors))]
+    findings += [Finding(KEYS, f"roles.attestors[{i}] {ss58(account, spec.ss58_prefix)} is not in genesis "
+                               "OrinqReceipts.CommitteeMembers: it certifies no receipt")
+                 for i, account in enumerate(attestors) if account not in members]
+    bound = uint_constant(meta, "OrinqReceipts", "MaxCommitteeSize", 4)
+    if bound is None:
+        findings.append(Finding(KEYS, "the runtime metadata declares no OrinqReceipts.MaxCommitteeSize the preflight "
+                                      "can read: whether the runtime decodes the genesis attestation committee is "
+                                      "unknown here"))
+    elif len(members) > bound:
+        findings.append(Finding(KEYS, f"genesis OrinqReceipts.CommitteeMembers seats {len(members)} attestors, and the "
+                                      f"runtime's OrinqReceipts.MaxCommitteeSize is {bound}: a set past it decodes as "
+                                      "none, so no receipt is certified"))
+    declared, stored = launch.get("attestation_threshold"), spec.uint("OrinqReceipts", "AttestationThreshold", 4)
+    if declared is None:
+        findings.append(Finding(KEYS, "the launch declares no attestation_threshold: how many attestors certify a "
+                                      "receipt is unchecked"))
+    elif stored is not None and stored != declared:
+        findings.append(Finding(KEYS, f"genesis OrinqReceipts.AttestationThreshold is {stored}, not the "
+                                      f"attestation_threshold {declared} the launch declares"))
+    if stored is None:
+        findings.append(Finding(KEYS, "genesis sets no OrinqReceipts.AttestationThreshold: the committee certifies "
+                                      "no receipt"))
+    elif not 1 <= stored <= len(members):
+        findings.append(Finding(KEYS, f"genesis OrinqReceipts.AttestationThreshold {stored} is outside 1 to the "
+                                      f"{len(members)} members of the committee: no receipt is certified"))
     return findings
 
 
@@ -2291,6 +2674,17 @@ def declared_authorities(launch: dict) -> list[tuple[str, bytes, bytes]]:
             for node in launch.get("nodes", []) if node["authority"]]
 
 
+def declared_cross_chains(launch: dict) -> dict[bytes, dict[bytes, str]]:
+    """Each declared authority's aura key, with the partner-chain (cross-chain) key each authority that declares that
+    aura key declares, and that authority's name."""
+    keys: dict[bytes, dict[bytes, str]] = {}
+    for node in launch.get("nodes", []):
+        if node["authority"]:
+            keys.setdefault(decode_public_key(node["aura"]), {})[hex_bytes(node["cross_chain"], "cross_chain")] = \
+                node["name"]
+    return keys
+
+
 def repeats(keys: list[bytes]) -> list[tuple[int, int]]:
     """(i, j) for each key at i that is first at an earlier j."""
     first: dict[bytes, int] = {}
@@ -2312,6 +2706,7 @@ def check_candidate_authorities(launch: dict, cardano: CardanoView) -> list[Find
     declared = declared_authorities(launch)
     for name, aura, grandpa in declared:
         grandpa_by_aura.setdefault(aura, {})[grandpa] = name
+    cross_chains = declared_cross_chains(launch)
     for i, cand in enumerate(cardano.candidates):
         grandpas = grandpa_by_aura.get(cand.aura)
         if grandpas is not None and cand.gran not in grandpas:
@@ -2319,6 +2714,13 @@ def check_candidate_authorities(launch: dict, cardano: CardanoView) -> list[Find
                                                f"the grandpa key authority {', '.join(sorted(grandpas.values()))} "
                                                "declares with its aura key: once the committee is drawn from Cardano "
                                                "it votes on finality unchecked"))
+        keys = cross_chains.get(cand.aura)
+        if keys is not None and cand.partner_chains_key not in keys:
+            findings.append(Finding(COMMITTEE, f"Cardano permissioned candidate {i} partner chains key "
+                                               f"0x{cand.partner_chains_key.hex()} is not the cross_chain key authority "
+                                               f"{', '.join(sorted(keys.values()))} declares with its aura key: once "
+                                               "the committee is drawn from Cardano it seats that authority under a "
+                                               "partner-chain key no declared authority holds"))
     on_cardano = {cand.aura for cand in cardano.candidates}
     findings += [Finding(COMMITTEE, f"authority {name}'s aura key 0x{aura.hex()} is on no Cardano permissioned "
                                     "candidate: every committee drawn from Cardano leaves it out, so it stops "
@@ -2384,6 +2786,89 @@ def check_cardano_committee(meta: Metadata, cardano: CardanoView) -> list[Findin
                                            "(SessionCommitteeManagement.MaxValidators): the runtime refuses a whole "
                                            "draw past a cap of its own that its metadata does not declare, so the "
                                            "preflight holds the D-parameter to what a committee holds"))
+    return findings
+
+
+def cardano_epoch(slot: int) -> int:
+    """The Cardano mainnet epoch of a Shelley-era slot, by the layout every authority's follower runs with."""
+    first_slot = int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_SLOT_NUMBER"])
+    if slot < first_slot:
+        raise InputError(f"Cardano slot {slot} is before Cardano mainnet's Shelley era, which starts at slot "
+                         f"{first_slot}: no partner chain output is that old")
+    slot_millis = int(CARDANO_MAINNET_FOLLOWER["MC__SLOT_DURATION_MILLIS"])
+    return int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_NUMBER"]) + (slot - first_slot) * slot_millis // \
+        CARDANO_EPOCH_MILLIS
+
+
+def cardano_epoch_start(epoch: int) -> str:
+    """When a Cardano mainnet epoch starts, in UTC."""
+    millis = int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_TIMESTAMP_MILLIS"]) + \
+        (epoch - int(CARDANO_MAINNET_FOLLOWER["MC__FIRST_EPOCH_NUMBER"])) * CARDANO_EPOCH_MILLIS
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(millis // 1000))
+
+
+def check_committee_age(cardano: CardanoView) -> list[Finding]:
+    """The node's followers serve a Cardano epoch's committee from the D-parameter and permissioned candidates as
+    they stood at the end of the epoch two before it. The chain's first block is authored no earlier than the
+    epoch Kupo's node is in now, so an output created in that epoch or the one before is not there for it: the
+    follower finds no data, no node authors block 1, and none does until Cardano reaches the epoch two after the
+    output's."""
+    if cardano.tip_slot is None:
+        raise InputError("the Cardano view holds no tip: the epoch a launch starts in is unknown")
+    now = cardano_epoch(cardano.tip_slot)
+    findings = []
+    for what in ("D-parameter", "permissioned candidates"):
+        if what not in cardano.created:
+            raise InputError(f"the Cardano view holds no creation slot for the {what} output")
+        created = cardano_epoch(cardano.created[what])
+        earliest = created + COMMITTEE_DATA_LAG_EPOCHS
+        if earliest > now:
+            findings.append(Finding(COMMITTEE, f"the {what} output was created in Cardano epoch {created}, and a "
+                                               f"launch in epoch {now} reads the committee from epoch "
+                                               f"{now - COMMITTEE_DATA_LAG_EPOCHS}, when it did not exist: the node's "
+                                               f"follower finds no {what} and no block is authored. The earliest "
+                                               f"valid launch is in epoch {earliest}, from "
+                                               f"{cardano_epoch_start(earliest)}"))
+    return findings
+
+
+def check_partner_chain(spec: Spec, launch: dict) -> list[Finding]:
+    """The partner chain's genesis UTXO and the Cardano scripts it parameterises. The committee candidate validator,
+    the D-parameter policy and the permissioned candidates policy are functions of the genesis UTXO, derived here as
+    partner-chains v1.8.0 derives them from the vendored v8.1.0 scripts. Genesis Sidechain.GenesisUtxo must be the
+    declared UTXO, and the declared partner_chain values and genesis MainChainScriptsConfiguration the scripts it
+    derives: a genesis that names other scripts draws its committee from datums the partner chain's setup never
+    made, which whoever holds that other policy writes."""
+    declared = launch.get("partner_chain")
+    if declared is None:
+        return [Finding(COMMITTEE, "the launch declares no partner_chain: the genesis UTXO and the Cardano scripts the "
+                                   "committee is drawn through are unchecked")]
+    utxo = declared["genesis_utxo"]
+    tx, _, index = utxo.partition("#")
+    findings = []
+    stored = spec.value("Sidechain", "GenesisUtxo")
+    if stored != bytes.fromhex(tx) + int(index).to_bytes(2, "little"):
+        shown = "sets none" if stored is None else f"is 0x{stored.hex()}"
+        findings.append(Finding(COMMITTEE, f"genesis Sidechain.GenesisUtxo {shown}, not partner_chain.genesis_utxo "
+                                           f"{utxo}: the chain is another partner chain than the one set up"))
+    validator, d_policy, candidates_policy = partner_chain_scripts(utxo)
+    address = committee_candidate_address(validator)
+    stored_address, stored_d_policy, stored_candidates_policy = main_chain_scripts(spec)
+    for name, want, launched, written in (
+            ("committee_candidate_address", address, declared["committee_candidate_address"], stored_address),
+            ("d_parameter_policy_id", d_policy, hex_bytes(declared["d_parameter_policy_id"], "d_parameter_policy_id"),
+             stored_d_policy),
+            ("permissioned_candidates_policy_id", candidates_policy,
+             hex_bytes(declared["permissioned_candidates_policy_id"], "permissioned_candidates_policy_id"),
+             stored_candidates_policy)):
+        shown = want if isinstance(want, str) else f"0x{want.hex()}"
+        for where, value in ((f"partner_chain.{name}", launched),
+                             (f"genesis SessionCommitteeManagement.MainChainScriptsConfiguration {name}", written)):
+            if value != want:
+                given = value if isinstance(value, str) else f"0x{value.hex()}"
+                findings.append(Finding(COMMITTEE, f"{where} is {given}, not {shown}, which {utxo} derives: the "
+                                                   "committee is drawn through scripts the partner chain's setup "
+                                                   "did not make"))
     return findings
 
 
@@ -2462,6 +2947,16 @@ def check_committee(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     findings += [Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee[{i}] repeats member {j}'s "
                                     "cross-chain key: each authority sits in the committee once, under its own key")
                  for i, j in repeats([cross_chain for cross_chain, _, _ in members])]
+    cross_chains = declared_cross_chains(launch)
+    pairs = {aura + grandpa for _, aura, grandpa in declared}
+    for i, (cross_chain, aura, grandpa) in enumerate(members):
+        keys = cross_chains.get(aura, {}) if aura + grandpa in pairs else {}
+        if keys and cross_chain not in keys:
+            findings.append(Finding(COMMITTEE, f"genesis SessionCommitteeManagement.CurrentCommittee[{i}] cross-chain key "
+                                               f"0x{cross_chain.hex()} is not the cross_chain key authority "
+                                               f"{', '.join(sorted(keys.values()))} declares: genesis seats it under a "
+                                               "partner-chain key no declared authority holds, and files its session "
+                                               "keys under that key's account"))
     findings += seated_once([(aura + grandpa, key_pair(aura, grandpa)) for _, aura, grandpa in members],
                             {aura + grandpa: (name, key_pair(aura, grandpa)) for name, aura, grandpa in declared},
                             "SessionCommitteeManagement.CurrentCommittee", "aura and grandpa key pair",
@@ -2844,53 +3339,164 @@ def check_public_rpc(launch: dict) -> list[Finding]:
     return findings
 
 
-def check_supply(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView) -> list[Finding]:
-    findings = []
-    economics = launch.get("economics", {})
-    attestors = launch.get("roles", {}).get("attestors", [])
-    bond = spec.uint("OrinqReceipts", "BondRequirement", BALANCE)
-    ed_raw = meta.constants.get(("Balances", "ExistentialDeposit"))
-    fee_buffer = economics.get("fee_buffer")
-    if not attestors:
-        findings.append(Finding(SUPPLY, "roles.attestors names no account: the endowment floor "
-                                        "has nothing to check"))
-    if bond is None or ed_raw is None or not isinstance(fee_buffer, int):
-        findings.append(Finding(SUPPLY, "cannot size attestor endowments: needs OrinqReceipts."
-                                        "BondRequirement in genesis, Balances.ExistentialDeposit "
-                                        "in metadata and economics.fee_buffer declared"))
-    else:
-        floor = bond + int.from_bytes(ed_raw, "little") + fee_buffer
-        for i, entry in enumerate(attestors):
+def declared_dust(launch: dict) -> tuple[dict[bytes, tuple[int, str]], list[str]]:
+    """Each account the launch's dust endows, with the base units and the field that endows it, and why an entry of
+    dust is refused: it names no public key or account, endows a role the launch does not declare or an account no
+    entry of its role is, or endows an account another entry endows."""
+    endowed: dict[bytes, tuple[int, str]] = {}
+    faults = []
+    roles = launch.get("roles", {})
+    for role, accounts in sorted(launch.get("dust", {}).items()):
+        if role not in roles:
+            faults.append(f"dust.{role} endows a role roles does not declare")
+            continue
+        try:
+            entries = {role_account(entry) for entry in roles[role]}
+        except ValueError:
+            continue  # rule 1 refuses a role key that does not decode
+        for name, amount in sorted(accounts.items()):
+            where = f"dust.{role}.{name}"
             try:
-                account = role_account(entry)
-            except ValueError:
-                continue  # rule 1 already refuses a role key that does not decode
-            balance, _ = spec.balance(account)
-            if balance < floor:
-                findings.append(Finding(SUPPLY, f"roles.attestors[{i}] is endowed {balance}, below "
-                                                f"bond + existential deposit + fee buffer = {floor}"))
+                account = role_account(name)
+            except ValueError as e:
+                faults.append(f"{where}: {e}; dust names an account by its public key, or a multisig by its account")
+                continue
+            if account not in entries:
+                faults.append(f"{where} names an account that is no entry of roles.{role}")
+            elif account in endowed:
+                faults.append(f"{where} endows the account {endowed[account][1]} endows")
+            else:
+                endowed[account] = (amount, where)
+    return endowed, faults
+
+
+def check_supply(spec: Spec, meta: Metadata, launch: dict, cardano: CardanoView) -> list[Finding]:
+    """Mainnet's MATRA is dust, fixed at genesis: OrinqReceipts.FixedIssuance must be set, and equal to
+    Balances.TotalIssuance, to what the genesis accounts hold and to what the launch declares they hold (its dust and
+    the Treasury's existential deposit), under one MATRA, with the attestation reward, receipt fee, fee floor and bond
+    stored as zero. The runtime then mints nothing after genesis, so no emission reserve counts against the cMATRA the
+    genesis lock holds, which must cover the issuance."""
+    findings = []
     stored = spec.uint("Balances", "TotalIssuance", BALANCE) or 0
     held = sum(sum(spec.balance(account)) for account in spec.accounts())
     if stored != held:
         findings.append(Finding(SUPPLY, f"Balances.TotalIssuance stores {stored}, but genesis accounts "
                                         f"hold {held}"))
-    issuance = max(stored, held)
-    missing = [name for name in EMISSION_RESERVES if ("OrinqReceipts", name) not in meta.constants]
-    if missing:
-        findings.append(Finding(SUPPLY, "the runtime metadata does not declare "
-                                        + ", ".join(f"OrinqReceipts.{name}" for name in missing)
-                                        + ": what the runtime mints after genesis is unbounded here, "
-                                          "so the supply cannot be checked against the Cardano lock"))
+    fixed = spec.uint("OrinqReceipts", "FixedIssuance", BALANCE)
+    if fixed is None:
+        findings.append(Finding(SUPPLY, "genesis sets no OrinqReceipts.FixedIssuance: a genesis that does not fix its "
+                                        "issuance lets the runtime mint its emission reserves, and a mainnet genesis "
+                                        "issues dust that nothing adds to"))
+    elif fixed != stored:
+        findings.append(Finding(SUPPLY, f"OrinqReceipts.FixedIssuance stores {fixed}, but Balances.TotalIssuance "
+                                        f"stores {stored}: the runtime holds the issuance to the fixed one"))
+    issuance = max(stored, held, fixed or 0)
+    if issuance >= MATRA:
+        findings.append(Finding(SUPPLY, f"genesis issues {issuance} base units, at least one MATRA ({MATRA}): a "
+                                        "mainnet genesis issues dust, enough for each role account to exist and sign"))
+    for item in FIXED_ISSUANCE_ZEROS:
+        value = spec.uint("OrinqReceipts", item, BALANCE)
+        if value != 0:
+            shown = "sets no" if value is None else f"stores {value} as"
+            findings.append(Finding(SUPPLY, f"genesis {shown} OrinqReceipts.{item}: a genesis that fixes its issuance "
+                                            "stores it as 0, since nothing is minted to pay it and no MATRA moves"))
+    endowed, faults = declared_dust(launch)
+    findings += [Finding(SUPPLY, fault) for fault in faults]
+    findings += check_endowments(spec, meta, launch, endowed, fixed)
     lock, output = launch["supply"]["genesis_lock"], cardano.lock
-    if output is not None and output["address"] == lock["address"] and not missing:
+    if output is not None and output["address"] == lock["address"]:
         amount = output["value"]["assets"].get(CMATRA_UNIT, 0)
-        emission = sum(int.from_bytes(meta.constants[("OrinqReceipts", name)], "little")
-                       for name in EMISSION_RESERVES)
-        if issuance + emission > amount:
-            findings.append(Finding(SUPPLY, f"Materios can issue {issuance + emission} (genesis {issuance} "
-                                            f"+ runtime emission reserves {emission}) against {amount} cMATRA "
-                                            f"locked on Cardano at {lock['utxo']}: the difference is reserve "
-                                            "counted both as cMATRA and as MATRA"))
+        if issuance > amount:
+            findings.append(Finding(SUPPLY, f"Materios issues {issuance} at genesis against {amount} cMATRA locked "
+                                            f"on Cardano at {lock['utxo']}: the difference is MATRA no cMATRA backs"))
+    return findings
+
+
+def check_endowments(spec: Spec, meta: Metadata, launch: dict, endowed: dict[bytes, tuple[int, str]],
+                     fixed: int | None) -> list[Finding]:
+    """Each genesis account holds, free and nothing reserved, exactly what the launch's dust endows it, the Treasury
+    its existential deposit, and no account more; and the fixed issuance is their sum."""
+    if "dust" not in launch:
+        return [Finding(SUPPLY, "the launch declares no dust: what each genesis account holds is unchecked")]
+    declared = dict(endowed)
+    treasury = treasury_account(meta)
+    deposit = uint_constant(meta, "Balances", "ExistentialDeposit", BALANCE)
+    if treasury is None or deposit is None:
+        return [Finding(SUPPLY, "the runtime metadata declares no Treasury.PalletId or Balances.ExistentialDeposit "
+                                "the preflight can read: what the Treasury's genesis endows itself is unknown here")]
+    declared.setdefault(treasury, (deposit, "the Treasury's existential deposit"))
+    findings = []
+    for account in sorted(set(spec.accounts()) | set(declared)):
+        free, reserved = spec.balance(account)
+        amount, where = declared.get(account, (0, None))
+        if (free, reserved) != (amount, 0):
+            said = f"{where} declares {amount}" if where else "the launch's dust declares none"
+            findings.append(Finding(SUPPLY, f"genesis endows {ss58(account, spec.ss58_prefix)} {free} free and "
+                                            f"{reserved} reserved, but {said}"))
+    total = sum(amount for amount, _ in declared.values())
+    if fixed is not None and fixed != total:
+        findings.append(Finding(SUPPLY, f"OrinqReceipts.FixedIssuance stores {fixed}, not the {total} the launch's "
+                                        "dust and the Treasury's existential deposit sum to"))
+    return findings
+
+
+def signer_floors(launch: dict, deposits: dict[str, int]) -> dict[bytes, tuple[int, list[str]]]:
+    """The deposits each account that signs reserves, with who it is: a keyholder of a multisig, in a role that holds
+    Root or its veto or one that signs, the multisig deposit its threshold takes when it opens a call; the sudo
+    account its recovery configuration, a base and a deposit per friend, when the launch names recovery friends; a
+    rescuer its recovery deposit; every other signing role's entry nothing beyond the existential deposit."""
+    roles = launch.get("roles", {})
+    friends = len(roles.get("recovery_friends", []))
+    needs: dict[bytes, tuple[int, list[str]]] = {}
+
+    def need(account: bytes, deposit: int, who: str) -> None:
+        reserved, whom = needs.get(account, (0, []))
+        needs[account] = (reserved + deposit, [*whom, who])
+
+    for role in (*KEYHOLDER_ROLES, *SIGNING_ROLES):
+        for i, entry in enumerate(roles.get(role, [])):
+            where = f"roles.{role}[{i}]"
+            try:
+                if role in SIGNING_ROLES:
+                    need(role_account(entry), deposits["rescuer"] if role == "recovery_rescuers" else 0, where)
+                elif role == "sudo" and friends:
+                    need(role_account(entry), deposits["config_base"] + deposits["friend_factor"] * friends,
+                         f"{where}, which reserves the recovery configuration of {friends} friends")
+                for path, multisig in role_multisigs(entry, where):
+                    for j, member in enumerate(multisig["members"]):
+                        need(role_account(member),
+                             deposits["multisig_base"] + deposits["multisig_factor"] * multisig["threshold"],
+                             f"{path}.members[{j}], a keyholder of {path}")
+            except ValueError:
+                continue  # rule 1 refuses a role key that does not decode and a multisig that lists a member twice
+    return needs
+
+
+def check_dust(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
+    """Every account that signs exists at genesis, with the provider frame_system's CheckNonce needs, and holds free
+    at least its floor: the existential deposit, which keeps it, and the deposits its roles reserve, read from the
+    runtime metadata. No signed call moves MATRA and none is minted after genesis, so a signer endowed below its floor
+    can never sign, or never pay its role's deposit."""
+    constants = {"existential": ("Balances", "ExistentialDeposit"), "rescuer": RECOVERY_DEPOSIT,
+                 "config_base": RECOVERY_CONFIG[0], "friend_factor": RECOVERY_CONFIG[1],
+                 "multisig_base": MULTISIG_DEPOSIT[0], "multisig_factor": MULTISIG_DEPOSIT[1]}
+    deposits = {name: uint_constant(meta, *constant, BALANCE) for name, constant in constants.items()}
+    missing = [".".join(constants[name]) for name, value in deposits.items() if value is None]
+    if missing:
+        return [Finding(DUST, f"the runtime metadata declares no {', '.join(missing)} the preflight can read: the "
+                              "dust each signer needs is unknown here")]
+    findings = []
+    for account, (reserved, whom) in signer_floors(launch, deposits).items():
+        who = f"{' and '.join(whom)} ({ss58(account, spec.ss58_prefix)})"
+        floor = deposits["existential"] + reserved
+        info = spec.account_info(account)
+        if info is None or info[2] == 0:
+            findings.append(Finding(DUST, f"{who} has no provider at genesis: it cannot sign, and nothing after "
+                                          "genesis endows it"))
+        elif info[4] < floor:
+            findings.append(Finding(DUST, f"{who} holds {info[4]} free at genesis, below its floor of {floor}: the "
+                                          f"existential deposit {deposits['existential']} and the {reserved} its "
+                                          "roles reserve"))
     return findings
 
 
@@ -3737,6 +4343,8 @@ def validate_role_entry(entry, where: str, member: bool = False) -> None:
 def validate_node(node, where: str) -> None:
     if not isinstance(node, dict) or not isinstance(node.get("name"), str) or not isinstance(node.get("host"), str):
         raise InputError(f"{where} needs a name and a host")
+    for field in sorted(set(node) - NODE_FIELDS):
+        raise InputError(f"{where} has unknown field {field}")
     if not isinstance(node.get("authority"), bool):
         raise InputError(f"{where} must declare authority as true or false")
     addresses = node.get("addresses", [])
@@ -3751,7 +4359,7 @@ def validate_node(node, where: str) -> None:
     env = node.get("env", {})
     if not isinstance(env, dict) or not all(isinstance(v, str) for v in env.values()):
         raise InputError(f"{where} env must map names to strings")
-    for field in ("cmdline", *CAPTURES, "exe_sha256"):
+    for field in ("cmdline", *CAPTURES, "exe_sha256", "cross_chain"):
         if field in node and not node["authority"]:
             raise InputError(f"{where} {field} is read for an authority only")
     if not isinstance(node.get("cmdline", ""), str):
@@ -3770,10 +4378,46 @@ def validate_node(node, where: str) -> None:
                 key = b""
             if len(key) != 32:
                 raise InputError(f"{where} is an authority and must declare its {field} public key (SS58 or 0x-hex)")
+        cross_chain = node.get("cross_chain")
+        key = hex_bytes(cross_chain, f"{where} cross_chain") if isinstance(cross_chain, str) else b""
+        if len(key) != CROSS_CHAIN_KEY or key[0] not in (2, 3):
+            raise InputError(f"{where} is an authority and must declare its cross_chain key: its ECDSA partner-chain "
+                             f"key, {CROSS_CHAIN_KEY} bytes compressed (0x02 or 0x03 first), as 0x-hex")
         pin = node.get("exe_sha256")
         if not isinstance(pin, str) or len(hex_bytes(pin, f"{where} exe_sha256")) != 32:
             raise InputError(f"{where} is an authority and must pin the sha256 of its node binary as exe_sha256")
         attested_options(node_process(node), f"authority {node['name']}")
+
+
+def validate_genesis_fields(launch: dict) -> None:
+    """The fields the node's mainnet chain-spec builder reads: dust, role -> account -> base units; how many
+    attestors certify a receipt; and the partner chain's genesis UTXO, at most output 32767 as partner-chains reads
+    one, with the committee candidate address and the two policy ids it derives."""
+    dust = launch.get("dust", {})
+    if not (isinstance(dust, dict) and all(isinstance(accounts, dict) for accounts in dust.values())):
+        raise InputError("dust must map each role to an object of accounts and the base units each holds")
+    for role, accounts in sorted(dust.items()):
+        for name, amount in sorted(accounts.items()):
+            validate_key_text(name, f"dust.{role} account")
+            if type(amount) is not int or not 0 <= amount < 2**128:
+                raise InputError(f"dust.{role}.{name} must be a u128 of base units")
+    threshold = launch.get("attestation_threshold", 0)
+    if type(threshold) is not int or not 0 <= threshold <= 0xFFFFFFFF:
+        raise InputError("attestation_threshold must be a u32: how many attestors certify a receipt")
+    partner_chain = launch.get("partner_chain")
+    if partner_chain is None:
+        return
+    if not isinstance(partner_chain, dict) or set(partner_chain) != PARTNER_CHAIN_FIELDS \
+            or not all(isinstance(value, str) for value in partner_chain.values()):
+        raise InputError(f"partner_chain must hold exactly {', '.join(sorted(PARTNER_CHAIN_FIELDS))}, each a string")
+    utxo = GENESIS_UTXO.fullmatch(partner_chain["genesis_utxo"])
+    if not utxo or int(utxo.group(2)) > MAX_GENESIS_UTXO_INDEX:
+        raise InputError(f"partner_chain.genesis_utxo must be <64 lowercase hex>#<output index from 0 to "
+                         f"{MAX_GENESIS_UTXO_INDEX}, in decimal with no leading zero>: partner-chains reads the index "
+                         "as an i16")
+    for field in ("d_parameter_policy_id", "permissioned_candidates_policy_id"):
+        if len(hex_bytes(partner_chain[field], f"partner_chain.{field}")) != POLICY_ID_LEN:
+            raise InputError(f"partner_chain.{field} must be a {POLICY_ID_LEN}-byte Cardano policy id")
 
 
 def validate_launch(launch) -> None:
@@ -3785,6 +4429,9 @@ def validate_launch(launch) -> None:
     if not isinstance(roles, dict):
         raise InputError("launch manifest roles must map each role to a list of public keys")
     for role, entries in roles.items():
+        if role not in ROLES:
+            raise InputError(f"roles.{role} is not a role a mainnet launch knows: the roles are "
+                             f"{', '.join(sorted(ROLES))}")
         if not isinstance(entries, list):
             raise InputError(f"roles.{role} must be a list of public keys")
         for i, entry in enumerate(entries):
@@ -3812,6 +4459,7 @@ def validate_launch(launch) -> None:
     if not UTXO.fullmatch(lock["utxo"]):
         raise InputError("supply.genesis_lock.utxo must be <64 hex>#<index>")
     hex_bytes(lock["native_script"], "supply.genesis_lock.native_script")
+    validate_genesis_fields(launch)
     slots = launch.get("slots_per_epoch", 0)
     if type(slots) is not int or not 0 <= slots <= 0xFFFFFFFF:
         raise InputError("slots_per_epoch must be a u32: the slots in each session, which genesis "
@@ -3878,16 +4526,20 @@ def run_checks(spec: Spec, meta: Metadata, launch: dict, signed: dict, manifest_
     well_known = load_well_known(extra_well_known)
     return (check_chain_identity(spec)
             + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
+            + check_attestation_committee(spec, meta, launch)
             + check_possession(spec, launch)
             + check_committee(spec, meta, launch)
             + check_sessions(spec, meta, launch)
             + check_follower(launch)
+            + check_partner_chain(spec, launch)
             + check_candidate_authorities(launch, cardano)
             + check_cardano_committee(meta, cardano)
+            + check_committee_age(cardano)
             + check_rewards(spec, meta, launch)
             + check_rpc(launch, authorities(spec, cardano))
             + check_public_rpc(launch)
             + check_supply(spec, meta, launch, cardano)
+            + check_dust(spec, meta, launch)
             + check_genesis_lock(spec, launch, cardano, well_known)
             + check_genesis_storage(spec, meta)
             + check_pallets(meta)
@@ -3998,8 +4650,9 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--kupo", required=True, help="Kupo on Cardano mainnet, indexing the genesis lock "
                                                      "and the permissioned candidates token")
     check.add_argument("--subwasm", default="subwasm")
-    check.add_argument("--extra-well-known", action="append", default=[], metavar="TABLE",
-                       help="JSON key table of exposed keys kept out of the public table; repeatable")
+    check.add_argument("--extra-well-known", action="append", required=True, metavar="TABLE",
+                       help="JSON key table of exposed keys kept out of the public tables; repeatable, and required: "
+                            "a mainnet launch is checked against the operator's table too")
     check.set_defaults(func=cmd_check)
     sign = sub.add_parser("sign", help="sign the launch hashes of a raw chain spec and a launch manifest")
     sign.add_argument("--spec", required=True)

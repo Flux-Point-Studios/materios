@@ -85,8 +85,8 @@ as Plutus data `Constr 0 [Constr 0 [tx hash], index]`, hashed as a Plutus V2
 script. Preprod's genesis UTXO derives the address preprod's genesis
 stores, which the node's tests pin. The two policy ids also follow from
 `genesis_utxo` but go through the version oracle's scripts; the builder takes
-them as given, and the launch preflight's rule 9 reads their outputs through
-the built spec.
+them as given, and the launch preflight's rule 9 derives all three from
+`genesis_utxo` and refuses a manifest or a genesis that names others.
 
 ## What genesis holds
 
@@ -185,24 +185,29 @@ what genesis holds, a committee member with no provider, a member listed
 twice, a threshold outside 1 to the committee, and a timelock guardian that
 is the sudo key or a development account.
 
-## Launch preflight rules that must change
+## What the launch preflight holds it to
 
-The preflight's tests check the fixture's raw spec with every rule that reads
-only the spec, its metadata and the manifest. What they find, and what each
-rule must change to, is pinned in
-`test_the_mainnet_fixture_launch_passes_each_rule_that_reads_neither_cardano_nor_a_signature`:
+The preflight reads the same manifest and genesis apart from the builder (see
+the preflight README's rules), and accepts the fixture's raw spec on every rule
+that reads only the spec, its metadata and the manifest:
 
-- **Input**: accept `dust`, `attestation_threshold` and `partner_chain` in the
-  manifest (refused today as unknown fields).
-- **Rule 1**: count the Treasury's account, which the runtime endows its
-  existential deposit, as declared.
-- **Rule 4**: put `OrinqReceipts.FixedIssuance`, `CommitteeMembers` and
-  `AttestationThreshold` on the genesis allowlist; replace the attestor
-  endowment floor (bond + existential deposit + fee buffer) with the role
-  dust floors above; and, on a genesis that fixes its issuance, count no
-  emission reserve against the genesis lock, since none is minted, and
-  require the issuance to equal `FixedIssuance`.
-- **Rule 9**: compare each Cardano permissioned candidate's partner-chain key
-  with the `cross_chain` key the authority with its aura key declares.
-- A new rule: every role signer has a provider and holds at least its dust
-  floor under the genesis MOTRA parameters.
+- **Input**: `dust`, `attestation_threshold`, `partner_chain` and each
+  authority's `cross_chain` are read, and the roles above; any other field or
+  role, or a key named twice, refuses.
+- **Rule 1**: the Treasury's account is declared; a 33-byte role key that is no
+  compressed ECDSA key refuses; `OrinqReceipts.CommitteeMembers` must be
+  `roles.attestors` and `AttestationThreshold` the declared threshold.
+- **Rule 4**: genesis must fix its issuance, at `Balances.TotalIssuance`, at
+  what the accounts hold, and at the `dust` plus the Treasury's existential
+  deposit, under one MATRA, each account holding exactly its declared dust,
+  with the attestation reward, fee, floor and bond zero; no emission reserve
+  counts against the genesis lock.
+- **Rule 9**: the genesis committee's and each Cardano candidate's partner-chain
+  key must be the `cross_chain` key its authority declares; genesis
+  `Sidechain.GenesisUtxo` must be `partner_chain.genesis_utxo`, and the
+  committee candidate address and both policy ids, declared and stored, the
+  ones it derives; the committee outputs must be two Cardano epochs old.
+- **Rule 12**: every role signer has a provider and holds at least the
+  existential deposit and the deposits its roles reserve, from the runtime's
+  constants. The working dust that generates its MOTRA is the builder's sizing
+  above, which the preflight does not repeat.
