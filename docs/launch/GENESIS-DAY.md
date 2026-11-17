@@ -39,9 +39,11 @@ sha256sum materios-node            # on each validator, on the file it received
   of possession binds it, and `check` hashes the binary each node process
   runs.
 - **If the hashes differ:** that validator does not start. Send the file
-  again. If the release is rebuilt, the hash, the spec and the genesis hash
-  all change: everything from step 6 is redone. A debug build embeds another
-  runtime than a release build, so it builds another genesis.
+  again. If the release is built again and its hash changes, every proof of
+  step 11 is void, since each binds the hash, and if the runtime it embeds
+  changed, so is the genesis: everything from step 6 is redone. A debug
+  build embeds another runtime than a release build, so it builds another
+  genesis.
 
 ### 1. Cardano setup: NOT REHEARSED AGAINST CARDANO
 
