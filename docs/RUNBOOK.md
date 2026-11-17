@@ -1,6 +1,7 @@
 # Materios — Operations Runbook
 
-> Based on the Partner Chains toolkit v1.8.1 wizard flow.
+> The Cardano setup uses the upstream partner-chains v1.8.0 `smart-contracts`
+> commands; `materios-node` has no wizards. See [GOVERNANCE.md](GOVERNANCE.md).
 
 ## Prerequisites
 
@@ -42,59 +43,15 @@ docker compose exec postgres psql -U materios -d dbsync -c \
 
 ---
 
-## Step 1: Generate Keys
+## Steps 1-4: Keys, Governance, D-Parameter and Chain Spec
 
-```bash
-materios-node wizards generate-keys
-```
-
-This generates:
-- Session keys (AURA, GRANDPA)
-- Cross-chain signing keys
-- Governance keys
-
-Keys are written to the local keystore. Back them up immediately.
-
----
-
-## Step 2: Prepare Configuration
-
-```bash
-materios-node wizards prepare-configuration
-```
-
-The wizard prompts for:
-- Network selection (testnet / mainnet)
-- Cardano socket path (from the Docker container)
-- DB Sync connection string
-- Governance parameters
-
-Output: a `partner-chains-cli-chain-config.json` file.
-
----
-
-## Step 3: Create Chain Spec
-
-```bash
-materios-node wizards create-chain-spec
-```
-
-Generates the chain specification (`chain-spec.json`) from the configuration prepared in Step 2. Review the spec before proceeding — this defines genesis state, initial authorities, and runtime parameters.
-
----
-
-## Step 4: Setup Main-Chain State
-
-```bash
-materios-node wizards setup-main-chain-state
-```
-
-This submits registration transactions to Cardano:
-- Registers the partner chain with the governance contract
-- Stakes the required collateral
-- Publishes the chain spec hash on-chain
-
-Requires funded Cardano keys and will spend real ADA (or tADA on testnet).
+Follow the [GOVERNANCE.md](GOVERNANCE.md) initialization procedure, steps 1
+to 5: each authority generates its partner-chain, aura and grandpa keys on
+its own machine; `partner-chains-node smart-contracts` initializes governance
+(spending the genesis UTXO, which cannot be undone) and publishes the
+D-parameter and the permissioned candidates; and `materios-node build-spec`
+writes the chain spec from the launch manifest
+([MAINNET-GENESIS.md](MAINNET-GENESIS.md)).
 
 ---
 
@@ -115,7 +72,7 @@ watch -n 60 'docker compose exec cardano-node \
 ## Step 6: Start the Node
 
 ```bash
-materios-node wizards start-node
+materios-node --chain mainnet-raw.json --base-path /data/materios --validator --name "materios-validator-1"
 ```
 
 The node begins:
@@ -248,7 +205,7 @@ curl -s -H "Content-Type: application/json" \
 
 ## Preprod Deployment
 
-This section covers deploying Materios to Cardano preprod using the Partner Chains toolkit wizard flow. For detailed governance and D-parameter documentation, see [GOVERNANCE.md](GOVERNANCE.md).
+This section covers deploying Materios to Cardano preprod with the upstream partner-chains `smart-contracts` commands. For detailed governance and D-parameter documentation, see [GOVERNANCE.md](GOVERNANCE.md).
 
 ### Prerequisites Checklist
 
@@ -264,7 +221,7 @@ Before starting the preprod deployment, confirm all of the following:
 
 ### Automated Boot (Recommended)
 
-The `preprod-boot.sh` script orchestrates the full wizard flow:
+The `preprod-boot.sh` script orchestrates the full flow:
 
 ```bash
 # From the materios-ops private repo:
@@ -283,37 +240,11 @@ docker compose up -d
 
 Wait for Cardano DB Sync to reach chain tip. This takes **12-48 hours** on first sync. Monitor progress via the DB Sync logs.
 
-#### Step 1: Generate Keys
+#### Steps 1-4: Keys, Governance and D-Parameter
 
-```bash
-materios-node wizards generate-keys
-```
-
-Back up the generated keys immediately. They are stored in `partner-chains-node-data/` by default.
-
-#### Step 2: Prepare Configuration
-
-```bash
-materios-node wizards prepare-configuration
-```
-
-The wizard prompts for network, Cardano socket path, DB Sync connection, governance parameters, and D-parameter initial values. For preprod, start with D = (3, 0) (fully permissioned).
-
-#### Step 3: Create Chain Spec
-
-```bash
-materios-node wizards create-chain-spec
-```
-
-Review the generated chain spec before proceeding. Verify MOTRA parameters, genesis balances, and initial authorities match expectations.
-
-#### Step 4: Setup Mainchain State (IRREVERSIBLE)
-
-```bash
-materios-node wizards setup-main-chain-state
-```
-
-This spends the genesis UTXO and registers governance on Cardano preprod. **This cannot be undone.** Double-check all configuration before confirming.
+As in [GOVERNANCE.md](GOVERNANCE.md), steps 1 to 4, on Cardano preprod: the
+preprod chain spec is built into the node (`--chain preprod`), so step 5
+does not apply.
 
 #### Step 5: Wait Two Cardano Epochs
 
@@ -326,11 +257,7 @@ watch -n 60 'docker compose exec cardano-node \
 
 #### Step 6: Start the Node
 
-```bash
-materios-node wizards start-node
-```
-
-Or manually with the preprod chain spec:
+With the preprod chain spec:
 
 ```bash
 materios-node \
@@ -380,7 +307,7 @@ If genesis setup fails or produces an inconsistent state:
 1. **Stop all services**: `docker compose down` and stop the partner chain node
 2. **Purge partner chain data**: `materios-node purge-chain --chain preprod -y`
 3. **Identify a new genesis UTXO** on Cardano preprod (the original one is spent)
-4. **Re-run the full wizard flow** from Step 0 with the new UTXO
+4. **Re-run the full flow** from Step 0 with the new UTXO
 5. **If DB Sync is corrupted**: remove the PostgreSQL volume (`docker volume rm ops_postgres-data`) and re-sync from scratch
 
 Note: On preprod, re-syncing Cardano from scratch is feasible (12-48h). On mainnet, consider restoring from a DB Sync snapshot instead.
@@ -422,5 +349,5 @@ This is expected if the same `content_hash` was already submitted. The pallet re
 ### Connection refused on port 9944
 
 - Verify the node is running: `docker compose ps` or `ps aux | grep materios-node`
-- Check that `--rpc-port 9944` and `--rpc-external` flags are set (the wizard sets these by default).
+- Check that `--rpc-port 9944` and `--rpc-external` flags are set.
 - Firewall rules may be blocking the port.

@@ -1,6 +1,7 @@
 //! CLI command dispatch.
 
 use crate::chain_spec;
+use crate::chain_spec_mainnet;
 use crate::chain_spec_preprod;
 use crate::cli::{Cli, MotraCmd, OrinqCmd, Subcommand};
 use crate::service;
@@ -37,9 +38,14 @@ impl SubstrateCli for Cli {
             "dev" => Box::new(chain_spec::development_config()?),
             "" | "local" => Box::new(chain_spec::local_testnet_config()?),
             "preprod" => Box::new(chain_spec_preprod::preprod_config()?),
-            path => Box::new(chain_spec::ChainSpec::from_json_file(
-                std::path::PathBuf::from(path),
-            )?),
+            path => match path.strip_prefix(chain_spec_mainnet::CHAIN_PREFIX) {
+                Some(manifest) => Box::new(chain_spec_mainnet::mainnet_config(
+                    std::path::Path::new(manifest),
+                )?),
+                None => Box::new(chain_spec::ChainSpec::from_json_file(
+                    std::path::PathBuf::from(path),
+                )?),
+            },
         };
         chain_spec::check_genesis_committee(spec.as_ref())?;
         Ok(spec)

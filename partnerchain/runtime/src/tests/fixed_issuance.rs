@@ -29,6 +29,11 @@ fn acct(k: Keyring) -> AccountId {
 /// can veto its tasks. With `fixed`, genesis declares the three endowments as
 /// the chain's issuance.
 fn chain(fixed: bool) -> TestExternalities {
+    seated(fixed, vec![], 0)
+}
+
+/// `chain`, with `committee` seated at genesis to attest behind `threshold`.
+fn seated(fixed: bool, committee: Vec<AccountId>, threshold: u32) -> TestExternalities {
     let mut storage = frame_system::GenesisConfig::<Runtime>::default()
         .build_storage()
         .expect("frame_system genesis builds");
@@ -39,6 +44,8 @@ fn chain(fixed: bool) -> TestExternalities {
     .expect("balances genesis builds");
     pallet_orinq_receipts::GenesisConfig::<Runtime> {
         fixed_issuance: fixed.then_some(ISSUED),
+        committee_members: committee,
+        attestation_threshold: threshold,
         ..Default::default()
     }
     .assimilate_storage(&mut storage)
@@ -355,6 +362,88 @@ fn the_recovery_veto_moves_a_deposit_and_keeps_the_issuance() {
         );
         assert_eq!(Balances::total_issuance(), ISSUED);
     });
+}
+
+/// The committee a fixed-issuance genesis seats certifies a receipt in block
+/// one, before any Root call could have waited out its delay. The submitter
+/// pays no MATRA, each attest is a duty the pool takes without MOTRA, and the
+/// issuance stays the declared one.
+#[test]
+fn a_genesis_committee_certifies_a_zero_fee_receipt_in_block_one() {
+    use parity_scale_codec::Encode;
+    #[allow(deprecated)]
+    use sp_runtime::traits::SignedExtension;
+    let receipt = H256::repeat_byte(0xA1);
+    let submit = RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::submit_receipt {
+        receipt_id: receipt,
+        content_hash: H256::repeat_byte(0xC1),
+        base_root_sha256: [1; 32],
+        zk_root_poseidon: None,
+        poseidon_params_hash: None,
+        base_manifest_hash: [2; 32],
+        safety_manifest_hash: [3; 32],
+        monitor_config_hash: [4; 32],
+        attestation_evidence_hash: [5; 32],
+        storage_locator_hash: [6; 32],
+        schema_hash: [7; 32],
+    });
+    seated(true, vec![acct(Bob), acct(Charlie)], 2).execute_with(|| {
+        assert_eq!(System::block_number(), 1);
+        assert_ok!(signed(Alice, submit));
+        assert_eq!(Balances::reserved_balance(acct(Alice)), 0);
+        let canonical = OrinqReceipts::canonical_cert_hash(receipt)
+            .expect("the receipt is stored")
+            .0;
+        let attest = RuntimeCall::OrinqReceipts(
+            pallet_orinq_receipts::Call::attest_availability_cert {
+                receipt_id: receipt,
+                claimed_hash: canonical,
+            },
+        );
+        for attestor in [Bob, Charlie] {
+            #[allow(deprecated)]
+            let taken = pallet_motra::fee::ChargeMotra::<Runtime>::new().validate(
+                &acct(attestor),
+                &attest,
+                &attest.get_dispatch_info(),
+                attest.encoded_size(),
+            );
+            assert!(taken.is_ok(), "{attestor}: {taken:?}");
+            assert_eq!(Motra::motra_balance(acct(attestor)), 0);
+            assert_ok!(signed(attestor, attest.clone()));
+        }
+        assert_eq!(
+            pallet_orinq_receipts::Receipts::<Runtime>::get(receipt)
+                .expect("the receipt is stored")
+                .availability_cert_hash,
+            canonical
+        );
+        assert_eq!(Balances::total_issuance(), ISSUED);
+        assert_ok!(OrinqReceipts::ensure_fixed_issuance());
+    });
+}
+
+/// The runtime's genesis builder seats the attestors a chain spec names in
+/// `orinqReceipts.committeeMembers`: `Balances` is built first, so each
+/// endowed member already holds the provider the committee asks for.
+#[test]
+fn a_chain_spec_seats_its_attestors_at_genesis() {
+    let attestors = [AccountId::from([0x11; 32]), AccountId::from([0x22; 32])];
+    let spec = |members: &[AccountId]| {
+        serde_json::json!({
+            "balances": { "balances": [[attestors[0].clone(), 10_000], [attestors[1].clone(), 20_000]] },
+            "sudo": { "key": AccountId::from([0x5A; 32]) },
+            "rootTimelock": { "delays": TESTNET_TIMELOCK_DELAYS, "guardian": AccountId::from([0x6B; 32]) },
+            "sessionCommitteeManagement": alice_committee(),
+            "orinqReceipts": {
+                "fixedIssuance": 30_000 + ExistentialDeposit::get(),
+                "committeeMembers": members,
+                "attestationThreshold": members.len(),
+            },
+        })
+    };
+    assert_eq!(build_chain_spec(spec(&attestors)), Ok(()));
+    assert_eq!(build_chain_spec(spec(&[])), Ok(()));
 }
 
 /// A chain spec declares the issuance its genesis holds, the Treasury's

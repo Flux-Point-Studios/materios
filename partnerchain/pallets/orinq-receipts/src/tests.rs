@@ -191,6 +191,8 @@ pub(crate) fn new_test_ext() -> sp_io::TestExternalities {
         backup_signers: vec![],
         backup_signer_delay: 0,
         fixed_issuance: None,
+        committee_members: vec![],
+        attestation_threshold: 0,
         _phantom: Default::default(),
     }
     .assimilate_storage(&mut t)
@@ -5571,5 +5573,141 @@ mod backup_signer_genesis {
     #[should_panic(expected = "backup_signers exceeds MaxCommitteeSize")]
     fn more_backup_signers_than_the_committee_holds_refuse_genesis() {
         genesis((0..=64).map(acc).collect(), 0);
+    }
+}
+
+mod committee_genesis {
+    use super::*;
+    use sp_runtime::BuildStorage;
+
+    /// Accounts 1 to 4 hold a balance each. Genesis seats `members` behind
+    /// `threshold` and, with `fixed`, declares the four balances as the
+    /// chain's issuance.
+    fn chain(members: Vec<MockAccountId>, threshold: u32, fixed: bool) -> sp_io::TestExternalities {
+        let mut storage = frame_system::GenesisConfig::<Test>::default()
+            .build_storage()
+            .unwrap();
+        pallet_balances::GenesisConfig::<Test> {
+            balances: (1..=4).map(|seed| (acc(seed), 1_000)).collect(),
+        }
+        .assimilate_storage(&mut storage)
+        .unwrap();
+        pallet_orinq_receipts::GenesisConfig::<Test> {
+            committee_members: members,
+            attestation_threshold: threshold,
+            fixed_issuance: fixed.then_some(4_000),
+            ..Default::default()
+        }
+        .assimilate_storage(&mut storage)
+        .unwrap();
+        let mut ext = sp_io::TestExternalities::new(storage);
+        ext.execute_with(|| {
+            System::set_block_number(1);
+            Timestamp::set_timestamp(1_000);
+        });
+        ext
+    }
+
+    /// A genesis that names none stores neither item, so its state is the
+    /// one the same spec built before the fields existed.
+    #[test]
+    fn a_default_genesis_stores_no_committee() {
+        chain(vec![], 0, false).execute_with(|| {
+            assert!(!pallet::CommitteeMembers::<Test>::exists());
+            assert!(!pallet::AttestationThreshold::<Test>::exists());
+        });
+    }
+
+    #[test]
+    fn a_named_committee_and_threshold_land_in_storage() {
+        chain(vec![acc(3), acc(1), acc(2)], 2, false).execute_with(|| {
+            assert_eq!(
+                OrinqReceipts::committee_members()
+                    .into_iter()
+                    .collect::<Vec<_>>(),
+                vec![acc(1), acc(2), acc(3)]
+            );
+            assert_eq!(OrinqReceipts::attestation_threshold(), 2);
+        });
+    }
+
+    /// The committee genesis seats certifies in block one, with no Root call
+    /// before it. On a chain that fixes its issuance the receipt costs its
+    /// submitter nothing and the certification moves no MATRA.
+    #[test]
+    fn a_genesis_committee_certifies_an_unpaid_receipt_in_block_one() {
+        chain(vec![acc(1), acc(2), acc(3)], 2, true).execute_with(|| {
+            let rid = H256::from([0xA1; 32]);
+            assert_ok!(submit(4, rid, H256::from([0xC1; 32])));
+            assert_eq!(Balances::reserved_balance(acc(4)), 0);
+            let canonical = canonical_for(rid);
+            assert_ok!(attest(1, rid, canonical));
+            assert_eq!(
+                pallet::Receipts::<Test>::get(rid).unwrap().availability_cert_hash,
+                [0; 32]
+            );
+            assert_ok!(attest(2, rid, canonical));
+            assert_eq!(
+                pallet::Receipts::<Test>::get(rid).unwrap().availability_cert_hash,
+                canonical
+            );
+            assert_eq!(Balances::total_issuance(), 4_000);
+            assert_ok!(OrinqReceipts::ensure_fixed_issuance());
+            for seed in 1..=4 {
+                assert_eq!(Balances::free_balance(acc(seed)), 1_000);
+            }
+        });
+    }
+
+    #[test]
+    fn the_genesis_patch_names_them_in_camel_case() {
+        let mut config =
+            serde_json::to_value(pallet_orinq_receipts::GenesisConfig::<Test>::default()).unwrap();
+        assert_eq!(config["committeeMembers"], serde_json::json!([]));
+        assert_eq!(config["attestationThreshold"], serde_json::json!(0));
+        config["committeeMembers"] = serde_json::to_value(vec![acc(7), acc(8)]).unwrap();
+        config["attestationThreshold"] = 2.into();
+        let config: pallet_orinq_receipts::GenesisConfig<Test> =
+            serde_json::from_value(config).expect("genesis JSON deserializes");
+        assert_eq!(config.committee_members, vec![acc(7), acc(8)]);
+        assert_eq!(config.attestation_threshold, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestation_threshold must be from 1 to the committee's size")]
+    fn a_committee_with_no_threshold_refuses_genesis() {
+        chain(vec![acc(1), acc(2)], 0, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestation_threshold must be from 1 to the committee's size")]
+    fn a_threshold_above_the_committee_refuses_genesis() {
+        chain(vec![acc(1), acc(2)], 3, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "attestation_threshold is set without committee_members")]
+    fn a_threshold_without_a_committee_refuses_genesis() {
+        chain(vec![], 1, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "committee_members lists a member twice")]
+    fn a_member_listed_twice_refuses_genesis() {
+        chain(vec![acc(1), acc(2), acc(1)], 2, false);
+    }
+
+    /// Account 5 holds nothing, so nothing provides for it: it could sign no
+    /// transaction, and the committee would count a seat that cannot attest.
+    #[test]
+    #[should_panic(expected = "a committee member has no provider")]
+    fn a_member_without_a_provider_refuses_genesis() {
+        chain(vec![acc(1), acc(5)], 1, false);
+    }
+
+    #[test]
+    #[should_panic(expected = "committee_members exceeds MaxCommitteeSize")]
+    fn more_members_than_the_committee_holds_refuse_genesis() {
+        chain((0..=64).map(acc).collect(), 1, false);
     }
 }

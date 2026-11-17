@@ -4581,6 +4581,57 @@ def test_the_spec244_genesis_starts_settlement_at_its_current_version_settling_a
     assert lp.stored_cardano_ids(spec) == (1, CARDANO_PREPROD_SHELLEY, bytes(28))
 
 
+# The fields the node's mainnet chain-spec builder reads from a launch manifest beyond those the preflight reads.
+GENESIS_FIELDS = ("dust", "attestation_threshold", "partner_chain")
+
+
+@pytest.fixture
+def mainnet() -> tuple[lp.Spec, lp.Metadata, dict]:
+    """The genesis `materios-node build-spec --chain mainnet:fixtures/mainnet-launch.json --raw` writes, less its
+    :code, with the metadata of the spec 244 runtime that builds it and the launch manifest it was built from. A node
+    test holds the spec to what this source builds."""
+    v14 = json.loads((FIXTURES / "spec244-metadata.json").read_text())["V14"]
+    spec = lp.load_spec(str(FIXTURES / "mainnet-launch-raw.json"))
+    spec.storage[lp.CODE_KEY] = b""
+    return spec, lp.Metadata.from_v14(v14), json.loads((FIXTURES / "mainnet-launch.json").read_text())
+
+
+def test_the_mainnet_fixture_launch_passes_each_rule_that_reads_neither_cardano_nor_a_signature(mainnet, known):
+    """The node builds a mainnet genesis from the launch manifest. Every rule that reads only the spec, its metadata
+    and the manifest passes it but for what a fixed-issuance mainnet needs the rules to change for: the manifest's
+    genesis fields, the Treasury account the runtime endows its existential deposit, and the attestation committee
+    and fixed issuance genesis stores. Rules 3, 6, 8 and 10 read node captures, live RPC or signatures, and the
+    Cardano half of rules 4 and 9 reads Kupo."""
+    spec, meta, launch = mainnet
+    with pytest.raises(lp.InputError, match="unknown launch manifest field attestation_threshold"):
+        lp.validate_launch(launch)
+    lp.validate_launch({field: value for field, value in launch.items() if field not in GENESIS_FIELDS})
+    assert spec.value("Sudo", "Key") == lp.role_account(launch["roles"]["sudo"][0])
+    found = messages(lp.check_chain_identity(spec)
+                     + lp.check_dev_keys(spec, meta, launch, NO_CARDANO, [], known)
+                     + lp.check_committee(spec, meta, launch)
+                     + lp.check_sessions(spec, meta, launch)
+                     + lp.check_follower(launch)
+                     + lp.check_rewards(spec, meta, launch)
+                     + lp.check_supply(spec, meta, launch, NO_CARDANO)
+                     + lp.check_genesis_storage(spec, meta)
+                     + lp.check_pallets(meta)
+                     + lp.check_observation(spec)
+                     + lp.check_code_overrides(launch)
+                     + lp.check_guardian(spec, meta, launch, known)
+                     + lp.check_delays(spec, meta)
+                     + lp.check_settlement(spec, launch))
+    treasury = lp.ss58((b"modl" + b"mat/trsy").ljust(32, b"\0"), 42)
+    outside = "which a mainnet genesis may not set: storage outside the genesis allowlist can hold a claim on MATRA " \
+              "that the supply check does not count"
+    assert found == [
+        f"[1 dev-keys] genesis account {treasury} is not declared in any role: who holds it is unchecked",
+        f"[4 supply] genesis sets OrinqReceipts.CommitteeMembers (1 entry), {outside}",
+        f"[4 supply] genesis sets OrinqReceipts.FixedIssuance (1 entry), {outside}",
+        f"[4 supply] genesis sets OrinqReceipts.AttestationThreshold (1 entry), {outside}",
+    ]
+
+
 @pytest.mark.parametrize("item", ["BackupSigners", "BackupSignerDelay"])
 def test_a_genesis_that_names_backup_signers_is_on_the_allowlist(spec244, item):
     """Who certifies unpaid, and how long it waits first, holds no MATRA. The runtime's own metadata names both

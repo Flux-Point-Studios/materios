@@ -53,6 +53,27 @@ fn the_preprod_ids_are_those_of_preprods_published_shelley_genesis() {
     assert_eq!(CARDANO_PREPROD.aegis_policy_v1_script_hash, [0; 28]);
 }
 
+/// Cardano mainnet's published environment
+/// (book.world.dev.cardano.org/environments/mainnet), which the launch
+/// preflight keeps as fixtures and holds a mainnet genesis to.
+#[test]
+fn the_mainnet_ids_are_those_of_mainnets_published_shelley_genesis() {
+    let shelley = include_bytes!(
+        "../../../../tools/launch-preflight/fixtures/cardano-mainnet-shelley-genesis.json"
+    );
+    let published: serde_json::Value = serde_json::from_slice(shelley).expect("JSON");
+    assert_eq!(
+        published["networkMagic"],
+        serde_json::json!(CARDANO_MAINNET.network_magic)
+    );
+    assert_eq!(
+        sp_io::hashing::blake2_256(shelley),
+        CARDANO_MAINNET.mainchain_genesis_hash
+    );
+    assert_eq!(CARDANO_MAINNET.aegis_policy_v1_script_hash, [0; 28]);
+    assert_eq!(CARDANO_MAINNET.check(), Ok(()));
+}
+
 fn hex(field: &serde_json::Value) -> Vec<u8> {
     sp_core::bytes::from_hex(field.as_str().expect("a hex string")).expect("valid hex")
 }

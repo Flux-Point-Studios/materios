@@ -27,70 +27,85 @@ The committee selection protocol that uses the D-parameter to compose the block-
 
 ## Initialization Procedure
 
+`materios-node` has no governance or smart-contract commands. The Cardano side
+is set up with the upstream partner-chains v1.8.0 binary
+(`partner-chains-node`), whose `smart-contracts` commands build and submit
+the governance, D-parameter and permissioned candidates transactions. The
+Materios side is the chain spec `materios-node build-spec` writes from the
+launch manifest (see [MAINNET-GENESIS.md](MAINNET-GENESIS.md)).
+
 ### Prerequisites
-- Cardano preprod fully synced (db-sync at tip)
-- Partner chain node built
-- Governance keys generated
+- A Cardano node and an Ogmios that `partner-chains-node` can query, evaluate
+  and submit through, on the network the chain settles on
+- A payer key that owns the genesis UTXO and pays the fees; it holds no
+  authority once governance is initialized
+- The governance authority's Cardano key hash(es); the keys sign offline
+- Each authority's three public keys: its ECDSA partner-chain key, its
+  sr25519 aura key and its ed25519 grandpa key, generated on its own machine
+  (`subkey generate --scheme ecdsa`, `--scheme sr25519`, `--scheme ed25519`)
 
-### Step 1: Generate Governance Keys
+### Step 1: Derive the scripts from the genesis UTXO
 ```bash
-materios-node wizards generate-keys
+partner-chains-node smart-contracts get-scripts --ogmios-url <ogmios> --genesis-utxo <tx hash>#<index>
 ```
-This produces:
-- ECDSA cross-chain key pair
-- Ed25519 Grandpa key pair
-- Sr25519 Aura key pair
-Stored in `partner-chains-node-data/` by default.
+Every script, address and policy id is a function of the genesis UTXO `G`.
+The committee candidate address and the D-parameter and permissioned
+candidates policy ids printed here are the launch manifest's `partner_chain`
+values.
 
-### Step 2: Prepare Configuration
+### Step 2: Initialize governance (spends the genesis UTXO)
 ```bash
-materios-node wizards prepare-configuration
+partner-chains-node smart-contracts governance init --ogmios-url <ogmios> --genesis-utxo <G> \
+  --payment-key-file payer.skey --governance-authority <key hash> --threshold 1
+partner-chains-node smart-contracts governance get-policy --ogmios-url <ogmios> --genesis-utxo <G>
 ```
-Interactive wizard that collects:
-- Cardano payment signing key path
-- Mainchain node socket path
-- DB Sync Postgres connection
-- D-parameter initial values (recommended: fully permissioned)
-- Governance keys threshold (e.g., 2-of-3)
+**This is the irreversible step.** It spends `G`, which becomes the chain's
+identity, and records the governance authority as a native script of the
+given key hashes and threshold. `get-policy` prints what was recorded.
 
-### Step 3: Create Chain Spec
+### Step 3: Publish the D-parameter and the permissioned candidates
 ```bash
-materios-node wizards create-chain-spec
+partner-chains-node smart-contracts upsert-d-parameter --ogmios-url <ogmios> --genesis-utxo <G> \
+  --payment-key-file payer.skey --permissioned-candidates-count <P> --registered-candidates-count 0
+partner-chains-node smart-contracts upsert-permissioned-candidates --ogmios-url <ogmios> --genesis-utxo <G> \
+  --payment-key-file payer.skey --permissioned-candidates-file candidates.txt
 ```
-Generates the genesis chain spec with:
-- Initial authorities
-- Genesis accounts and balances (MATRA distribution)
-- MOTRA parameters
-- Protocol parameters
-
-### Step 4: Setup Mainchain State
+When the payer is not the governance authority, each command funds a
+temporary wallet, builds the transaction on it and prints it instead of
+submitting it. The governance key signs it offline, and the signed witness is
+added and submitted with:
 ```bash
-materios-node wizards setup-main-chain-state
+partner-chains-node smart-contracts assemble-and-submit-tx --ogmios-url <ogmios> \
+  --transaction <cbor hex> --witnesses <witness>
 ```
-**This is the irreversible step.** It:
-- Spends the genesis UTXO
-- Registers governance committee on mainchain
-- Publishes the initial D-parameter
-- Sets up the native token reserve (if applicable)
 
-### Step 5: Wait for Registration
-Wait **2 Cardano epochs** (~10 days: Cardano's epochs last five days on mainnet and preprod alike) for:
-- Committee registration to be confirmed
-- Governance parameters to be readable by nodes
+### Step 4: Wait for the datums to be readable
+A session's committee is drawn from the Cardano data of the epoch two before
+the one it starts in. Both datums must be on chain by the end of Cardano epoch
+`E - 2`, where `E` is the Cardano epoch block 1 falls in, or block 1 is not
+authored.
 
-### Step 6: Start Partner Chain
+### Step 5: Build the chain spec
 ```bash
-materios-node wizards start-node
+materios-node build-spec --chain mainnet:launch.json --raw --disable-default-bootnode > mainnet-raw.json
 ```
-Or manually:
+The launch manifest names the genesis UTXO, the scripts of step 1, every
+authority's keys and every role account; [MAINNET-GENESIS.md](MAINNET-GENESIS.md)
+gives what genesis holds and what the builder refuses. The launch preflight
+(`tools/launch-preflight`) then checks the raw spec against the manifest and
+Cardano before any node starts.
+
+### Step 6: Start the Partner Chain
 ```bash
 materios-node \
-  --chain preprod \
+  --chain mainnet-raw.json \
   --base-path /data/materios \
   --validator \
-  --name "materios-validator-1" \
-  --cardano-socket-path /data/cardano/node.socket
+  --name "materios-validator-1"
 ```
+Every authority runs with Cardano mainnet's follower settings (the `MC__`
+epoch layout, `CARDANO_SECURITY_PARAMETER` and `CARDANO_ACTIVE_SLOTS_COEFF`)
+that the launch manifest declares.
 
 ### Step 7: Verify
 ```bash
@@ -127,13 +142,11 @@ curl -s localhost:9944 -H "Content-Type: application/json" \
 
 ## Changing D-Parameter
 
-Requires governance transaction on Cardano:
+Requires a governance transaction on Cardano, built as in step 3 and signed
+by the governance authority:
 ```bash
-# Via the governance tooling (details TBD per toolkit version)
-materios-node wizards update-d-parameter \
-  --permissioned 2 \
-  --registered 1 \
-  --governance-key path/to/key
+partner-chains-node smart-contracts upsert-d-parameter --ogmios-url <ogmios> --genesis-utxo <G> \
+  --payment-key-file payer.skey --permissioned-candidates-count 2 --registered-candidates-count 1
 ```
 A change made in Cardano epoch N seats committees from the first session that starts in epoch N + 2, five to
 ten days later: each session's committee is drawn from the Cardano data of the epoch two before the one it starts

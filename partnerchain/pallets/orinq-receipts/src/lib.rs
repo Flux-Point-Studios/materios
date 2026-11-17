@@ -807,9 +807,9 @@ pub mod pallet {
         /// Initial expiry deadline in blocks (Component 4). Defaults to
         /// 14_400 blocks (~24h at 6s/block).
         pub receipt_expiry_blocks: u32,
-        /// Initial backup signers. Not checked against the committee, which
-        /// genesis does not set: a listed account is a backup signer from
-        /// the block it joins.
+        /// Initial backup signers. Not checked against the committee: a
+        /// listed account genesis does not seat is a backup signer from the
+        /// block it joins.
         pub backup_signers: Vec<T::AccountId>,
         /// Initial backup signer delay in blocks. Zero imposes none; any other
         /// must be less than half of the expiry window genesis stores.
@@ -820,6 +820,15 @@ pub mod pallet {
         /// reward, fee, fee floor or bond requirement other than zero. None
         /// leaves the issuance open.
         pub fixed_issuance: Option<u128>,
+        /// The attestation committee from block zero, so receipts can be
+        /// certified before any Root call has waited out its delay. Like
+        /// `set_committee`, genesis asks its members for no bond. Each is
+        /// listed once and holds a provider, so it can sign. Empty leaves
+        /// the committee to Root.
+        pub committee_members: Vec<T::AccountId>,
+        /// How many of `committee_members` certify a receipt: from 1 to
+        /// their number, and zero when genesis seats none.
+        pub attestation_threshold: u32,
         #[serde(skip)]
         pub _phantom: core::marker::PhantomData<T>,
     }
@@ -907,6 +916,37 @@ pub mod pallet {
             if let Some(issuance) = self.fixed_issuance {
                 FixedIssuance::<T>::put(issuance);
             }
+            // Stored only when set, so a genesis that seats no committee has
+            // the state root it would have without these items.
+            if self.committee_members.is_empty() {
+                assert!(
+                    self.attestation_threshold == 0,
+                    "attestation_threshold is set without committee_members"
+                );
+                return;
+            }
+            let listed: BTreeSet<T::AccountId> = self.committee_members.iter().cloned().collect();
+            assert!(
+                listed.len() == self.committee_members.len(),
+                "committee_members lists a member twice"
+            );
+            let size = listed.len() as u32;
+            let Ok(members) = BoundedBTreeSet::<T::AccountId, T::MaxCommitteeSize>::try_from(listed)
+            else {
+                panic!("committee_members exceeds MaxCommitteeSize")
+            };
+            assert!(
+                (1..=size).contains(&self.attestation_threshold),
+                "attestation_threshold must be from 1 to the committee's size"
+            );
+            assert!(
+                members
+                    .iter()
+                    .all(|member| frame_system::Pallet::<T>::providers(member) > 0),
+                "a committee member has no provider: endow each at least the existential deposit"
+            );
+            CommitteeMembers::<T>::put(members);
+            AttestationThreshold::<T>::put(self.attestation_threshold);
         }
     }
 
