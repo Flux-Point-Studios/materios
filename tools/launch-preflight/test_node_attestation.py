@@ -386,6 +386,91 @@ def served_by_running_node(node: Path, spec_path: Path, base_path: Path, tmp_pat
 # The rehearsal's validators ran the mock follower from a setting their manifest left out, and passed. The real node
 # is started here with everything a mainnet authority declares and the mock's two settings besides, and its
 # environment is captured as an operator captures it.
+def captured_environment(running: RunningNode, capture: Path) -> tuple[subprocess.CompletedProcess, dict]:
+    """The capture tool run on a running node as its operator runs it, and that process's stat capture."""
+    done = subprocess.run([sys.executable, "-I", "-S", str(base.HERE / "capture_environ.py"),
+                           str(running.process.pid), str(capture)], stdin=subprocess.DEVNULL, capture_output=True,
+                          text=True)
+    stat = capture.with_suffix(".stat")
+    stat.write_bytes(Path(f"/proc/{running.process.pid}/stat").read_bytes())
+    return done, {"process_stat": str(stat)}
+
+
+# What the mock follower needs of the epoch layout besides the first epoch's number, which each case below gives in
+# its own way.
+EPOCH_LAYOUT = {name: value for name, value in lp.NODE_ENV.items() if name != "MC__FIRST_EPOCH_NUMBER"}
+# How a unit can give the node its first Cardano epoch's number so that the node reads 208 and an exact-name reading
+# of its environment does not: the node's follower (figment) trims a name, reads it whatever its case, reads past a
+# space after the MC__ prefix, and takes the later of two entries it reads as one setting. Each node below starts,
+# which it does only if it read 208: the mock follower refuses an epoch number that is no number, and one it lacks.
+EPOCH_NUMBER_AS_THE_NODE_READS_IT = {
+    "padded after the exact name": {"MC__FIRST_EPOCH_NUMBER": "no-number", "MC__FIRST_EPOCH_NUMBER ": "208"},
+    "padded and no exact name": {"MC__FIRST_EPOCH_NUMBER ": "208"},
+    "a space after the MC__ prefix": {"MC__FIRST_EPOCH_NUMBER": "no-number", "MC__ FIRST_EPOCH_NUMBER": "208"},
+    "a tab": {"MC__FIRST_EPOCH_NUMBER": "no-number", "MC__FIRST_EPOCH_NUMBER\t": "208"},
+    "lowercase": {"MC__FIRST_EPOCH_NUMBER": "no-number", "mc__first_epoch_number": "208"},
+}
+
+
+@pytest.mark.parametrize("given", EPOCH_NUMBER_AS_THE_NODE_READS_IT.values(), ids=EPOCH_NUMBER_AS_THE_NODE_READS_IT)
+def test_a_real_node_that_reads_a_setting_under_a_name_that_is_not_exact_is_refused(tmp_path, node, preprod, given):
+    cwd = tmp_path / "running"
+    cwd.mkdir()
+    running = RunningNode(node, preprod, tmp_path / "base", cwd, env=dict(EPOCH_LAYOUT, **given))
+    capture = tmp_path / "val0.cmdline.environ"
+    try:
+        running.served_genesis(cwd / "genesis.json")
+        done, stat = captured_environment(running, capture)
+    finally:
+        running.stop()
+    assert done.returncode == 0, done.stderr
+    twin = next(name for name in given if name != "MC__FIRST_EPOCH_NUMBER")
+    declared = {name: value for name, value in lp.NODE_ENV.items() if name.startswith("MC__")}
+    entry = dict(base.authority(["materios-node", "--validator"], "val0", "val0"), env=declared,
+                 cmdline=str(capture)[:-len(".environ")], **stat)
+    found = [str(f) for f in lp.check_environment({"nodes": [entry]})]
+    assert (f"[8 node] authority val0: its node process was started with a setting named {twin!r}, which is not the "
+            "exact name MC__FIRST_EPOCH_NUMBER: the node's follower trims a setting's name, reads it whatever its "
+            "case and takes the later of two it reads as one, so the node may run on that value and not on the "
+            "declared one") in found, found
+
+
+def test_a_real_node_given_no_readable_epoch_number_does_not_start(tmp_path, node, preprod):
+    """The control of the cases above: the exact name alone, holding what they hold under it."""
+    (tmp_path / "registrations.json").write_text("[]")
+    done = subprocess.run([str(node), "export-blocks", "--chain", str(preprod), "--base-path", str(tmp_path / "base"),
+                           "--from", "0", "--to", "0", "--binary", str(tmp_path / "block-0")], cwd=tmp_path,
+                          env=dict(EPOCH_LAYOUT, MC__FIRST_EPOCH_NUMBER="no-number",
+                                   MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE=str(tmp_path / "registrations.json")),
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=lp.NODE_TIMEOUT)
+    assert done.returncode != 0 and "FIRST_EPOCH_NUMBER" in done.stdout + done.stderr
+
+
+def test_a_real_node_whose_settings_are_all_under_their_exact_names_passes(tmp_path, node, preprod):
+    cwd = tmp_path / "running"
+    cwd.mkdir()
+    running = RunningNode(node, preprod, tmp_path / "base", cwd)
+    capture = tmp_path / "val0.cmdline.environ"
+    try:
+        running.served_genesis(cwd / "genesis.json")
+        done, stat = captured_environment(running, capture)
+    finally:
+        running.stop()
+    assert done.returncode == 0, done.stderr
+    settings, (pid, started) = base.capture_environ.read(capture.read_bytes())
+    assert pid == running.process.pid
+    mock = {name: value for name, value in settings.items() if name in lp.MOCK_FOLLOWER_SETTINGS}
+    declared = {name: value for name, value in settings.items() if name not in mock}
+    entry = dict(base.authority(["materios-node", "--validator"], "val0", "val0"), env=declared,
+                 cmdline=str(capture)[:-len(".environ")], **stat)
+    assert [str(f) for f in lp.check_environment({"nodes": [entry]})] == [
+        f"[8 node] authority val0: its node process was started with {name}: {base.MOCK_FOLLOWER}"
+        for name in sorted(mock)]
+    capture.write_bytes(base.capture_block(settings, pid, started - 1))
+    with pytest.raises(lp.InputError, match="was taken of pid .* the settings are another process's"):
+        lp.check_environment({"nodes": [entry]})
+
+
 def test_a_real_node_on_the_mock_follower_is_refused_by_the_capture_of_its_environment(tmp_path, node, preprod):
     cwd = tmp_path / "running"
     cwd.mkdir()
@@ -393,14 +478,12 @@ def test_a_real_node_on_the_mock_follower_is_refused_by_the_capture_of_its_envir
     capture = tmp_path / "val0.cmdline.environ"
     try:
         running.served_genesis(cwd / "genesis.json")
-        done = subprocess.run([sys.executable, "-I", "-S", str(base.HERE / "capture_environ.py"),
-                               str(running.process.pid), str(capture)], stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True)
+        done, stat = captured_environment(running, capture)
     finally:
         running.stop()
     assert done.returncode == 0, done.stderr
     assert base.PASSWORD.encode() not in capture.read_bytes() and base.PASSWORD not in done.stdout + done.stderr
-    entry = dict(base.follower_node("val0", base.AUTHORITY_ENV), cmdline=str(tmp_path / "val0.cmdline"))
+    entry = dict(base.follower_node("val0", base.AUTHORITY_ENV), cmdline=str(tmp_path / "val0.cmdline"), **stat)
     assert [str(f) for f in lp.check_environment({"nodes": [entry]})] == [
         f"[8 node] authority val0: its node process was started with {name}: {base.MOCK_FOLLOWER}"
         for name in ("MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE", "USE_MAIN_CHAIN_FOLLOWER_MOCK")]
@@ -591,6 +674,18 @@ def test_the_real_node_builds_one_spec_whatever_the_deployment_fields_hold(clean
     endowed = clean.tmp_path / "endowed-raw.json"
     endowed.write_bytes(build_spec(node, f"mainnet:{manifest}", clean.tmp_path / "endowed-base", "--raw"))
     assert lp.spec_genesis_hash(lp.load_spec(str(endowed))) != lp.spec_genesis_hash(clean.spec)
+
+
+def test_cli_the_genesis_stage_refuses_the_chain_built_into_the_real_node_as_the_launch_gate_does(
+        clean, capsys, node, pin):
+    """No capture is read: the binary, run offline on the argv the manifest declares, builds a genesis from a name
+    with no file behind it."""
+    on_real_node(clean, node, pin)
+    base.with_node_argv(clean, ["--chain", "preprod"])
+    code, out = base.genesis_stage(clean, capsys, binaries=[node])
+    assert code == 1 and len(base.reasons(out)) == 4, out
+    assert all("[8 node] authority val" in line and "--chain 'preprod' builds genesis 0x" in line
+               for line in base.reasons(out)), out
 
 
 def test_cli_refuses_a_spec_its_real_node_does_not_build_from_the_launch_manifest(clean, capsys, node, pin):

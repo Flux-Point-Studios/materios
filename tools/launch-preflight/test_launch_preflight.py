@@ -7,6 +7,7 @@ server that answers with Kupo's response shapes.
 """
 import ast
 import base64
+import contextlib
 import copy
 import dataclasses
 import gzip
@@ -15,6 +16,7 @@ import itertools
 import json
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -3528,7 +3530,7 @@ AUTHORITY_ENV = {**MAINNET_FOLLOWER, "MAIN_CHAIN_FOLLOWER": "db-sync", "BLOCK_ST
 
 
 def environ_block(settings: dict) -> bytes:
-    """/proc/<pid>/environ, and what the capture tool writes of it: each NAME=value ended by a NUL."""
+    """/proc/<pid>/environ: each NAME=value ended by a NUL."""
     return b"".join(f"{name}={value}".encode() + b"\0" for name, value in settings.items())
 NO_FOLLOWER = ("[9 committee] the launch declares no cardano_follower, the Cardano settings every authority's "
                "follower must share: the preflight holds each authority to Cardano mainnet's")
@@ -7315,10 +7317,19 @@ SET_UP = STARTED - 60
 DIRECTORY, REGULAR_FILE, SYMBOLIC_LINK = 0o40755, 0o100644, 0o120777
 
 
-def process_stat(started_ticks: int = STARTED_TICKS, comm: str = "materios-node") -> str:
+NODE_PID = 4242
+
+
+def process_stat(started_ticks: int = STARTED_TICKS, comm: str = "materios-node", pid: int = NODE_PID) -> str:
     """/proc/<pid>/stat: the pid, the command name in parentheses, then 50 fields, starttime the 20th after them."""
     fields = ["S", "1", *["0"] * 17, str(started_ticks), *["0"] * 30]
-    return f"4242 ({comm}) " + " ".join(fields) + "\n"
+    return f"{pid} ({comm}) " + " ".join(fields) + "\n"
+
+
+def capture_block(settings: dict, pid: int = NODE_PID, started_ticks: int = STARTED_TICKS) -> bytes:
+    """What the capture tool writes of a node process: the settings it keeps, in the order of their names, each
+    NAME=value ended by a NUL, then the process they were read from, its pid and its start in ticks after boot."""
+    return environ_block(dict(sorted(settings.items()))) + f"process={pid} {started_ticks}".encode() + b"\0"
 
 
 SYSTEM_STAT = f"cpu  1 2 3 4 5 6 7 0 0 0\ncpu0 1 2 3 4 5 6 7 0 0 0\nintr 7\nctxt 9\nbtime {BOOT}\nprocesses 4242\n"
@@ -8332,7 +8343,7 @@ class Launch:
                 capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
                 declared = {name: value for name, value in node.get("env", {}).items() if name not in LOGGING}
                 Path(node["cmdline"] + ".environ").write_bytes(
-                    environ_block(dict(sorted(self.environ.get(node["name"], declared).items()))))
+                    capture_block(self.environ.get(node["name"], declared)))
         spec_path = self.spec_path()
         (self.tmp_path / "node-built-raw.json").write_text(spec_path.read_text() if self.built is None else self.built)
         for node in self.launch["nodes"]:
@@ -10041,10 +10052,11 @@ def test_the_capture_keeps_the_settings_the_preflight_reads_and_reduces_the_conn
 
 
 def test_the_capture_holds_no_password_user_or_setting_outside_its_names():
-    written = capture_environ.written(capture_environ.captured(environ_block(RUNNING_ENV)))
+    written = capture_environ.written(capture_environ.captured(environ_block(RUNNING_ENV)), (NODE_PID, 77))
     for secret in (PASSWORD, "materios:", SECRET_TOKEN, "API_TOKEN", "/var/lib/materios", "INVOCATION_ID"):
         assert secret.encode() not in written
-    assert capture_environ.read(written) == AUTHORITY_ENV
+    assert written == capture_block(AUTHORITY_ENV, NODE_PID, 77)
+    assert capture_environ.read(written) == (AUTHORITY_ENV, (NODE_PID, 77))
 
 
 def test_the_capture_names_every_setting_an_authority_declares_and_the_ones_it_may_not_run_with():
@@ -10052,7 +10064,12 @@ def test_the_capture_names_every_setting_an_authority_declares_and_the_ones_it_m
     assert declared < capture_environ.CAPTURED
     assert capture_environ.CAPTURED - declared == {
         "USE_MAIN_CHAIN_FOLLOWER_MOCK", "MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE", "MITHRIL_CLIENT_BIN",
-        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"}
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", *SQLX_SETTINGS}
+
+
+# What sqlx-postgres 0.7.4 reads from the environment for a connection (options/mod.rs, options/pgpass.rs).
+SQLX_SETTINGS = ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY",
+                 "PGSSLMODE", "PGAPPNAME", "PGOPTIONS", "PGPASSFILE")
 
 
 @pytest.mark.parametrize("url, reduced", [
@@ -10060,8 +10077,10 @@ def test_the_capture_names_every_setting_an_authority_declares_and_the_ones_it_m
     (f"postgresql://materios:{PASSWORD}@10.0.0.5:6432/yaci_store?sslmode=require", "10.0.0.5:6432/yaci_store"),
     ("postgres://materios@DB-1.Internal:5432/cexplorer", "db-1.internal:5432/cexplorer"),
     (f"postgres://materios:{PASSWORD}@[fd00::5]:5432/cexplorer", "[fd00::5]:5432/cexplorer"),
-    (f"postgres://materios:{PASSWORD}@db-1/cexplorer?port=6432&dbname=other&password={PASSWORD}", "db-1:6432/other"),
-    (f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?host=db-2", "db-2:5432/cexplorer"),
+    (f"postgres://materios:{PASSWORD}@db-1/?port=6432&dbname=other&password={PASSWORD}", "db-1:6432/other"),
+    ("postgres:///cexplorer?host=/var/run/postgresql&port=5432", "/var/run/postgresql:5432/cexplorer"),
+    (f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?sslmode=verify-full&sslrootcert=/etc/ssl/db.pem"
+     "&application_name=materios", "db-1:5432/cexplorer"),
 ])
 def test_a_connection_string_is_reduced_to_its_host_port_and_database(url, reduced):
     assert capture_environ.reduced_connection(url) == reduced
@@ -10071,9 +10090,22 @@ def test_a_connection_string_is_reduced_to_its_host_port_and_database(url, reduc
     f"postgres://materios:{PASSWORD}@db-1/cexplorer", f"postgres://materios:{PASSWORD}@db-1:5432",
     f"postgres://materios:{PASSWORD}@:5432/cexplorer", f"host=db-1 port=5432 password={PASSWORD} dbname=cexplorer",
     f"postgres://materios:pa/{PASSWORD}@db-1:5432/cexplorer", f"mysql://materios:{PASSWORD}@db-1:5432/cexplorer",
-    f"postgres://materios:{PASSWORD}@db-1:port/cexplorer", ""],
+    f"postgres://materios:{PASSWORD}@db-1:port/cexplorer", "",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?options=-c%20search_path%3Dfake",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?options[search_path]=fake",
+    f"postgres://materios:{PASSWORD}@ignored:5432/cexplorer?host=/var/run/evil&host=db-1",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?host=/var/run/evil",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?host=db-2",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?hostaddr=10.9.9.9",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?port=6432",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?dbname=other",
+    f"postgres://user:8080/{PASSWORD}?@db-1:5432/cexplorer", f"postgres://user:12/{PASSWORD}#@db-1:5432/cexplorer",
+    f"postgres://db-1:5432/cexplorer?user=u@v&password={PASSWORD}",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer#x@y"],
     ids=["no port", "no database", "no host", "no URL", "a slash in the password", "another scheme",
-         "a port that is no number", "empty"])
+         "a port that is no number", "empty", "session options", "one session option", "a socket and then a host",
+         "a host and a socket", "two hosts", "a host and a host address", "two ports", "two databases",
+         "an @ in the query", "an @ in the fragment", "an @ in a parameter", "an @ after the database"])
 def test_a_connection_string_the_capture_cannot_reduce_is_refused_without_its_value(url):
     with pytest.raises(ValueError) as refused:
         capture_environ.captured(environ_block(dict(RUNNING_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=url)))
@@ -10083,10 +10115,74 @@ def test_a_connection_string_the_capture_cannot_reduce_is_refused_without_its_va
     assert PASSWORD not in repr(refused.value)
 
 
-def test_the_capture_keeps_a_setting_in_the_spelling_the_process_has_it():
-    """The node's follower reads its settings whatever their case, so a lowercase one counts and is shown as given."""
-    assert capture_environ.captured(environ_block({"block_stability_margin": "9", "Mc__First_Epoch_Number": "1"})) == {
-        "block_stability_margin": "9", "Mc__First_Epoch_Number": "1"}
+# How the node's most forgiving reader takes a name: figment trims it, matches it and the MC__ prefix without regard
+# to ASCII case, trims again what follows the prefix, and nests at a dot.
+NAMES_READ_AS = {
+    "BLOCK_STABILITY_MARGIN": "BLOCK_STABILITY_MARGIN",
+    "BLOCK_STABILITY_MARGIN ": "BLOCK_STABILITY_MARGIN",
+    " CARDANO_SECURITY_PARAMETER": "CARDANO_SECURITY_PARAMETER",
+    "BLOCK_STABILITY_MARGIN\t": "BLOCK_STABILITY_MARGIN",
+    "DB_SYNC_POSTGRES_CONNECTION_STRING ": "DB_SYNC_POSTGRES_CONNECTION_STRING",
+    "\u00a0DB_SYNC_POSTGRES_CONNECTION_STRING\u2003": "DB_SYNC_POSTGRES_CONNECTION_STRING",
+    "block_stability_margin": "BLOCK_STABILITY_MARGIN",
+    "Mc__First_Epoch_Number": "MC__FIRST_EPOCH_NUMBER",
+    "MC__ FIRST_EPOCH_NUMBER": "MC__FIRST_EPOCH_NUMBER",
+    " mc__\tfirst_epoch_number ": "MC__FIRST_EPOCH_NUMBER",
+    "CARDANO_SECURITY_PARAMETER.depth": "CARDANO_SECURITY_PARAMETER",
+    "MC__FIRST_EPOCH_NUMBER .x": "MC__FIRST_EPOCH_NUMBER",
+    "PATH": "PATH",
+    "MC_FIRST_EPOCH_NUMBER": "MC_FIRST_EPOCH_NUMBER",
+}
+
+
+@pytest.mark.parametrize("name, setting", NAMES_READ_AS.items(), ids=list(map(repr, NAMES_READ_AS)))
+def test_a_name_is_read_as_the_most_forgiving_of_the_nodes_readers_takes_it(name, setting):
+    assert capture_environ.reads_as(name) == setting
+
+
+TWINS = [name for name, setting in NAMES_READ_AS.items() if name != setting and setting in capture_environ.CAPTURED]
+
+
+@pytest.mark.parametrize("twin", TWINS, ids=list(map(repr, TWINS)))
+def test_the_capture_keeps_a_name_the_node_reads_as_a_setting_spelled_as_the_process_has_it(twin):
+    """Dropped, the node would run on a value the capture does not show: figment takes the later of two entries it
+    reads as one setting."""
+    exact = NAMES_READ_AS[twin]
+    kept = capture_environ.captured(environ_block({exact: RUNNING_ENV[exact], twin: RUNNING_ENV[exact]}))
+    assert kept == {exact: AUTHORITY_ENV[exact], twin: AUTHORITY_ENV[exact]}
+    assert capture_environ.read(capture_block(kept)) == (kept, (NODE_PID, STARTED_TICKS))
+    assert capture_environ.captured(environ_block({twin: RUNNING_ENV[exact]})) == {twin: AUTHORITY_ENV[exact]}
+
+
+def test_a_connection_string_under_a_padded_name_is_reduced_like_the_exact_one():
+    kept = capture_environ.captured(environ_block({
+        "DB_SYNC_POSTGRES_CONNECTION_STRING": f"postgres://materios:{PASSWORD}@db-1.internal:5432/cexplorer",
+        "DB_SYNC_POSTGRES_CONNECTION_STRING ": f"postgres://materios:{PASSWORD}@db-9.elsewhere:5432/cexplorer"}))
+    assert kept == {"DB_SYNC_POSTGRES_CONNECTION_STRING": "db-1.internal:5432/cexplorer",
+                    "DB_SYNC_POSTGRES_CONNECTION_STRING ": "db-9.elsewhere:5432/cexplorer"}
+
+
+def test_the_capture_names_each_postgres_setting_and_shows_no_credential():
+    process = dict(RUNNING_ENV, PGHOST="db-9.elsewhere", PGPORT="6432", PGDATABASE="other", PGUSER="materios",
+                   PGPASSWORD=PASSWORD, PGPASSFILE="/run/secrets/pgpass", PGSSLKEY="/run/secrets/db.key",
+                   PGSSLMODE="disable", PGSSLROOTCERT="/tmp/ca.pem", PGSSLCERT="/tmp/cert.pem", PGAPPNAME="x",
+                   PGOPTIONS="-c search_path=fake")
+    kept = capture_environ.captured(environ_block(process))
+    assert {name: value for name, value in kept.items() if name.startswith("PG")} == {
+        "PGHOST": "db-9.elsewhere", "PGPORT": "6432", "PGDATABASE": "other", "PGSSLMODE": "disable",
+        "PGSSLROOTCERT": "/tmp/ca.pem", "PGSSLCERT": "/tmp/cert.pem", "PGAPPNAME": "x",
+        "PGOPTIONS": "-c search_path=fake", "PGUSER": "<set>", "PGPASSWORD": "<set>", "PGPASSFILE": "<set>",
+        "PGSSLKEY": "<set>"}
+    written = capture_environ.written(kept, (NODE_PID, 77))
+    assert PASSWORD.encode() not in written and b"/run/secrets" not in written and b"materios" not in written
+
+
+@pytest.mark.parametrize("raw", [b"PGPASSWORD=" + PASSWORD.encode() + b"\0process=1 2\0",
+                                 b"PGUSER=materios\0process=1 2\0"])
+def test_a_capture_file_that_shows_a_credential_is_refused(raw):
+    with pytest.raises(ValueError) as refused:
+        capture_environ.read(raw)
+    assert PASSWORD not in str(refused.value) and "materios" not in str(refused.value)
 
 
 def test_a_setting_the_process_has_twice_is_refused():
@@ -10094,11 +10190,25 @@ def test_a_setting_the_process_has_twice_is_refused():
         capture_environ.captured(b"MAIN_CHAIN_FOLLOWER=yaci\0MAIN_CHAIN_FOLLOWER=db-sync\0")
 
 
-@pytest.mark.parametrize("raw", [b"MAIN_CHAIN_FOLLOWER=yaci", b"MAIN_CHAIN_FOLLOWER\0", b"\xff=1\0"],
-                         ids=["no final NUL", "no =", "not UTF-8"])
-def test_a_capture_that_is_not_settings_each_ended_by_a_nul_is_refused(raw):
+@pytest.mark.parametrize("raw", [
+    b"MAIN_CHAIN_FOLLOWER=yaci\0process=1 2", b"MAIN_CHAIN_FOLLOWER\0process=1 2\0", b"\xff=1\0process=1 2\0",
+    b"MAIN_CHAIN_FOLLOWER=yaci\0", b"", b"process=1 2\0MAIN_CHAIN_FOLLOWER=yaci\0",
+    b"MAIN_CHAIN_FOLLOWER=yaci\0process=1 2\0process=1 2\0", b"MAIN_CHAIN_FOLLOWER=yaci\0process=1\0",
+    b"MAIN_CHAIN_FOLLOWER=yaci\0process=one 2\0", b"MAIN_CHAIN_FOLLOWER=yaci\0process=1 -2\0",
+    b"HOME=/root\0process=1 2\0", b"MAIN_CHAIN_FOLLOWER=yaci\0MAIN_CHAIN_FOLLOWER=yaci\0process=1 2\0"],
+    ids=["no final NUL", "no =", "not UTF-8", "no process", "empty", "the process first", "two processes",
+         "a process with no start", "a pid that is no number", "a negative start", "a setting it does not write",
+         "a setting twice"])
+def test_a_capture_that_is_not_what_the_tool_writes_is_refused(raw):
     with pytest.raises(ValueError):
         capture_environ.read(raw)
+
+
+def test_the_process_a_capture_is_of_is_read_from_its_stat():
+    assert capture_environ.process_of(process_stat(77, "materios node) x (", 99).encode()) == (99, 77)
+    for stat in (b"", b"99 (materios-node", b"99 (materios-node) S 1"):
+        with pytest.raises(ValueError):
+            capture_environ.process_of(stat)
 
 
 def test_the_capture_tool_runs_with_the_standard_library_alone(tmp_path):
@@ -10108,8 +10218,23 @@ def test_the_capture_tool_runs_with_the_standard_library_alone(tmp_path):
     assert done.returncode == 0 and "environ" in done.stdout, done.stderr
 
 
+# When each process a test started began, in ticks after boot, read from its /proc/<pid>/stat before it is killed.
+STARTED_BY = {}
+
+
+def started(env: dict) -> subprocess.Popen:
+    """A process started with `env`, once the kernel shows its environment: /proc/<pid>/environ reads empty until
+    exec has set the new image's bounds, a moment after Popen returns."""
+    process = subprocess.Popen(["sleep", "60"], env=env)
+    deadline = time.monotonic() + 10
+    while not Path(f"/proc/{process.pid}/environ").read_bytes() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    STARTED_BY[process.pid] = int(Path(f"/proc/{process.pid}/stat").read_text().rpartition(")")[2].split()[19])
+    return process
+
+
 def test_the_capture_tool_writes_a_running_process_and_prints_only_names(tmp_path):
-    process = subprocess.Popen(["sleep", "60"], env=RUNNING_ENV)
+    process = started(RUNNING_ENV)
     try:
         out = tmp_path / "val-1.cmdline.environ"
         done = subprocess.run([sys.executable, "-I", "-S", str(HERE / "capture_environ.py"), str(process.pid),
@@ -10118,7 +10243,7 @@ def test_the_capture_tool_writes_a_running_process_and_prints_only_names(tmp_pat
         process.kill()
         process.wait()
     assert done.returncode == 0, done.stderr
-    assert capture_environ.read(out.read_bytes()) == AUTHORITY_ENV
+    assert capture_environ.read(out.read_bytes()) == (AUTHORITY_ENV, (process.pid, STARTED_BY[process.pid]))
     assert done.stdout == (f"pid {process.pid}: {len(AUTHORITY_ENV)} settings written to {out}: "
                            f"{' '.join(sorted(AUTHORITY_ENV))}\n")
     for secret in (PASSWORD, SECRET_TOKEN, "db-1", "0x" + "ab" * 32):
@@ -10127,7 +10252,7 @@ def test_the_capture_tool_writes_a_running_process_and_prints_only_names(tmp_pat
 
 def test_the_capture_tool_writes_nothing_for_a_connection_string_it_cannot_reduce(tmp_path):
     env = dict(RUNNING_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=f"host=db-1 password={PASSWORD}")
-    process = subprocess.Popen(["sleep", "60"], env=env)
+    process = started(env)
     try:
         out = tmp_path / "val-1.cmdline.environ"
         done = subprocess.run([sys.executable, "-I", "-S", str(HERE / "capture_environ.py"), str(process.pid),
@@ -10143,9 +10268,18 @@ def test_the_capture_tool_writes_nothing_for_a_connection_string_it_cannot_reduc
 def environment_findings(tmp_path: Path, running: dict, env: dict = AUTHORITY_ENV, script: str | None = None):
     """Rule 8 on an authority whose manifest declares `env`, or a script, and whose node process was started with
     `running`, as the capture tool saves it next to its cmdline capture."""
-    node = dict(follower_node(env=env, script=script), cmdline=str(tmp_path / "val1.cmdline"))
-    Path(node["cmdline"] + ".environ").write_bytes(environ_block(dict(sorted(running.items()))))
+    node = captured_node(tmp_path, env, script)
+    Path(node["cmdline"] + ".environ").write_bytes(capture_block(running))
     return messages(lp.check_environment({"nodes": [node, {"name": "edge", "host": "edge", "authority": False}]}))
+
+
+def captured_node(tmp_path: Path, env: dict = AUTHORITY_ENV, script: str | None = None) -> dict:
+    """An authority with the captures rule 8 reads its environment by: its cmdline's path, which names where the
+    environment capture is, and its process's stat."""
+    node = dict(follower_node(env=env, script=script), cmdline=str(tmp_path / "val1.cmdline"),
+                process_stat=str(tmp_path / "val1.stat"))
+    Path(node["process_stat"]).write_text(process_stat())
+    return node
 
 
 def test_an_authority_whose_node_runs_with_the_settings_its_manifest_declares_passes(tmp_path):
@@ -10190,11 +10324,91 @@ def test_an_authority_whose_node_runs_without_a_declared_setting_is_refused(tmp_
 
 @pytest.mark.parametrize("name, value", [("LD_PRELOAD", "/opt/hook.so"), ("MITHRIL_CLIENT_BIN", "/tmp/mithril"),
                                          ("MITHRIL_AGGREGATOR_ENDPOINT", "https://aggregator.example"),
-                                         ("block_stability_margin", "9"), ("mc__first_epoch_number", "1")])
+                                         ("PGHOST", "db-9.elsewhere"), ("PGPORT", "6432"), ("PGDATABASE", "other"),
+                                         ("PGOPTIONS", "-c search_path=fake"), ("PGSSLMODE", "disable"),
+                                         ("PGSSLROOTCERT", "/tmp/ca.pem"), ("PGSSLCERT", "/tmp/cert.pem"),
+                                         ("PGAPPNAME", "x"), ("PGUSER", "<set>"), ("PGPASSWORD", "<set>"),
+                                         ("PGPASSFILE", "<set>"), ("PGSSLKEY", "<set>")])
 def test_an_authority_whose_node_runs_with_a_setting_its_manifest_does_not_declare_is_refused(tmp_path, name, value):
     assert environment_findings(tmp_path, dict(AUTHORITY_ENV, **{name: value})) == [
         f"[8 node] authority val1: its node process was started with {name}={value}, which its manifest does not "
         f"declare: {DECLARED_APART}"]
+
+
+def twin_refused(twin: str) -> str:
+    return (f"[8 node] authority val1: its node process was started with a setting named {twin!r}, which is not the "
+            f"exact name {NAMES_READ_AS[twin]}: the node's follower trims a setting's name, reads it "
+            "whatever its case and takes the later of two it reads as one, so the node may run on that value and "
+            "not on the declared one")
+
+
+@pytest.mark.parametrize("twin", TWINS, ids=list(map(repr, TWINS)))
+def test_an_authority_whose_node_process_has_a_setting_under_a_name_that_is_not_exact_is_refused(tmp_path, twin):
+    """Beside the exact name, with the declared value under both, and in its place: either way the name refuses."""
+    exact = NAMES_READ_AS[twin]
+    assert environment_findings(tmp_path, dict(AUTHORITY_ENV, **{twin: AUTHORITY_ENV[exact]})) == [twin_refused(twin)]
+    alone = {name: value for name, value in AUTHORITY_ENV.items() if name != exact}
+    assert environment_findings(tmp_path, dict(alone, **{twin: AUTHORITY_ENV[exact]})) == [
+        twin_refused(twin),
+        f"[8 node] authority val1: its node process was started without {exact}, which its manifest declares as "
+        f"{exact}={AUTHORITY_ENV[exact]}: {DECLARED_APART}"]
+
+
+def test_the_value_under_a_name_that_is_not_exact_is_not_shown(tmp_path):
+    found = environment_findings(tmp_path, dict(AUTHORITY_ENV, **{"DB_SYNC_POSTGRES_CONNECTION_STRING ": "db-9:1/x"}))
+    assert found == [twin_refused("DB_SYNC_POSTGRES_CONNECTION_STRING ")] and "db-9" not in found[0]
+
+
+def test_an_environment_capture_of_another_process_than_its_stat_capture_is_refused(tmp_path):
+    """A capture left from before a restart, or taken of another process: the settings are not this node's."""
+    node = captured_node(tmp_path)
+    for pid, ticks, said in ((NODE_PID, STARTED_TICKS - 1, f"pid {NODE_PID}, started at tick {STARTED_TICKS - 1}"),
+                             (NODE_PID + 1, STARTED_TICKS, f"pid {NODE_PID + 1}, started at tick {STARTED_TICKS}")):
+        Path(node["cmdline"] + ".environ").write_bytes(capture_block(AUTHORITY_ENV, pid, ticks))
+        with pytest.raises(lp.InputError) as refused:
+            lp.check_environment({"nodes": [node]})
+        assert str(refused.value) == (
+            f"authority val1: environ {node['cmdline']}.environ was taken of {said}, and its process_stat capture is "
+            f"of pid {NODE_PID}, started at tick {STARTED_TICKS}: the settings are another process's, as a capture "
+            "left from before a restart is; take both of the node process that runs now")
+    Path(node["cmdline"] + ".environ").write_bytes(capture_block(AUTHORITY_ENV))
+    assert lp.check_environment({"nodes": [node]}) == []
+
+
+def test_an_authority_with_no_stat_capture_cannot_tie_its_environment_to_a_process(tmp_path):
+    node = captured_node(tmp_path)
+    Path(node["cmdline"] + ".environ").write_bytes(capture_block(AUTHORITY_ENV))
+    del node["process_stat"]
+    with pytest.raises(lp.InputError, match="authority val1: give a copy of its node process's /proc/<pid>/stat"):
+        lp.check_environment({"nodes": [node]})
+
+
+CONNECTION_URL = f"postgres://materios:{PASSWORD}@db-1.internal:5432/cexplorer"
+
+
+@pytest.mark.parametrize("running", [AUTHORITY_ENV,
+                                     dict(AUTHORITY_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING="db-9:5432/cexplorer"),
+                                     {name: value for name, value in AUTHORITY_ENV.items()
+                                      if name != "DB_SYNC_POSTGRES_CONNECTION_STRING"}],
+                         ids=["the same database", "another database", "none"])
+def test_a_connection_string_the_manifest_declares_is_never_shown(tmp_path, running):
+    """A manifest that wrongly holds the URL, password and all: rule 9 refuses it, and rule 8's line on the
+    difference names the setting and shows neither side's value unless it is a reduced one."""
+    found = environment_findings(tmp_path, running,
+                                 dict(AUTHORITY_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=CONNECTION_URL))
+    assert len(found) == 1 and "DB_SYNC_POSTGRES_CONNECTION_STRING" in found[0]
+    assert PASSWORD not in found[0] and "materios:" not in found[0] and "postgres://" not in found[0]
+
+
+def test_cli_never_shows_a_connection_string_a_manifest_wrongly_holds(clean, capsys):
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            clean.environ[node["name"]] = dict(node["env"])
+            node["env"]["DB_SYNC_POSTGRES_CONNECTION_STRING"] = CONNECTION_URL
+    code, out = clean.run(capsys)
+    assert code == 1 and "[9 committee] authority val0 gives DB_SYNC_POSTGRES_CONNECTION_STRING in another form" in out
+    assert "[8 node] authority val0: its node process was started with DB_SYNC_POSTGRES_CONNECTION_STRING" in out
+    assert PASSWORD not in out and "materios:" not in out
 
 
 def test_every_setting_an_authority_runs_apart_from_its_manifest_is_named(tmp_path):
@@ -10204,7 +10418,7 @@ def test_every_setting_an_authority_runs_apart_from_its_manifest_is_named(tmp_pa
 
 
 def test_an_authority_with_no_environment_capture_is_an_input_error_that_says_how_to_take_it(tmp_path):
-    node = dict(follower_node(env=AUTHORITY_ENV), cmdline=str(tmp_path / "val1.cmdline"))
+    node = captured_node(tmp_path)
     with pytest.raises(lp.InputError) as refused:
         lp.check_environment({"nodes": [node]})
     assert str(refused.value) == (
@@ -10214,7 +10428,7 @@ def test_an_authority_with_no_environment_capture_is_an_input_error_that_says_ho
 
 
 def test_an_environment_capture_that_is_no_capture_is_an_input_error(tmp_path):
-    node = dict(follower_node(env=AUTHORITY_ENV), cmdline=str(tmp_path / "val1.cmdline"))
+    node = captured_node(tmp_path)
     Path(node["cmdline"] + ".environ").write_bytes(b"PATH=/usr/bin")
     with pytest.raises(lp.InputError, match="authority val1: environ .* is not what capture_environ.py writes"):
         lp.check_environment({"nodes": [node]})
@@ -10223,7 +10437,7 @@ def test_an_environment_capture_that_is_no_capture_is_an_input_error(tmp_path):
 def test_a_raw_copy_of_the_environment_is_refused_as_a_capture(tmp_path):
     """`cat /proc/<pid>/environ` holds every setting, the database password among them: the preflight reads only what
     the capture tool writes."""
-    node = dict(follower_node(env=AUTHORITY_ENV), cmdline=str(tmp_path / "val1.cmdline"))
+    node = captured_node(tmp_path)
     Path(node["cmdline"] + ".environ").write_bytes(environ_block(RUNNING_ENV))
     with pytest.raises(lp.InputError) as refused:
         lp.check_environment({"nodes": [node]})
@@ -10344,9 +10558,12 @@ def test_cli_the_genesis_stage_runs_each_pinned_binarys_build_of_the_manifest(cl
             node.update(exe=str(clean.tmp_path / f"{node['name']}.exe-capture-to-come"), exe_sha256=sha256_pin(exe))
     code, out = genesis_stage(clean, capsys, binaries=[exe])
     assert code == 0, out
-    assert [call["argv"][1] for call in node_calls(log)] == ["build-spec"]
-    assert node_calls(log)[0]["manifest_sha256"] == hashlib.sha256(
-        (clean.tmp_path / "launch.json").read_bytes()).hexdigest()
+    calls = node_calls(log)
+    assert sorted(call["argv"][1] for call in calls) == ["build-spec", "chain-id", "export-blocks", "export-blocks"]
+    assert [call["manifest_sha256"] for call in calls if call["argv"][1] == "build-spec"] == [hashlib.sha256(
+        (clean.tmp_path / "launch.json").read_bytes()).hexdigest()]
+    spec_sha = hashlib.sha256((clean.tmp_path / "clean-raw.json").read_bytes()).hexdigest()
+    assert [call["chain_sha256"] for call in calls if call["argv"][1] != "build-spec"] == [False, spec_sha, spec_sha]
 
 
 def test_cli_the_genesis_stage_refuses_a_spec_the_pinned_binary_does_not_build(clean, capsys):
@@ -10554,3 +10771,342 @@ def test_a_refused_chain_path_says_what_moves_a_directorys_ctime(clean, capsys):
     clean.changed["val1"] = {step: STARTED + 30}
     code, out = clean.run(capsys)
     assert code == 1 and only_reason(out, changed_after_start(step, STARTED + 30).replace("val0", "val1")), out
+
+
+# ---------------------------------------------------------------------------
+# A setting's name, as the node's readers take it
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("twin", TWINS, ids=list(map(repr, TWINS)))
+def test_a_manifest_that_declares_a_setting_under_a_name_that_is_not_exact_is_refused(twin):
+    exact = NAMES_READ_AS[twin]
+    node = follower_node(env=dict(AUTHORITY_ENV, **{twin: AUTHORITY_ENV[exact]}))
+    with pytest.raises(lp.InputError) as refused:
+        lp.validate_node(node, "nodes[0]")
+    assert str(refused.value) == (
+        f"node val1: sets a setting named {twin!r}, which is not the exact name {exact}: the node's follower trims a "
+        "setting's name, reads it whatever its case and takes the later of two it reads as one, so declare each "
+        "setting under its exact name alone")
+
+
+@pytest.mark.parametrize("twin", ["use_main_chain_follower_mock", "LD_PRELOAD ", " pghost"])
+def test_a_node_that_is_no_authority_may_not_declare_such_a_name_either(twin):
+    node = {"name": "edge", "host": "edge", "authority": False, "env": {twin: "x"}}
+    with pytest.raises(lp.InputError, match=f"node edge: sets a setting named {twin!r}, which is not the exact name"):
+        lp.validate_node(node, "nodes[0]")
+
+
+def node_process_captures(clean, name: str, process: subprocess.Popen) -> None:
+    """Take an authority's environment, stat and machine captures from a process of this host, as its operator
+    takes them from its node: the tool for the first, a copy of /proc for the others."""
+    node = next(node for node in clean.launch["nodes"] if node["name"] == name)
+    Path(node["process_stat"]).write_bytes(Path(f"/proc/{process.pid}/stat").read_bytes())
+    Path(node["system_stat"]).write_bytes(Path("/proc/stat").read_bytes())
+    done = subprocess.run([sys.executable, "-I", "-S", str(HERE / "capture_environ.py"), str(process.pid),
+                           node["cmdline"] + ".environ"], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+def gate_on_a_process(clean, capsys, extra: dict) -> tuple[int, str]:
+    """The launch gate on the clean launch, its first authority's process captures taken from a process of this host
+    started with the settings its manifest declares, the database as the URL the node is given, and `extra`."""
+    spec_path = clean.prepare()
+    node = clean.launch["nodes"][0]
+    process = started(dict(node["env"], DB_SYNC_POSTGRES_CONNECTION_STRING=CONNECTION_URL, **extra))
+    try:
+        node_process_captures(clean, node["name"], process)
+    finally:
+        process.kill()
+        process.wait()
+    return run_cli(clean.tmp_path, spec_path, prove(clean.launch, lp.load_spec(str(spec_path))), capsys,
+                   clean.kupo.url, clean.launch_key)
+
+
+def test_cli_passes_an_authority_whose_process_was_started_with_what_its_manifest_declares(clean, capsys):
+    code, out = gate_on_a_process(clean, capsys, {})
+    assert (code, out.splitlines()[0]) == (0, PASS), out
+
+
+def test_cli_refuses_an_authority_whose_process_has_another_value_under_the_exact_name(clean, capsys):
+    code, out = gate_on_a_process(clean, capsys, {"MC__FIRST_EPOCH_NUMBER": "1"})
+    assert code == 1 and "started with MC__FIRST_EPOCH_NUMBER=1, and its manifest declares" in out, out
+
+
+# The node read the padded entry and the gate read the exact one: a database, an epoch layout, a security parameter
+# and a stability margin the manifest never showed.
+@pytest.mark.parametrize("extra", [
+    {"MC__FIRST_EPOCH_NUMBER ": "1"},
+    {"DB_SYNC_POSTGRES_CONNECTION_STRING ": f"postgres://materios:{PASSWORD}@attacker.example:5432/fake"},
+    {" CARDANO_SECURITY_PARAMETER": "5", "BLOCK_STABILITY_MARGIN\t": "9"},
+    {"MC__ FIRST_EPOCH_NUMBER": "1"}, {"mc__first_epoch_number": "1"}, {"PGOPTIONS": "-c search_path=fake"},
+], ids=["a padded epoch number", "a padded database", "a padded security parameter and margin",
+        "a space after the MC__ prefix", "a lowercase epoch number", "session options for the database"])
+def test_cli_refuses_an_authority_whose_process_has_a_setting_the_node_reads_and_the_manifest_does_not_show(
+        clean, capsys, extra):
+    code, out = gate_on_a_process(clean, capsys, extra)
+    refused = out.splitlines()[1:]
+    assert code == 1 and len(refused) == len(extra), out
+    for name, line in zip(sorted(extra), refused):
+        said = (f"was started with {name}={extra[name]}, which its manifest does not declare"
+                if capture_environ.reads_as(name) == name else
+                f"was started with a setting named {name!r}, which is not the exact name")
+        assert line.startswith("  [8 node] authority val0: its node process ") and said in line, out
+    assert PASSWORD not in out and "attacker.example" not in out
+
+
+# ---------------------------------------------------------------------------
+# What the genesis stage runs is what the launch gate runs, less what reads a running node
+# ---------------------------------------------------------------------------
+
+def pinned_to_a_node(clean, **knobs) -> Path:
+    """Pin every authority of the clean launch to a stand-in node with these knobs, and return its call log."""
+    log = clean.tmp_path / "pinned-calls.jsonl"
+    exe = fake_node(clean.tmp_path, log=str(log), **knobs)
+    clean.node_exe = exe
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node.update(exe=str(exe), exe_sha256=sha256_pin(exe))
+    return log
+
+
+def reasons(out: str) -> list[str]:
+    return [line for line in out.splitlines() if line.startswith("  [")]
+
+
+# What a pinned binary shows of the checked spec with no node running: the genesis it builds from it, the chain ids
+# its runtime holds at block one, the Cardano ids it reads, and the chain its argv names.
+BINARY_ALONE = {
+    "a node that builds another genesis": (lambda clean: pinned_to_a_node(clean, tamper=True),
+                                           "its node builds genesis 0x"),
+    "a runtime chain id that is not the genesis": (
+        lambda clean: pinned_to_a_node(clean, chain_ids={"Oracle.MateriosChainId": [7] * 32}),
+        "the spec's runtime holds Oracle.MateriosChainId 0x"),
+    "a runtime that reads other Cardano ids": (
+        lambda clean: pinned_to_a_node(clean, cardano_ids={"network_magic": 1, "mainchain_genesis_hash": [0] * 32,
+                                                           "aegis_policy_v1_script_hash": [0] * 28}),
+        "its node's chain-id reads IntentSettlement.CardanoIds as network magic 1"),
+    "a chain built into the node": (lambda clean: with_node_argv(clean, ["--chain", "local"]),
+                                    "--chain 'local' builds genesis 0x"),
+    "no chain": (lambda clean: with_node_argv(clean, []), "gives no --chain"),
+}
+
+
+@pytest.mark.parametrize("arrange, reason", BINARY_ALONE.values(), ids=BINARY_ALONE)
+def test_cli_the_genesis_stage_refuses_whatever_the_launch_gate_refuses_of_the_binary_and_the_spec_alone(
+        clean, capsys, arrange, reason):
+    arrange(clean)
+    gate_code, gate_out = clean.run(capsys)
+    stage_code, stage_out = genesis_stage(clean, capsys)
+    assert gate_code == 1 and all("[8 node]" in line and reason in line for line in reasons(gate_out)), gate_out
+    assert (stage_code, reasons(stage_out)) == (1, reasons(gate_out)), stage_out
+
+
+# Defects of a launch that no capture shows, one from each rule the stage runs.
+ANY_RULE = {
+    "1 dev-keys": lambda clean: clean.launch["roles"].update(anchor_signer=[ss58(ALICE)]),
+    "2 rewards": lambda clean: clean.launch["economics"].update(era_cap_baseline_attestor_count=31),
+    "3 rpc": lambda clean: clean.launch["nodes"][0].update(
+        argv=[*clean.launch["nodes"][0]["argv"][:-1], "unsafe", "--unsafe-rpc-external"]),
+    "4 supply": lambda clean: clean.launch["dust"]["dust_pool"].update(
+        {name: amount + 1 for name, amount in clean.launch["dust"]["dust_pool"].items()}),
+    "6 checkpoint": lambda clean: clean.spec.doc.update(codeSubstitutes={"1": "0x00"}),
+    "7 timelock": lambda clean: put(clean.spec, "RootTimelock", "Delays", delays(*TESTNET_DELAYS)),
+    "9 committee": lambda clean: clean.launch["nodes"][2]["env"].pop("SIDECHAIN_BLOCK_BENEFICIARY"),
+    "11 settlement": lambda clean: clean.launch.update(settlement=dict(BOUND_AFTER_GENESIS)),
+    "12 dust": lambda clean: put(clean.spec, "Motra", "Params", bytes(108)),
+}
+
+
+@pytest.mark.parametrize("rule", ANY_RULE)
+def test_cli_the_genesis_stage_gives_the_launch_gates_reasons_for_a_defect_no_capture_shows(clean, capsys, rule):
+    ANY_RULE[rule](clean)
+    clean.node_builds_this()
+    gate_code, gate_out = clean.run(capsys)
+    stage_code, stage_out = genesis_stage(clean, capsys)
+    assert gate_code == 1 and any(f"[{rule}]" in line for line in reasons(gate_out)), gate_out
+    assert (stage_code, reasons(stage_out)) == (1, reasons(gate_out)), stage_out
+
+
+def functions_of_the_preflight() -> dict[str, ast.FunctionDef]:
+    tree = ast.parse((HERE / "launch_preflight.py").read_text())
+    return {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+
+def names_used(node: ast.AST) -> set[str]:
+    """Every name a piece of code refers to: what it calls, and what it hands on to be called. A function is read by
+    its body: what a parameter defaults to is the caller's to replace."""
+    parts = node.body if isinstance(node, ast.FunctionDef) else [node]
+    return {inner.id for part in parts for inner in ast.walk(part) if isinstance(inner, ast.Name)}
+
+
+def reaches(start: set[str], functions: dict[str, ast.FunctionDef]) -> set[str]:
+    """`start` and every function of the preflight those functions refer to, at any depth."""
+    seen, queue = set(), [name for name in start if name in functions]
+    while queue:
+        name = queue.pop()
+        if name not in seen:
+            seen.add(name)
+            queue += [used for used in names_used(functions[name]) if used in functions]
+    return seen
+
+
+def findings_made(function: ast.FunctionDef) -> int:
+    return sum(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Finding"
+               for node in ast.walk(function))
+
+
+def steps_of_a_run() -> list[tuple[str | None, set[str]]]:
+    """(what the step needs that a run may lack, the functions it calls) for each step run_checks lists."""
+    run_checks = functions_of_the_preflight()["run_checks"]
+    steps = next(node.value for node in ast.walk(run_checks) if isinstance(node, ast.Assign)
+                 and getattr(node.targets[0], "id", None) == "steps")
+    listed = []
+    for step in steps.elts:
+        needs, check = step.elts
+        listed.append((getattr(lp, needs.id) if isinstance(needs, ast.Name) else needs.value, names_used(check)))
+    return listed
+
+
+# The readers through which a rule reads a running node: its captures but the binary, which the genesis stage is
+# given, and the live probe of a public URL.
+READS_A_RUNNING_NODE = {"read_capture", "running_argv", "running_environ", "rpc_answer"}
+# Each function that makes a finding and reads a running node, with how many findings it makes and the line the
+# genesis stage prints for not running it. A finding added to one of these is a finding the genesis stage does not
+# give: it is counted here once someone has seen that it needs the running node.
+NEEDS_A_RUNNING_NODE = {
+    "check_public_rpc": (3, "[3 rpc] what each public RPC URL serves, probed live"),
+    "check_node_genesis": (3, "[8 node] the genesis and chain each authority's running node serves, the binary and "
+                              "chain spec file it runs, and when its --chain path last changed"),
+    "check_served_chain": (1, "[8 node] the genesis and chain each authority's running node serves, the binary and "
+                              "chain spec file it runs, and when its --chain path last changed"),
+    "check_chain_spec_age": (1, "[8 node] the genesis and chain each authority's running node serves, the binary and "
+                                "chain spec file it runs, and when its --chain path last changed"),
+    "check_environment": (5, "[8 node] the environment each authority's node process was started with: a mock "
+                             "follower, or a setting other than its manifest declares"),
+}
+
+
+def test_every_finding_the_launch_gate_can_make_is_made_before_any_node_runs_or_named_as_not_run():
+    """Read from the source, so that a rule added later is in the genesis stage or in this table: every function
+    that makes a finding either reads a running node, and then the stage prints a line for it, or is reached from a
+    step the stage runs."""
+    functions = functions_of_the_preflight()
+    makes = {name: findings_made(function) for name, function in functions.items() if findings_made(function)}
+    reads_running = {name for name in makes if reaches({name}, functions) & READS_A_RUNNING_NODE}
+    assert {name: makes[name] for name in reads_running} == {
+        name: count for name, (count, _) in NEEDS_A_RUNNING_NODE.items()}
+    assert {line for _, line in NEEDS_A_RUNNING_NODE.values()} <= set(lp.NOT_RUN[lp.RUNNING])
+    steps = steps_of_a_run()
+    gate = reaches(set().union(*(calls for _, calls in steps)), functions)
+    stage = reaches(set().union(*(calls for needs, calls in steps if needs != lp.RUNNING)), functions)
+    assert set(makes) - gate == set(), "a function makes a finding no step of the launch gate reaches"
+    assert set(makes) - reads_running <= stage
+    assert len(makes) > 40 and len(steps) > 30
+    running_steps = set().union(*(calls for needs, calls in steps if needs == lp.RUNNING))
+    assert reaches(running_steps, functions) & set(makes) - stage == set(NEEDS_A_RUNNING_NODE)
+
+
+# ---------------------------------------------------------------------------
+# The genesis stage reads each binary it is given once
+# ---------------------------------------------------------------------------
+
+def test_cli_the_genesis_stage_runs_the_bytes_it_hashed_of_a_binary_that_reads_another_way_each_time(clean, capsys):
+    """A FIFO gives the pinned binary to its first reader and other bytes to every later one."""
+    log = pinned_to_a_node(clean)
+    fifo = clean.tmp_path / "node.fifo"
+    os.mkfifo(fifo)
+    pinned, done = clean.node_exe.read_bytes(), threading.Event()
+
+    def feed() -> None:
+        for payload in itertools.chain([pinned], itertools.repeat(b"#!/bin/sh\nexit 1\n")):
+            if done.is_set():
+                return
+            with contextlib.suppress(BrokenPipeError), open(fifo, "wb") as writer:
+                writer.write(payload)
+            time.sleep(0.2)
+
+    feeder = threading.Thread(target=feed, daemon=True)
+    feeder.start()
+    try:
+        code, out = genesis_stage(clean, capsys, binaries=[fifo])
+    finally:
+        done.set()
+        os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+    assert (code, out.splitlines()[0]) == (0, GENESIS_PASS), out
+    assert sorted(call["argv"][1] for call in node_calls(log)) == ["build-spec", "chain-id", "export-blocks",
+                                                                   "export-blocks"]
+
+
+def test_cli_the_genesis_stage_runs_the_bytes_it_hashed_of_a_binary_replaced_once_it_was_read(clean, capsys,
+                                                                                              monkeypatch):
+    log = pinned_to_a_node(clean)
+    given = clean.tmp_path / "release-binary"
+    given.write_bytes(clean.node_exe.read_bytes())
+    read = lp.node_binaries
+
+    def then_replaced(*args):
+        staged = read(*args)
+        given.write_text("#!/bin/sh\necho replaced\n")
+        return staged
+
+    monkeypatch.setattr(lp, "node_binaries", then_replaced)
+    code, out = genesis_stage(clean, capsys, binaries=[given])
+    assert (code, out.splitlines()[0]) == (0, GENESIS_PASS), out
+    assert sorted(call["argv"][1] for call in node_calls(log)) == ["build-spec", "chain-id", "export-blocks",
+                                                                   "export-blocks"]
+
+
+def test_a_binary_that_is_not_the_pinned_one_when_the_genesis_stage_runs_it_is_a_reason(clean, tmp_path):
+    """Whatever stands at the path the stage runs must hash to the pin, or the stage says it ran no binary for that
+    authority."""
+    spec = lp.load_spec(str(clean.spec_path()))
+    other = tmp_path / "other"
+    other.write_text("#!/bin/sh\nexit 1\n")
+    launch = dict(clean.launch, nodes=[dict(node, exe=str(other)) if node["authority"] else node
+                                       for node in clean.launch["nodes"]])
+    lp.validate_launch(launch)
+    pin = clean.launch["nodes"][0]["exe_sha256"]
+    assert messages(lp.check_binary_genesis(spec, launch)) == [
+        f"[8 node] authority val{i}: the node binary read for it has sha256 {sha256_pin(other)}, not its pinned "
+        f"exe_sha256 {pin}: only the pinned binary is run to attest its genesis" for i in range(4)]
+
+
+# ---------------------------------------------------------------------------
+# A node whose name is no string, and a launch key file that cannot be written
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [["edge"], {"is": "edge"}, 7, None])
+def test_a_node_name_that_is_no_string_is_an_input_error(name):
+    launch = {"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": name, "host": "edge", "authority": False}],
+              "rpc_proxies": [{"name": "p", "node": "edge", "kind": "nginx", "config": "c"}]}
+    with pytest.raises(lp.InputError) as refused:
+        lp.validate_launch(launch)
+    assert [str(error).split(":")[0] for error in refused.value.errors] == [
+        "nodes[0] needs a name and a host", "rpc_proxies[0] runs on edge, which is not a declared node"]
+
+
+def test_cli_a_node_name_that_is_no_string_is_an_input_error(clean, capsys):
+    clean.launch["nodes"][-1]["name"] = ["edge"]
+    signing_code, code, out = sign_and_check(clean.tmp_path, clean.prepare(), clean.launch, capsys, clean.kupo.url,
+                                             clean.launch_key)
+    assert (signing_code, code) == (2, 2)
+    assert out.splitlines()[0] == "MAINNET LAUNCH PREFLIGHT: REFUSE (input) nodes[4] needs a name and a host"
+
+
+def test_a_launch_key_whose_seed_cannot_be_written_leaves_no_file(tmp_path):
+    """The file is created before the seed is written: a write the file system refuses must not leave an empty key
+    file that a later run cannot replace."""
+    out = tmp_path / "launch.key"
+
+    def no_room() -> None:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+    done = subprocess.run([sys.executable, "-B", str(HERE / "launch_preflight.py"), "launch-key", "new", "--out",
+                           str(out)], capture_output=True, text=True, preexec_fn=no_room)
+    assert done.returncode == 2 and done.stdout == "", done.stderr
+    assert done.stderr == (f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) cannot write the launch key to {out}: File too "
+                           "large\n")
+    assert not out.exists()
+    again = subprocess.run([sys.executable, "-B", str(HERE / "launch_preflight.py"), "launch-key", "new", "--out",
+                            str(out)], capture_output=True, text=True)
+    assert again.returncode == 0 and out.stat().st_mode & 0o777 == 0o600

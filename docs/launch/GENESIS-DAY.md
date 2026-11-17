@@ -14,7 +14,9 @@ file is the order to run things in.
 with throwaway keys, four validators on loopback, the mock Cardano follower,
 and stand-ins for Kupo and the public RPC filter, except the steps marked
 **NOT REHEARSED AGAINST CARDANO**. Those need a rehearsal on Cardano preprod
-before the launch; the last section lists what the mock could not show.
+before the launch; the last section lists what the mock could not show. The
+rehearsal made its validator keys with a script, so the `subkey` commands of
+step 2 were not run in it: run them once on a throwaway key before the day.
 
 **Who signs what.** Each keyholder of the Root and guardian multisigs signs
 a proof that binds the genesis and the genesis-bound fields of the manifest.
@@ -65,18 +67,28 @@ burnt. `get-scripts` on the genesis UTXO prints the manifest's
 
 Each validator needs an aura key (sr25519), a grandpa key (ed25519), a
 cross-chain key (ECDSA, 33 bytes compressed) and a libp2p node key. The node
-has no `key` subcommand; use `subkey` 20.0.0:
+has no `key` subcommand; use `subkey` 20.0.0 and `jq`. `subkey generate` and
+`subkey inspect` print the secret phrase with the public key, so neither is
+run with its output on the terminal: the first writes to a file only the
+validator's user reads, and the others go through `jq`, which prints the
+public key alone.
 
 ```
-subkey generate --scheme sr25519                    # keep the phrase in a file only the validator's user reads
-subkey inspect --scheme ed25519 <secret URI file>   # the grandpa key of the same phrase
-subkey inspect --scheme ecdsa <secret URI file>     # its cross-chain key
-subkey generate-node-key --file node-key
+umask 077
+subkey generate --scheme sr25519 --output-type json > val-1.key.json    # prints nothing
+jq -r .secretPhrase val-1.key.json > val-1.phrase                        # the secret URI, in a private file
+jq -r .publicKey val-1.key.json                                          # the aura public key
+subkey inspect --scheme ed25519 --output-type json val-1.phrase | jq -r .publicKey    # the grandpa public key
+subkey inspect --scheme ecdsa --output-type json val-1.phrase | jq -r .publicKey      # the cross-chain public key
+subkey generate-node-key --file node-key                                 # prints the peer id
 ```
 
 Keystore files go in `<base path>/chains/materios_mainnet/keystore/`, each
 named `<hex of the key type><hex of the public key>` and holding the secret
-URI as a JSON string. The key types are `aura`, `gran` and `crch`.
+URI as a JSON string (`jq -R . val-1.phrase > <keystore file>`, under the
+same umask). The key types are `aura`, `gran` and `crch`. Remove
+`val-1.key.json` once the keystore files are written; keep `val-1.phrase`
+wherever the validator's backup is kept, and nowhere else.
 
 - **Proves:** nothing; the manifest takes the three public keys.
 - **If a validator has no node key:** it exits at start with
@@ -158,25 +170,69 @@ Each validator's `env` holds the seven Cardano settings and:
 ### 7. Build the raw spec, on two machines
 
 ```
-materios-node build-spec --chain mainnet:launch.json --raw --disable-default-bootnode > mainnet-raw.json
+materios-node build-spec --chain mainnet:launch.json --raw --disable-default-bootnode > mainnet-raw.built.json
+sha256sum mainnet-raw.built.json
+materios-node chain-id --chain mainnet-raw.built.json
+cp mainnet-raw.built.json mainnet-raw.json
 sha256sum mainnet-raw.json
-materios-node chain-id --chain mainnet-raw.json
 ```
 
 - **Proves:** the build is deterministic and both machines hold the same
   manifest and binary. `chain-id` prints the genesis hash, and settlement's
   and the oracle's chain ids, which must equal it.
+- **Two files, two hashes.** `mainnet-raw.built.json` is the node's own
+  output and is never edited: its sha256 is the one the two machines
+  compare here, and the one step 9 compares a rebuild with.
+  `mainnet-raw.json` is the spec the launch uses. Add `bootNodes` to it now
+  if the launch uses any: it is the one field an operator may add. Its
+  sha256, taken after that edit, is the one every validator checks its copy
+  against in step 14. With no boot node added, the two files are the same
+  bytes.
 - **If the hashes differ:** compare the two manifests and the two binaries'
   `sha256sum`; do not go on.
-- **The runtime against the source:** `tools/runtime-build/build.sh <commit>`
-  rebuilds the release commit's runtime and prints its blake2-256. It must
-  be the `code_hash` that step 12 writes in `signed.json`. If it is not, the
-  binary embeds another runtime than the reviewed commit's: stop.
 - **If `build-spec` refuses:** it names the manifest field. Fix it and
   build again.
-- Add `bootNodes` to the spec now if the launch uses any. It is the one
-  field an operator may add, and the edited file is then the spec everyone
-  uses.
+
+### 7a. A dry run of the genesis stage, before the lock and before any proof
+
+The launch key holder signs the draft, and the genesis stage runs on it with
+no Kupo. Nothing here is kept: the lock's id is still the placeholder, and
+step 12 signs again.
+
+```
+P sign --spec mainnet-raw.json --launch launch.json --key launch.key --out draft-signed.json
+P check --stage genesis --spec mainnet-raw.json --launch launch.json \
+    --signed-manifest draft-signed.json --node-binary ./materios-node \
+    --subwasm ./subwasm --extra-well-known exposed-keys.json
+```
+
+- **Expected: it refuses, exit 1, under rule 10 alone**, one reason for each
+  multisig member, since nobody has signed a proof yet:
+
+  ```
+  MAINNET LAUNCH PREFLIGHT (genesis stage): REFUSE (5 reasons)
+    [10 possession] roles.guardian[0].members[0] gives no pop: its holder has not signed its challenge (challenge --role guardian --index 0 0), so no one has shown they hold its key
+    [10 possession] roles.guardian[0].members[1] gives no pop: ...
+    [10 possession] roles.sudo[0].members[0] gives no pop: ...
+    [10 possession] roles.sudo[0].members[1] gives no pop: ...
+    [10 possession] roles.sudo[0].members[2] gives no pop: ...
+    not run: ...        (four lines for what needs a running node, three for what needs a Kupo)
+  This is not the launch gate: run check without --stage once every authority's node runs, and announce the genesis hash only after it passes.
+  ```
+
+- **Proves:** apart from the proofs, and from Cardano, which it did not
+  read, the manifest, the spec and the binary pass every rule that needs no
+  running node: the keys, the dust and economics, the committee, each
+  validator's argv and settings, that the spec is what the binary builds
+  from the manifest, and that the binary builds this genesis from the spec
+  and holds its hash as its chain ids.
+- **Any other reason, or exit 2:** fix it now, and build again from step 7
+  if it touches a genesis-bound field. This is the cheap moment: the lock
+  does not exist yet, and no keyholder has been asked for anything.
+- **The runtime against the source:** `tools/runtime-build/build.sh <commit>`
+  rebuilds the release commit's runtime and prints its blake2-256. It must
+  be the `code_hash` in `draft-signed.json`. If it is not, the binary embeds
+  another runtime than the reviewed commit's: stop.
 
 ### 8. Create the genesis lock on Cardano: NOT REHEARSED AGAINST CARDANO
 
@@ -195,14 +251,17 @@ hash as a Plutus bytestring (CBOR `5820` followed by the 32 bytes).
 ### 9. Put the lock's id in the manifest
 
 Set `supply.genesis_lock.utxo` to `<tx id>#<index>`, then build once more
-and compare:
+and compare with the node's own output of step 7:
 
 ```
 materios-node build-spec --chain mainnet:launch.json --raw --disable-default-bootnode | sha256sum
+sha256sum mainnet-raw.built.json
 ```
 
-- **Proves:** the spec does not depend on the lock's id: the hash is step
-  7's.
+- **Proves:** the spec does not depend on the lock's id: the two hashes are
+  equal. The file to compare with is `mainnet-raw.built.json`, not
+  `mainnet-raw.json`, which differs from every build once boot nodes were
+  added to it.
 - **If the hash changed:** something else in the manifest changed. Find it
   before going on.
 
@@ -270,9 +329,14 @@ rehearsed against a stand-in).
 
 - **Proves:** every rule that needs no running node passes: the manifest,
   the keys, the proofs, the launch signature, the economics and dust, the
-  committee, the settlement binding, and that the spec is what the release
-  binary builds from the manifest. With `--kupo`: the lock, the committee
-  datums and their age.
+  committee, the settlement binding, each validator's listeners and
+  settings as its manifest entry gives them, and of the release binary, run
+  offline: that the spec is what it builds from the manifest, that it
+  builds this genesis from the spec as each validator's argv launches it,
+  and that its runtime holds the genesis hash as its chain ids and the
+  Cardano ids the spec stores. With `--kupo`: the lock, the committee
+  datums and their age. It gives every reason step 18 gives that needs no
+  running node.
 - **Passes as:** `MAINNET LAUNCH PREFLIGHT (genesis stage): PASS`, then a
   `not run:` line for each rule it left out, then that it is not the launch
   gate.
@@ -287,8 +351,9 @@ rehearsed against a stand-in).
 ### 14. Distribute
 
 To each validator: `mainnet-raw.json`, at the path its `--chain` names, at
-least a few seconds before the start; the binary, checked as in step 0; its
-own entry of the signed manifest. Its base path is empty: a base path that
+least a few seconds before the start, its `sha256sum` checked there against
+the one step 7 took of that file; the binary, checked as in step 0; its own
+entry of the signed manifest. Its base path is empty: a base path that
 holds a database of the chain id `materios_mainnet` starts that old genesis
 whatever `--chain` names.
 
@@ -340,16 +405,21 @@ cat /proc/<pid>/stat > val-1.stat
 cat /proc/stat > val-1.proc-stat
 (cd /proc/<pid>/root && stat -c '%Z %f %n' srv srv/materios srv/materios/spec \
     srv/materios/spec/mainnet-raw.json) > val-1.chain.stat
-for call in chain_getBlockHash:[0]:genesis system_chain:[]:chain-name \
-            system_chainType:[]:chain-type system_properties:[]:properties; do
-  IFS=: read -r method params name <<< "$call"
+for call in 'chain_getBlockHash:[0]:genesis' 'system_chain:[]:chain-name' \
+            'system_chainType:[]:chain-type' 'system_properties:[]:properties'; do
+  method="${call%%:*}"; rest="${call#*:}"; params="${rest%%:*}"; name="${rest#*:}"
   curl -s -H 'Content-Type: application/json' \
       -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}" \
       http://127.0.0.1:<rpc port> > "val-1.$name.json"
 done
 ```
 
-For a relative `--chain`, copy from and run `stat` in `/proc/<pid>/cwd`.
+The loop is plain POSIX shell, for bash, dash and zsh alike: each call is
+quoted, so no shell reads `[0]` or `[]` as a file pattern, and it is split
+with parameter expansions alone. For a relative `--chain`, copy
+from and run `stat` in `/proc/<pid>/cwd`. The environment capture names the
+process it read, and `check` holds it to `val-1.stat`: after a restart, take
+both again, with the new PID.
 `capture_environ.py` is the one file `tools/launch-preflight/capture_environ.py`
 and needs python3 alone. It writes the settings the preflight reads, the
 database as `<host>:<port>/<database>`, and prints their names: no value and
@@ -378,13 +448,20 @@ Kupo on Cardano mainnet (**NOT REHEARSED AGAINST CARDANO**).
 - **Passes as:** `MAINNET LAUNCH PREFLIGHT: PASS`, then the launch key that
   signed and the file that pins it. Keep the output, the signed manifest and
   the commit id in the launch record.
+- **What can still refuse here.** Step 13 gave every reason this run gives
+  that needs no running node, so after a PASS there a refusal here is about
+  what runs: what a validator's node serves, the binary, spec file, argv or
+  settings it runs with, when its `--chain` path last changed, or what a
+  public RPC URL serves. Or it is about something that changed since step
+  13: a file, the manifest, an output on Cardano.
 - **If it refuses on a validator's deployment** (its settings, its argv, its
-  spec path, its RPC): fix that validator, restart it, take its captures
-  again. If the manifest was what was wrong, edit it and sign again (step
-  12). No keyholder is needed and the genesis stands.
-- **If it refuses on the genesis** (which step 13 is there to rule out): stop
-  every validator, wipe every base path, and go back to step 6. The genesis
-  hash changes.
+  spec path, its binary, its RPC): fix that validator, restart it, take its
+  captures again. If the manifest was what was wrong, edit it and sign again
+  (step 12). No keyholder is needed and the genesis stands.
+- **If it refuses on the genesis itself,** with a reason step 13 also gives
+  when run again now: something changed since step 13 passed. Stop every
+  validator, wipe every base path, and go back to step 6. The genesis hash
+  changes.
 - **If an input cannot be read (exit 2):** every missing or unreadable
   capture of every validator is listed in the one run.
 

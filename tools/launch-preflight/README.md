@@ -152,12 +152,19 @@ tables, and:
   proofs of possession and the signed manifest: rules 1, 2, 4, 5, 6, 7, 9, 10,
   11 and 12, with rule 3's reading of each authority's listeners taken from
   the argv its manifest declares;
-- runs rule 8's build comparison (see
-  [The node's own build](#the-nodes-own-build)) on the binaries given with
-  `--node-binary`, one for each sha256 the authorities pin as `exe_sha256`.
-  It needs every pinned binary and refuses as unreadable without one: the
-  spec must be what the release binary builds from the manifest. No `exe`
-  capture is read;
+- runs, of rule 8, everything a pinned binary shows with no node running,
+  on the binaries given with `--node-binary`, one for each sha256 the
+  authorities pin as `exe_sha256`: the build comparison (see
+  [The node's own build](#the-nodes-own-build)); `export-blocks` as each
+  authority's manifest argv launches it, which refuses a `--chain` that
+  names a chain built into the node or no chain; `export-blocks` on the
+  checked spec, whose genesis must be the one the preflight computes; and
+  `chain-id`, for the chain ids and Cardano ids the runtime holds at block
+  one (see [Node attestation](#node-attestation)). It needs every pinned
+  binary and refuses as unreadable without one. Each given file is read
+  once, into a private copy that is hashed as it is written, and that copy
+  is what runs: a path that holds other bytes a moment later changes
+  nothing. No `exe` capture is read;
 - runs the rules that read Cardano (the lock, the D-parameter and the
   permissioned candidates, and their age) when `--kupo` is given, and leaves
   them out when it is not;
@@ -179,6 +186,14 @@ This is not the launch gate: run check without --stage once every authority's no
 Without `--kupo` three more lines name the Cardano rules. The first line
 never reads `MAINNET LAUNCH PREFLIGHT: PASS`, which only the launch gate
 prints. The launch gate takes no `--node-binary` and needs `--kupo`.
+
+The stage gives every reason the launch gate gives that needs no running
+node, with the same words, and each thing it cannot run is one of those
+`not run:` lines. A test reads this from the source: every function that
+makes a finding either reads a capture of a running node or a live URL, and
+is then tabled with its `not run:` line and the number of findings it
+makes, or is reached from a step the stage runs. A finding added where a
+capture is read fails that test until someone counts it.
 
 ### The launch key
 
@@ -264,7 +279,11 @@ Each step is forced by what the next one hashes.
 
 1. **Spec.** Write the manifest, with the lock's `utxo` still a placeholder,
    and build the raw spec from it with the release binary. The spec does not
-   depend on any deployment field, the lock's `utxo` among them.
+   depend on any deployment field, the lock's `utxo` among them. A dry run
+   of `check --stage genesis` on this draft, signed by the launch key and
+   with no Kupo, must refuse under rule 10 alone, once for each multisig
+   member: anything else is cheapest to fix now, before the lock exists and
+   before a keyholder is asked to sign.
 2. **Lock.** Create the cMATRA lock on Cardano with the genesis hash as its
    inline datum. It can only come after the spec.
 3. **Lock id.** Put the lock's `<tx id>#<index>` in the manifest.
@@ -788,8 +807,9 @@ mainnet genesis from (see `docs/MAINNET-GENESIS.md`).
     password; the capture of the running node reduces its URL to the same
     form, and the two must be equal. The URL the node runs with must name
     its host, port and database itself (`postgres://user:password@host:5432/db`):
-    one it leaves out comes from `PGHOST`, `PGPORT` or `PGDATABASE`, which
-    the preflight does not read;
+    one it leaves out comes from `PGHOST`, `PGPORT` or `PGDATABASE`, so the
+    capture refuses such a URL, and `check` refuses a node process that has
+    any `PG` setting at all;
   - `BLOCK_STABILITY_MARGIN`: a u32 in decimal, how many Cardano blocks past
     the security parameter the follower waits before it cites a block (`0`
     is what the operator kit sets on preprod). Both backends refuse to start
@@ -1223,7 +1243,9 @@ python3 capture_environ.py <pid> val-1.cmdline.environ
 `capture_environ.py` is one file and needs python3 alone, none of the
 preflight's packages. It reads `/proc/<pid>/environ`, the environment the
 kernel handed the process at its start, and writes only the settings it
-names, as `NAME=value` ended by a NUL, the way `/proc` lists them:
+names, as `NAME=value` ended by a NUL, the way `/proc` lists them, and then
+the process it read them from (`process=<pid> <start>`, the start in clock
+ticks after boot, from `/proc/<pid>/stat`):
 
 | Settings | Read by |
 |---|---|
@@ -1232,6 +1254,7 @@ names, as `NAME=value` ended by a NUL, the way `/proc` lists them:
 | `CARDANO_SECURITY_PARAMETER`, `CARDANO_ACTIVE_SLOTS_COEFF`, the five `MC__` epoch settings | Cardano's layout, as rule 9 names it |
 | `MITHRIL_AGGREGATOR_ENDPOINT`, `MITHRIL_GENESIS_VERIFICATION_KEY`, `MITHRIL_CLIENT_BIN` | the yaci backend's stake snapshots, and the program it runs for them |
 | `SIDECHAIN_BLOCK_BENEFICIARY` | the block proposer |
+| `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`, `PGPASSFILE`, `PGSSLMODE`, `PGSSLROOTCERT`, `PGSSLCERT`, `PGSSLKEY`, `PGAPPNAME`, `PGOPTIONS` | the follower's Postgres client (sqlx-postgres 0.7.4), besides the connection string |
 | `LD_PRELOAD`, `LD_LIBRARY_PATH`, `LD_AUDIT` | the dynamic loader, before the node's own code |
 
 It writes no secret and prints none:
@@ -1239,37 +1262,79 @@ It writes no secret and prints none:
 - a setting outside that list is never written: not `PATH`, not a token, not
   a keystore password;
 - `DB_SYNC_POSTGRES_CONNECTION_STRING` is written as
-  `<host>:<port>/<database>`, as sqlx reads the URL for the node (a `host`,
-  `hostaddr`, `port` or `dbname` parameter replaces the URL's own). The
-  user, the password and every other parameter are dropped. A value it
-  cannot reduce (no `postgres://` URL, or one that leaves out its host, port
-  or database) stops the capture: it names the setting, shows no part of
-  the value and writes no file;
+  `<host>:<port>/<database>`, as sqlx reads the URL for the node. The URL
+  must give each of the three exactly once, itself or as a `host`,
+  `hostaddr`, `port` or `dbname` parameter (a socket directory is a host).
+  The user, the password and the TLS and application-name parameters are
+  dropped. A value it cannot reduce stops the capture, which names the
+  setting, shows no part of the value and writes no file: no `postgres://`
+  URL; one that leaves out its host, port or database, which sqlx would
+  take from `PGHOST`, `PGPORT` or `PGDATABASE`; one that gives one of them
+  twice, since sqlx keeps a socket over a host whichever comes last; one
+  with `options`, which can point every query at another schema; and one
+  with an `@` after the host, where a password that holds a `/`, `?` or `#`
+  would otherwise be read as a database, a parameter or a fragment;
+- `PGUSER`, `PGPASSWORD`, `PGPASSFILE` and `PGSSLKEY` are written as
+  `<set>`, never by value;
 - it prints one line, `pid <pid>: <n> settings written to <file>: <names>`,
   with the names and no value.
 
 Never give `cat /proc/<pid>/environ` in its place: that copy holds every
-setting, the database password among them. `check` refuses a file that
-holds a setting outside the list, or a connection string that is not
-reduced, as no capture.
+setting, the database password among them. `check` refuses, as no capture,
+a file that holds a setting outside the list, a credential by value, a
+connection string that is not reduced, or no process at its end.
 
-The node's follower reads its settings whatever their case
-(`block_stability_margin` is `BLOCK_STABILITY_MARGIN` to it), so the capture
-keeps a setting of the list in any case, spelled as the process has it, and
-`check` refuses one the manifest does not declare in exactly that spelling.
+**A setting's name.** The node does not read every setting by its exact
+name, so neither does the capture:
+
+| Reader in the node | Settings | How it matches a name | Of two entries |
+|---|---|---|---|
+| figment 0.10.19 `Env::prefixed("MC__")` (`MainchainEpochConfig::read_from_env`: the service, both follower backends, the mock) | the `MC__` epoch settings | trims the name; matches the `MC__` prefix whatever its ASCII case; trims again what follows the prefix; lowercases; nests at a `.` | the later one |
+| figment 0.10.19 `Env::raw()` (db-sync and yaci `ConnectionConfig`, block source and candidates cache) | `DB_SYNC_POSTGRES_CONNECTION_STRING`, `CARDANO_SECURITY_PARAMETER`, `CARDANO_ACTIVE_SLOTS_COEFF`, `BLOCK_STABILITY_MARGIN` | trims the name; whatever its ASCII case; nests at a `.` | the later one |
+| `std::env::var` (the node's follower choice, the mock, the native-token source, the block proposer, the yaci Mithril client) | `MAIN_CHAIN_FOLLOWER`, `USE_MAIN_CHAIN_FOLLOWER_MOCK`, `MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE`, `MC__EPOCH_DURATION_MILLIS` (mock), `CARDANO_SECURITY_PARAMETER` (native token), `SIDECHAIN_BLOCK_BENEFICIARY`, the three `MITHRIL_` settings | the exact bytes | the earlier one |
+| `std::env::var` in sqlx-postgres 0.7.4 | the twelve `PG` settings | the exact bytes | the earlier one |
+| the dynamic loader | the `LD_` settings | the exact bytes | the earlier one |
+| envy 0.4.2 | none at run time: the node links it and calls none of the readers that use it | lowercases, no trimming | |
+| clap `env` | none: neither the node nor sc-cli gives an option an `env` | | |
+
+So `DB_SYNC_POSTGRES_CONNECTION_STRING ` (a space after it), set after the
+exact name, is the database the node connects to, and an exact-name reading
+would show the other. The capture therefore keeps every entry whose name
+the most forgiving of those readers takes for a setting of the list
+(trimmed, upper-cased, trimmed again after `MC__`, cut at a `.`), under the
+name the process has it, and `check` refuses each such name that is not the
+exact one, whatever value it holds and whether or not the exact name is
+there too. A value under such a name is reduced or hidden as under the
+exact one, and `check` does not show it. The manifest is held to the same
+rule: a node's `env` that names a setting in another spelling refuses as
+unreadable. An exact name the process has twice stops the capture: the
+readers disagree on which one counts.
+
+**The process.** The capture ends with the pid and start time of the
+process it read, and `check` requires them to be the ones the authority's
+`process_stat` capture gives. A capture left from before a restart, or
+taken of another process, refuses as unreadable: take the environment and
+the stat captures of the node process that runs now.
 
 `check` reads the capture at `<cmdline capture>.environ` and refuses, under
 rule 8, each difference from what the manifest declares for that authority
 (its `env`, and the assignments of its launch commands):
 
 - a mock follower setting, with any value;
-- a setting the process has and the manifest does not declare;
+- a setting under a name that is not exact (above);
+- a setting the process has and the manifest does not declare. No authority
+  may declare a `PG`, `LD_` or mock setting or `MITHRIL_CLIENT_BIN`, so a
+  process that has one is refused: everything about the database connection
+  goes in the connection string;
 - a setting the manifest declares and the process does not have;
-- a value other than the declared one, compared as strings.
+- a value other than the declared one, compared as strings. A connection
+  string the manifest declares in another form than `<host>:<port>/<database>`
+  is never shown: it may be the URL, password and all.
 
 `RUST_LOG`, `RUST_BACKTRACE`, `RUST_LIB_BACKTRACE` and `TZ` are not
-captured and not compared. A missing capture is an input error that gives
-the command above.
+captured and not compared, and neither are the TLS parameters of the
+connection string. A missing capture is an input error that gives the
+command above.
 
 ### The node's own build
 
