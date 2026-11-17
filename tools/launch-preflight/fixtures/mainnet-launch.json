@@ -173,7 +173,11 @@
         "MC__FIRST_SLOT_NUMBER": "4492800",
         "MC__SLOT_DURATION_MILLIS": "1000",
         "CARDANO_SECURITY_PARAMETER": "2160",
-        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05"
+        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
+        "MAIN_CHAIN_FOLLOWER": "db-sync",
+        "DB_SYNC_POSTGRES_CONNECTION_STRING": "db-sync.internal:5432/cexplorer",
+        "BLOCK_STABILITY_MARGIN": "0",
+        "SIDECHAIN_BLOCK_BENEFICIARY": "0x205931feb1f4dd52a66c0cefaf3a2a5abcd8623c813910abf80252536dd5cb5f"
       }
     },
     {
@@ -199,7 +203,11 @@
         "MC__FIRST_SLOT_NUMBER": "4492800",
         "MC__SLOT_DURATION_MILLIS": "1000",
         "CARDANO_SECURITY_PARAMETER": "2160",
-        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05"
+        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
+        "MAIN_CHAIN_FOLLOWER": "db-sync",
+        "DB_SYNC_POSTGRES_CONNECTION_STRING": "db-sync.internal:5432/cexplorer",
+        "BLOCK_STABILITY_MARGIN": "0",
+        "SIDECHAIN_BLOCK_BENEFICIARY": "0x96ef6c44de26b001e6df712e4cab270759fb57d6cbd70e795e366b706afe0031"
       }
     },
     {
@@ -225,7 +233,11 @@
         "MC__FIRST_SLOT_NUMBER": "4492800",
         "MC__SLOT_DURATION_MILLIS": "1000",
         "CARDANO_SECURITY_PARAMETER": "2160",
-        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05"
+        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
+        "MAIN_CHAIN_FOLLOWER": "db-sync",
+        "DB_SYNC_POSTGRES_CONNECTION_STRING": "db-sync.internal:5432/cexplorer",
+        "BLOCK_STABILITY_MARGIN": "0",
+        "SIDECHAIN_BLOCK_BENEFICIARY": "0x0eeba6faac0ebb20aa598d4503224d7fb525a27bf2fcbcf2d720b0c033d4460b"
       }
     },
     {
@@ -251,7 +263,11 @@
         "MC__FIRST_SLOT_NUMBER": "4492800",
         "MC__SLOT_DURATION_MILLIS": "1000",
         "CARDANO_SECURITY_PARAMETER": "2160",
-        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05"
+        "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
+        "MAIN_CHAIN_FOLLOWER": "db-sync",
+        "DB_SYNC_POSTGRES_CONNECTION_STRING": "db-sync.internal:5432/cexplorer",
+        "BLOCK_STABILITY_MARGIN": "0",
+        "SIDECHAIN_BLOCK_BENEFICIARY": "0x7086aa28fe36419247c624ca93a1f34dfa8d85450b16e5a2e56b1dcd5a02915c"
       }
     }
   ]

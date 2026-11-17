@@ -3,6 +3,7 @@ binary, which MATERIOS_NODE names; CI builds it from this tree. Every node run i
 and a node started to serve its genesis listens on loopback only, with no peers. The specs are fresh from that
 binary: `build-spec --chain preprod --raw`, and `build-spec --chain mainnet:<launch manifest> --raw` of the fixture
 manifest and of the clean launch's."""
+import copy
 import hashlib
 import json
 import os
@@ -10,6 +11,7 @@ import re
 import signal
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -308,7 +310,8 @@ class RunningNode:
     """The real node's run command, offline: listeners on loopback only, no peers, no discovery, no telemetry or
     Prometheus, no keys, the mock follower, on a base path of the test's. Its chain spec names no boot node."""
 
-    def __init__(self, node: Path, spec_path: Path, base_path: Path, cwd: Path, chain: str | None = None):
+    def __init__(self, node: Path, spec_path: Path, base_path: Path, cwd: Path, chain: str | None = None,
+                 env: dict = lp.NODE_ENV):
         assert not json.loads(spec_path.read_text()).get("bootNodes")
         (cwd / "registrations.json").write_text("[]")
         self.port = free_port()
@@ -317,7 +320,7 @@ class RunningNode:
                 "--no-prometheus", "--no-mdns", "--reserved-only", "--in-peers", "0", "--out-peers", "0",
                 "--in-peers-light", "0", "--listen-addr", "/ip4/127.0.0.1/tcp/0", "--rpc-port", str(self.port),
                 "--rpc-methods", "safe"]
-        env = dict(lp.NODE_ENV, MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE=str(cwd / "registrations.json"))
+        env = dict(env, MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE=str(cwd / "registrations.json"))
         self.log = cwd / "node.log"
         with open(self.log, "wb") as log:
             self.process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
@@ -378,6 +381,29 @@ def served_by_running_node(node: Path, spec_path: Path, base_path: Path, tmp_pat
         return served
     finally:
         running.stop()
+
+
+# The rehearsal's validators ran the mock follower from a setting their manifest left out, and passed. The real node
+# is started here with everything a mainnet authority declares and the mock's two settings besides, and its
+# environment is captured as an operator captures it.
+def test_a_real_node_on_the_mock_follower_is_refused_by_the_capture_of_its_environment(tmp_path, node, preprod):
+    cwd = tmp_path / "running"
+    cwd.mkdir()
+    running = RunningNode(node, preprod, tmp_path / "base", cwd, env=dict(base.RUNNING_ENV, **lp.NODE_ENV))
+    capture = tmp_path / "val0.cmdline.environ"
+    try:
+        running.served_genesis(cwd / "genesis.json")
+        done = subprocess.run([sys.executable, "-I", "-S", str(base.HERE / "capture_environ.py"),
+                               str(running.process.pid), str(capture)], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True)
+    finally:
+        running.stop()
+    assert done.returncode == 0, done.stderr
+    assert base.PASSWORD.encode() not in capture.read_bytes() and base.PASSWORD not in done.stdout + done.stderr
+    entry = dict(base.follower_node("val0", base.AUTHORITY_ENV), cmdline=str(tmp_path / "val0.cmdline"))
+    assert [str(f) for f in lp.check_environment({"nodes": [entry]})] == [
+        f"[8 node] authority val0: its node process was started with {name}: {base.MOCK_FOLLOWER}"
+        for name in ("MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE", "USE_MAIN_CHAIN_FOLLOWER_MOCK")]
 
 
 def with_alice_as_root(preprod: Path, path: Path) -> Path:
@@ -529,7 +555,42 @@ def test_cli_passes_the_mainnet_spec_its_real_node_builds_from_the_launch_manife
     on_real_node(clean, node, pin)
     assert len(clean.spec.code) > 500_000
     code, out = clean.run(capsys)
-    assert (code, out.strip()) == (0, "MAINNET LAUNCH PREFLIGHT: PASS")
+    assert (code, out.splitlines()[0]) == (0, "MAINNET LAUNCH PREFLIGHT: PASS")
+
+
+# Before any node runs: the same launch, with no capture of any authority, given the binary every authority pins.
+def test_cli_the_genesis_stage_passes_the_mainnet_spec_its_real_node_builds(clean, capsys, node, pin):
+    on_real_node(clean, node, pin)
+    for entry in clean.launch["nodes"]:
+        if entry["authority"]:
+            entry["exe"] = str(clean.tmp_path / f"{entry['name']}.exe")
+    code, out = base.genesis_stage(clean, capsys, binaries=[node])
+    assert (code, out.splitlines()) == (0, [base.GENESIS_PASS,
+                                            *("  not run: " + rule for rule in base.NOT_RUN_BEFORE_START),
+                                            base.NOT_THE_GATE]), out
+
+
+def test_the_real_node_builds_one_spec_whatever_the_deployment_fields_hold(clean, node, pin):
+    """Every deployment field of the manifest edited at once, the nodes in another order and one more node that is
+    no authority: the build is the same bytes, so the launch key's signature alone can cover those fields. One more
+    base unit of dust, a genesis field, builds another genesis."""
+    on_real_node(clean, node, pin)
+    built = (clean.tmp_path / "node-raw.json").read_bytes()
+    redeployed = copy.deepcopy(clean.launch)
+    for field in sorted(set(base.FIELD_EDITS) - base.PROOF_BOUND):
+        base.FIELD_EDITS[field](redeployed)
+    redeployed["nodes"] = [{"name": "edge-2", "host": "edge-2", "authority": False}, *reversed(redeployed["nodes"])]
+    assert lp.genesis_content_hash(redeployed) == lp.genesis_content_hash(clean.launch)
+    assert lp.launch_manifest_hash(redeployed) != lp.launch_manifest_hash(clean.launch)
+    manifest = clean.tmp_path / "manifest-redeployed.json"
+    manifest.write_text(json.dumps(redeployed))
+    assert build_spec(node, f"mainnet:{manifest}", clean.tmp_path / "redeployed-base", "--raw") == built
+    base.FIELD_EDITS["dust"](redeployed)
+    assert lp.genesis_content_hash(redeployed) != lp.genesis_content_hash(clean.launch)
+    manifest.write_text(json.dumps(redeployed))
+    endowed = clean.tmp_path / "endowed-raw.json"
+    endowed.write_bytes(build_spec(node, f"mainnet:{manifest}", clean.tmp_path / "endowed-base", "--raw"))
+    assert lp.spec_genesis_hash(lp.load_spec(str(endowed))) != lp.spec_genesis_hash(clean.spec)
 
 
 def test_cli_refuses_a_spec_its_real_node_does_not_build_from_the_launch_manifest(clean, capsys, node, pin):
