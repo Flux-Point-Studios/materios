@@ -4192,8 +4192,7 @@ mod tests {
                     *pooled = (4 * 22_167).into();
                 }
                 for keyholder in members(launch, "sudo") {
-                    launch["dust"]["endowed"][keyholder.to_ss58check()] =
-                        (FLOORS[0] as u64).into();
+                    launch["dust"]["endowed"][keyholder.to_ss58check()] = (FLOORS[0] as u64).into();
                 }
                 for key in &keys {
                     let key = key.to_ss58check();
