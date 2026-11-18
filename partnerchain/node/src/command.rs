@@ -64,6 +64,11 @@ pub fn run() -> sc_cli::Result<()> {
             println!("{identity}");
             Ok(())
         }
+        Some(Subcommand::DustBudget { manifest }) => {
+            let budget = chain_spec_mainnet::dust_budget(manifest).map_err(sc_cli::Error::Input)?;
+            print!("{budget}");
+            Ok(())
+        }
         Some(Subcommand::BuildSpec(cmd)) => {
             let runner = cli.create_runner(cmd)?;
             runner.sync_run(|config| cmd.run(config.chain_spec, config.network))

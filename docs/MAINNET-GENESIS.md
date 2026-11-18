@@ -17,7 +17,20 @@ preflight refuses a node whose `--chain` names a chain built into the node.
 of freshly generated public keys, whose `partner_chain` values are the ones
 partner-chains v1.8.0 derives from its genesis UTXO. The node's tests build
 it, and the preflight's tests check the raw spec it builds
-(`fixtures/mainnet-launch-raw.json`, without its code).
+(`fixtures/mainnet-launch-raw.json`, without its code). Nobody holds its
+keys and no Cardano transaction made its genesis UTXO: a manifest written by
+editing it names a genesis UTXO of its own, and the builder then refuses any
+other value of the fixture it still carries.
+
+```bash
+materios-node dust-budget --manifest launch.json
+```
+
+prints the dust budget of a manifest the builder takes, for the launch
+record: every endowment with its floor and what it holds above it, the
+issuance, the headroom under one MATRA, and what the dust pool covers. The
+rows are in the order of the `dust` fields that endow them, so the same
+manifest prints the same text however its objects order their keys.
 
 ## Order of a launch
 
@@ -25,10 +38,12 @@ it, and the preflight's tests check the raw spec it builds
    genesis UTXO `G` is spent by governance init, and the D-parameter and
    permissioned candidates datums are published. `get-scripts` prints the
    values of the manifest's `partner_chain`, all functions of `G`.
-2. The manifest is written: roles, dust, authorities with their three keys
-   and the sha256 of the one release binary they all run, the attestation
-   committee, and `partner_chain`, with the genesis lock's output id still a
-   placeholder.
+2. The manifest is written: roles, with a standby for the anchor signer and
+   the gateway sponsor, dust, the later signers the dust pool is sized for,
+   authorities with their three keys and the sha256 of the one release
+   binary they all run, the attestation committee, and `partner_chain`, with
+   the genesis lock's output id still a placeholder. `dust-budget` prints
+   what it issues.
 3. `build-spec` writes the raw spec. Its genesis hash is the chain's id. The
    spec does not depend on the lock's output id or on any other deployment
    field of the manifest.
@@ -69,6 +84,8 @@ not read:
 |---|---|
 | `dust` | `role -> account -> base units`: the MATRA each role account holds at genesis. An account is named by its key (SS58 or 0x-hex), or by its account for a multisig entry. Every name must be an entry of that role. |
 | `attestation_threshold` | How many of `roles.attestors` certify a receipt. |
+| `later_signers` | How many signers admitted after genesis the dust pool is sized for, at least 4. The `dust_pool` entries together hold that many times a later signer's dust (22,167 base units). No account of the pool may also hold a role or a key. |
+| `no_standby` | Optional. A list of `anchor_signer` and `gateway_sponsor`: each role the launch knowingly starts with one key for. A role listed here must have exactly one entry. |
 | `partner_chain` | `genesis_utxo` (`<tx hash>#<index>`, the index at most 32767, the most partner-chains' `UtxoIndex` reads), `committee_candidate_address` (lowercase bech32, see below), `d_parameter_policy_id` and `permissioned_candidates_policy_id` (0x-hex, 28 bytes). |
 | `nodes[].cross_chain` | Each authority's ECDSA partner-chain key, 33 bytes compressed, 0x-hex. |
 
@@ -82,6 +99,13 @@ and these roles, besides `sudo`, `guardian`, `anchor_signer`, `attestors`,
 | `recovery_friends` | `Recovery.vouch_recovery` for the sudo account. |
 | `recovery_rescuers` | A recovery of the sudo account (`initiate_recovery`, `claim_recovery`, `as_recovered`). |
 | `dust_pool` | Nothing. Holds dust for signers admitted after genesis: no signed call moves MATRA and none is minted, so Root's force transfer out of this pool is how a later signer gets the provider it needs. |
+
+A signing role's entry is a key or a multisig of keys. `anchor_signer` and
+`gateway_sponsor` each name two entries, the second a standby with dust of
+its own: a key that is lost or leaked is replaced the same day by the one
+already endowed, where dust out of the pool waits Root's standard delay of 7
+days with the role idle. A launch that names one lists the role under
+`no_standby`.
 
 The builder reads none of a node's `argv`, `env`, `host` or capture paths.
 The preflight does: each authority's `env` must give its node
@@ -107,11 +131,14 @@ validator `genesis_utxo` parameterises. The builder derives it as
 partner-chains v1.8.0 does: the validator of
 partner-chains-smart-contracts v8.1.0 (`raw-scripts`), applied to the UTXO
 as Plutus data `Constr 0 [Constr 0 [tx hash], index]`, hashed as a Plutus V2
-script. Preprod's genesis UTXO derives the address preprod's genesis
-stores, which the node's tests pin. The two policy ids also follow from
-`genesis_utxo` but go through the version oracle's scripts; the builder takes
-them as given, and the launch preflight's rule 9 derives all three from
-`genesis_utxo` and refuses a manifest or a genesis that names others.
+script. The two policy ids follow from `genesis_utxo` through the version
+oracle: the builder applies the version oracle validator and policy of the
+same release to the UTXO, the D-parameter and permissioned candidates
+validators to the UTXO and the oracle policy's id, and each policy to those
+and its validator's address, and refuses any other id. Preprod's genesis
+UTXO derives the address and the policy ids preprod's genesis stores, which
+the node's tests pin. The launch preflight's rule 9 derives all three apart
+from the builder and refuses a manifest or a genesis that names others.
 
 ## What genesis holds
 
@@ -139,37 +166,102 @@ least its floor, or the builder refuses the manifest:
 - the deposits its role reserves: `DepositBase + DepositFactor x threshold`
   (2,000 for a 2-of-n) for a multisig keyholder who opens a call,
   `ConfigDepositBase + FriendDepositFactor x friends` (1,000 + 500 per friend)
-  for the sudo account's recovery configuration, `RecoveryDeposit` (1,000)
+  for the sudo account's recovery configuration, counted for one friend more
+  than the launch names so that one can be added, `RecoveryDeposit` (1,000)
   for a rescuer;
-- working dust that generates the MOTRA its calls cost: a day of its calls,
-  generated in a day, and for a role that carries a runtime, enough to settle
-  at twice the fee of a block-long call (5 MiB, the runtime's block length),
-  so an upgrade of any size the chain accepts can be paid within half a day.
+- working dust that generates the MOTRA its calls cost, the larger of what
+  sustains them and what answers them.
+
+To sustain a role: a day of its calls, generated in a day, and for a role
+that carries a runtime, enough to settle at twice the fee of a block-long
+call (5 MiB, the runtime's block length), so an upgrade of any size the
+chain accepts can be paid within half a day.
+
+To answer: genesis stores no MOTRA, and a burst spends what an account had
+saved, so a role whose calls cannot wait must generate their fees within a
+stated number of blocks of an empty balance. An account that generates g a
+block and keeps 99.99% of its balance holds `g x (1 - 0.9999^n) / 0.0001`
+after n blocks; the builder runs that a block at a time, each rounded down.
+Reserved dust generates nothing, so a deposit is counted on top.
 
 A MOTRA fee below the congestion target is `1e9 + 1e6 x bytes` base units
 (15 decimals). One MATRA generates 10^10 MOTRA base units a block, 1.44 x
 10^14 a day, and a balance keeps 99.99% a block, so it settles at 10^4 blocks
 of generation.
 
-| Role account | Load sized for | Floor (base units) | MOTRA a day at the floor | Fees a day at the floor | Settled MOTRA at the floor |
+| Role account | Load sized for | Answers from no MOTRA | Floor (base units) | Calls a day at the floor | First call, blocks after genesis |
 |---|---|---|---|---|---|
-| sudo keyholder | 24 calls of 512 B, and an upgrade | 107,630 | 1.52e13 | 10,060 | 1.06e13 |
-| guardian keyholder | 64 vetoes of 384 B | 3,116 | 1.61e11 | 116 | 1.12e11 |
-| enactor | 64 calls of 512 B, and an upgrade | 106,050 | 1.53e13 | 10,100 | 1.06e13 |
-| anchor_signer | 1,000 calls of 512 B | 11,000 | 1.58e12 | 1,047 | 1.10e12 |
-| gateway_sponsor | 2,000 receipts of 512 B | 21,500 | 3.10e12 | 2,047 | 2.15e12 |
-| oracle | 4,800 prices of 512 B | 50,900 | 7.33e12 | 4,848 | 5.09e12 |
-| attestor | 100 calls of 256 B; attests are feeless | 1,373 | 1.98e11 | 157 | 1.37e11 |
-| recovery friend | 8 calls of 256 B | 570 | 8.21e10 | 65 | 5.70e10 |
-| recovery rescuer | 24 calls of 512 B | 1,752 | 1.08e11 | 71 | 7.52e10 |
-| sudo account | the recovery configuration deposit | 3,000 | | | |
+| sudo keyholder | 24 calls of 512 B, and an upgrade | | 107,630 | 10,060 | 2 |
+| guardian keyholder | 64 vetoes of 384 B | 1 within 10 blocks | 16,347 | 1,492 | 10 |
+| enactor | 64 calls of 512 B, and an upgrade | | 106,050 | 10,100 | 2 |
+| anchor_signer | 2,000 anchors of 256 B | | 17,945 | 2,057 | 8 |
+| gateway_sponsor | 6,000 receipts of 560 B | 500 within 1,200 blocks | 69,478 | 6,413 | 3 |
+| oracle | 4,800 prices of 512 B | | 50,900 | 4,847 | 3 |
+| attestor | 400 submissions of 4,288 B | | 15,189 | 413 | 35 |
+| recovery friend | 8 calls of 256 B | 1 within 60 blocks | 2,600 | 298 | 49 |
+| recovery rescuer | 24 calls of 512 B | 1 within 30 blocks | 6,548 | 528 | 28 |
+| sudo account | the recovery configuration deposit, with one more friend | | 3,500 | | |
 
-A sudo keyholder's or the enactor's upgrade fee is 5.24e12 at the block
-length; its floor settles at twice that. The node's tests hold each role, at
-exactly its floor with its deposits reserved, to paying a day of its calls
-as they come due, and the upgrade half a day in, through the runtime's own
-MOTRA pallet; and each role's call, signed and on the wire, to no more bytes
-than its load names, at the fee the runtime charges.
+The last two columns count calls of the sized length on what the floor
+leaves free once the role's deposit is reserved. A guardian keyholder at its
+floor vetoes within a minute of genesis and again a minute after, whether it
+opened the multisig call or closed it. A gateway sponsor that has submitted
+nothing for two hours holds 500 receipts' fees. A receipt is the
+`OrinqReceipts.submit_receipt_v2` the gateway submits, with both optional ZK
+roots, signed at a nonce of 2^14 or more: 560 bytes, which the node's tests
+take from encoding the call. An attestor's load is
+`TeeAttestation.submit_evidence` of a 4 KiB payload, 400 a day; its attests
+are feeless, and a payload at the pallet's 16 KiB bound costs 3.3 times as
+much. A sudo keyholder's or the enactor's upgrade fee is 5.24e12 at the block
+length, and its floor settles at twice that: starting from no MOTRA it holds
+the fee of an 886,000-byte runtime's call about 880 blocks after genesis, and
+of a block-long one after 6,900.
+
+The node's tests hold each role, at exactly its floor with its deposits
+reserved, to paying a day of its calls as they come due and the upgrade half
+a day in, and to paying its burst when its blocks have passed and again as
+many blocks later, through the runtime's own MOTRA pallet; two guardian
+keyholders at their floor to vetoing with signed transactions in the first
+ten blocks and the next ten; and each role's call, signed and on the wire,
+to no more bytes than its load names, at the fee the runtime charges.
+
+A signing role held by a multisig never signs with the multisig's own
+account. Each keyholder holds the existential deposit, the multisig deposit
+and the role's working dust for a call 48 bytes and 32 for each other
+signatory longer, since whichever of them signs pays for it; the multisig's
+account holds the existential deposit and the deposit its role reserves.
+
+An account that carries more than one load, a keyholder that also holds a
+signing role or two roles' keyholder, needs what sustains all its calls and
+each burst on top: one role's calls spend the MOTRA another role's burst was
+saved from. A guardian keyholder that is also an oracle has a floor of
+67,363, where either role alone takes 16,347 or 50,900.
+
+### The cap, the pool and the oracles
+
+The whole issuance stays under one MATRA. With a 2-of-3 sudo key, a 2-of-3
+guardian, three oracles, three attestors, three recovery friends, a rescuer,
+and two anchor signers and two gateway sponsors, the floors and the
+Treasury's deposit come to 869,442, and the dust pool at its least to
+88,668: 958,110 in all, 41,889 under the cap.
+
+The dust pool is the only source of dust after genesis, and Root's transfer
+out of it waits 7 days. It holds at least `later_signers` times 22,167, the
+dust of a client that submits 2,000 receipts of 560 bytes a day itself, and
+`later_signers` is at least 4. No account of the pool may also be a signer
+or a keyholder, whose own floor would count as spare. `dust-budget` prints
+what the pool holds beyond `later_signers` and how many replacement keys of
+each single-key role that spare covers at the role's floor, each of them an
+alternative to the others.
+
+`OracleMaxAttestors` is 16, but the cap, not the roster, bounds the oracles a
+genesis funds: at the floors above, three oracles fit and a fourth does
+not (1,009,010). A fourth fits in place of the anchor signer's standby
+(991,065) or with a 2-of-2 guardian (992,663). A price needs `OracleMinAttestorThreshold` (3) oracles submitting, so a
+launch that seats three stops pricing when one is offline until Root
+registers another, endowed out of the pool. Root can also raise
+`Motra.Params.generationPerMatraPerBlock` behind the standard delay, which
+makes every base unit of dust generate more without minting any.
 
 ## Refusals
 
@@ -181,29 +273,43 @@ The builder refuses a manifest, naming the field, when:
   with two digits a byte and exactly the bytes its field holds;
 - a key is a well-known development key (`//Alice` to `//Ferdie`, their
   `//stash`, `//One`, `//Two`, under sr25519, ed25519 and ECDSA, and an ECDSA
-  key's account), any account, key, script or Cardano value preprod's genesis
+  key's account), a key the launch preflight tables as well known or exposed
+  (`well_known_keys.json` and `exposed_keys.json`, which the node carries a
+  copy of), any account, key, script or Cardano value preprod's genesis
   names, or all zero;
+- the manifest names a genesis UTXO other than the public fixture's and
+  still names a key or a Cardano value of the fixture, in any field;
+- a 33-byte role key, a multisig member's among them, or an authority's
+  partner-chain key is not a compressed point of secp256k1;
 - two role entries share an account; a multisig lists a member twice; the
   guardian shares a keyholder with the sudo key; two authorities share a key;
 - `roles.sudo` or `roles.guardian` is not exactly one multisig of keys with a
-  threshold of at least 2, or has more than `MaxSignatories` members;
+  threshold of at least 2, or has more than `MaxSignatories` members; a
+  signing role's multisig has a multisig among its members;
+- `roles.anchor_signer` or `roles.gateway_sponsor` names one entry and
+  `no_standby` does not list the role, or `no_standby` lists a role that has
+  no entry or more than one, another role, or a role twice;
 - `roles.anchor_signer` is empty, `roles.attestors` is empty or larger than
   the committee, `attestation_threshold` is outside 1 to the attestors,
   `roles.oracle` names fewer than `OracleMinAttestorThreshold` or more than
   `OracleMaxAttestors`, or `roles.recovery_friends` names more than
   `MaxFriends`;
-- fewer than 4 or more than `MaxValidators` authorities; a partner-chain key
-  is not compressed;
+- fewer than 4 or more than `MaxValidators` authorities;
 - `slots_per_epoch` is not 600, `cardano_follower` is not Cardano mainnet's,
   `partner_chain.genesis_utxo` names an output above 32767,
   `partner_chain.committee_candidate_address` is not lowercase bech32 with a
   valid checksum, not `addr`, not on network 1, not an enterprise script
   address, or not the address of the validator `genesis_utxo`
-  parameterises, or `economics.attestation_reward_per_signer` is not 0;
+  parameterises, a policy id is not the one `genesis_utxo` parameterises, or
+  `economics.attestation_reward_per_signer` is not 0;
 - a role account that signs or pays a deposit holds no dust or less than its
   floor, `dust` names an account that is no entry of its role, endows an
   account the builder sizes nothing for, or endows one below the existential
-  deposit; or the issuance reaches one MATRA.
+  deposit;
+- `later_signers` is missing or under 4, the `dust_pool` entries together
+  hold less than it takes, or an account of the pool also holds a role or a
+  key; or the issuance reaches one MATRA, where the
+  refusal names what the launch would issue with every account at its floor.
 
 The runtime's genesis builder refuses in turn a declared issuance other than
 what genesis holds, a committee member with no provider, a member listed
@@ -249,8 +355,11 @@ holds the spec to what the rules do not read.
   endowed account has its MOTRA checkpoint. Every role signer has a provider
   and holds at least the deposits its roles reserve and, left free, the larger
   of the existential deposit and its working dust. The preflight sizes that
-  working dust apart from the builder, for the loads tabled above: from the
-  balance each load holds an account's MOTRA below, with the existential
+  working dust apart from the builder, for the loads and bursts tabled above:
+  from the balance each load holds an account's MOTRA below and from the
+  closed form of what an empty balance holds n blocks on, with the existential
   deposit counted as dust that generates, and an upgrade at twice the genesis
   runtime's length. The builder's floors above cover the preflight's for every
-  role and any runtime a block holds (the preflight README tables both).
+  role and any runtime a block holds (the preflight README tables both). The
+  standbys, the dust pool and `later_signers` are the builder's to hold; the
+  preflight's rule 8 holds the checked spec to what the builder builds.

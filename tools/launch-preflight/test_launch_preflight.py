@@ -239,7 +239,7 @@ GENESIS_CONTENT_DOMAIN = b"materios-launch-genesis-content-v1"
 # fields the chain spec is built from, whole; the lock's address and script; and of each authority its keys and the
 # sha256 of its node binary.
 GENESIS_BOUND = ("dust", "attestation_threshold", "economics", "partner_chain", "slots_per_epoch", "settlement",
-                 "cardano_follower")
+                 "cardano_follower", "later_signers", "no_standby")
 LOCK_BOUND = ("address", "native_script")
 AUTHORITY_BOUND = ("authority", "aura", "grandpa", "cross_chain", "exe_sha256")
 
@@ -4547,7 +4547,7 @@ def test_the_mainnet_fixture_checkpoints_each_endowed_account_at_its_free_balanc
     balance it holds, held since block 0."""
     spec, meta, _ = mainnet
     prefix = lp.storage_key("Motra", "AccrualCheckpoint")
-    assert lp.treasury_account(meta) in spec.accounts() and len(spec.accounts()) == 22
+    assert lp.treasury_account(meta) in spec.accounts() and len(spec.accounts()) == 24
     assert {key: value for key, value in spec.storage.items() if key.startswith(prefix)} == {
         map_key("Motra", "AccrualCheckpoint", account): checkpoint(spec.balance(account)[0])
         for account in spec.accounts()}
@@ -4586,7 +4586,7 @@ def test_a_genesis_with_no_checkpoint_is_refused_for_every_account(mainnet):
     for key in [key for key in spec.storage if key.startswith(lp.storage_key("Motra", "AccrualCheckpoint"))]:
         del spec.storage[key]
     found = motra_findings(spec)
-    assert len(found) == 22 and all("genesis sets no Motra.AccrualCheckpoint for " in message for message in found)
+    assert len(found) == 24 and all("genesis sets no Motra.AccrualCheckpoint for " in message for message in found)
 
 
 @pytest.mark.parametrize("stray", ["an account genesis does not endow", "another hash", "a longer key"])
@@ -4770,7 +4770,7 @@ def test_the_mainnet_fixture_fixes_its_issuance_at_its_dust_and_the_treasurys_ex
     assert meta.constants[("Balances", "ExistentialDeposit")] == ED.to_bytes(16, "little")
     assert lp.treasury_account(meta) == TREASURY and spec.balance(TREASURY) == (ED, 0)
     assert spec.uint("OrinqReceipts", "FixedIssuance", 16) == spec.uint("Balances", "TotalIssuance", 16) \
-        == dust + ED == 906_500
+        == dust + ED == 994_000
 
 
 def account_of(text: str) -> bytes:
@@ -5135,21 +5135,21 @@ def test_a_genesis_that_fixes_no_issuance_is_refused(spec244, mainnet):
 
 def test_a_fixed_issuance_other_than_genesis_holds_is_refused(mainnet):
     spec, meta, launch = mainnet
-    put(spec, "OrinqReceipts", "FixedIssuance", (906_501).to_bytes(16, "little"))
+    put(spec, "OrinqReceipts", "FixedIssuance", (994_001).to_bytes(16, "little"))
     assert mainnet_supply(spec, meta, launch) == [
-        "[4 supply] OrinqReceipts.FixedIssuance stores 906501, but Balances.TotalIssuance stores 906500: the runtime "
+        "[4 supply] OrinqReceipts.FixedIssuance stores 994001, but Balances.TotalIssuance stores 994000: the runtime "
         "holds the issuance to the fixed one",
-        "[4 supply] OrinqReceipts.FixedIssuance stores 906501, not the 906500 the launch's dust and the Treasury's "
+        "[4 supply] OrinqReceipts.FixedIssuance stores 994001, not the 994000 the launch's dust and the Treasury's "
         "existential deposit sum to"]
 
 
 def test_an_account_holding_other_than_its_declared_dust_is_refused(mainnet):
     spec, meta, launch = mainnet
     oracle = launch["roles"]["oracle"][0]
-    set_account(spec, account_of(oracle), 100_001)
+    set_account(spec, account_of(oracle), 55_001)
     assert mainnet_supply(spec, meta, launch) == [
-        f"[4 supply] genesis endows {oracle} 100001 free and 0 reserved, but dust.oracle.{oracle} declares 100000",
-        "[4 supply] OrinqReceipts.FixedIssuance stores 906501, not the 906500 the launch's dust and the Treasury's "
+        f"[4 supply] genesis endows {oracle} 55001 free and 0 reserved, but dust.oracle.{oracle} declares 55000",
+        "[4 supply] OrinqReceipts.FixedIssuance stores 994001, not the 994000 the launch's dust and the Treasury's "
         "existential deposit sum to"]
 
 
@@ -5229,16 +5229,16 @@ def test_reserved_dust_is_refused(mainnet):
     oracle = launch["roles"]["oracle"][0]
     key = account_key(account_of(oracle))
     raw = spec.storage[key]
-    spec.storage[key] = raw[:16] + (99_000).to_bytes(16, "little") + (1_000).to_bytes(16, "little") + raw[48:]
+    spec.storage[key] = raw[:16] + (54_000).to_bytes(16, "little") + (1_000).to_bytes(16, "little") + raw[48:]
     assert mainnet_supply(spec, meta, launch) == [
-        f"[4 supply] genesis endows {oracle} 99000 free and 1000 reserved, but dust.oracle.{oracle} declares 100000"]
+        f"[4 supply] genesis endows {oracle} 54000 free and 1000 reserved, but dust.oracle.{oracle} declares 55000"]
 
 
 def test_dust_genesis_does_not_hold_is_refused(mainnet):
     spec, meta, launch = mainnet
     oracle = launch["roles"]["oracle"][0]
     del spec.storage[account_key(account_of(oracle))]
-    assert f"[4 supply] genesis endows {oracle} 0 free and 0 reserved, but dust.oracle.{oracle} declares 100000" \
+    assert f"[4 supply] genesis endows {oracle} 0 free and 0 reserved, but dust.oracle.{oracle} declares 55000" \
            in mainnet_supply(spec, meta, launch)
 
 
@@ -5255,7 +5255,7 @@ def test_a_treasury_endowed_other_than_its_existential_deposit_is_refused(mainne
      "dust.treasurer endows a role roles does not declare"),
     (lambda dust, roles: dust["oracle"].update({roles["enactor"][0]: 1}),
      "dust.oracle.{enactor} names an account that is no entry of roles.oracle"),
-    (lambda dust, roles: dust.update(enactor={roles["enactor"][0]: 120_000, "0x" + account_of(
+    (lambda dust, roles: dust.update(enactor={roles["enactor"][0]: 110_000, "0x" + account_of(
         roles["enactor"][0]).hex(): 1}),
      "dust.enactor.{enactor} endows the account dust.enactor.0x{enactor_hex} endows"),
     (lambda dust, roles: dust["oracle"].update({"5Garbage": 1}),
@@ -5280,7 +5280,7 @@ def test_a_launch_that_declares_no_dust_is_refused(mainnet):
 def test_a_genesis_that_issues_a_matra_is_refused(mainnet):
     spec, meta, launch = mainnet
     pool = launch["roles"]["dust_pool"][0]
-    redust(spec, launch, "dust_pool", pool, lp.MATRA - 906_500 + 100_000)
+    redust(spec, launch, "dust_pool", pool, lp.MATRA - 994_000 + 90_000)
     assert mainnet_supply(spec, meta, launch) == [
         "[4 supply] genesis issues 1000000 base units, at least one MATRA (1000000): a mainnet genesis issues dust, "
         "enough for each role account to exist and sign"]
@@ -5312,13 +5312,13 @@ def test_a_fixed_issuance_genesis_that_pays_or_bonds_anything_is_refused(mainnet
 def test_no_emission_reserve_counts_against_the_lock_of_a_fixed_issuance(mainnet):
     spec, meta, launch = mainnet
     assert ("OrinqReceipts", "ValidatorEmissionReserve") in meta.constants
-    assert mainnet_supply(spec, meta, launch, locked(906_500, launch["supply"]["genesis_lock"]["address"])) == []
+    assert mainnet_supply(spec, meta, launch, locked(994_000, launch["supply"]["genesis_lock"]["address"])) == []
 
 
 def test_a_fixed_issuance_above_the_cardano_lock_is_refused(mainnet):
     spec, meta, launch = mainnet
-    assert mainnet_supply(spec, meta, launch, locked(906_499, launch["supply"]["genesis_lock"]["address"])) == [
-        f"[4 supply] Materios issues 906500 at genesis against 906499 cMATRA locked on Cardano at "
+    assert mainnet_supply(spec, meta, launch, locked(993_999, launch["supply"]["genesis_lock"]["address"])) == [
+        f"[4 supply] Materios issues 994000 at genesis against 993999 cMATRA locked on Cardano at "
         f"{launch['supply']['genesis_lock']['utxo']}: the difference is MATRA no cMATRA backs"]
 
 
@@ -5397,28 +5397,42 @@ def lowest_motra(free: int, loads, days: int = 8) -> float:
 
 # What a key that signs for each role signs in a day, (calls, bytes of one), and whether it also signs an upgrade.
 LOADS = {"sudo": ((24, 512), True), "guardian": ((64, 384), False), "enactor": ((64, 512), True),
-         "anchor_signer": ((1_000, 512), False), "gateway_sponsor": ((2_000, 512), False),
-         "oracle": ((4_800, 512), False), "attestors": ((100, 256), False), "recovery_friends": ((8, 256), False),
+         "anchor_signer": ((2_000, 256), False), "gateway_sponsor": ((6_000, 560), False),
+         "oracle": ((4_800, 512), False), "attestors": ((400, 4_288), False), "recovery_friends": ((8, 256), False),
          "recovery_rescuers": ((24, 512), False)}
+# What a key that signs for a role pays for together starting from no MOTRA, (calls, blocks), as the launch decided
+# it: a guardian's veto within ten blocks, 500 sponsored receipts after two hours, a friend's vouch within sixty
+# blocks and a rescuer's call every thirty.
+BURSTS = {"guardian": (1, 10), "gateway_sponsor": (500, 1_200), "recovery_friends": (1, 60),
+          "recovery_rescuers": (1, 30)}
 SIMULATED = [([load], upgrades) for load, upgrades in LOADS.values()] + [
     ([LOADS["sudo"][0], LOADS["oracle"][0]], True),
     ([LOADS["attestors"][0], LOADS["recovery_friends"][0], LOADS["guardian"][0]], False)]
 
 
+# The head of the table docs/MAINNET-GENESIS.md gives each role's load, burst and builder's floor in.
+FLOOR_TABLE = "| Role account | Load sized for | Answers from no MOTRA | Floor (base units) |"
+
+
 def test_the_preflight_sizes_each_role_for_the_load_the_genesis_doc_tables():
     doc = (HERE.parent.parent / "docs" / "MAINNET-GENESIS.md").read_text()
-    table = doc[doc.index("| Role account | Load sized for | Floor (base units) |"):doc.index("## Refusals")]
-    rows = {cells[0]: cells[1] for cells in ([cell.strip() for cell in line.strip("|").split("|")]
-                                             for line in table.splitlines()[2:] if line.startswith("|"))}
+    table = doc[doc.index(FLOOR_TABLE):doc.index("## Refusals")]
+    rows = {cells[0]: cells[1:3] for cells in ([cell.strip() for cell in line.strip("|").split("|")]
+                                               for line in table.splitlines()[2:] if line.startswith("|"))}
     named = {"sudo": "sudo keyholder", "guardian": "guardian keyholder", "enactor": "enactor",
              "anchor_signer": "anchor_signer", "gateway_sponsor": "gateway_sponsor", "oracle": "oracle",
              "attestors": "attestor", "recovery_friends": "recovery friend", "recovery_rescuers": "recovery rescuer"}
-    tabled = {}
+    tabled, answered = {}, {}
     for role, name in named.items():
-        calls, length = re.match(r"([\d,]+) \w+ of (\d+) B", rows[name]).groups()
-        tabled[role] = ((int(calls.replace(",", "")), int(length)), "and an upgrade" in rows[name])
-    assert tabled == LOADS
+        calls, length = (int(number.replace(",", ""))
+                         for number in re.match(r"([\d,]+) \w+ of ([\d,]+) B", rows[name][0]).groups())
+        tabled[role] = ((calls, length), "and an upgrade" in rows[name][0])
+        burst = re.fullmatch(r"([\d,]+) within ([\d,]+) blocks", rows[name][1])
+        if burst:
+            answered[role] = tuple(int(number.replace(",", "")) for number in burst.groups())
+    assert tabled == LOADS and answered == BURSTS
     assert lp.ROLE_LOADS == {role: load for role, (load, _) in LOADS.items()}
+    assert lp.ROLE_BURSTS == BURSTS
     assert set(lp.UPGRADE_ROLES) == {role for role, (_, upgrades) in LOADS.items() if upgrades}
     assert lp.UPGRADE_HEADROOM == 2
 
@@ -5434,6 +5448,40 @@ def test_working_dust_is_what_keeps_a_signers_motra_above_its_calls_block_by_blo
     assert lowest_motra(working * 98 // 100, loads) < upgrade_fee
 
 
+def motra_from_empty(free: int, blocks: int) -> float:
+    """The MOTRA an account that holds `free` MATRA base units has `blocks` blocks after its balance was empty, block
+    by block as the runtime's MOTRA pallet moves it under mainnet's parameters."""
+    balance = 0.0
+    for _ in range(blocks):
+        balance = balance * 0.9999 + free * 10**4
+    return balance
+
+
+@pytest.mark.parametrize("role", BURSTS)
+def test_burst_dust_is_what_pays_for_a_roles_burst_that_many_blocks_after_an_empty_balance(role):
+    """The preflight's closed form against the pallet's rule run block by block: at its burst dust an account that
+    starts with no MOTRA holds the fees of its role's burst when its blocks have passed, and one percent less dust
+    does not. A block earlier it holds less than they cost, but for the 500 receipts, which a block more or less
+    in 1,200 does not decide."""
+    (calls, blocks), length = BURSTS[role], LOADS[role][0][1]
+    fees = calls * (1e9 + 1e6 * length)
+    dust = lp.burst_dust(calls, length, blocks)
+    assert motra_from_empty(dust, blocks) >= fees > motra_from_empty(dust * 99 // 100, blocks)
+    assert blocks > 100 or motra_from_empty(dust, blocks - 1) < fees
+    assert dust == {"guardian": 13_847, "gateway_sponsor": 68_975, "recovery_friends": 2_100,
+                    "recovery_rescuers": 5_048}[role]
+
+
+def test_the_decay_the_burst_dust_is_worked_from_is_the_pallets():
+    """pallet_motra accrues an interval in one step: the generation of each block, kept at the decay rate for the
+    blocks after it, less half a base unit a block for the rounding of the block-by-block rule it replaced."""
+    source = (HERE.parent.parent / "partnerchain" / "pallets" / "motra" / "src" / "decay.rs").read_text()
+    assert "let sum_lower = (SCALE - upper) * BILLION / loss;" in source
+    assert "let generated = mul_div(per_block, sum_lower, SCALE, Rounding::Down);" in source
+    assert "let rounding_loss = sum_upper.saturating_sub(SCALE).div_ceil(2 * SCALE);" in source
+    assert "(decayed, generated.saturating_sub(rounding_loss))" in source
+
+
 def test_the_fee_the_dust_is_sized_for_is_the_runtimes_below_its_congestion_target():
     """pallet_motra's compute_fee: the minimum fee, the congestion rate's price of the weight, which is nothing at
     the zero rate genesis starts at, and the price of the bytes."""
@@ -5446,25 +5494,27 @@ def test_the_fee_the_dust_is_sized_for_is_the_runtimes_below_its_congestion_targ
 
 # Each signer of the fixture with the deposits the runtime's constants reserve from it and the working dust its
 # role's calls take, worked here apart from the preflight. The deposits: a 2-of-3 keyholder's multisig deposit,
-# DepositBase 1,000 + DepositFactor 500 x 2; the sudo account's recovery configuration of 3 friends,
-# ConfigDepositBase 1,000 + FriendDepositFactor 500 x 3; a rescuer's RecoveryDeposit 1,000. The working dust settles
-# at 10^8 MOTRA a base unit, and has to cover each role's fee f over 1 - 0.9999^k for a call every k blocks: 24
-# calls of 512 bytes a day take 260, 64 of 384 take 623, 64 of 512 take 680, 1,000 of 512 take 10,509, 2,000 of 512
-# take 21,010, 4,800 of 512 take 50,413, 100 of 256 take 879 and 8 of 256 take 77; a 1,800,000-byte upgrade takes
-# 18,010 more. The floor is the deposits and, left free, the larger of the existential deposit 500 and the working
-# dust.
+# DepositBase 1,000 + DepositFactor 500 x 2; the sudo account's recovery configuration of its 3 friends and one
+# more, ConfigDepositBase 1,000 + FriendDepositFactor 500 x 4; a rescuer's RecoveryDeposit 1,000. The working dust
+# settles at 10^8 MOTRA a base unit, and has to cover each role's fee f over 1 - 0.9999^k for a call every k blocks:
+# 24 calls of 512 bytes a day take 260, 64 of 384 take 623, 64 of 512 take 680, 2,000 of 256 take 17,453, 6,000 of
+# 560 take 65,015, 4,800 of 512 take 50,413, 400 of 4,288 take 14,717 and 8 of 256 take 77; a 1,800,000-byte upgrade
+# takes 18,010 more. A burst takes its fees over what a base unit generates in its blocks from an empty balance: a veto of
+# 384 bytes within 10 blocks takes 13,847, 500 receipts of 560 within 1,200 take 68,975, a vouch of 256 within 60
+# takes 2,100 and a rescuer's call of 512 within 30 takes 5,048, each more than its role's calls a day take. The
+# floor is the deposits and, left free, the larger of the existential deposit 500 and the working dust.
 SIGNER_FLOORS = [
     (("roles", "sudo", 0, "members", 1), "roles.sudo[0].members[1], a keyholder of roles.sudo[0]", 2_000, 18_270),
     (("roles", "guardian", 0, "members", 2), "roles.guardian[0].members[2], a keyholder of roles.guardian[0]", 2_000,
-     623),
-    (("roles", "sudo", 0), "roles.sudo[0], which reserves the recovery configuration of 3 friends", 2_500, 0),
-    (("roles", "recovery_rescuers", 0), "roles.recovery_rescuers[0]", 1_000, 260),
+     13_847),
+    (("roles", "sudo", 0), "roles.sudo[0], which reserves a recovery configuration of up to 4 friends", 3_000, 0),
+    (("roles", "recovery_rescuers", 0), "roles.recovery_rescuers[0]", 1_000, 5_048),
     (("roles", "enactor", 0), "roles.enactor[0]", 0, 18_690),
-    (("roles", "anchor_signer", 0), "roles.anchor_signer[0]", 0, 10_509),
+    (("roles", "anchor_signer", 1), "roles.anchor_signer[1]", 0, 17_453),
     (("roles", "oracle", 2), "roles.oracle[2]", 0, 50_413),
-    (("roles", "gateway_sponsor", 0), "roles.gateway_sponsor[0]", 0, 21_010),
-    (("roles", "attestors", 1), "roles.attestors[1]", 0, 879),
-    (("roles", "recovery_friends", 0), "roles.recovery_friends[0]", 0, 77),
+    (("roles", "gateway_sponsor", 1), "roles.gateway_sponsor[1]", 0, 68_975),
+    (("roles", "attestors", 1), "roles.attestors[1]", 0, 14_717),
+    (("roles", "recovery_friends", 0), "roles.recovery_friends[0]", 0, 2_100),
 ]
 
 
@@ -5518,22 +5568,23 @@ def test_a_longer_genesis_runtime_raises_the_floor_of_those_who_sign_an_upgrade(
 def documented_floors() -> dict[str, int]:
     """The floor the node's builder holds each role account to, as docs/MAINNET-GENESIS.md tables them."""
     doc = (HERE.parent.parent / "docs" / "MAINNET-GENESIS.md").read_text()
-    table = doc[doc.index("| Role account | Load sized for | Floor (base units) |"):doc.index("## Refusals")]
+    table = doc[doc.index(FLOOR_TABLE):doc.index("## Refusals")]
     rows = [[cell.strip() for cell in line.strip("|").split("|")] for line in table.splitlines()[2:]
             if line.startswith("|")]
-    return {row[0]: int(row[2].replace(",", "")) for row in rows}
+    return {row[0]: int(row[3].replace(",", "")) for row in rows}
 
 
 def test_the_builders_floor_of_each_role_covers_the_preflights_whatever_runtime_a_block_holds(mainnet):
     """The node's builder sizes an upgrade at a block-long call, 5 MiB, and adds its working dust to the existential
     deposit; the preflight sizes it at twice the genesis runtime and counts the existential deposit as free dust
-    that generates. So an account at the builder's floor passes rule 12 even where the genesis runtime is as long as
-    a block."""
+    that generates. The builder works a burst from the pallet's rule a block at a time, each block rounded down, and
+    the preflight from its closed form. So an account at the builder's floor passes rule 12 even where the genesis
+    runtime is as long as a block."""
     spec, meta, launch = mainnet
     floors = documented_floors()
-    assert floors == {"sudo keyholder": 107_630, "guardian keyholder": 3_116, "enactor": 106_050,
-                      "anchor_signer": 11_000, "gateway_sponsor": 21_500, "oracle": 50_900, "attestor": 1_373,
-                      "recovery friend": 570, "recovery rescuer": 1_752, "sudo account": 3_000}
+    assert floors == {"sudo keyholder": 107_630, "guardian keyholder": 16_347, "enactor": 106_050,
+                      "anchor_signer": 17_945, "gateway_sponsor": 69_478, "oracle": 50_900, "attestor": 15_189,
+                      "recovery friend": 2_600, "recovery rescuer": 6_548, "sudo account": 3_500}
     assert meta.constants[("System", "BlockLength")][4:8] == (5 * 1024 * 1024).to_bytes(4, "little")
     spec.storage[lp.CODE_KEY] = bytes(5 * 1024 * 1024)
     roles = launch["roles"]
@@ -5575,8 +5626,68 @@ def test_a_keyholder_of_two_multisigs_needs_both_deposits_and_carries_both_roles
     assert oracle not in json.dumps(launch["roles"]["oracle"])
 
 
+def test_a_guardian_keyholder_that_is_also_an_oracle_needs_both_roles_calls_and_the_veto_on_top(sized):
+    """64 vetoes of 384 bytes and 4,800 prices of 512 a day take 51,035 to sustain, and the veto within ten blocks
+    13,847 more, since the prices spend what the veto was saved from: 2,000 reserved and 64,882 free."""
+    spec, meta, launch = sized
+    member = launch["roles"]["guardian"][0]["members"][2]["key"]
+    launch["roles"]["oracle"][0] = member
+    account = account_of(member)
+    who = "roles.guardian[0].members[2], a keyholder of roles.guardian[0] and roles.oracle[0]"
+    set_account(spec, account, 66_881)
+    assert below_floor(who, account, 66_881, 2_000, 64_882, False) in dust_findings(spec, meta, launch)
+    set_account(spec, account, 66_882)
+    assert not any(ss58(account) in message for message in dust_findings(spec, meta, launch))
+
+
+def test_a_sponsors_keyholder_that_is_also_an_attestor_needs_both_roles_calls_and_the_burst_on_top(sized):
+    """400 evidence submissions of 4,288 bytes and 6,000 receipts of 560 a day take 79,732 to sustain, and the 500
+    receipts after two hours 68,975 more: 2,000 reserved and 148,707 free."""
+    spec, meta, launch = sized
+    attestor = launch["roles"]["attestors"][0]
+    other = fresh_account()
+    launch["roles"]["gateway_sponsor"][0] = msig(2, account_of(attestor), other)
+    account = account_of(attestor)
+    set_account(spec, other, 200_000)
+    who = "roles.attestors[0] and roles.gateway_sponsor[0].members[0], a keyholder of roles.gateway_sponsor[0]"
+    set_account(spec, account, 150_706)
+    assert below_floor(who, account, 150_706, 2_000, 148_707, False) in dust_findings(spec, meta, launch)
+    set_account(spec, account, 150_707)
+    assert not any(ss58(account) in message for message in dust_findings(spec, meta, launch))
+
+
+def test_a_dust_pool_account_that_also_holds_a_key_is_refused(sized):
+    """The floor of a keyholder listed in the dust pool is not spare dust for later signers."""
+    spec, meta, launch = sized
+    member = launch["roles"]["sudo"][0]["members"][0]["key"]
+    launch["roles"]["dust_pool"] = [member]
+    set_account(spec, account_of(member), 200_000)
+    assert dust_findings(spec, meta, launch) == [
+        f"[12 dust] roles.dust_pool[0] ({ss58(account_of(member))}) is also roles.sudo[0].members[0], a keyholder of "
+        "roles.sudo[0]: the dust pool holds dust for signers admitted after genesis, and none of the dust an account "
+        "needs for a role of its own is spare"]
+
+
+def test_a_dust_pool_below_the_later_signers_the_launch_declares_is_refused(sized):
+    """A later signer of 2,000 receipts of 560 bytes a day takes 21,677: four take 86,708 over the pool's accounts."""
+    spec, meta, launch = sized
+    assert launch["later_signers"] == 4
+    pool = account_of(launch["roles"]["dust_pool"][0])
+    set_account(spec, pool, 86_708)
+    assert dust_findings(spec, meta, launch) == []
+    set_account(spec, pool, 86_707)
+    assert dust_findings(spec, meta, launch) == [
+        "[12 dust] the dust pool holds 86707 free at genesis, below the 86708 that later_signers = 4 take at 21677 "
+        "each, the working dust of 2000 calls of 560 bytes a day"]
+    launch["later_signers"] = 5
+    set_account(spec, pool, 86_708)
+    assert dust_findings(spec, meta, launch) == [
+        "[12 dust] the dust pool holds 86708 free at genesis, below the 108385 that later_signers = 5 take at 21677 "
+        "each, the working dust of 2000 calls of 560 bytes a day"]
+
+
 @pytest.mark.parametrize("pallet, constant", [("Balances", "ExistentialDeposit"), ("Multisig", "DepositFactor"),
-                                              ("Recovery", "RecoveryDeposit")])
+                                              ("Recovery", "RecoveryDeposit"), ("Recovery", "MaxFriends")])
 def test_a_runtime_that_hides_a_deposit_is_refused(mainnet, pallet, constant):
     spec, meta, launch = mainnet
     del meta.constants[(pallet, constant)]
@@ -8384,9 +8495,10 @@ def no_provider(role: str, index: int, key: bytes) -> str:
 
 
 # What the clean launch endows a keyholder it seats, by the role it holds: above the floor of a keyholder of
-# multisigs whose thresholds take up to 6,000 in deposits, with the working dust of its role's calls left free, 623
-# for the guardian's vetoes and 10,806 for Root's calls and an upgrade of twice the clean launch's runtime.
-KEYHOLDER_DUST = {"sudo": 30_000, "guardian": 8_000}
+# multisigs whose thresholds take up to 6,000 in deposits, with the working dust of its role's calls left free,
+# 13,847 for the guardian's veto within ten blocks and 10,806 for Root's calls and an upgrade of twice the clean
+# launch's runtime.
+KEYHOLDER_DUST = {"sudo": 30_000, "guardian": 20_000}
 
 
 def drop_account(spec: lp.Spec, account: bytes) -> None:
@@ -8462,7 +8574,7 @@ def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path,
     kupo.serve(spec, kupo_output(assets={lp.CMATRA_UNIT: 975_000 * MATRA}), genesis_candidates_datum(spec))
     launch = {"roles": {"anchor_signer": [ss58(ALICE)], "attestors": [ss58(PREPROD_ATTESTOR)], "oracle": [],
                         "sudo": [ss58(fresh_account())]},
-              "economics": dict(TUNED, fee_buffer=100 * MATRA), "supply": {"genesis_lock": LOCK},
+              "economics": dict(TUNED), "supply": {"genesis_lock": LOCK},
               "nodes": [], "rpc_proxies": []}
     code, out = run_cli(tmp_path, preprod_path, launch, capsys, kupo.url)
     assert code == 1
@@ -9010,6 +9122,10 @@ def test_cli_refuses_root_one_keyholder_runs_through_a_nested_multisig(clean, ca
 
 @pytest.mark.parametrize("count, code", [(10, 0), (11, 1)])
 def test_cli_bounds_the_guardian_by_the_runtime_max_signatories(clean, capsys, count, code):
+    """Each guardian keyholder holds the dust of a veto within ten blocks, and ten of them leave the fixture's other
+    dust no room under one MATRA: the sudo keyholders give up what they hold above the clean launch's floor."""
+    for keyholder in clean.sudo_members:
+        redust(clean.spec, clean.launch, "endowed", ss58(keyholder), KEYHOLDER_DUST["sudo"])
     clean.hold("guardian", msig(2, *(fresh_account() for _ in range(count))))
     exit_code, out = clean.run(capsys)
     assert exit_code == code, out
@@ -9342,9 +9458,9 @@ def test_cli_refuses_a_pending_withdrawal_planted_in_raw_genesis(clean, capsys):
 
 def test_cli_refuses_a_negative_economics_value_as_unreadable(clean, capsys):
     signed = copy.deepcopy(clean.launch)
-    clean.launch["economics"]["fee_buffer"] = -1
+    clean.launch["economics"]["era_cap_base"] = -1
     code, out = clean.run(capsys, signed_launch=signed)
-    assert code == 2 and "economics.fee_buffer must be a non-negative integer" in out
+    assert code == 2 and "economics.era_cap_base must be a non-negative integer" in out
 
 
 def test_cli_refuses_an_authority_that_overrides_the_signed_runtime(clean, capsys):
@@ -9474,10 +9590,11 @@ VALID_LOCK = {"genesis_lock": LOCK}
     ({"roles": {"sudo": [{"threshold": 1, "members": ["a", "b"], "note": 1}]}, "supply": VALID_LOCK},
      "roles.sudo\\[0\\] must hold exactly threshold and members"),
     ({"roles": {}, "economics": [], "supply": VALID_LOCK}, "economics must be an object"),
-    ({"roles": {}, "economics": {"fee_buffer": -1}, "supply": VALID_LOCK},
-     "economics.fee_buffer must be a non-negative integer"),
-    ({"roles": {}, "economics": {"fee_buffer": True}, "supply": VALID_LOCK},
-     "economics.fee_buffer must be a non-negative integer"),
+    ({"roles": {}, "economics": {"era_cap_base": -1}, "supply": VALID_LOCK},
+     "economics.era_cap_base must be a non-negative integer"),
+    ({"roles": {}, "economics": {"era_cap_base": True}, "supply": VALID_LOCK},
+     "economics.era_cap_base must be a non-negative integer"),
+    ({"roles": {}, "economics": {"fee_buffer": 0}, "supply": VALID_LOCK}, "unknown economics field fee_buffer"),
     ({"roles": {}, "economics": {"era_cap_base": "50000"}, "supply": VALID_LOCK},
      "economics.era_cap_base must be a non-negative integer"),
     ({"roles": {}, "economics": {"fee_bufer": 1}, "supply": VALID_LOCK}, "unknown economics field fee_bufer"),
@@ -9707,7 +9824,8 @@ def test_a_manifest_field_the_classification_does_not_name_is_refused():
 
 # What the proofs must bind whatever else moves: the binary that builds the genesis and runs it, each authority's
 # keys, who holds the lock, and every field the chain spec is built from.
-PROOF_BOUND = {"roles", "dust", "attestation_threshold", "slots_per_epoch", "nodes[].authority", "nodes[].aura",
+PROOF_BOUND = {"roles", "dust", "attestation_threshold", "slots_per_epoch", "later_signers", "no_standby",
+               "nodes[].authority", "nodes[].aura",
                "nodes[].grandpa", "nodes[].cross_chain", "nodes[].exe_sha256", "supply.genesis_lock.address",
                "supply.genesis_lock.native_script",
                *(f"economics.{field}" for field in lp.ECONOMICS_FIELDS),
@@ -9763,13 +9881,14 @@ FIELD_EDITS = {
     "dust": endow_one_more,
     "attestation_threshold": edit_at("attestation_threshold", lambda threshold: threshold + 1),
     "slots_per_epoch": edit_at("slots_per_epoch", 300),
+    "later_signers": edit_at("later_signers", lambda signers: signers + 1),
+    "no_standby": edit_at("no_standby", ["anchor_signer"]),
     "public_rpc": edit_at("public_rpc", lambda urls: [*urls, "https://rpc-2.example.org/rpc"]),
     "economics.attestation_reward_per_signer": edit_at("economics.attestation_reward_per_signer", 1),
     "economics.era_cap_base": edit_at("economics.era_cap_base", 7),
     "economics.era_cap_baseline_attestor_count": edit_at("economics.era_cap_baseline_attestor_count", 33),
     "economics.validator_reward_per_era": edit_at("economics.validator_reward_per_era", 1),
     "economics.treasury_emission_share_perbill": edit_at("economics.treasury_emission_share_perbill", 1),
-    "economics.fee_buffer": edit_at("economics.fee_buffer", 9),
     "supply.genesis_lock.utxo": edit_at("supply.genesis_lock.utxo", "ab" * 32 + "#0"),
     "supply.genesis_lock.address": edit_at("supply.genesis_lock.address", "addr1w" + "q" * 52),
     "supply.genesis_lock.native_script": edit_at("supply.genesis_lock.native_script", "0x8200581c" + "11" * 28),
@@ -9881,7 +10000,7 @@ def test_the_genesis_content_hash_is_the_tagged_canonical_json_of_the_genesis_bo
     assert lp.genesis_content_hash(clean.launch) == genesis_content_hash(clean.launch)
     content = lp.genesis_content(clean.launch)
     assert set(content) == {"roles", "dust", "attestation_threshold", "economics", "supply", "partner_chain",
-                            "slots_per_epoch", "settlement", "cardano_follower", "nodes"}
+                            "slots_per_epoch", "settlement", "cardano_follower", "nodes", "later_signers"}
     assert content["supply"] == {"genesis_lock": {field: LOCK[field] for field in ("address", "native_script")}}
     assert all(set(node) == {"authority", "aura", "grandpa", "cross_chain", "exe_sha256"} for node in content["nodes"])
     assert len(content["nodes"]) == 4

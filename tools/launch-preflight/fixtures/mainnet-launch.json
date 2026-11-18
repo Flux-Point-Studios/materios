@@ -33,7 +33,8 @@
       }
     ],
     "anchor_signer": [
-      "5HZCjrLG7NswdX4P8L82CZvn88KUcHym21a4pGMnoZ99VB4F"
+      "5HZCjrLG7NswdX4P8L82CZvn88KUcHym21a4pGMnoZ99VB4F",
+      "5FvsvJaLjM5mbFjp57tMwM3jdsZMcM7qiA5u426NycBBxcdZ"
     ],
     "attestors": [
       "5CBDxtVcuQbcM76Q78nkjSrY35x42eepTUZr2HZ7ZmCXYBVX",
@@ -49,7 +50,8 @@
       "5HppT8j1Sf2NM2QPSRr4RkaHzHeHi99pZc72pqcNgM8CskLW"
     ],
     "gateway_sponsor": [
-      "5D7S3MzuqJ4LDBGrGE2FFd1QQynv94AYnTEckFX5hGhnyiXx"
+      "5D7S3MzuqJ4LDBGrGE2FFd1QQynv94AYnTEckFX5hGhnyiXx",
+      "5EcExZuD47jtU738g3RRBZMqSq74fE1CwbQUEoQYc48sTDqq"
     ],
     "recovery_friends": [
       "5GrqK9PPy4ZeQXfbBZi15eZdtM6GFRAef8AhbtACJBbFExZX",
@@ -76,52 +78,54 @@
       "5D9ETXkxgQzWtEcrDX883k5b1KYYXadrUFhVAjRrQb7zYXc6": 5000
     },
     "endowed": {
-      "5Hg4FNixvRsQ2Uxoxe7sQ2taBCUCPgJuLtxmuktrxggYF4Nw": 120000,
-      "5FWTMUWcv6cqUUA82uyMvAP9F4HLNHpn7AdW1DPzLyaKhxh7": 120000,
-      "5D9zwy5S56X8k5gMSwAMsrE11o1Jfmjo1hDPixrVyG5oerGG": 120000,
-      "5G6Vb6htiQMUhSvTDyMScva5wD65g8iRqwEmo9MV5wkQ4Tsu": 5000,
-      "5C7QQvEzdzz5uRpgKh6CqRPdMKwKSTEgXB3gcc3hhiJ5qSjT": 5000,
-      "5EkfVaZz3tdUizFivv9LfiCpzS3J435aNr6bjGEMAvFCc97i": 5000
+      "5Hg4FNixvRsQ2Uxoxe7sQ2taBCUCPgJuLtxmuktrxggYF4Nw": 110000,
+      "5FWTMUWcv6cqUUA82uyMvAP9F4HLNHpn7AdW1DPzLyaKhxh7": 110000,
+      "5D9zwy5S56X8k5gMSwAMsrE11o1Jfmjo1hDPixrVyG5oerGG": 110000,
+      "5G6Vb6htiQMUhSvTDyMScva5wD65g8iRqwEmo9MV5wkQ4Tsu": 17000,
+      "5C7QQvEzdzz5uRpgKh6CqRPdMKwKSTEgXB3gcc3hhiJ5qSjT": 17000,
+      "5EkfVaZz3tdUizFivv9LfiCpzS3J435aNr6bjGEMAvFCc97i": 17000
     },
     "anchor_signer": {
-      "5HZCjrLG7NswdX4P8L82CZvn88KUcHym21a4pGMnoZ99VB4F": 20000
+      "5HZCjrLG7NswdX4P8L82CZvn88KUcHym21a4pGMnoZ99VB4F": 20000,
+      "5FvsvJaLjM5mbFjp57tMwM3jdsZMcM7qiA5u426NycBBxcdZ": 20000
     },
     "attestors": {
-      "5CBDxtVcuQbcM76Q78nkjSrY35x42eepTUZr2HZ7ZmCXYBVX": 5000,
-      "5HdJp7y1z9pDBULLogmTt27nXcrxe9ReYkhgvwq2KekNMqoL": 5000,
-      "5DvEwWDdgqnN1hEzmpnG1Mxmv6DcJLSm3f9fFzoaF1hFanuu": 5000
+      "5CBDxtVcuQbcM76Q78nkjSrY35x42eepTUZr2HZ7ZmCXYBVX": 15500,
+      "5HdJp7y1z9pDBULLogmTt27nXcrxe9ReYkhgvwq2KekNMqoL": 15500,
+      "5DvEwWDdgqnN1hEzmpnG1Mxmv6DcJLSm3f9fFzoaF1hFanuu": 15500
     },
     "oracle": {
-      "5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": 100000,
-      "5GbM9HyTRh3BPKMYbv33HEf6DzuHzuvAhfHFxm3986FkfZje": 60000,
-      "5Fgug1BaP7SsLATVdbfiD1kREs1r7XatfUWHWgX7LcZvpLsz": 60000
+      "5ExZQnaVM2aGSNyTnNawqyDFu5TXh9Q13oTdHLVtPJN9xrfE": 55000,
+      "5GbM9HyTRh3BPKMYbv33HEf6DzuHzuvAhfHFxm3986FkfZje": 55000,
+      "5Fgug1BaP7SsLATVdbfiD1kREs1r7XatfUWHWgX7LcZvpLsz": 55000
     },
     "enactor": {
-      "5HppT8j1Sf2NM2QPSRr4RkaHzHeHi99pZc72pqcNgM8CskLW": 120000
+      "5HppT8j1Sf2NM2QPSRr4RkaHzHeHi99pZc72pqcNgM8CskLW": 110000
     },
     "gateway_sponsor": {
-      "5D7S3MzuqJ4LDBGrGE2FFd1QQynv94AYnTEckFX5hGhnyiXx": 40000
+      "5D7S3MzuqJ4LDBGrGE2FFd1QQynv94AYnTEckFX5hGhnyiXx": 70000,
+      "5EcExZuD47jtU738g3RRBZMqSq74fE1CwbQUEoQYc48sTDqq": 70000
     },
     "recovery_friends": {
-      "5GrqK9PPy4ZeQXfbBZi15eZdtM6GFRAef8AhbtACJBbFExZX": 2000,
-      "5EPbFqqwVnGZMd3djqgGXDJbBqXnG7ixHAyVAa3B1x9VxaLD": 2000,
-      "5EX64SSxdiVcseHyJWejihdznnEoHuK5nWLzafhKjcUML5nj": 2000
+      "5GrqK9PPy4ZeQXfbBZi15eZdtM6GFRAef8AhbtACJBbFExZX": 3000,
+      "5EPbFqqwVnGZMd3djqgGXDJbBqXnG7ixHAyVAa3B1x9VxaLD": 3000,
+      "5EX64SSxdiVcseHyJWejihdznnEoHuK5nWLzafhKjcUML5nj": 3000
     },
     "recovery_rescuers": {
-      "5EZsrgoYT49gqGaLs5JcdeqfzS3ojn3NsQGY3FmKgresAYyf": 5000
+      "5EZsrgoYT49gqGaLs5JcdeqfzS3ojn3NsQGY3FmKgresAYyf": 7000
     },
     "dust_pool": {
-      "5GL4CkaM2n78vpozx1FWzMKGu2bwsrziLFHoZTjJebdy9fY9": 100000
+      "5GL4CkaM2n78vpozx1FWzMKGu2bwsrziLFHoZTjJebdy9fY9": 90000
     }
   },
   "attestation_threshold": 2,
+  "later_signers": 4,
   "economics": {
     "attestation_reward_per_signer": 0,
     "era_cap_base": 0,
     "era_cap_baseline_attestor_count": 32,
     "validator_reward_per_era": 102739726,
-    "treasury_emission_share_perbill": 150000000,
-    "fee_buffer": 0
+    "treasury_emission_share_perbill": 150000000
   },
   "supply": {
     "genesis_lock": {
