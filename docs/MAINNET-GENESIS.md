@@ -84,7 +84,7 @@ not read:
 |---|---|
 | `dust` | `role -> account -> base units`: the MATRA each role account holds at genesis. An account is named by its key (SS58 or 0x-hex), or by its account for a multisig entry. Every name must be an entry of that role. |
 | `attestation_threshold` | How many of `roles.attestors` certify a receipt. |
-| `later_signers` | How many signers admitted after genesis the dust pool is sized for, at least 4. The `dust_pool` entries together hold that many times a later signer's dust (21,056 base units). |
+| `later_signers` | How many signers admitted after genesis the dust pool is sized for, at least 4. The `dust_pool` entries together hold that many times a later signer's dust (22,167 base units). No account of the pool may also hold a role or a key. |
 | `no_standby` | Optional. A list of `anchor_signer` and `gateway_sponsor`: each role the launch knowingly starts with one key for. A role listed here must have exactly one entry. |
 | `partner_chain` | `genesis_utxo` (`<tx hash>#<index>`, the index at most 32767, the most partner-chains' `UtxoIndex` reads), `committee_candidate_address` (lowercase bech32, see below), `d_parameter_policy_id` and `permissioned_candidates_policy_id` (0x-hex, 28 bytes). |
 | `nodes[].cross_chain` | Each authority's ECDSA partner-chain key, 33 bytes compressed, 0x-hex. |
@@ -195,7 +195,7 @@ of generation.
 | guardian keyholder | 64 vetoes of 384 B | 1 within 10 blocks | 16,347 | 1,492 | 10 |
 | enactor | 64 calls of 512 B, and an upgrade | | 106,050 | 10,100 | 2 |
 | anchor_signer | 2,000 anchors of 256 B | | 17,945 | 2,057 | 8 |
-| gateway_sponsor | 6,000 receipts of 480 B | 500 within 1,200 blocks | 65,941 | 6,415 | 3 |
+| gateway_sponsor | 6,000 receipts of 560 B | 500 within 1,200 blocks | 69,478 | 6,413 | 3 |
 | oracle | 4,800 prices of 512 B | | 50,900 | 4,847 | 3 |
 | attestor | 400 submissions of 4,288 B | | 15,189 | 413 | 35 |
 | recovery friend | 8 calls of 256 B | 1 within 60 blocks | 2,600 | 298 | 49 |
@@ -206,8 +206,10 @@ The last two columns count calls of the sized length on what the floor
 leaves free once the role's deposit is reserved. A guardian keyholder at its
 floor vetoes within a minute of genesis and again a minute after, whether it
 opened the multisig call or closed it. A gateway sponsor that has submitted
-nothing for two hours holds 500 receipts' fees; a receipt is sized with both
-of its optional ZK roots. An attestor's load is
+nothing for two hours holds 500 receipts' fees. A receipt is the
+`OrinqReceipts.submit_receipt_v2` the gateway submits, with both optional ZK
+roots, signed at a nonce of 2^14 or more: 560 bytes, which the node's tests
+take from encoding the call. An attestor's load is
 `TeeAttestation.submit_evidence` of a 4 KiB payload, 400 a day; its attests
 are feeless, and a payload at the pallet's 16 KiB bound costs 3.3 times as
 much. A sudo keyholder's or the enactor's upgrade fee is 5.24e12 at the block
@@ -229,24 +231,33 @@ and the role's working dust for a call 48 bytes and 32 for each other
 signatory longer, since whichever of them signs pays for it; the multisig's
 account holds the existential deposit and the deposit its role reserves.
 
+An account that carries more than one load, a keyholder that also holds a
+signing role or two roles' keyholder, needs what sustains all its calls and
+each burst on top: one role's calls spend the MOTRA another role's burst was
+saved from. A guardian keyholder that is also an oracle has a floor of
+67,363, where either role alone takes 16,347 or 50,900.
+
 ### The cap, the pool and the oracles
 
 The whole issuance stays under one MATRA. With a 2-of-3 sudo key, a 2-of-3
 guardian, three oracles, three attestors, three recovery friends, a rescuer,
 and two anchor signers and two gateway sponsors, the floors and the
-Treasury's deposit come to 862,368, and the dust pool at its least to
-84,224: 946,592 in all.
+Treasury's deposit come to 869,442, and the dust pool at its least to
+88,668: 958,110 in all, 41,889 under the cap.
 
 The dust pool is the only source of dust after genesis, and Root's transfer
-out of it waits 7 days. It holds at least `later_signers` times 21,056, the
-dust of a client that submits 2,000 receipts of 480 bytes a day itself, and
-`later_signers` is at least 4. `dust-budget` also prints how many
-replacement keys of each single-key role the pool covers at that role's
-floor.
+out of it waits 7 days. It holds at least `later_signers` times 22,167, the
+dust of a client that submits 2,000 receipts of 560 bytes a day itself, and
+`later_signers` is at least 4. No account of the pool may also be a signer
+or a keyholder, whose own floor would count as spare. `dust-budget` prints
+what the pool holds beyond `later_signers` and how many replacement keys of
+each single-key role that spare covers at the role's floor, each of them an
+alternative to the others.
 
 `OracleMaxAttestors` is 16, but the cap, not the roster, bounds the oracles a
-genesis funds: at the floors above a fourth oracle fits and a fifth does
-not. A price needs `OracleMinAttestorThreshold` (3) oracles submitting, so a
+genesis funds: at the floors above, three oracles fit and a fourth does
+not (1,009,010). A fourth fits in place of the anchor signer's standby
+(991,065) or with a 2-of-2 guardian (992,663). A price needs `OracleMinAttestorThreshold` (3) oracles submitting, so a
 launch that seats three stops pricing when one is offline until Root
 registers another, endowed out of the pool. Root can also raise
 `Motra.Params.generationPerMatraPerBlock` behind the standard delay, which
@@ -295,8 +306,9 @@ The builder refuses a manifest, naming the field, when:
   floor, `dust` names an account that is no entry of its role, endows an
   account the builder sizes nothing for, or endows one below the existential
   deposit;
-- `later_signers` is missing or under 4, or the `dust_pool` entries together
-  hold less than it takes; or the issuance reaches one MATRA, where the
+- `later_signers` is missing or under 4, the `dust_pool` entries together
+  hold less than it takes, or an account of the pool also holds a role or a
+  key; or the issuance reaches one MATRA, where the
   refusal names what the launch would issue with every account at its floor.
 
 The runtime's genesis builder refuses in turn a declared issuance other than

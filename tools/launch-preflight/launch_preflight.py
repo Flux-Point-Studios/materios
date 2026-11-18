@@ -324,9 +324,10 @@ MOTRA = {name: value for name, _, value in MOTRA_PARAMS}
 ACCRUAL_CHECKPOINT = (16, 4)
 # What each key that signs for a role signs in a day, as docs/MAINNET-GENESIS.md sizes its dust: (calls, bytes of
 # one). A sudo keyholder's and the enactor's keys also sign a call that carries a whole runtime. An attestor's calls
-# are TeeAttestation.submit_evidence of a 4 KiB payload: its attests are feeless.
+# are TeeAttestation.submit_evidence of a 4 KiB payload: its attests are feeless. A gateway sponsor's are the
+# OrinqReceipts.submit_receipt_v2 the gateway submits, with both optional ZK roots, at a nonce of 2^14 or more.
 ROLE_LOADS = {"sudo": (24, 512), "guardian": (64, 384), "enactor": (64, 512), "anchor_signer": (2_000, 256),
-              "gateway_sponsor": (6_000, 480), "oracle": (4_800, 512), "attestors": (400, 4_288),
+              "gateway_sponsor": (6_000, 560), "oracle": (4_800, 512), "attestors": (400, 4_288),
               "recovery_friends": (8, 256), "recovery_rescuers": (24, 512)}
 # What a key that signs for a role pays for together starting from no MOTRA, which is what genesis leaves every
 # account and a burst leaves the one that made it: (calls of the role's bytes, the blocks it has). A guardian
@@ -338,6 +339,9 @@ ROLE_BURSTS = {"guardian": (1, 10), "gateway_sponsor": (500, 1_200), "recovery_f
 # that many friends larger, up to the runtime's Recovery.MaxFriends.
 SPARE_RECOVERY_FRIENDS = 1
 UPGRADE_ROLES = ("sudo", "enactor")
+# What a signer admitted after genesis signs in a day, which the dust pool holds launch.later_signers times the dust
+# of: a client's own receipts, as long as a gateway sponsor's.
+LATER_SIGNER_LOAD = (2_000, ROLE_LOADS["gateway_sponsor"][1])
 # The call that carries a runtime is sized at this many times the genesis runtime code, as genesis stores it.
 UPGRADE_HEADROOM = 2
 DAY_MILLIS = 86_400_000
@@ -3941,11 +3945,17 @@ def check_dust(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     """Every account that signs exists at genesis, with the provider frame_system's CheckNonce needs, and holds free
     at least its floor: the deposits its roles reserve, read from the runtime metadata, and, left free once they are
     reserved, the larger of the existential deposit, which keeps it, and its working dust, which generates the MOTRA
-    its calls cost: MOTRA comes of free MATRA alone. The working dust is the larger of what sustains its roles'
-    calls day after day and what pays for their bursts starting from no MOTRA, which is what genesis stores. For a
-    sudo keyholder and the enactor those calls include one that carries a runtime UPGRADE_HEADROOM times the size of
-    the genesis runtime code. No signed call moves MATRA and none is minted after genesis, so a signer endowed below
-    its floor can never sign, never pay its role's deposit, or never pay for its role's calls in time."""
+    its calls cost: MOTRA comes of free MATRA alone. The working dust of a single role is the larger of what sustains
+    its calls day after day and what pays for its burst starting from no MOTRA, which is what genesis stores; an
+    account that carries several roles' calls needs what sustains them all and each burst on top, since one role's
+    calls spend what another's burst was saved from. For a sudo keyholder and the enactor those calls include one
+    that carries a runtime UPGRADE_HEADROOM times the size of the genesis runtime code. No signed call moves MATRA
+    and none is minted after genesis, so a signer endowed below its floor can never sign, never pay its role's
+    deposit, or never pay for its role's calls in time.
+
+    The dust pool is what a signer admitted after genesis is endowed out of, so no pool account may also sign or
+    hold a key, whose own floor would count as spare, and the pool's accounts hold, free at genesis, at least
+    launch.later_signers times the working dust of LATER_SIGNER_LOAD."""
     constants = {"existential": ("Balances", "ExistentialDeposit"), "rescuer": RECOVERY_DEPOSIT,
                  "config_base": RECOVERY_CONFIG[0], "friend_factor": RECOVERY_CONFIG[1],
                  "multisig_base": MULTISIG_DEPOSIT[0], "multisig_factor": MULTISIG_DEPOSIT[1]}
@@ -3961,10 +3971,12 @@ def check_dust(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                               "dust each signer needs is unknown here")]
     upgrade_bytes = UPGRADE_HEADROOM * len(spec.code)
     findings = []
-    for account, signer in signer_needs(launch, deposits).items():
+    needs = signer_needs(launch, deposits)
+    for account, signer in needs.items():
         who = f"{' and '.join(signer.whom)} ({ss58(account, spec.ss58_prefix)})"
-        working = max(working_dust(signer.loads, upgrade_bytes if signer.upgrades else None, DAY_MILLIS // slot),
-                      sum(burst_dust(*burst) for burst in signer.bursts))
+        sustaining = working_dust(signer.loads, upgrade_bytes if signer.upgrades else None, DAY_MILLIS // slot)
+        answering = sum(burst_dust(*burst) for burst in signer.bursts)
+        working = max(sustaining, answering) if len(signer.loads) == 1 else sustaining + answering
         floor = signer.reserved + max(deposits["existential"], working)
         info = spec.account_info(account)
         if info is None or info[2] == 0:
@@ -3976,6 +3988,25 @@ def check_dust(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
                                           f"{signer.reserved} its roles reserve and, left free, the larger of the "
                                           f"existential deposit {deposits['existential']} and the working dust "
                                           f"{working} that generates the MOTRA its calls cost{upgrade}"))
+    pooled = 0
+    for i, entry in enumerate(launch.get("roles", {}).get("dust_pool", [])):
+        try:
+            account = role_account(entry)
+        except ValueError:
+            continue  # rule 1 refuses a role key that does not decode
+        if account in needs:
+            findings.append(Finding(DUST, f"roles.dust_pool[{i}] ({ss58(account, spec.ss58_prefix)}) is also "
+                                          f"{' and '.join(needs[account].whom)}: the dust pool holds dust for "
+                                          "signers admitted after genesis, and none of the dust an account needs "
+                                          "for a role of its own is spare"))
+        info = spec.account_info(account)
+        pooled += 0 if info is None else info[4]
+    later = launch.get("later_signers", 0)
+    unit = max(deposits["existential"], working_dust([LATER_SIGNER_LOAD], None, DAY_MILLIS // slot))
+    if pooled < later * unit:
+        findings.append(Finding(DUST, f"the dust pool holds {pooled} free at genesis, below the {later * unit} that "
+                                      f"later_signers = {later} take at {unit} each, the working dust of "
+                                      f"{LATER_SIGNER_LOAD[0]} calls of {LATER_SIGNER_LOAD[1]} bytes a day"))
     return findings
 
 

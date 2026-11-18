@@ -224,9 +224,11 @@ pub const VETO_BLOCKS: u32 = 10;
 /// The bytes `OrinqReceipts.submit_anchor` is sized at.
 pub const ANCHOR_BYTES: u128 = 256;
 
-/// The bytes `OrinqReceipts.submit_receipt` is sized at: a receipt that
-/// carries both of its optional ZK roots.
-pub const RECEIPT_BYTES: u128 = 480;
+/// The bytes a gateway sponsor's receipt is sized at: the
+/// `OrinqReceipts.submit_receipt_v2` the gateway submits, carrying both of
+/// its optional ZK roots, signed with a mortal era at a nonce of 2^14 or
+/// more.
+pub const RECEIPT_BYTES: u128 = 560;
 
 /// The receipts a gateway sponsor submits together after two hours of
 /// submitting none.
@@ -402,12 +404,14 @@ pub fn upgrade_bytes() -> u128 {
     .into()
 }
 
-/// The free MATRA base units that carry `loads` together, the larger of two
-/// needs. To sustain them: enough to generate each day what their calls
-/// cost, and, when one carries a runtime, to settle at twice the fee of a
-/// call of `upgrade_bytes` on top, so that call is paid for again half a day
-/// after it was made. To answer them: enough to pay for each load's burst
-/// within its blocks of an empty MOTRA balance.
+/// The free MATRA base units that carry `loads` together. To sustain them:
+/// enough to generate each day what their calls cost, and, when one carries
+/// a runtime, to settle at twice the fee of a call of `upgrade_bytes` on
+/// top, so that call is paid for again half a day after it was made. To
+/// answer them: enough to pay for each load's burst within its blocks of an
+/// empty MOTRA balance. A single load needs the larger of the two, since its
+/// burst stands in for its own calls; an account that carries several needs
+/// both, since one role's calls spend what another's burst was saved from.
 pub fn working_dust(loads: &[Load]) -> Balance {
     let daily: u128 = loads
         .iter()
@@ -424,7 +428,10 @@ pub fn working_dust(loads: &[Load]) -> Balance {
         .iter()
         .filter_map(|load| Some(burst_dust(load.burst?, load.call_bytes)))
         .sum();
-    sustaining.max(answering)
+    match loads {
+        [_] => sustaining.max(answering),
+        _ => sustaining + answering,
+    }
 }
 
 /// The deposit `pallet_multisig` reserves from the keyholder who opens a call
@@ -1490,11 +1497,17 @@ impl std::fmt::Display for Budget {
             self.later_signers,
             Balance::from(self.later_signers) * self.later_signer
         )?;
-        for (role, floor) in &self.replacements {
+        let spare = self.pool - Balance::from(self.later_signers) * self.later_signer;
+        writeln!(
+            f,
+            "{spare:>9}  dust pool spare beyond {LATER_SIGNERS}, which endows one of:"
+        )?;
+        for (index, (role, floor)) in self.replacements.iter().enumerate() {
             writeln!(
                 f,
-                "{:>9}  replacement {role} keys the dust pool endows at the floor of {floor}",
-                self.pool / floor
+                "{:>9}  {}replacement {role} keys at the floor of {floor}",
+                spare / floor,
+                if index == 0 { "" } else { "or " }
             )?;
         }
         Ok(())
@@ -1653,6 +1666,18 @@ fn genesis_patch(launch: &Json) -> Result<(Json, Budget), String> {
         }
     }
     let pool = roles.get(DUST_POOL).into_iter().flatten();
+    if let Some((entry, (_, who))) = pool
+        .clone()
+        .find_map(|entry| Some((entry, floors.get(&entry.account)?)))
+    {
+        return Err(format!(
+            "{} ({}) is also {}: the dust pool holds dust for signers admitted after genesis, \
+             and none of the dust an account needs for a role of its own is spare",
+            entry.path,
+            entry.account,
+            who.trim_end_matches(',')
+        ));
+    }
     let pooled: BTreeSet<&AccountId> = pool.map(|entry| &entry.account).collect();
     let mut budgeted = Vec::new();
     let mut floors_outside_the_pool = ExistentialDeposit::get();
@@ -2223,6 +2248,27 @@ mod tests {
         })
     }
 
+    /// A receipt as the gateway sponsors it, with both optional ZK roots: the
+    /// player's key and signature are the submitter's key and zeros.
+    fn submit_receipt_v2(receipt_id: H256) -> RuntimeCall {
+        RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::submit_receipt_v2 {
+            player_pubkey: [0xB1; 32],
+            player_sig: [0; 64],
+            sig_type: 1,
+            receipt_id,
+            content_hash: H256::repeat_byte(0xC1),
+            base_root_sha256: [1; 32],
+            zk_root_poseidon: Some([8; 32]),
+            poseidon_params_hash: Some([9; 32]),
+            base_manifest_hash: [2; 32],
+            safety_manifest_hash: [3; 32],
+            monitor_config_hash: [4; 32],
+            attestation_evidence_hash: [5; 32],
+            storage_locator_hash: [6; 32],
+            schema_hash: [7; 32],
+        })
+    }
+
     fn submit_receipt(receipt_id: H256) -> RuntimeCall {
         RuntimeCall::OrinqReceipts(pallet_orinq_receipts::Call::submit_receipt {
             receipt_id,
@@ -2304,7 +2350,7 @@ mod tests {
             of(
                 "gateway_sponsor",
                 0,
-                submit_receipt(H256::repeat_byte(0xA1)),
+                submit_receipt_v2(H256::repeat_byte(0xA1)),
             ),
             of(
                 "oracle",
@@ -2351,8 +2397,12 @@ mod tests {
         ]
     }
 
-    /// `call` as a signed transaction of the widest signature and nonce,
-    /// which is how long it is on the wire.
+    /// The highest nonce SCALE encodes in four bytes, as every nonce from
+    /// 2^14 on is: a signer reaches it after a billion calls.
+    const WIDE_NONCE: u32 = (1 << 30) - 1;
+
+    /// `call` as a signed transaction of the widest signature, with a mortal
+    /// era and a nonce of `WIDE_NONCE`, which is how long it is on the wire.
     fn on_the_wire(call: RuntimeCall) -> usize {
         let extra: SignedExtra = (
             frame_system::CheckNonZeroSender::new(),
@@ -2360,7 +2410,7 @@ mod tests {
             frame_system::CheckTxVersion::new(),
             frame_system::CheckGenesis::new(),
             frame_system::CheckEra::from(Era::mortal(64, 63)),
-            frame_system::CheckNonce::from(u32::MAX),
+            frame_system::CheckNonce::from(WIDE_NONCE),
             frame_system::CheckWeight::new(),
             pallet_motra::fee::ChargeMotra::new(),
         );
@@ -2377,7 +2427,7 @@ mod tests {
     /// anchor signer, a gateway sponsor, an oracle, an attestor, a recovery
     /// friend, a rescuer and the sudo account, in `signers`' order.
     const FLOORS: [Balance; 10] = [
-        107_630, 16_347, 106_050, 17_945, 65_941, 50_900, 15_189, 2_600, 6_548, 3_500,
+        107_630, 16_347, 106_050, 17_945, 69_478, 50_900, 15_189, 2_600, 6_548, 3_500,
     ];
 
     /// The launch plan rounds the dust of a sudo keyholder and of the
@@ -2442,7 +2492,9 @@ mod tests {
     }
 
     /// A role's call is no longer on the wire than the builder sizes its
-    /// dust for, and the runtime charges for it what the builder reckons.
+    /// dust for, and the runtime charges for it what the builder reckons. A
+    /// receipt is sized at exactly the sponsored `submit_receipt_v2` with
+    /// both roots, which a later signer is sized in too.
     #[test]
     fn each_roles_call_fits_the_bytes_its_dust_is_sized_for_at_the_fee_the_runtime_charges() {
         let launch = fixture();
@@ -2477,6 +2529,9 @@ mod tests {
                     fee(bytes as u128)
                 );
             }
+            let sponsored = on_the_wire(submit_receipt_v2(H256::repeat_byte(0xA2)));
+            assert_eq!(sponsored as u128, RECEIPT_BYTES);
+            assert_eq!(LATER_SIGNER.call_bytes, RECEIPT_BYTES);
             assert_eq!(upgrade_bytes(), 5 * 1024 * 1024);
             for (case, load, call) in upgrades {
                 assert!(load.carries_runtime, "{case}");
@@ -3818,7 +3873,7 @@ mod tests {
         let pool = holders(&launch, DUST_POOL)[0].clone();
         let pointer = dust_of(DUST_POOL, &pool);
         let later_signer = ExistentialDeposit::get() + working_dust(&[LATER_SIGNER]);
-        assert_eq!((later_signer, MIN_LATER_SIGNERS), (21_056, 4));
+        assert_eq!((later_signer, MIN_LATER_SIGNERS), (22_167, 4));
         assert_eq!(launch[LATER_SIGNERS], 4);
         let at = |dust: Balance, signers: u64| {
             edited(|launch| {
@@ -3834,14 +3889,14 @@ mod tests {
             .unwrap_or_default();
         assert!(
             short.contains(
-                "dust.dust_pool holds 84223 in all, below the 84224 that later_signers = 4 later \
-                 signers take at 21056 each, the dust of a signer of 2000 calls of 480 bytes a day"
+                "dust.dust_pool holds 88667 in all, below the 88668 that later_signers = 4 later \
+                 signers take at 22167 each, the dust of a signer of 2000 calls of 560 bytes a day"
             ),
             "{short}"
         );
         let more = build(&at(90_000, 5)).err().unwrap_or_default();
         assert!(
-            more.contains("dust.dust_pool holds 90000 in all, below the 105280"),
+            more.contains("dust.dust_pool holds 90000 in all, below the 110835"),
             "{more}"
         );
         let few = build(&at(90_000, 3)).err().unwrap_or_default();
@@ -3869,7 +3924,7 @@ mod tests {
             }
         });
         assert!(
-            none.contains("dust.dust_pool holds 0 in all, below the 84224"),
+            none.contains("dust.dust_pool holds 0 in all, below the 88668"),
             "{none}"
         );
         let below_the_deposit = refusal(|launch| {
@@ -4007,7 +4062,7 @@ mod tests {
                  reserves the recovery deposit"
             ),
             format!(
-                "    20000     16347      3653  dust.endowed.{guardian}: \
+                "    17000     16347       653  dust.endowed.{guardian}: \
                  roles.guardian[0].members[2] ({guardian}), a keyholder of roles.guardian[0]"
             ),
             format!(
@@ -4021,13 +4076,39 @@ mod tests {
             lines[2 + endowed.len()..],
             [
                 "      500       500         0  the Treasury's existential deposit",
-                "   995000  issued at genesis, fixed as OrinqReceipts.FixedIssuance",
-                "     4999  headroom: the dust that can still be added with the issuance under one MATRA",
-                "    90000  dust pool: 4 later signers of 21056 each; later_signers 4 takes 84224",
-                "        5  replacement anchor_signer keys the dust pool endows at the floor of 17945",
-                "        1  replacement gateway_sponsor keys the dust pool endows at the floor of 65941",
-                "        1  replacement oracle keys the dust pool endows at the floor of 50900",
-                "        5  replacement attestors keys the dust pool endows at the floor of 15189",
+                "   994000  issued at genesis, fixed as OrinqReceipts.FixedIssuance",
+                "     5999  headroom: the dust that can still be added with the issuance under one MATRA",
+                "    90000  dust pool: 4 later signers of 22167 each; later_signers 4 takes 88668",
+                "     1332  dust pool spare beyond later_signers, which endows one of:",
+                "        0  replacement anchor_signer keys at the floor of 17945",
+                "        0  or replacement gateway_sponsor keys at the floor of 69478",
+                "        0  or replacement oracle keys at the floor of 50900",
+                "        0  or replacement attestors keys at the floor of 15189",
+            ]
+        );
+        let standby = holders(&launch, "anchor_signer")[1].to_ss58check();
+        let pooled = edited(|launch| {
+            launch["roles"]["anchor_signer"]
+                .as_array_mut()
+                .unwrap()
+                .pop();
+            launch["dust"]["anchor_signer"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&standby);
+            launch[NO_STANDBY] = serde_json::json!(["anchor_signer"]);
+            *launch.pointer_mut(&dust_of(DUST_POOL, &pool)).unwrap() = 110_000.into();
+        });
+        let spare = dust_budget_from(&pooled.to_string()).unwrap();
+        let tail: Vec<&str> = spare.lines().rev().take(5).collect();
+        assert_eq!(
+            tail,
+            [
+                "        1  or replacement attestors keys at the floor of 15189",
+                "        0  or replacement oracle keys at the floor of 50900",
+                "        0  or replacement gateway_sponsor keys at the floor of 69478",
+                "        1  replacement anchor_signer keys at the floor of 17945",
+                "    21332  dust pool spare beyond later_signers, which endows one of:",
             ]
         );
         assert!(budget.ends_with('\n'));
@@ -4108,7 +4189,11 @@ mod tests {
                     .unwrap()
                     .values_mut()
                 {
-                    *pooled = (4 * 21_056).into();
+                    *pooled = (4 * 22_167).into();
+                }
+                for keyholder in members(launch, "sudo") {
+                    launch["dust"]["endowed"][keyholder.to_ss58check()] =
+                        (FLOORS[0] as u64).into();
                 }
                 for key in &keys {
                     let key = key.to_ss58check();
@@ -4528,12 +4613,14 @@ mod tests {
     }
 
     /// Issuance stays under one MATRA, and that, not the oracle roster's 16,
-    /// bounds the oracles a genesis funds: with every account at its floor
-    /// and the pool at four later signers, a fourth oracle fits and a fifth
-    /// does not. More come out of the dust pool after genesis.
+    /// bounds the oracles a genesis funds: with every account at its floor,
+    /// a standby for each single-key role and the pool at four later
+    /// signers, three oracles fit and a fourth does not. A fourth fits in
+    /// place of the anchor signer's standby. More come out of the dust pool
+    /// after genesis.
     #[test]
-    fn the_issuance_cap_bounds_the_oracles_a_genesis_funds_to_four_at_the_floors() {
-        let at_the_floors = |oracles: usize| {
+    fn the_issuance_cap_bounds_the_oracles_a_genesis_funds_to_three_at_the_floors() {
+        let at_the_floors = |oracles: usize, standby: bool| {
             edited(|launch| {
                 let by_role = [
                     ("anchor_signer", FLOORS[3]),
@@ -4544,7 +4631,7 @@ mod tests {
                     ("recovery_friends", FLOORS[7]),
                     ("recovery_rescuers", FLOORS[8]),
                     ("sudo", FLOORS[9]),
-                    (DUST_POOL, 4 * 21_056),
+                    (DUST_POOL, 4 * 22_167),
                 ];
                 for (role, floor) in by_role {
                     for dust in launch["dust"][role].as_object_mut().unwrap().values_mut() {
@@ -4564,22 +4651,233 @@ mod tests {
                         .push(key.clone().into());
                     launch["dust"]["oracle"][&key] = (FLOORS[5] as u64).into();
                 }
+                if !standby {
+                    let standby = launch["roles"]["anchor_signer"]
+                        .as_array_mut()
+                        .unwrap()
+                        .pop()
+                        .unwrap();
+                    launch["dust"]["anchor_signer"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(standby.as_str().unwrap());
+                    launch[NO_STANDBY] = serde_json::json!(["anchor_signer"]);
+                }
             })
         };
-        start(&build(&at_the_floors(3)).unwrap()).execute_with(|| {
-            assert_eq!(Balances::total_issuance(), 946_592);
+        start(&build(&at_the_floors(3, true)).unwrap()).execute_with(|| {
+            assert_eq!(Balances::total_issuance(), 958_110);
         });
-        start(&build(&at_the_floors(4)).unwrap()).execute_with(|| {
-            assert_eq!(Balances::total_issuance(), 997_492);
-        });
-        let refused = build(&at_the_floors(5)).err().unwrap_or_default();
+        let refused = build(&at_the_floors(4, true)).err().unwrap_or_default();
         assert!(
             refused.contains(
-                "dust endows 1048392 base units with the Treasury's existential deposit: mainnet \
+                "dust endows 1009010 base units with the Treasury's existential deposit: mainnet \
                  issues less than one MATRA (1000000). With each account at its floor and the \
-                 dust pool at the 84224 of later_signers it would issue 1048392: what the cap \
+                 dust pool at the 88668 of later_signers it would issue 1009010: what the cap \
                  leaves no room for at genesis is endowed out of the dust pool after it"
             ),
+            "{refused}"
+        );
+        start(&build(&at_the_floors(4, false)).unwrap()).execute_with(|| {
+            assert_eq!(Balances::total_issuance(), 991_065);
+        });
+    }
+
+    /// The dust pool's dust is spare only if no account of it needs dust for
+    /// a role of its own: a keyholder or a signer listed in the pool would
+    /// count its own floor as dust for later signers.
+    #[test]
+    fn a_dust_pool_account_that_also_holds_a_role_or_a_key_is_refused() {
+        let launch = fixture();
+        let pool = holders(&launch, DUST_POOL)[0].to_ss58check();
+        for (role, floor) in [("sudo", FLOORS[0]), ("guardian", FLOORS[1])] {
+            let keyholder = members(&launch, role)[0].clone();
+            let key = keyholder.to_ss58check();
+            let refused = refusal(|launch| {
+                launch["roles"][DUST_POOL] = serde_json::json!([key]);
+                let endowed = launch["roles"]["endowed"].as_array_mut().unwrap();
+                endowed.retain(|entry| entry.as_str() != Some(key.as_str()));
+                launch["dust"]["endowed"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(&key);
+                launch["dust"][DUST_POOL] =
+                    serde_json::json!({ key.clone(): floor as u64 + 88_668 });
+                launch["dust"][DUST_POOL]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(&pool);
+            });
+            assert!(
+                refused.contains(&format!(
+                    "roles.dust_pool[0] ({keyholder}) is also roles.{role}[0].members[0] \
+                     ({keyholder}), a keyholder of roles.{role}[0]: the dust pool holds dust for \
+                     signers admitted after genesis, and none of the dust an account needs for a \
+                     role of its own is spare"
+                )),
+                "{role}: {refused}"
+            );
+        }
+        let at_its_floor = refusal(|launch| {
+            let key = members(launch, "sudo")[0].to_ss58check();
+            launch["roles"][DUST_POOL] = serde_json::json!([key]);
+            let endowed = launch["roles"]["endowed"].as_array_mut().unwrap();
+            endowed.retain(|entry| entry.as_str() != Some(key.as_str()));
+            launch["dust"]["endowed"]
+                .as_object_mut()
+                .unwrap()
+                .remove(&key);
+            launch["dust"][DUST_POOL] = serde_json::json!({ key: FLOORS[0] as u64 });
+        });
+        assert!(
+            at_its_floor.contains("is also roles.sudo[0].members[0]"),
+            "{at_its_floor}"
+        );
+        let entry = holders(&launch, "oracle")[0].to_ss58check();
+        let signer = refusal(|launch| {
+            launch["roles"][DUST_POOL] = serde_json::json!([entry]);
+        });
+        assert!(
+            signer.contains("roles.oracle[0] names the account roles.dust_pool[0] names")
+                || signer.contains("roles.dust_pool[0] names the account roles.oracle[0] names"),
+            "{signer}"
+        );
+    }
+
+    /// The floor of an account that carries `loads` with `deposits` reserved.
+    fn floor_of(deposits: Balance, loads: &[Load]) -> Balance {
+        ExistentialDeposit::get() + deposits + working_dust(loads)
+    }
+
+    /// An account that carries two roles' loads needs what sustains both and
+    /// what answers each burst on top: one role's calls spend what another's
+    /// burst was saved from. A guardian keyholder that is also an oracle,
+    /// endowed exactly that, vetoes every ten blocks from an empty balance
+    /// while it prices every third, through the runtime's MOTRA pallet.
+    #[test]
+    fn an_account_with_two_roles_carries_both_their_calls_and_each_burst_on_top() {
+        let launch = fixture();
+        let oracle = role_load("oracle");
+        let combined = floor_of(multisig_deposit(2), &[GUARDIAN_MEMBER, oracle]);
+        let sustained = (GUARDIAN_MEMBER.calls_per_day * fee(GUARDIAN_MEMBER.call_bytes)
+            + oracle.calls_per_day * fee(oracle.call_bytes))
+            * MATRA;
+        let veto = GUARDIAN_MEMBER
+            .burst
+            .expect("a guardian keyholder answers a veto");
+        assert_eq!(
+            combined,
+            ExistentialDeposit::get()
+                + multisig_deposit(2)
+                + sustained.div_ceil(generated_per_block(MATRA) * u128::from(DAYS))
+                + burst_dust(veto, GUARDIAN_MEMBER.call_bytes)
+        );
+        assert_eq!(combined, 67_363);
+        let keyholder = members(&launch, "guardian")[2].clone();
+        let key = keyholder.to_ss58check();
+        let both = |dust: Balance| {
+            edited(|launch| {
+                let oracle = launch["roles"]["oracle"][0].as_str().unwrap().to_string();
+                launch["roles"]["oracle"][0] = key.clone().into();
+                let oracles = launch["dust"]["oracle"].as_object_mut().unwrap();
+                oracles.remove(&oracle);
+                oracles.insert(key.clone(), (dust as u64).into());
+                let endowed = launch["roles"]["endowed"].as_array_mut().unwrap();
+                endowed.retain(|entry| entry.as_str() != Some(key.as_str()));
+                launch["dust"]["endowed"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove(&key);
+            })
+        };
+        let refused = build(&both(combined - 1)).err().unwrap_or_default();
+        assert!(
+            refused.contains(&format!("below its floor of {combined}")),
+            "{refused}"
+        );
+        start(&build(&both(combined)).unwrap()).execute_with(|| {
+            System::set_block_number(0);
+            Balances::force_set_balance(RuntimeOrigin::root(), keyholder.clone().into(), combined)
+                .unwrap();
+            <Balances as ReservableCurrency<AccountId>>::reserve(&keyholder, multisig_deposit(2))
+                .unwrap();
+            let spacing = u32::try_from(u128::from(DAYS) / oracle.calls_per_day).unwrap();
+            for block in 1..=DAYS / 4 {
+                System::set_block_number(block);
+                if block % spacing == 0 {
+                    Motra::burn_fee(&keyholder, fee(oracle.call_bytes))
+                        .unwrap_or_else(|_| panic!("the price at block {block}"));
+                }
+                if block % VETO_BLOCKS == 0 {
+                    Motra::burn_fee(&keyholder, fee(GUARDIAN_MEMBER.call_bytes))
+                        .unwrap_or_else(|_| panic!("the veto at block {block}"));
+                }
+            }
+        });
+    }
+
+    /// A keyholder of a gateway sponsor's multisig that is also an attestor
+    /// carries the attestor's evidence and the sponsor's receipts, on a
+    /// call as long as `as_multi` makes it, and the sponsor's burst on top.
+    /// That is more than the cap leaves the fixture, so at its floor the
+    /// builder refuses the issuance and no longer the account.
+    #[test]
+    fn a_sponsors_keyholder_that_is_also_an_attestor_carries_both_and_the_burst() {
+        let launch = fixture();
+        let attestor = holders(&launch, "attestors")[0].clone();
+        let other = AccountId::from([0x52; 32]);
+        let sponsor = role_load("gateway_sponsor");
+        let wrapped = Load {
+            call_bytes: sponsor.call_bytes + AS_MULTI_BYTES + SIGNATORY_BYTES,
+            ..sponsor
+        };
+        let combined = floor_of(multisig_deposit(2), &[role_load("attestors"), wrapped]);
+        let sustained = (role_load("attestors").calls_per_day
+            * fee(role_load("attestors").call_bytes)
+            + wrapped.calls_per_day * fee(wrapped.call_bytes))
+            * MATRA;
+        assert_eq!(
+            combined,
+            ExistentialDeposit::get()
+                + multisig_deposit(2)
+                + sustained.div_ceil(generated_per_block(MATRA) * u128::from(DAYS))
+                + burst_dust(RECEIPT_BURST, wrapped.call_bytes)
+        );
+        let multisig = preflight_multisig(vec![attestor.clone(), other.clone()], 2);
+        let replaced = holders(&launch, "gateway_sponsor")[0].to_ss58check();
+        let shared = |dust: Balance| {
+            edited(|launch| {
+                launch["roles"]["gateway_sponsor"][0] = serde_json::json!({
+                    "threshold": 2,
+                    "members": [
+                        { "key": attestor.to_ss58check() },
+                        { "key": other.to_ss58check() },
+                    ],
+                });
+                let sponsors = launch["dust"]["gateway_sponsor"].as_object_mut().unwrap();
+                sponsors.remove(&replaced);
+                sponsors.insert(multisig.to_ss58check(), 500.into());
+                launch["dust"]["attestors"][attestor.to_ss58check()] = (dust as u64).into();
+                launch["roles"]["endowed"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(other.to_ss58check().into());
+                launch["dust"]["endowed"][other.to_ss58check()] =
+                    (floor_of(multisig_deposit(2), &[wrapped]) as u64).into();
+            })
+        };
+        let at_the_floor = build(&shared(combined)).err().unwrap_or_default();
+        assert!(
+            !at_the_floor.contains("below its floor")
+                && at_the_floor.contains("mainnet issues less than one MATRA"),
+            "{at_the_floor}"
+        );
+        let refused = build(&shared(combined - 1)).err().unwrap_or_default();
+        assert!(
+            refused.contains(&format!(
+                "a keyholder of roles.gateway_sponsor[0], {}, below its floor of {combined}",
+                combined - 1
+            )),
             "{refused}"
         );
     }
