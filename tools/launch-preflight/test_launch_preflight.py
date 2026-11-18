@@ -239,7 +239,7 @@ GENESIS_CONTENT_DOMAIN = b"materios-launch-genesis-content-v1"
 # fields the chain spec is built from, whole; the lock's address and script; and of each authority its keys and the
 # sha256 of its node binary.
 GENESIS_BOUND = ("dust", "attestation_threshold", "economics", "partner_chain", "slots_per_epoch", "settlement",
-                 "cardano_follower")
+                 "cardano_follower", "later_signers", "no_standby")
 LOCK_BOUND = ("address", "native_script")
 AUTHORITY_BOUND = ("authority", "aura", "grandpa", "cross_chain", "exe_sha256")
 
@@ -9824,7 +9824,8 @@ def test_a_manifest_field_the_classification_does_not_name_is_refused():
 
 # What the proofs must bind whatever else moves: the binary that builds the genesis and runs it, each authority's
 # keys, who holds the lock, and every field the chain spec is built from.
-PROOF_BOUND = {"roles", "dust", "attestation_threshold", "slots_per_epoch", "nodes[].authority", "nodes[].aura",
+PROOF_BOUND = {"roles", "dust", "attestation_threshold", "slots_per_epoch", "later_signers", "no_standby",
+               "nodes[].authority", "nodes[].aura",
                "nodes[].grandpa", "nodes[].cross_chain", "nodes[].exe_sha256", "supply.genesis_lock.address",
                "supply.genesis_lock.native_script",
                *(f"economics.{field}" for field in lp.ECONOMICS_FIELDS),
@@ -9880,13 +9881,14 @@ FIELD_EDITS = {
     "dust": endow_one_more,
     "attestation_threshold": edit_at("attestation_threshold", lambda threshold: threshold + 1),
     "slots_per_epoch": edit_at("slots_per_epoch", 300),
+    "later_signers": edit_at("later_signers", lambda signers: signers + 1),
+    "no_standby": edit_at("no_standby", ["anchor_signer"]),
     "public_rpc": edit_at("public_rpc", lambda urls: [*urls, "https://rpc-2.example.org/rpc"]),
     "economics.attestation_reward_per_signer": edit_at("economics.attestation_reward_per_signer", 1),
     "economics.era_cap_base": edit_at("economics.era_cap_base", 7),
     "economics.era_cap_baseline_attestor_count": edit_at("economics.era_cap_baseline_attestor_count", 33),
     "economics.validator_reward_per_era": edit_at("economics.validator_reward_per_era", 1),
     "economics.treasury_emission_share_perbill": edit_at("economics.treasury_emission_share_perbill", 1),
-    "economics.fee_buffer": edit_at("economics.fee_buffer", 9),
     "supply.genesis_lock.utxo": edit_at("supply.genesis_lock.utxo", "ab" * 32 + "#0"),
     "supply.genesis_lock.address": edit_at("supply.genesis_lock.address", "addr1w" + "q" * 52),
     "supply.genesis_lock.native_script": edit_at("supply.genesis_lock.native_script", "0x8200581c" + "11" * 28),
@@ -9998,7 +10000,7 @@ def test_the_genesis_content_hash_is_the_tagged_canonical_json_of_the_genesis_bo
     assert lp.genesis_content_hash(clean.launch) == genesis_content_hash(clean.launch)
     content = lp.genesis_content(clean.launch)
     assert set(content) == {"roles", "dust", "attestation_threshold", "economics", "supply", "partner_chain",
-                            "slots_per_epoch", "settlement", "cardano_follower", "nodes"}
+                            "slots_per_epoch", "settlement", "cardano_follower", "nodes", "later_signers"}
     assert content["supply"] == {"genesis_lock": {field: LOCK[field] for field in ("address", "native_script")}}
     assert all(set(node) == {"authority", "aura", "grandpa", "cross_chain", "exe_sha256"} for node in content["nodes"])
     assert len(content["nodes"]) == 4

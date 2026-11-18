@@ -1043,7 +1043,8 @@ signature, and an edit of a genesis field voids every proof.
 | `roles`: every entry, a multisig's `threshold` and `members`, a member's `key` | genesis | who holds Root, the guardian and every other role; genesis accounts and the attestation committee |
 | a member's `pop` | neither | it is the proof; both hashes leave it out |
 | `dust`, `attestation_threshold`, `slots_per_epoch` | genesis | genesis storage |
-| `economics.*` (all six, `fee_buffer` among them) | genesis | genesis storage and what rule 2 holds the runtime to |
+| `later_signers`, `no_standby` | genesis | the node's builder sizes the dust pool and the single-key roles' standbys by them, so they decide whether a genesis builds |
+| `economics.*` (all five) | genesis | genesis storage and what rule 2 holds the runtime to |
 | `partner_chain.*` | genesis | the genesis UTXO and the Cardano scripts the committee is drawn from |
 | `settlement.aegis_policy_v1_script_hash` | genesis | genesis storage |
 | `cardano_follower.*` | genesis | the Cardano layout every authority must share; the builder takes only Cardano mainnet's |
