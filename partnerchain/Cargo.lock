@@ -4658,6 +4658,7 @@ dependencies = [
  "pallet-sidechain",
  "pallet-sidechain-rpc",
  "pallet-sudo",
+ "pallet-tee-attestation",
  "sc-basic-authorship",
  "sc-cli",
  "sc-client-api",

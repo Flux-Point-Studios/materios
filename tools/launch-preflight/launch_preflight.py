@@ -323,10 +323,20 @@ MOTRA = {name: value for name, _, value in MOTRA_PARAMS}
 # Motra.AccrualCheckpoint's value: the free MATRA an account has held since a block, a u128 and a u32 block number.
 ACCRUAL_CHECKPOINT = (16, 4)
 # What each key that signs for a role signs in a day, as docs/MAINNET-GENESIS.md sizes its dust: (calls, bytes of
-# one). A sudo keyholder's and the enactor's keys also sign a call that carries a whole runtime.
-ROLE_LOADS = {"sudo": (24, 512), "guardian": (64, 384), "enactor": (64, 512), "anchor_signer": (1_000, 512),
-              "gateway_sponsor": (2_000, 512), "oracle": (4_800, 512), "attestors": (100, 256),
+# one). A sudo keyholder's and the enactor's keys also sign a call that carries a whole runtime. An attestor's calls
+# are TeeAttestation.submit_evidence of a 4 KiB payload: its attests are feeless.
+ROLE_LOADS = {"sudo": (24, 512), "guardian": (64, 384), "enactor": (64, 512), "anchor_signer": (2_000, 256),
+              "gateway_sponsor": (6_000, 480), "oracle": (4_800, 512), "attestors": (400, 4_288),
               "recovery_friends": (8, 256), "recovery_rescuers": (24, 512)}
+# What a key that signs for a role pays for together starting from no MOTRA, which is what genesis leaves every
+# account and a burst leaves the one that made it: (calls of the role's bytes, the blocks it has). A guardian
+# keyholder vetoes within ten blocks, a gateway sponsor submits 500 receipts after two hours, a recovery friend
+# vouches within sixty blocks and a rescuer calls every thirty.
+ROLE_BURSTS = {"guardian": (1, 10), "gateway_sponsor": (500, 1_200), "recovery_friends": (1, 60),
+               "recovery_rescuers": (1, 30)}
+# The friends a sudo account can add to its recovery configuration: its floor counts the deposit of a configuration
+# that many friends larger, up to the runtime's Recovery.MaxFriends.
+SPARE_RECOVERY_FRIENDS = 1
 UPGRADE_ROLES = ("sudo", "enactor")
 # The call that carries a runtime is sized at this many times the genesis runtime code, as genesis stores it.
 UPGRADE_HEADROOM = 2
@@ -359,8 +369,7 @@ REWARD_ITEMS = (
 ACCOUNT_INFO = (4, 4, 4, 4, BALANCE, BALANCE, BALANCE, BALANCE)
 # pallet_balances' ExtraFlags as its genesis writes them for every account it endows: the new-logic bit alone.
 ACCOUNT_FLAGS = 1 << 127
-ECONOMICS_FIELDS = {"fee_buffer", *(field for field, _ in VALIDATOR_REWARD_CONSTANTS),
-                    *(field for field, _, _ in REWARD_ITEMS)}
+ECONOMICS_FIELDS = {*(field for field, _ in VALIDATOR_REWARD_CONSTANTS), *(field for field, _, _ in REWARD_ITEMS)}
 # SessionCommitteeManagement.CurrentCommittee: the epoch it serves, a u64, then its members, each a cross-chain key
 # (ecdsa, 33 bytes) with its session keys (aura sr25519, then grandpa ed25519).
 EPOCH_NUMBER = 8
@@ -388,6 +397,7 @@ ROLES = frozenset({*REQUIRED_ROLES, *SIGNING_ROLES, *KEYHOLDER_ROLES, "endowed",
 # when it opens a call, a base and a factor per approval its threshold needs.
 RECOVERY_DEPOSIT = ("Recovery", "RecoveryDeposit")
 RECOVERY_CONFIG = (("Recovery", "ConfigDepositBase"), ("Recovery", "FriendDepositFactor"))
+RECOVERY_MAX_FRIENDS = ("Recovery", "MaxFriends")
 MULTISIG_DEPOSIT = (("Multisig", "DepositBase"), ("Multisig", "DepositFactor"))
 # A pallet's account, as frame_support's PalletId derives it: this prefix and the pallet's id, zero-padded.
 PALLET_ACCOUNT_PREFIX = b"modl"
@@ -577,7 +587,8 @@ STAT_LINE = re.compile(r"(\d+) ([0-9a-f]+) (.*)")
 GENESIS_HEADER = 32 + 1 + 32 + 32 + 1
 GENESIS_EXPORT = 8 + GENESIS_HEADER + 2
 LAUNCH_FIELDS = {"roles", "economics", "supply", "slots_per_epoch", "cardano_follower", "settlement", "nodes",
-                 "rpc_proxies", "public_rpc", "dust", "attestation_threshold", "partner_chain"}
+                 "rpc_proxies", "public_rpc", "dust", "attestation_threshold", "partner_chain", "later_signers",
+                 "no_standby"}
 NODE_FIELDS = {"name", "host", "authority", "addresses", "argv", "env", "exe_sha256", "aura", "grandpa", "cross_chain",
                "cmdline", *CAPTURES}
 PARTNER_CHAIN_FIELDS = {"genesis_utxo", "committee_candidate_address", "d_parameter_policy_id",
@@ -3837,9 +3848,11 @@ def check_endowments(spec: Spec, meta: Metadata, launch: dict, endowed: dict[byt
 @dataclass
 class SignerNeed:
     """What an account that signs needs its dust for: the deposits its roles reserve, the calls it signs in a day,
-    each (calls, bytes of one), whether it also signs a call that carries a runtime, and who it is."""
+    each (calls, bytes of one), the bursts it pays for starting from no MOTRA, each (calls, bytes of one, blocks),
+    whether it also signs a call that carries a runtime, and who it is."""
     reserved: int = 0
     loads: list[tuple[int, int]] = dataclasses.field(default_factory=list)
+    bursts: list[tuple[int, int, int]] = dataclasses.field(default_factory=list)
     upgrades: bool = False
     whom: list[str] = dataclasses.field(default_factory=list)
 
@@ -3847,12 +3860,14 @@ class SignerNeed:
 def signer_needs(launch: dict, deposits: dict[str, int]) -> dict[bytes, SignerNeed]:
     """What each account that signs needs, with who it is: a keyholder of a multisig, in a role that holds Root or
     its veto or one that signs, the multisig deposit its threshold takes when it opens a call; the sudo account its
-    recovery configuration, a base and a deposit per friend, when the launch names recovery friends; a rescuer its
-    recovery deposit; every other signing role's entry no deposit. Each key that signs for a role, the entry's own or
-    each key of its multisig at any depth, carries the role's load of ROLE_LOADS, once for each entry it signs for:
-    the key pays the fee of a call its multisig makes."""
+    recovery configuration, a base and a deposit per friend, for the friends the launch names and
+    SPARE_RECOVERY_FRIENDS more, as far as `deposits["max_friends"]` allows; a rescuer its recovery deposit; every
+    other signing role's entry no deposit. Each key that signs for a role, the entry's own or each key of its
+    multisig at any depth, carries the role's load of ROLE_LOADS and its burst of ROLE_BURSTS, once for each entry
+    it signs for: the key pays the fee of a call its multisig makes."""
     roles = launch.get("roles", {})
     friends = len(roles.get("recovery_friends", []))
+    sized = min(friends + SPARE_RECOVERY_FRIENDS, max(friends, deposits["max_friends"]))
     needs: dict[bytes, SignerNeed] = {}
 
     def need(account: bytes, deposit: int, who: str) -> None:
@@ -3867,8 +3882,8 @@ def signer_needs(launch: dict, deposits: dict[str, int]) -> dict[bytes, SignerNe
                 if role in SIGNING_ROLES:
                     need(role_account(entry), deposits["rescuer"] if role == "recovery_rescuers" else 0, where)
                 elif role == "sudo" and friends:
-                    need(role_account(entry), deposits["config_base"] + deposits["friend_factor"] * friends,
-                         f"{where}, which reserves the recovery configuration of {friends} friends")
+                    need(role_account(entry), deposits["config_base"] + deposits["friend_factor"] * sized,
+                         f"{where}, which reserves a recovery configuration of up to {sized} friends")
                 for path, multisig in role_multisigs(entry, where):
                     for j, member in enumerate(multisig["members"]):
                         need(role_account(member),
@@ -3879,6 +3894,9 @@ def signer_needs(launch: dict, deposits: dict[str, int]) -> dict[bytes, SignerNe
                     if account not in needs:
                         need(account, 0, leaf_where)
                     needs[account].loads.append(ROLE_LOADS[role])
+                    if role in ROLE_BURSTS:
+                        calls, blocks = ROLE_BURSTS[role]
+                        needs[account].bursts.append((calls, ROLE_LOADS[role][1], blocks))
                     needs[account].upgrades |= role in UPGRADE_ROLES
             except ValueError:
                 continue  # rule 1 refuses a role key that does not decode and a multisig that lists a member twice
@@ -3907,18 +3925,33 @@ def working_dust(loads: list[tuple[int, int]], upgrade_bytes: int | None, blocks
     return math.ceil(owed / settles)
 
 
+def burst_dust(calls: int, length: int, blocks: int) -> int:
+    """The free MATRA base units whose MOTRA, under MOTRA_PARAMS, pays for `calls` calls of `length` bytes `blocks`
+    blocks after the balance was empty. A balance that generates g a block and keeps the share r of itself holds
+    g (1 - r^n) / (1 - r) after n blocks. pallet_motra accrues an interval in one step (decay.rs), rounding what it
+    generated down to a whole base unit and then by half a base unit for each block of that sum but the first."""
+    kept = Fraction(MOTRA["decay_rate_per_block"], 10**9)
+    blocks_of_generation = (1 - kept ** blocks) / (1 - kept)
+    rounding = 1 + math.ceil((blocks_of_generation - 1) / 2)
+    generated = Fraction(MOTRA["generation_per_matra_per_block"], MATRA) * blocks_of_generation
+    return math.ceil((calls * motra_fee(length) + rounding) / generated)
+
+
 def check_dust(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     """Every account that signs exists at genesis, with the provider frame_system's CheckNonce needs, and holds free
     at least its floor: the deposits its roles reserve, read from the runtime metadata, and, left free once they are
     reserved, the larger of the existential deposit, which keeps it, and its working dust, which generates the MOTRA
-    its calls cost: MOTRA comes of free MATRA alone. For a sudo keyholder and the enactor those calls include one
-    that carries a runtime UPGRADE_HEADROOM times the size of the genesis runtime code. No signed call moves MATRA
-    and none is minted after genesis, so a signer endowed below its floor can never sign, never pay its role's
-    deposit, or never pay for its role's calls."""
+    its calls cost: MOTRA comes of free MATRA alone. The working dust is the larger of what sustains its roles'
+    calls day after day and what pays for their bursts starting from no MOTRA, which is what genesis stores. For a
+    sudo keyholder and the enactor those calls include one that carries a runtime UPGRADE_HEADROOM times the size of
+    the genesis runtime code. No signed call moves MATRA and none is minted after genesis, so a signer endowed below
+    its floor can never sign, never pay its role's deposit, or never pay for its role's calls in time."""
     constants = {"existential": ("Balances", "ExistentialDeposit"), "rescuer": RECOVERY_DEPOSIT,
                  "config_base": RECOVERY_CONFIG[0], "friend_factor": RECOVERY_CONFIG[1],
                  "multisig_base": MULTISIG_DEPOSIT[0], "multisig_factor": MULTISIG_DEPOSIT[1]}
     deposits = {name: uint_constant(meta, *constant, BALANCE) for name, constant in constants.items()}
+    deposits["max_friends"] = uint_constant(meta, *RECOVERY_MAX_FRIENDS, 4)
+    constants["max_friends"] = RECOVERY_MAX_FRIENDS
     missing = [".".join(constants[name]) for name, value in deposits.items() if value is None]
     slot = uint_constant(meta, "Aura", "SlotDuration", 8)
     if not slot:
@@ -3930,7 +3963,8 @@ def check_dust(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     findings = []
     for account, signer in signer_needs(launch, deposits).items():
         who = f"{' and '.join(signer.whom)} ({ss58(account, spec.ss58_prefix)})"
-        working = working_dust(signer.loads, upgrade_bytes if signer.upgrades else None, DAY_MILLIS // slot)
+        working = max(working_dust(signer.loads, upgrade_bytes if signer.upgrades else None, DAY_MILLIS // slot),
+                      sum(burst_dust(*burst) for burst in signer.bursts))
         floor = signer.reserved + max(deposits["existential"], working)
         info = spec.account_info(account)
         if info is None or info[2] == 0:
@@ -5268,8 +5302,10 @@ def validate_node(node, where: str) -> None:
 
 def validate_genesis_fields(launch: dict) -> None:
     """The fields the node's mainnet chain-spec builder reads: dust, role -> account -> base units; how many
-    attestors certify a receipt; and the partner chain's genesis UTXO, at most output 32767 as partner-chains reads
-    one, with the committee candidate address and the two policy ids it derives."""
+    attestors certify a receipt; how many later signers the dust pool is sized for and which single-key roles start
+    without a standby, which the builder alone holds the launch to; and the partner chain's genesis UTXO, at most
+    output 32767 as partner-chains reads one, with the committee candidate address and the two policy ids it
+    derives."""
     dust = launch.get("dust", {})
     if not (isinstance(dust, dict) and all(isinstance(accounts, dict) for accounts in dust.values())):
         raise InputError("dust must map each role to an object of accounts and the base units each holds")
@@ -5281,6 +5317,14 @@ def validate_genesis_fields(launch: dict) -> None:
     threshold = launch.get("attestation_threshold", 0)
     if type(threshold) is not int or not 0 <= threshold <= 0xFFFFFFFF:
         raise InputError("attestation_threshold must be a u32: how many attestors certify a receipt")
+    signers = launch.get("later_signers", 0)
+    if type(signers) is not int or not 0 <= signers < 2**64:
+        raise InputError("later_signers must be a u64: how many signers admitted after genesis the node's builder "
+                         "sizes the dust pool for")
+    acknowledged = launch.get("no_standby", [])
+    if not (isinstance(acknowledged, list) and all(isinstance(role, str) for role in acknowledged)):
+        raise InputError("no_standby must be a list of roles: the ones the node's builder lets the launch start "
+                         "with one key for")
     partner_chain = launch.get("partner_chain")
     if partner_chain is None:
         return

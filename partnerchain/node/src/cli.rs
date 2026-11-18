@@ -27,6 +27,15 @@ pub enum Subcommand {
         chain: String,
     },
 
+    /// Print the dust budget of a mainnet launch manifest the builder takes:
+    /// each endowment against its floor, the issuance, the headroom under
+    /// one MATRA and what the dust pool covers. Offline.
+    DustBudget {
+        /// The launch manifest `build-spec --chain mainnet:<manifest>` builds.
+        #[arg(long)]
+        manifest: std::path::PathBuf,
+    },
+
     /// Build a chain specification.
     BuildSpec(sc_cli::BuildSpecCmd),
 

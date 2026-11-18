@@ -76,7 +76,7 @@ for the whole launch, in order.
 | 9 committee | Genesis `SessionCommitteeManagement.CurrentCommittee` is not exactly the declared authorities' `aura` and `grandpa` key pairs, each once, two of its members share a cross-chain key, or it lists more members than the runtime's `SessionCommitteeManagement.MaxValidators`, read from the runtime metadata (a runtime that does not declare it is refused). The runtime seats this committee at every rotation whose Cardano draw fails, and a fresh chain's first draw fails, since the live-quorum floor counts no candidate that has not authored yet: an empty committee halts the chain there (GRANDPA refuses an empty authority set), an undeclared member authors and finalizes unchecked, and a committee past MaxValidators does not decode and reads as empty. The committee serves another epoch than the 0 build-spec writes: the node takes only an epoch-0 committee as the genesis one, and otherwise asks Cardano at block 1 for the committee of the epoch after it instead of the current one's, which it cannot derive for an epoch that began before Cardano's first, so the chain never authors block 1. Genesis `Aura.Authorities` or `Grandpa.Authorities` is not exactly the declared authorities' `aura` or `grandpa` keys, each once, a voter at weight 1 as build-spec writes them: a key listed twice, or a weight above 1, counts as several authors or voters. Genesis `Grandpa.CurrentSetId` is set and not 0, or `Grandpa.SetIdSession` is not build-spec's one entry, set 0 beginning in session 0: every GRANDPA client starts the genesis authority set at set id 0, and a node that warp- or state-syncs takes the runtime's set id instead, so it would hold another set id than the one its peers sign votes and justifications under. `Session.ValidatorsAndKeys` is not the committee as the session genesis writes it (each member's account, blake2-256 of its cross-chain key, with its session keys, in the committee's order), or `PalletSession.QueuedKeys` or `PalletSession.Validators` is not the empty list build-spec writes: the session keys they hold would go unchecked. Two authorities declare the same `aura` or `grandpa` key: two nodes that sign with one key equivocate. A Cardano permissioned candidate's `gran` key is not the `grandpa` key that the authority with its `aura` key declares: the candidates vote on finality with those keys once the committee is drawn from Cardano. A declared authority's `aura` key is on no permissioned candidate: Ariadne seats every candidate when all fit, so the first committee drawn from Cardano leaves that authority out, and a datum of 2 of 4 authorities seats a committee of 2, which GRANDPA needs both of to finalize, so it tolerates no fault. The permissioned candidates datum holds a candidate Ariadne drops (a partner chains key not 33 bytes, an `aura` or `gran` key not 32), one that repeats an earlier candidate's key (the runtime keeps the first), or fewer than two candidates the runtime can seat: from fewer than two it draws no committee, and every rotation seats the genesis committee again. The D-parameter seats registered candidates (a Cardano stake pool that registers would join the committee, and the preflight reads no registration), fewer permissioned seats than the datum's candidates (Ariadne would draw the seats at random, with repeats, so a declared authority could be left out), or more than `MaxValidators` (the runtime refuses a whole draw past a cap of its own that its metadata does not declare). The node reads both datums with partner-chains v1.5.1's decoder: a legacy datum or version 0 of the versioned one; any other version refuses as unreadable. A genesis committee member's cross-chain key, or a Cardano permissioned candidate's partner chains key, is not the `cross_chain` key the authority with its aura and grandpa keys (a candidate: its aura key) declares: genesis would seat it under a partner-chain key no declared authority holds, and file its session keys under that key's account, and a committee drawn from Cardano would seat it so. The launch declares no `partner_chain`, genesis `Sidechain.GenesisUtxo` is not its `genesis_utxo`, or `partner_chain.committee_candidate_address`, `d_parameter_policy_id` or `permissioned_candidates_policy_id`, or genesis `SessionCommitteeManagement.MainChainScriptsConfiguration`'s address or policies, are not what the genesis UTXO derives (see [Partner chain scripts](#partner-chain-scripts)): a genesis that names other scripts draws its committee from datums the setup never made. The D-parameter or permissioned candidates output was created in a Cardano epoch later than two before the launch epoch: the followers serve an epoch's committee from the data of the epoch two before it, so for a chain whose first block is authored now the output is not there, the follower finds no data and no node authors block 1 until Cardano reaches the output's epoch plus two. The launch epoch is the one in which the session that holds the tip of Kupo's node started: block 1 asks for the committee of the Cardano epoch its session started in, and a session, genesis `Sidechain.SlotsPerEpoch` slots of the runtime's `Aura.SlotDuration`, starts at a multiple of its length since the Unix epoch. A Cardano epoch starts at 21:44:51 UTC and an hour's session on the hour, so for the first 909 seconds of an epoch the launch epoch is the one before the tip's. The refusal names the earliest valid launch epoch and when its first session starts. A candidate's partner chains key that is 33 bytes and no compressed secp256k1 point refuses: its seat would be filed under an account no one holds. Epochs are Cardano mainnet's Shelley layout (epoch 208 from slot 4,492,800 at 2020-07-29T21:44:51Z, 432,000 one-second slots each); a slot before it refuses as unreadable, and so does a committee output Kupo gives no `created_at` slot for. The launch declares no `slots_per_epoch`, genesis `Sidechain.SlotsPerEpoch` is absent (the runtime then reads partner-chains' default of 60) or not that declared length, it is 0 (the runtime divides each block's slot by it as it initializes the block, so block 1 traps), or a session of that many slots of the runtime's `Aura.SlotDuration` does not divide Cardano's 432,000-second epoch, as partner-chains' sidechain-slots requires: a session longer than a Cardano epoch skips the committees Cardano holds for the epochs it spans, and in a session that began before Cardano's first epoch, as one of 2^32-1 slots did, the node cannot draw block 1's committee, so the chain never authors it. A runtime whose metadata declares no `Aura.SlotDuration` is refused. The launch declares no `cardano_follower`, or one other than Cardano mainnet's (see [Launch manifest](#launch-manifest)); or an authority does not set each of those settings, or sets one, in its `env` or anywhere in its launch, to any other value or spelling than the declared one: every node derives Cardano's epochs and slots, and which Cardano blocks are stable, from them, so an authority whose settings differ from its peers' draws another committee or judges another Cardano block stable, and refuses the committee changes and blocks they make. A launch that declares none is held to Cardano mainnet's. An authority's launch does not give its node `SIDECHAIN_BLOCK_BENEFICIARY` as 32 bytes of hex (the node then syncs, keeps its peers and authors no block), `MAIN_CHAIN_FOLLOWER` as `db-sync` or `yaci`, `DB_SYNC_POSTGRES_CONNECTION_STRING` as `<host>:<port>/<database>`, or `BLOCK_STABILITY_MARGIN` as a u32 in decimal (without any of these three the node does not start); see `env` under [Launch manifest](#launch-manifest). |
 | 10 possession | A member of a multisig, in any role and at any depth, is not proven held: it is a bare key or the all-zero key, it gives no `pop`, or its `pop` is not its key's signature (sr25519, or ECDSA for a 33-byte key) of its challenge, which binds the domain, the chain spec's name and id, the genesis hash, the hash of the launch manifest's genesis-bound content, its role, its position and its key. A member no one proves to hold can be the address of a multisig no one declared, which no secret signs for, so the multisig it is in needs fewer keyholders, or other ones, than it reads. See [Proof of possession](#proof-of-possession). |
 | 11 settlement | Genesis `IntentSettlement.CardanoIds`, the Cardano network settlement binds, is absent (settlement then refuses every voucher, settlement and expiry), holds a network magic other than Cardano mainnet's 764824073 or a Shelley genesis hash other than mainnet's `1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81`, or binds an `aegis_policy_v1` script hash other than the one `settlement.aegis_policy_v1_script_hash` declares, none where it declares one, or any where it declares null; or the launch declares neither. The policy takes the chain's genesis hash as a parameter, so a launch may bind it only after genesis: it declares null, genesis binds none, and Root binds the deployed hash with `IntentSettlement.bind_aegis_policy_v1`, which binds one only while none is bound; until then settlement refuses every voucher, settlement and expiry on Cardano mainnet. Every voucher the committee signs commits to the network magic and the Aegis policy, and all settlement and expiry evidence must name the Shelley genesis, so a chain launched with another network's ids settles against that network. The preflight holds every launch to Cardano mainnet (rule 9). Mainnet's ids are those its published environment gives (book.world.dev.cardano.org/environments/mainnet): the `networkMagic` of its `shelley-genesis.json`, and that file's blake2b-256, which its `config.json` publishes as `ShelleyGenesisHash`; `fixtures/cardano-mainnet-*.json` are those files, and a test holds the preflight to them. Genesis `IntentSettlement.IntentTTL`, `ClaimTTL` or `MinSignerThreshold` is not the runtime's own default (its metadata constants `DefaultIntentTTL`, `DefaultClaimTTL` and `DefaultMinSignerThreshold`, which its genesis stores), or `PoolUtilization`, `SettlementStorageVersion`, `StcaCutoverBlock` or `PolicyExpireCutoverBlock` is not what the settlement genesis writes (see [Genesis values no other rule reads](#genesis-values-no-other-rule-reads)). |
-| 12 dust | A role signer has no provider at genesis (no `System.Account`, or one with no provider), or holds free less than its floor: the deposits its roles reserve, each read from the runtime metadata (`Multisig.DepositBase` and `DepositFactor`, `Recovery.ConfigDepositBase`, `FriendDepositFactor` and `RecoveryDeposit`), and, left free once they are reserved, the larger of `Balances.ExistentialDeposit`, which keeps the account, and its working dust, which generates the MOTRA its role's calls cost, a runtime upgrade among a sudo keyholder's and the enactor's (see [MOTRA and working dust](#motra-and-working-dust)). A runtime that does not declare one of those constants, or `Aura.SlotDuration`, is refused. The signers are each keyholder, at any depth, of a `sudo` or `guardian` multisig, or of a multisig entry of a signing role, who reserves `DepositBase + DepositFactor x threshold` when it opens a call; the sudo account, which reserves `ConfigDepositBase + FriendDepositFactor x friends` for its recovery configuration when the launch names `recovery_friends`; each `recovery_rescuers` entry, which reserves `RecoveryDeposit`; and each `anchor_signer`, `attestors`, `oracle`, `enactor`, `gateway_sponsor` and `recovery_friends` entry. An account in several needs all their deposits and carries all their calls. No signed call moves MATRA and none is minted after genesis, so a signer below its floor can never sign, never pay its role's deposit, or never pay for its role's calls. Genesis `Motra.Params` is not mainnet's, byte for byte, or genesis does not hold a `Motra.AccrualCheckpoint` for exactly the accounts it endows, each the account's free balance held since block 0: the runtime generates an account's MOTRA from its checkpoint, so an account with none generates nothing. |
+| 12 dust | A role signer has no provider at genesis (no `System.Account`, or one with no provider), or holds free less than its floor: the deposits its roles reserve, each read from the runtime metadata (`Multisig.DepositBase` and `DepositFactor`, `Recovery.ConfigDepositBase`, `FriendDepositFactor` and `RecoveryDeposit`), and, left free once they are reserved, the larger of `Balances.ExistentialDeposit`, which keeps the account, and its working dust, which generates the MOTRA its role's calls cost, a runtime upgrade among a sudo keyholder's and the enactor's, and pays for its role's burst starting from the empty MOTRA balance genesis stores (see [MOTRA and working dust](#motra-and-working-dust)). A runtime that does not declare one of those constants, `Recovery.MaxFriends` or `Aura.SlotDuration`, is refused. The signers are each keyholder, at any depth, of a `sudo` or `guardian` multisig, or of a multisig entry of a signing role, who reserves `DepositBase + DepositFactor x threshold` when it opens a call; the sudo account, which reserves `ConfigDepositBase + FriendDepositFactor x friends` for its recovery configuration when the launch names `recovery_friends`, counted for one friend more than it names, up to `MaxFriends`, so that one can be added; each `recovery_rescuers` entry, which reserves `RecoveryDeposit`; and each `anchor_signer`, `attestors`, `oracle`, `enactor`, `gateway_sponsor` and `recovery_friends` entry. An account in several needs all their deposits and carries all their calls. No signed call moves MATRA and none is minted after genesis, so a signer below its floor can never sign, never pay its role's deposit, or never pay for its role's calls. Genesis `Motra.Params` is not mainnet's, byte for byte, or genesis does not hold a `Motra.AccrualCheckpoint` for exactly the accounts it endows, each the account's free balance held since block 0: the runtime generates an account's MOTRA from its checkpoint, so an account with none generates nothing. |
 
 Every reason is printed. Exit 0 means every rule passed, 1 means at least one
 refused, 2 means an input could not be read (also a refusal): every such
@@ -475,19 +475,34 @@ not. Each key that signs for a role carries the role's calls: the entry's own
 key, or each key of its multisig at any depth, since the key that signs pays
 the fee of a call its multisig makes.
 
-| A key that signs for | Calls a day, bytes of one | Working dust (base units) |
-|---|---|---|
-| `sudo` | 24 of 512, and an upgrade | 260 and the upgrade's |
-| `guardian` | 64 of 384 | 623 |
-| `enactor` | 64 of 512, and an upgrade | 680 and the upgrade's |
-| `anchor_signer` | 1,000 of 512 | 10,509 |
-| `gateway_sponsor` | 2,000 of 512 | 21,010 |
-| `oracle` | 4,800 of 512 | 50,413 |
-| `attestors` | 100 of 256 (attests are feeless) | 879 |
-| `recovery_friends` | 8 of 256 | 77 |
-| `recovery_rescuers` | 24 of 512 | 260 |
+Genesis stores no MOTRA, and a burst spends what an account had saved, so a
+role whose calls cannot wait must also generate their fees within a stated
+number of blocks of an empty balance. A balance that generates g a block and
+keeps 0.9999 of itself holds `g x (1 - 0.9999^n) / (1 - 0.9999)` n blocks
+after it was empty; the pallet accrues an interval in one step
+(`pallets/motra/src/decay.rs`), rounding what it generated down to a whole
+base unit and then by half a base unit for each block of that sum but the
+first, which the preflight adds to the fees. The burst dust is the fees over
+what one base unit of MATRA holds by then, and a key's working dust is the
+larger of what sustains its roles' calls and what pays for their bursts. A
+test runs the pallet's rule block by block against the closed form: at the
+burst dust an empty balance holds the fees when its blocks have passed, and
+at 1% less it does not.
 
-The loads are the ones `docs/MAINNET-GENESIS.md` sizes each role's dust for.
+| A key that signs for | Calls a day, bytes of one | To sustain them | From no MOTRA | To answer that | Working dust (base units) |
+|---|---|---|---|---|---|
+| `sudo` | 24 of 512, and an upgrade | 260 and the upgrade's | | | 260 and the upgrade's |
+| `guardian` | 64 of 384 | 623 | 1 within 10 blocks | 13,847 | 13,847 |
+| `enactor` | 64 of 512, and an upgrade | 680 and the upgrade's | | | 680 and the upgrade's |
+| `anchor_signer` | 2,000 of 256 | 17,453 | | | 17,453 |
+| `gateway_sponsor` | 6,000 of 480 (a receipt with both ZK roots) | 61,681 | 500 within 1,200 blocks | 65,438 | 65,438 |
+| `oracle` | 4,800 of 512 | 50,413 | | | 50,413 |
+| `attestors` | 400 of 4,288 (`submit_evidence` of 4 KiB; attests are feeless) | 14,717 | | | 14,717 |
+| `recovery_friends` | 8 of 256 | 77 | 1 within 60 blocks | 2,100 | 2,100 |
+| `recovery_rescuers` | 24 of 512 | 260 | 1 within 30 blocks | 5,048 | 5,048 |
+
+The loads and bursts are the ones `docs/MAINNET-GENESIS.md` sizes each role's
+dust for.
 The call that carries an upgrade is sized at twice the genesis runtime code,
 as genesis stores it, so a later runtime may be twice as long: for a code of
 886,000 bytes that is a fee of 1.773 x 10^12 and 17,730 base units, a sudo
@@ -499,8 +514,9 @@ free once its deposit was reserved, which settle at 5 x 10^10 MOTRA, a
 thirty-fifth of that upgrade's fee.
 
 The node's builder sizes the same loads another way (a day's fees generated
-in a day, on top of the existential deposit, and twice the fee of a 5 MiB
-call, the longest a block takes, for an upgrade), and its floors cover the
+in a day, on top of the existential deposit, twice the fee of a 5 MiB call,
+the longest a block takes, for an upgrade, and a burst from the pallet's rule
+run a block at a time, each block rounded down), and its floors cover the
 preflight's for every role, whatever runtime a block can hold: a test sets
 each role account to the floor `docs/MAINNET-GENESIS.md` tables, with a 5 MiB
 genesis runtime, and rule 12 passes.
@@ -508,15 +524,15 @@ genesis runtime, and rule 12 passes.
 | Role account | Builder's floor | Preflight's floor, 886,000-byte runtime | Preflight's floor, 5 MiB runtime |
 |---|---|---|---|
 | sudo keyholder (2-of-n) | 107,630 | 19,990 | 107,128 |
-| guardian keyholder (2-of-n) | 3,116 | 2,623 | 2,623 |
+| guardian keyholder (2-of-n) | 16,347 | 15,847 | 15,847 |
 | enactor | 106,050 | 18,410 | 105,548 |
-| anchor_signer | 11,000 | 10,509 | 10,509 |
-| gateway_sponsor | 21,500 | 21,010 | 21,010 |
+| anchor_signer | 17,945 | 17,453 | 17,453 |
+| gateway_sponsor | 65,941 | 65,438 | 65,438 |
 | oracle | 50,900 | 50,413 | 50,413 |
-| attestor | 1,373 | 879 | 879 |
-| recovery friend | 570 | 500 | 500 |
-| recovery rescuer | 1,752 | 1,500 | 1,500 |
-| sudo account, 3 friends | 3,000 | 3,000 | 3,000 |
+| attestor | 15,189 | 14,717 | 14,717 |
+| recovery friend | 2,600 | 2,100 | 2,100 |
+| recovery rescuer | 6,548 | 6,048 | 6,048 |
+| sudo account, 3 friends and one more | 3,500 | 3,500 | 3,500 |
 
 ## Runtime code
 
@@ -553,8 +569,7 @@ state version but 0 as V1. A version section the node cannot decode refuses.
     "era_cap_base": 0,
     "era_cap_baseline_attestor_count": 32,
     "validator_reward_per_era": 102739726,
-    "treasury_emission_share_perbill": 150000000,
-    "fee_buffer": 0
+    "treasury_emission_share_perbill": 150000000
   },
   "supply": {
     "genesis_lock": {"utxo": "<tx id>#<index>", "address": "addr1w...", "native_script": "0x8303..."}
@@ -627,6 +642,11 @@ mainnet genesis from (see `docs/MAINNET-GENESIS.md`).
   Another shape refuses as unreadable.
 - `attestation_threshold` is how many of `roles.attestors` certify a
   receipt, a u32 genesis `OrinqReceipts.AttestationThreshold` must store.
+- `later_signers`, a u64, and `no_standby`, a list of roles, are the node
+  builder's: how many signers admitted after genesis the dust pool is sized
+  for, and which of `anchor_signer` and `gateway_sponsor` start with one key
+  (`docs/MAINNET-GENESIS.md`). The preflight reads their shape, and rule 8
+  holds the checked spec to what the builder makes of them.
 - `partner_chain` holds exactly `genesis_utxo` (`<64 lowercase hex>#<index>`,
   the index in decimal with no leading zero and at most 32767, the most
   partner-chains' `UtxoIndex` reads), `committee_candidate_address`, and
@@ -636,8 +656,6 @@ mainnet genesis from (see `docs/MAINNET-GENESIS.md`).
 - Every `economics` value is a non-negative integer in the smallest unit; an
   unknown field or any other value refuses as unreadable. Genesis stores the
   attestation reward as 0 (rule 4), so the declared one is 0 (rule 2).
-  `fee_buffer` is accepted and read by no rule: a signer's floor is the
-  deposits the runtime reserves and its working dust (rule 12).
 - `supply.genesis_lock` is the Cardano output holding the cMATRA that backs
   Materios issuance, and `native_script` the CBOR of the native script its
   address pays to, as 0x-hex. The backing is the cMATRA amount Kupo reports at
@@ -1677,6 +1695,23 @@ value at a time:
 materios-node build-spec --chain mainnet:../tools/launch-preflight/fixtures/mainnet-launch.json --raw \
     --disable-default-bootnode --base-path "$(mktemp -d)" > raw.json
 jq 'del(.genesis.raw.top["0x3a636f6465"])' raw.json > ../tools/launch-preflight/fixtures/mainnet-launch-raw.json
+```
+
+The node's builder refuses the keys of `well_known_keys.json` and
+`exposed_keys.json`, and the fixture's own keys and Cardano values under any
+genesis UTXO but the fixture's. Its Docker build takes no file outside
+`partnerchain/`, so it carries a copy of each, which a node test holds to
+these files. After changing a table or the fixture manifest, from this
+directory:
+
+```
+jq -rs 'reduce (.[].keys[]) as $k ({}; .[$k.public] //= "\($k.label), \($k.scheme)")
+        | to_entries | sort_by(.key)[] | "\(.key)\t\(.value)"' well_known_keys.json exposed_keys.json \
+    > ../../partnerchain/node/src/chain_spec_mainnet/well_known_keys.tsv
+jq -r '[.roles[][] | .. | strings] + [.dust[] | keys[]] + [.nodes[] | .aura, .grandpa, .cross_chain]
+       + [.partner_chain | .committee_candidate_address, .d_parameter_policy_id, .permissioned_candidates_policy_id]
+       + [.supply.genesis_lock[]] | unique[]' fixtures/mainnet-launch.json \
+    > ../../partnerchain/node/src/chain_spec_mainnet/launch_fixture_values.txt
 ```
 
 The historical preprod v6 fixture leaves
