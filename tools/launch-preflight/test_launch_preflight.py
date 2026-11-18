@@ -5,7 +5,9 @@ genesis hash was read from a live node, so the genesis-hash test checks this
 implementation against the reference one. Cardano is served by a local HTTP
 server that answers with Kupo's response shapes.
 """
+import ast
 import base64
+import contextlib
 import copy
 import dataclasses
 import gzip
@@ -14,6 +16,7 @@ import itertools
 import json
 import os
 import re
+import resource
 import shutil
 import subprocess
 import sys
@@ -31,6 +34,7 @@ import xxhash
 import zstandard
 from nacl import signing
 
+import capture_environ
 import launch_preflight as lp
 
 HERE = Path(__file__).resolve().parent
@@ -229,7 +233,43 @@ def msig(threshold, *members) -> dict:
     return {"threshold": threshold, "members": [role_key(m) for m in members]}
 
 
-POP_DOMAIN = b"materios-launch-pop-v1"
+POP_DOMAIN = b"materios-launch-pop-v2"
+GENESIS_CONTENT_DOMAIN = b"materios-launch-genesis-content-v1"
+# What a proof of possession binds of a launch manifest, listed here apart from the preflight's classification: the
+# fields the chain spec is built from, whole; the lock's address and script; and of each authority its keys and the
+# sha256 of its node binary.
+GENESIS_BOUND = ("dust", "attestation_threshold", "economics", "partner_chain", "slots_per_epoch", "settlement",
+                 "cardano_follower")
+LOCK_BOUND = ("address", "native_script")
+AUTHORITY_BOUND = ("authority", "aura", "grandpa", "cross_chain", "exe_sha256")
+
+
+def canonical_json(doc) -> bytes:
+    return json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def unproven_entry(entry):
+    if isinstance(entry, dict) and "members" in entry:
+        return dict(entry, members=[unproven_entry(member) for member in entry["members"]])
+    return {"key": entry["key"]} if isinstance(entry, dict) else entry
+
+
+def genesis_content_hash(launch: dict) -> bytes:
+    """blake2-256 of the domain and the canonical JSON of what a proof binds of the manifest, built here apart from
+    the preflight: no pop, no node that is no authority, the authorities in the order of their canonical JSON."""
+    content = {field: launch[field] for field in GENESIS_BOUND if field in launch}
+    if "roles" in launch:
+        content["roles"] = {role: [unproven_entry(entry) for entry in entries]
+                            for role, entries in launch["roles"].items()}
+    lock = {field: value for field, value in launch.get("supply", {}).get("genesis_lock", {}).items()
+            if field in LOCK_BOUND}
+    if lock:
+        content["supply"] = {"genesis_lock": lock}
+    authorities = [{field: node[field] for field in AUTHORITY_BOUND if field in node}
+                   for node in launch.get("nodes", []) if node.get("authority") is True]
+    if authorities:
+        content["nodes"] = sorted(authorities, key=canonical_json)
+    return hashlib.blake2b(GENESIS_CONTENT_DOMAIN + canonical_json(content), digest_size=32).digest()
 
 
 def scale_text(text: str) -> bytes:
@@ -238,20 +278,27 @@ def scale_text(text: str) -> bytes:
 
 def launch_context(spec: lp.Spec, launch: dict) -> bytes:
     """What every proof of possession of a launch signs first, built here apart from the preflight: the domain, the
-    chain spec's name and id, the genesis hash and the launch manifest hash."""
+    chain spec's name and id, the genesis hash and the hash of the manifest's genesis-bound content."""
     return (POP_DOMAIN + scale_text(spec.doc["name"]) + scale_text(spec.doc["id"]) + lp.spec_genesis_hash(spec)
-            + lp.launch_manifest_hash(launch))
+            + genesis_content_hash(launch))
 
 
-def member_challenge(context: bytes, role: str, position: tuple[int, ...]) -> bytes:
-    """The challenge the holder of the member at `position` in `role` signs: the launch's context, the role, then its
-    multisig's index in the role and its index in each multisig down to it, each a u32."""
+def member_challenge(context: bytes, role: str, position: tuple[int, ...], key: bytes) -> bytes:
+    """The challenge the holder of the member at `position` in `role` signs: the launch's context, the role, its
+    multisig's index in the role and its index in each multisig down to it, each a u32, then its key as SCALE
+    bytes."""
     return (context + scale_text(role) + lp.compact(len(position))
-            + b"".join(index.to_bytes(4, "little") for index in position))
+            + b"".join(index.to_bytes(4, "little") for index in position) + lp.compact(len(key)) + key)
 
 
-def challenge(spec: lp.Spec, launch: dict, role: str, position: tuple[int, ...]) -> bytes:
-    return member_challenge(launch_context(spec, launch), role, position)
+def member_key(launch: dict, role: str, position: tuple[int, ...]) -> bytes:
+    return next(lp.decode_public_key(lp.key_text(leaf)) for member_role, _, at, leaf in lp.multisig_members(launch)
+                if (member_role, at) == (role, position))
+
+
+def challenge(spec: lp.Spec, launch: dict, role: str, position: tuple[int, ...], key: bytes | None = None) -> bytes:
+    """The challenge of the member at `position` in `role`, or what one of `key` would sign there."""
+    return member_challenge(launch_context(spec, launch), role, position, key or member_key(launch, role, position))
 
 
 def held(text) -> bytes | None:
@@ -285,7 +332,8 @@ def prove(launch: dict, spec: lp.Spec) -> dict:
                 collect(entry, role, (i,))
     context = launch_context(spec, proven)
     for role, position, leaf in owed:
-        leaf["pop"] = "0x" + KEYHOLDERS[held(leaf["key"])](member_challenge(context, role, position)).hex()
+        key = held(leaf["key"])
+        leaf["pop"] = "0x" + KEYHOLDERS[key](member_challenge(context, role, position, key)).hex()
     return proven
 
 
@@ -3473,6 +3521,17 @@ MAINNET_FOLLOWER = {
     "MC__FIRST_EPOCH_NUMBER": "208", "MC__FIRST_SLOT_NUMBER": "4492800", "MC__SLOT_DURATION_MILLIS": "1000",
     "CARDANO_SECURITY_PARAMETER": "2160", "CARDANO_ACTIVE_SLOTS_COEFF": "0.05",
 }
+# What a mainnet authority's unit gives its node: those settings, its follower's backend, database and stability
+# margin, and the 32 bytes its blocks are counted under. The database is declared as the capture tool reduces the
+# connection string the node runs with: host, port and database, no user and no password.
+AUTHORITY_ENV = {**MAINNET_FOLLOWER, "MAIN_CHAIN_FOLLOWER": "db-sync", "BLOCK_STABILITY_MARGIN": "0",
+                 "DB_SYNC_POSTGRES_CONNECTION_STRING": "db-1.internal:5432/cexplorer",
+                 "SIDECHAIN_BLOCK_BENEFICIARY": "0x" + "ab" * 32}
+
+
+def environ_block(settings: dict) -> bytes:
+    """/proc/<pid>/environ: each NAME=value ended by a NUL."""
+    return b"".join(f"{name}={value}".encode() + b"\0" for name, value in settings.items())
 NO_FOLLOWER = ("[9 committee] the launch declares no cardano_follower, the Cardano settings every authority's "
                "follower must share: the preflight holds each authority to Cardano mainnet's")
 FOLLOWER_DIVERGES = ("a node derives Cardano's epochs and slots, and which Cardano blocks are stable, from these "
@@ -4675,6 +4734,7 @@ def spec_rule_findings(spec: lp.Spec, meta: lp.Metadata, launch: dict, known, ca
                     + lp.check_committee(spec, meta, launch)
                     + lp.check_sessions(spec, meta, launch)
                     + lp.check_follower(launch)
+                    + lp.check_authority_settings(launch)
                     + lp.check_partner_chain(spec, launch)
                     + lp.check_rewards(spec, meta, launch)
                     + lp.check_supply(spec, meta, launch, cardano)
@@ -6703,8 +6763,9 @@ def no_pop(where: str, role: str, index: str) -> str:
 
 def unproven(where: str, scheme: str, role: str, index: str) -> str:
     return (f"[10 possession] {where}: its pop is not an {scheme} signature by its key of its challenge (challenge "
-            f"--role {role} --index {index}), which binds this chain, genesis and launch manifest and its role and "
-            "position: another key signed it, or its holder signed for another launch, role or position")
+            f"--role {role} --index {index}), which binds this chain, its genesis, the launch manifest's "
+            "genesis-bound fields, and its role, position and key: another key signed it, its holder signed for "
+            "another launch, role or position, or a genesis-bound field changed since")
 
 
 def nested_multisig() -> dict:
@@ -6758,18 +6819,27 @@ def renamed(spec: lp.Spec, **fields) -> lp.Spec:
     return lp.Spec(dict(spec.doc, **fields), spec.storage, spec.source)
 
 
-# The challenge the member at roles.sudo[0].members[1] signs, for another launch, role or position than its own.
+def its_key(launch: dict) -> bytes:
+    return member_key(launch, "sudo", (0, 1))
+
+
+# The challenge the member at roles.sudo[0].members[1] signs, for another launch, role, position or key than its own.
 OTHER_CHALLENGES = {
-    "another launch manifest": lambda spec, launch: challenge(spec, dict(launch, slots_per_epoch=60), "sudo", (0, 1)),
-    "another role": lambda spec, launch: challenge(spec, launch, "guardian", (0, 1)),
-    "another member index": lambda spec, launch: challenge(spec, launch, "sudo", (0, 2)),
-    "another multisig index": lambda spec, launch: challenge(spec, launch, "sudo", (1, 1)),
-    "a nested position": lambda spec, launch: challenge(spec, launch, "sudo", (0, 1, 0)),
+    "another genesis-bound manifest": lambda spec, launch: challenge(spec, dict(launch, slots_per_epoch=60), "sudo",
+                                                                     (0, 1)),
+    "another role": lambda spec, launch: challenge(spec, launch, "guardian", (0, 1), its_key(launch)),
+    "another member index": lambda spec, launch: challenge(spec, launch, "sudo", (0, 2), its_key(launch)),
+    "another multisig index": lambda spec, launch: challenge(spec, launch, "sudo", (1, 1), its_key(launch)),
+    "a nested position": lambda spec, launch: challenge(spec, launch, "sudo", (0, 1, 0), its_key(launch)),
+    "another key": lambda spec, launch: challenge(spec, launch, "sudo", (0, 1), fresh_account()),
     "another chain name": lambda spec, launch: challenge(renamed(spec, name="Materios"), launch, "sudo", (0, 1)),
     "another chain id": lambda spec, launch: challenge(renamed(spec, id="materios"), launch, "sudo", (0, 1)),
     "another genesis": lambda spec, launch: challenge(another_genesis(spec), launch, "sudo", (0, 1)),
-    "another domain": lambda spec, launch: (b"materios-launch-pop-v2"
-                                            + challenge(spec, launch, "sudo", (0, 1))[len(POP_DOMAIN):]),
+    "the first version's domain": lambda spec, launch: (b"materios-launch-pop-v1"
+                                                        + challenge(spec, launch, "sudo", (0, 1))[len(POP_DOMAIN):]),
+    "the whole manifest's hash in place of its genesis-bound content's": lambda spec, launch: (
+        launch_context(spec, launch)[:-32] + lp.launch_manifest_hash(launch)
+        + challenge(spec, launch, "sudo", (0, 1))[len(launch_context(spec, launch)):]),
     "the challenge wrapped as polkadot.js signRaw wraps it": lambda spec, launch: (
         b"<Bytes>" + challenge(spec, launch, "sudo", (0, 1)) + b"</Bytes>"),
 }
@@ -7247,10 +7317,19 @@ SET_UP = STARTED - 60
 DIRECTORY, REGULAR_FILE, SYMBOLIC_LINK = 0o40755, 0o100644, 0o120777
 
 
-def process_stat(started_ticks: int = STARTED_TICKS, comm: str = "materios-node") -> str:
+NODE_PID = 4242
+
+
+def process_stat(started_ticks: int = STARTED_TICKS, comm: str = "materios-node", pid: int = NODE_PID) -> str:
     """/proc/<pid>/stat: the pid, the command name in parentheses, then 50 fields, starttime the 20th after them."""
     fields = ["S", "1", *["0"] * 17, str(started_ticks), *["0"] * 30]
-    return f"4242 ({comm}) " + " ".join(fields) + "\n"
+    return f"{pid} ({comm}) " + " ".join(fields) + "\n"
+
+
+def capture_block(settings: dict, pid: int = NODE_PID, started_ticks: int = STARTED_TICKS) -> bytes:
+    """What the capture tool writes of a node process: the settings it keeps, in the order of their names, each
+    NAME=value ended by a NUL, then the process they were read from, its pid and its start in ticks after boot."""
+    return environ_block(dict(sorted(settings.items()))) + f"process={pid} {started_ticks}".encode() + b"\0"
 
 
 SYSTEM_STAT = f"cpu  1 2 3 4 5 6 7 0 0 0\ncpu0 1 2 3 4 5 6 7 0 0 0\nintr 7\nctxt 9\nbtime {BOOT}\nprocesses 4242\n"
@@ -7429,7 +7508,9 @@ def test_a_served_chain_capture_that_is_not_an_answer_is_an_input_error(tmp_path
 def changed_after_start(step: str, ctime: int, started: str = f"{STARTED}.00") -> str:
     return (f"[8 node] authority val0: {step}, on the path its --chain names, changed at {ctime} (its ctime), not a "
             f"full second before its node process started at {started}: the path may have named another chain spec "
-            "when the node read it, and the node keeps the one it read")
+            "when the node read it, and the node keeps the one it read. A directory's ctime also moves when an entry "
+            "is added to it or removed, so keep the spec under directories nothing writes to once the node runs, and "
+            "restart the node to take the path as it is now")
 
 
 # The red team's swap: the spec file overwritten once the node runs, so the file its --chain names now is the checked
@@ -8129,6 +8210,10 @@ def subwasm() -> str:
     return path
 
 
+# What an authority may set that the capture of its node's environment leaves out.
+LOGGING = {"RUST_LOG", "RUST_BACKTRACE", "RUST_LIB_BACKTRACE", "TZ"}
+
+
 class Launch:
     """A clean launch: the mainnet genesis the node builds from fixtures/mainnet-launch.json, its fixed issuance of
     dust and its attestation committee among it, with the preprod v6 runtime as its code and the LastRuntimeUpgrade
@@ -8196,6 +8281,9 @@ class Launch:
         # The raw chain spec the node binary builds from the launch manifest, where a test gives other than the
         # checked spec.
         self.built = None
+        # The settings each authority's node process was started with, where a test gives other than its manifest
+        # declares.
+        self.environ = {}
         self.launch_key = signing.SigningKey.generate()
         self.candidates = legacy_datum(self.members)
         self.d_parameter = d_parameter_datum(len(self.members))
@@ -8230,7 +8318,7 @@ class Launch:
         """An authority that runs the fake node, pinned to it, on the spec from its own file."""
         node = authority(["materios-node", "--validator", "--chain", authority_chain(self.tmp_path), "--rpc-methods",
                           "safe"], name, name, aura, cross_chain)
-        return dict(node, grandpa="0x" + grandpa.hex(), env=dict(MAINNET_FOLLOWER),
+        return dict(node, grandpa="0x" + grandpa.hex(), env=dict(AUTHORITY_ENV),
                     cmdline=str(self.tmp_path / f"{name}.cmdline"), exe=str(self.node_exe),
                     exe_sha256=sha256_pin(self.node_exe), chain_spec=str(self.tmp_path / f"{name}.chain.json"),
                     served_genesis=str(self.tmp_path / f"{name}.genesis.json"),
@@ -8253,6 +8341,9 @@ class Launch:
         for node in self.launch["nodes"]:
             if node["authority"] and isinstance(node.get("argv"), list) and "cmdline" in node:
                 capture(self.tmp_path, node["name"], self.running.get(node["name"], node["argv"]))
+                declared = {name: value for name, value in node.get("env", {}).items() if name not in LOGGING}
+                Path(node["cmdline"] + ".environ").write_bytes(
+                    capture_block(self.environ.get(node["name"], declared)))
         spec_path = self.spec_path()
         (self.tmp_path / "node-built-raw.json").write_text(spec_path.read_text() if self.built is None else self.built)
         for node in self.launch["nodes"]:
@@ -8390,7 +8481,7 @@ def test_cli_refuses_the_preprod_spec_naming_the_dev_anchor_signer(preprod_path,
 
 def test_cli_passes_a_clean_launch(clean, capsys):
     code, out = clean.run(capsys)
-    assert out.strip() == "MAINNET LAUNCH PREFLIGHT: PASS"
+    assert out.splitlines()[0] == "MAINNET LAUNCH PREFLIGHT: PASS"
     assert code == 0
 
 
@@ -8958,7 +9049,7 @@ def test_cli_passes_root_held_by_a_nested_multisig_whose_every_key_proves_posses
     entry["members"][2]["members"][0] = role_key(fresh_ecdsa_key())
     clean.hold("sudo", entry)
     code, out = clean.run(capsys)
-    assert (code, out.strip()) == (0, PASS)
+    assert (code, out.splitlines()[0]) == (0, PASS)
 
 
 def test_cli_refuses_a_multisig_member_whose_holder_gave_no_pop(clean, capsys):
@@ -9047,7 +9138,7 @@ def test_cli_prints_each_members_challenge_and_passes_the_launch_its_holders_sig
                 bytes.fromhex(printed.strip()[2:])).hex()
     code, out = run_cli(clean.tmp_path, spec_path, signed, capsys, clean.kupo.url, clean.launch_key,
                         signed_launch=draft)
-    assert (code, out.strip()) == (0, PASS)
+    assert (code, out.splitlines()[0]) == (0, PASS)
 
 
 @pytest.mark.parametrize("role, index", [
@@ -9581,3 +9672,1441 @@ def test_a_chain_id_report_built_on_another_genesis_is_refused(monkeypatch, tmp_
                                                "authority val0")) == [
         f"[8 node] authority val0: its node's chain-id builds genesis 0x{other.hex()} from the checked chain spec, and "
         f"the preflight computes 0x{GENESIS.hex()}"]
+
+
+# ---------------------------------------------------------------------------
+# What a keyholder's proof binds, and what the launch key alone signs
+# ---------------------------------------------------------------------------
+
+# Each field the readers of a launch manifest take, as its classification names it: a field of an object by its
+# path, an entry of a list as []. A role's entries are one field, less each member's pop, which is the proof itself.
+def manifest_schema() -> set[str]:
+    objects = {"economics": lp.ECONOMICS_FIELDS, "supply.genesis_lock": lp.GENESIS_LOCK_FIELDS,
+               "partner_chain": lp.PARTNER_CHAIN_FIELDS, "settlement": lp.SETTLEMENT_FIELDS,
+               "cardano_follower": set(lp.CARDANO_MAINNET_FOLLOWER), "nodes[]": lp.NODE_FIELDS,
+               "rpc_proxies[]": lp.PROXY_FIELDS}
+    whole = lp.LAUNCH_FIELDS - {"economics", "supply", "partner_chain", "settlement", "cardano_follower", "nodes",
+                                "rpc_proxies"}
+    return whole | {f"{path}.{field}" for path, fields in objects.items() for field in fields}
+
+
+def test_every_manifest_field_is_classified_exactly_once():
+    """The classification names exactly the fields the readers take, and names none twice: a dict keeps the last of
+    a key its source repeats, so the source is read."""
+    assert set(lp.MANIFEST_FIELDS) == manifest_schema()
+    assert set(lp.MANIFEST_FIELDS.values()) == {lp.GENESIS, lp.DEPLOYMENT}
+    table = next(node.value for node in ast.parse((HERE / "launch_preflight.py").read_text()).body
+                 if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", None) == "MANIFEST_FIELDS")
+    assert sorted(key.value for key in table.keys) == sorted(lp.MANIFEST_FIELDS)
+
+
+def test_a_manifest_field_the_classification_does_not_name_is_refused():
+    with pytest.raises(lp.InputError, match="nodes\\[\\].region is a launch manifest field no binding is given for"):
+        lp.genesis_content({"nodes": [{"authority": True, "region": "eu"}]})
+
+
+# What the proofs must bind whatever else moves: the binary that builds the genesis and runs it, each authority's
+# keys, who holds the lock, and every field the chain spec is built from.
+PROOF_BOUND = {"roles", "dust", "attestation_threshold", "slots_per_epoch", "nodes[].authority", "nodes[].aura",
+               "nodes[].grandpa", "nodes[].cross_chain", "nodes[].exe_sha256", "supply.genesis_lock.address",
+               "supply.genesis_lock.native_script",
+               *(f"economics.{field}" for field in lp.ECONOMICS_FIELDS),
+               *(f"partner_chain.{field}" for field in lp.PARTNER_CHAIN_FIELDS),
+               *(f"settlement.{field}" for field in lp.SETTLEMENT_FIELDS),
+               *(f"cardano_follower.{field}" for field in lp.CARDANO_MAINNET_FOLLOWER)}
+
+
+def test_the_proofs_bind_the_genesis_the_binary_and_the_lock_holders_and_nothing_of_the_deployment():
+    assert {field for field, binding in lp.MANIFEST_FIELDS.items() if binding == lp.GENESIS} == PROOF_BOUND
+
+
+def other_hash(digits: int = 64) -> str:
+    return "0x" + os.urandom(digits // 2).hex()
+
+
+def edit_node(field: str, value):
+    """Give the first authority's `field` another value; for a field only another kind of node takes, a new one."""
+    def edit(launch: dict) -> None:
+        launch["nodes"][0][field] = value(launch["nodes"][0].get(field)) if callable(value) else value
+    return edit
+
+
+def edit_at(path: str, value):
+    def edit(launch: dict) -> None:
+        *parents, field = path.split(".")
+        target = launch
+        for parent in parents:
+            target = target[parent]
+        target[field] = value(target.get(field)) if callable(value) else value
+    return edit
+
+
+def rekey_a_role(launch: dict) -> None:
+    launch["roles"]["anchor_signer"] = [ss58(fresh_account())]
+
+
+def endow_one_more(launch: dict) -> None:
+    accounts = next(iter(launch["dust"].values()))
+    accounts[next(iter(accounts))] += 1
+
+
+def edit_proxy(field: str, value):
+    def edit(launch: dict) -> None:
+        launch["rpc_proxies"][0][field] = value
+    return edit
+
+
+# One edit of each field of the manifest, by its classification's name: a value the readers take, other than the
+# clean launch's.
+FIELD_EDITS = {
+    "roles": rekey_a_role,
+    "dust": endow_one_more,
+    "attestation_threshold": edit_at("attestation_threshold", lambda threshold: threshold + 1),
+    "slots_per_epoch": edit_at("slots_per_epoch", 300),
+    "public_rpc": edit_at("public_rpc", lambda urls: [*urls, "https://rpc-2.example.org/rpc"]),
+    "economics.attestation_reward_per_signer": edit_at("economics.attestation_reward_per_signer", 1),
+    "economics.era_cap_base": edit_at("economics.era_cap_base", 7),
+    "economics.era_cap_baseline_attestor_count": edit_at("economics.era_cap_baseline_attestor_count", 33),
+    "economics.validator_reward_per_era": edit_at("economics.validator_reward_per_era", 1),
+    "economics.treasury_emission_share_perbill": edit_at("economics.treasury_emission_share_perbill", 1),
+    "economics.fee_buffer": edit_at("economics.fee_buffer", 9),
+    "supply.genesis_lock.utxo": edit_at("supply.genesis_lock.utxo", "ab" * 32 + "#0"),
+    "supply.genesis_lock.address": edit_at("supply.genesis_lock.address", "addr1w" + "q" * 52),
+    "supply.genesis_lock.native_script": edit_at("supply.genesis_lock.native_script", "0x8200581c" + "11" * 28),
+    "partner_chain.genesis_utxo": edit_at("partner_chain.genesis_utxo", "cd" * 32 + "#1"),
+    "partner_chain.committee_candidate_address": edit_at("partner_chain.committee_candidate_address",
+                                                         "addr1w" + "p" * 52),
+    "partner_chain.d_parameter_policy_id": edit_at("partner_chain.d_parameter_policy_id", other_hash(56)),
+    "partner_chain.permissioned_candidates_policy_id": edit_at("partner_chain.permissioned_candidates_policy_id",
+                                                               other_hash(56)),
+    "settlement.aegis_policy_v1_script_hash": edit_at("settlement.aegis_policy_v1_script_hash", None),
+    **{f"cardano_follower.{name}": edit_at(f"cardano_follower.{name}", lambda value: value + "0")
+       for name in lp.CARDANO_MAINNET_FOLLOWER},
+    "nodes[].name": edit_node("name", "validator-one"),
+    "nodes[].host": edit_node("host", "validator-one.internal"),
+    "nodes[].addresses": edit_node("addresses", ["10.9.8.7"]),
+    "nodes[].argv": edit_node("argv", lambda argv: [*argv, "--reserved-nodes", "/dns/val9/tcp/30333/p2p/12D3"]),
+    "nodes[].env": edit_node("env", lambda env: dict(env, DB_SYNC_POSTGRES_CONNECTION_STRING="db-9:5432/cexplorer")),
+    "nodes[].authority": edit_node("authority", False),
+    "nodes[].aura": edit_node("aura", lambda _: "0x" + fresh_account().hex()),
+    "nodes[].grandpa": edit_node("grandpa", lambda _: "0x" + fresh_account().hex()),
+    "nodes[].cross_chain": edit_node("cross_chain", lambda _: "0x" + cross_chain_key().hex()),
+    "nodes[].exe_sha256": edit_node("exe_sha256", lambda _: other_hash()),
+    **{f"nodes[].{field}": edit_node(field, lambda path: path + ".retaken")
+       for field in ("cmdline", "exe", "chain_spec", "served_genesis", "served_chain", "served_chain_type",
+                     "served_properties", "process_stat", "system_stat", "chain_spec_stat")},
+    "rpc_proxies[].name": edit_proxy("name", "public-rpc-2"),
+    "rpc_proxies[].node": edit_proxy("node", "val1"),
+    "rpc_proxies[].kind": edit_proxy("kind", "nginx-dump"),
+    "rpc_proxies[].config": edit_proxy("config", "/etc/nginx/other.conf"),
+    "rpc_proxies[].other_targets": edit_proxy("other_targets", ["rpc-node:9944", "status.example.org:443"]),
+}
+
+
+def test_every_manifest_field_has_an_edit():
+    assert set(FIELD_EDITS) == manifest_schema()
+
+
+def signed_and_proven(clean) -> tuple[lp.Spec, dict, dict]:
+    """The clean launch as its ceremony leaves it: every keyholder's proof in, then the launch key's signature."""
+    spec = lp.load_spec(str(clean.spec_path()))
+    launch = prove(clean.launch, spec)
+    return spec, launch, lp.signed_manifest(spec, launch, clean.launch_key)
+
+
+def members_of(launch: dict) -> list[tuple[str, str, str]]:
+    return [(where, role, " ".join(map(str, position))) for role, where, position, _ in lp.multisig_members(launch)]
+
+
+MANIFEST_EDITED = "[6 checkpoint] launch_manifest_hash is 0x"
+
+
+def checkpoint_findings(clean, spec, launch, signed) -> list[str]:
+    return messages(lp.check_checkpoint(spec, launch, signed, [pub(clean.launch_key)]))
+
+
+@pytest.mark.parametrize("field", sorted(field for field in FIELD_EDITS if field not in PROOF_BOUND))
+def test_an_edit_to_a_deployment_field_leaves_every_proof_valid_and_needs_a_new_launch_signature(clean, field):
+    spec, launch, signed = signed_and_proven(clean)
+    edited = copy.deepcopy(launch)
+    FIELD_EDITS[field](edited)
+    assert edited != launch
+    assert len(members_of(edited)) == 6 and possession_findings(spec, edited) == []
+    refused = checkpoint_findings(clean, spec, edited, signed)
+    assert len(refused) == 1 and refused[0].startswith(MANIFEST_EDITED)
+    assert checkpoint_findings(clean, spec, edited, lp.signed_manifest(spec, edited, clean.launch_key)) == []
+
+
+@pytest.mark.parametrize("field", sorted(PROOF_BOUND))
+def test_an_edit_to_a_genesis_field_voids_every_proof(clean, field):
+    spec, launch, signed = signed_and_proven(clean)
+    edited = copy.deepcopy(launch)
+    FIELD_EDITS[field](edited)
+    assert edited != launch
+    assert possession_findings(spec, edited) == [unproven(where, "sr25519", role, index)
+                                                 for where, role, index in members_of(edited)]
+    assert any(reason.startswith(MANIFEST_EDITED) for reason in checkpoint_findings(clean, spec, edited, signed))
+
+
+def test_a_pop_is_bound_by_neither_hash(clean):
+    """A proof is what is verified: the launch signature may come before it, and it voids no other member's."""
+    spec, launch, signed = signed_and_proven(clean)
+    draft = copy.deepcopy(launch)
+    del draft["roles"]["guardian"][0]["members"][1]["pop"]
+    assert lp.genesis_content_hash(draft) == lp.genesis_content_hash(launch)
+    assert checkpoint_findings(clean, spec, draft, signed) == []
+    assert possession_findings(spec, draft) == [no_pop("roles.guardian[0].members[1]", "guardian", "0 1")]
+
+
+def test_the_genesis_content_is_the_same_whatever_the_order_of_the_nodes_and_whichever_nodes_are_no_authority(clean):
+    launch = clean.launch
+    edge = {"name": "edge-0", "host": "edge-0", "authority": False}
+    shuffled = dict(launch, nodes=[edge, *reversed(launch["nodes"])])
+    without_edge = dict(launch, nodes=[node for node in launch["nodes"] if node["authority"]])
+    assert lp.genesis_content_hash(shuffled) == lp.genesis_content_hash(launch) == lp.genesis_content_hash(without_edge)
+
+
+def test_an_authority_keeps_its_own_binary_pin(clean):
+    """Two authorities' pins swapped pin the same two binaries, to other keys: each authority's pin is bound with
+    its keys."""
+    swapped = copy.deepcopy(clean.launch)
+    swapped["nodes"][0]["exe_sha256"], swapped["nodes"][1]["exe_sha256"] = other_hash(), other_hash()
+    twice = copy.deepcopy(swapped)
+    twice["nodes"][0]["exe_sha256"], twice["nodes"][1]["exe_sha256"] = (swapped["nodes"][1]["exe_sha256"],
+                                                                       swapped["nodes"][0]["exe_sha256"])
+    assert lp.genesis_content_hash(twice) != lp.genesis_content_hash(swapped)
+
+
+def test_the_genesis_content_hash_is_the_tagged_canonical_json_of_the_genesis_bound_fields(clean):
+    assert lp.genesis_content_hash(clean.launch) == genesis_content_hash(clean.launch)
+    content = lp.genesis_content(clean.launch)
+    assert set(content) == {"roles", "dust", "attestation_threshold", "economics", "supply", "partner_chain",
+                            "slots_per_epoch", "settlement", "cardano_follower", "nodes"}
+    assert content["supply"] == {"genesis_lock": {field: LOCK[field] for field in ("address", "native_script")}}
+    assert all(set(node) == {"authority", "aura", "grandpa", "cross_chain", "exe_sha256"} for node in content["nodes"])
+    assert len(content["nodes"]) == 4
+
+
+def test_a_challenge_binds_its_members_key(spec):
+    """The same role and position under another key is another challenge: a holder cannot be handed the challenge of
+    the key that stood there before."""
+    member, other = fresh_account(), fresh_account()
+    launch = prove({"roles": {"sudo": [msig(2, fresh_account(), member)]}}, spec)
+    context = launch_context(spec, launch)
+    assert member_challenge(context, "sudo", (0, 1), member) != member_challenge(context, "sudo", (0, 1), other)
+    assert lp.possession_challenge(lp.possession_context(spec, launch), "sudo", (0, 1), member) == member_challenge(
+        context, "sudo", (0, 1), member)
+    assert member_challenge(context, "sudo", (0, 1), member).endswith(b"\x80" + member)
+
+
+# The rehearsal's negative case: a host renamed on a node that is no authority, after the ceremony.
+def test_cli_a_deployment_edit_after_the_ceremony_keeps_every_proof_and_needs_a_new_launch_signature(clean, capsys):
+    spec_path = clean.prepare()
+    proven = prove(clean.launch, lp.load_spec(str(spec_path)))
+    edited = copy.deepcopy(proven)
+    edited["nodes"][-1]["host"] = "edge.renamed.internal"
+    assert not edited["nodes"][-1]["authority"]
+    code, out = run_cli(clean.tmp_path, spec_path, edited, capsys, clean.kupo.url, clean.launch_key,
+                        signed_launch=proven)
+    assert code == 1 and out.count("\n") == 2 and out.splitlines()[1].startswith("  " + MANIFEST_EDITED), out
+    code, out = run_cli(clean.tmp_path, spec_path, edited, capsys, clean.kupo.url, clean.launch_key)
+    assert (code, out.splitlines()[0]) == (0, PASS), out
+
+
+def test_cli_an_authority_repinned_to_another_binary_after_the_ceremony_voids_every_proof(clean, capsys):
+    """The launch key alone cannot move an authority to another node build: the keyholders' proofs bind each pin."""
+    spec_path = clean.prepare()
+    proven = prove(clean.launch, lp.load_spec(str(spec_path)))
+    other = fake_node(clean.tmp_path, log=str(clean.tmp_path / "other-binary.jsonl"))
+    edited = copy.deepcopy(proven)
+    edited["nodes"][0].update(exe=str(other), exe_sha256=sha256_pin(other))
+    code, out = run_cli(clean.tmp_path, spec_path, edited, capsys, clean.kupo.url, clean.launch_key)
+    assert code == 1, out
+    assert out.splitlines()[1:] == ["  " + unproven(where, "sr25519", role, index)
+                                    for where, role, index in members_of(edited)], out
+
+
+# ---------------------------------------------------------------------------
+# Rule 9: the settings without which an authority authors nothing, or does not start
+# ---------------------------------------------------------------------------
+
+def settings_findings(env: dict, script: str | None = None) -> list[str]:
+    return messages(lp.check_authority_settings({"nodes": [follower_node(env=env, script=script)]}))
+
+
+NO_BENEFICIARY = ("[9 committee] authority val1 does not set SIDECHAIN_BLOCK_BENEFICIARY: its node's block proposer "
+                  "reads from it the 32 bytes its blocks are counted under, and without it the node syncs, keeps its "
+                  "peers and authors no block")
+NO_BACKEND = ("[9 committee] authority val1 does not set MAIN_CHAIN_FOLLOWER: declare the Cardano follower its node "
+              "reads Cardano through, db-sync or yaci")
+NO_DATABASE = ("[9 committee] authority val1 does not set DB_SYNC_POSTGRES_CONNECTION_STRING, the database its "
+               "Cardano follower reads: a node with none does not start")
+NO_MARGIN = ("[9 committee] authority val1 does not set BLOCK_STABILITY_MARGIN: its Cardano follower does not start "
+             "without it")
+
+
+def test_an_authority_with_its_beneficiary_and_follower_backend_passes():
+    assert settings_findings(AUTHORITY_ENV) == []
+    exports = "; ".join(f"export {name}={value}" for name, value in AUTHORITY_ENV.items())
+    assert settings_findings({}, f"{exports}; exec materios-node --validator") == []
+    assert settings_findings(dict(AUTHORITY_ENV, MAIN_CHAIN_FOLLOWER="yaci")) == []
+
+
+@pytest.mark.parametrize("name, reason", [
+    ("SIDECHAIN_BLOCK_BENEFICIARY", NO_BENEFICIARY), ("MAIN_CHAIN_FOLLOWER", NO_BACKEND),
+    ("DB_SYNC_POSTGRES_CONNECTION_STRING", NO_DATABASE), ("BLOCK_STABILITY_MARGIN", NO_MARGIN)])
+def test_an_authority_that_leaves_a_setting_its_node_needs_out_is_refused(name, reason):
+    assert settings_findings({key: value for key, value in AUTHORITY_ENV.items() if key != name}) == [reason]
+
+
+def test_a_node_that_is_no_authority_needs_none_of_them():
+    assert lp.check_authority_settings({"nodes": [{"name": "edge", "host": "edge", "authority": False}]}) == []
+
+
+@pytest.mark.parametrize("value", ["0x" + "ab" * 31, "0x" + "ab" * 33, "ab" * 31, "0x" + "zz" * 32, "", "5Grw"],
+                         ids=["31 bytes", "33 bytes", "31 bytes and no 0x", "no hex", "empty", "an address"])
+def test_a_beneficiary_that_is_not_32_bytes_of_hex_is_refused(value):
+    assert settings_findings(dict(AUTHORITY_ENV, SIDECHAIN_BLOCK_BENEFICIARY=value)) == [
+        "[9 committee] authority val1 sets SIDECHAIN_BLOCK_BENEFICIARY to other than the 64 hex digits of 32 bytes, "
+        "with or without 0x: its node's block proposer reads no other value, and the node authors no block"]
+
+
+@pytest.mark.parametrize("value", ["0x" + "ab" * 32, "ab" * 32, "AB" * 32])
+def test_a_beneficiary_is_read_in_each_spelling_the_node_reads(value):
+    assert settings_findings(dict(AUTHORITY_ENV, SIDECHAIN_BLOCK_BENEFICIARY=value)) == []
+
+
+@pytest.mark.parametrize("value", ["mock", "dbsync", "Yaci", "", "db-sync "])
+def test_a_follower_backend_other_than_db_sync_or_yaci_is_refused(value):
+    assert settings_findings(dict(AUTHORITY_ENV, MAIN_CHAIN_FOLLOWER=value)) == [
+        f"[9 committee] authority val1 sets MAIN_CHAIN_FOLLOWER to {value!r}, not db-sync or yaci: its node reads any "
+        "value but yaci, in any case, as db-sync"]
+
+
+PASSWORD = "hunter2-" + "s3cr3t"
+
+
+@pytest.mark.parametrize("value", [
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer", "postgres://db-1:5432/cexplorer", "db-1/cexplorer",
+    "db-1:5432", "db-1:port/cexplorer", f"db-1:5432/cexplorer?password={PASSWORD}", ""],
+    ids=["a URL with its password", "a URL", "no port", "no database", "no port number", "a query", "empty"])
+def test_a_connection_string_declared_in_another_form_than_the_capture_writes_is_refused_without_echoing_it(value):
+    assert settings_findings(dict(AUTHORITY_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=value)) == [
+        "[9 committee] authority val1 gives DB_SYNC_POSTGRES_CONNECTION_STRING in another form than "
+        "<host>:<port>/<database>, as capture_environ.py writes what its node runs with: the manifest is signed and "
+        "handed round, and holds no user or password"]
+
+
+@pytest.mark.parametrize("value", ["db-1.internal:5432/cexplorer", "10.0.0.5:6432/yaci_store", "[fd00::5]:5432/db"])
+def test_a_connection_string_declared_as_host_port_and_database_passes(value):
+    assert settings_findings(dict(AUTHORITY_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=value)) == []
+
+
+@pytest.mark.parametrize("value", ["", "-1", "0x10", "1.5", "4294967296", "ten"])
+def test_a_stability_margin_that_is_no_u32_is_refused(value):
+    assert settings_findings(dict(AUTHORITY_ENV, BLOCK_STABILITY_MARGIN=value)) == [
+        f"[9 committee] authority val1 sets BLOCK_STABILITY_MARGIN to {value!r}, not a number of Cardano blocks from "
+        "0 to 4294967295 in decimal: its Cardano follower does not start on another value"]
+
+
+def test_the_mainnet_fixtures_authorities_set_what_their_nodes_need(mainnet):
+    _, _, launch = mainnet
+    assert [sorted(set(node["env"]) - set(MAINNET_FOLLOWER)) for node in launch["nodes"]] == [
+        sorted(set(AUTHORITY_ENV) - set(MAINNET_FOLLOWER))] * 4
+    assert lp.check_authority_settings(launch) == []
+
+
+# The rehearsal's validator restarted without its beneficiary logged "Unable to author block in slot" at every slot.
+def test_cli_refuses_an_authority_with_no_block_beneficiary(clean, capsys):
+    del clean.launch["nodes"][2]["env"]["SIDECHAIN_BLOCK_BENEFICIARY"]
+    code, out = clean.run(capsys)
+    assert code == 1 and only_reason(out, NO_BENEFICIARY.replace("val1", "val2")), out
+
+
+def test_cli_refuses_an_authority_that_declares_no_follower_backend(clean, capsys):
+    for name in ("MAIN_CHAIN_FOLLOWER", "DB_SYNC_POSTGRES_CONNECTION_STRING"):
+        del clean.launch["nodes"][0]["env"][name]
+    code, out = clean.run(capsys)
+    assert (code, out.splitlines()[1:]) == (1, ["  " + reason.replace("val1", "val0")
+                                                for reason in (NO_BACKEND, NO_DATABASE)]), out
+
+
+# ---------------------------------------------------------------------------
+# The environment a running node process was started with
+# ---------------------------------------------------------------------------
+
+SECRET_TOKEN = "tok-" + "9f8e7d6c5b4a"
+
+
+RUNNING_ENV = {
+    "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin", "HOME": "/var/lib/materios", "LANG": "C.UTF-8",
+    "INVOCATION_ID": "0f0e0d0c0b0a09080706050403020100", "RUST_LOG": "info", "API_TOKEN": SECRET_TOKEN,
+    **MAINNET_FOLLOWER, "MAIN_CHAIN_FOLLOWER": "db-sync", "BLOCK_STABILITY_MARGIN": "0",
+    "DB_SYNC_POSTGRES_CONNECTION_STRING": f"postgres://materios:{PASSWORD}@db-1.internal:5432/cexplorer",
+    "SIDECHAIN_BLOCK_BENEFICIARY": "0x" + "ab" * 32,
+}
+
+
+def test_the_capture_keeps_the_settings_the_preflight_reads_and_reduces_the_connection_string():
+    assert capture_environ.captured(environ_block(RUNNING_ENV)) == AUTHORITY_ENV
+
+
+def test_the_capture_holds_no_password_user_or_setting_outside_its_names():
+    written = capture_environ.written(capture_environ.captured(environ_block(RUNNING_ENV)), (NODE_PID, 77))
+    for secret in (PASSWORD, "materios:", SECRET_TOKEN, "API_TOKEN", "/var/lib/materios", "INVOCATION_ID"):
+        assert secret.encode() not in written
+    assert written == capture_block(AUTHORITY_ENV, NODE_PID, 77)
+    assert capture_environ.read(written) == (AUTHORITY_ENV, (NODE_PID, 77))
+
+
+def test_the_capture_names_every_setting_an_authority_declares_and_the_ones_it_may_not_run_with():
+    declared = lp.AUTHORITY_SETTINGS - {"RUST_LOG", "RUST_BACKTRACE", "RUST_LIB_BACKTRACE", "TZ"}
+    assert declared < capture_environ.CAPTURED
+    assert capture_environ.CAPTURED - declared == {
+        "USE_MAIN_CHAIN_FOLLOWER_MOCK", "MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE", "MITHRIL_CLIENT_BIN",
+        "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", *SQLX_SETTINGS}
+
+
+# What sqlx-postgres 0.7.4 reads from the environment for a connection (options/mod.rs, options/pgpass.rs).
+SQLX_SETTINGS = ("PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGDATABASE", "PGSSLROOTCERT", "PGSSLCERT", "PGSSLKEY",
+                 "PGSSLMODE", "PGAPPNAME", "PGOPTIONS", "PGPASSFILE")
+
+
+@pytest.mark.parametrize("url, reduced", [
+    (f"postgres://materios:{PASSWORD}@db-1.internal:5432/cexplorer", "db-1.internal:5432/cexplorer"),
+    (f"postgresql://materios:{PASSWORD}@10.0.0.5:6432/yaci_store?sslmode=require", "10.0.0.5:6432/yaci_store"),
+    ("postgres://materios@DB-1.Internal:5432/cexplorer", "db-1.internal:5432/cexplorer"),
+    (f"postgres://materios:{PASSWORD}@[fd00::5]:5432/cexplorer", "[fd00::5]:5432/cexplorer"),
+    (f"postgres://materios:{PASSWORD}@db-1/?port=6432&dbname=other&password={PASSWORD}", "db-1:6432/other"),
+    ("postgres:///cexplorer?host=/var/run/postgresql&port=5432", "/var/run/postgresql:5432/cexplorer"),
+    (f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?sslmode=verify-full&sslrootcert=/etc/ssl/db.pem"
+     "&application_name=materios", "db-1:5432/cexplorer"),
+])
+def test_a_connection_string_is_reduced_to_its_host_port_and_database(url, reduced):
+    assert capture_environ.reduced_connection(url) == reduced
+
+
+@pytest.mark.parametrize("url", [
+    f"postgres://materios:{PASSWORD}@db-1/cexplorer", f"postgres://materios:{PASSWORD}@db-1:5432",
+    f"postgres://materios:{PASSWORD}@:5432/cexplorer", f"host=db-1 port=5432 password={PASSWORD} dbname=cexplorer",
+    f"postgres://materios:pa/{PASSWORD}@db-1:5432/cexplorer", f"mysql://materios:{PASSWORD}@db-1:5432/cexplorer",
+    f"postgres://materios:{PASSWORD}@db-1:port/cexplorer", "",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?options=-c%20search_path%3Dfake",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?options[search_path]=fake",
+    f"postgres://materios:{PASSWORD}@ignored:5432/cexplorer?host=/var/run/evil&host=db-1",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?host=/var/run/evil",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?host=db-2",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?hostaddr=10.9.9.9",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?port=6432",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer?dbname=other",
+    f"postgres://user:8080/{PASSWORD}?@db-1:5432/cexplorer", f"postgres://user:12/{PASSWORD}#@db-1:5432/cexplorer",
+    f"postgres://db-1:5432/cexplorer?user=u@v&password={PASSWORD}",
+    f"postgres://materios:{PASSWORD}@db-1:5432/cexplorer#x@y"],
+    ids=["no port", "no database", "no host", "no URL", "a slash in the password", "another scheme",
+         "a port that is no number", "empty", "session options", "one session option", "a socket and then a host",
+         "a host and a socket", "two hosts", "a host and a host address", "two ports", "two databases",
+         "an @ in the query", "an @ in the fragment", "an @ in a parameter", "an @ after the database"])
+def test_a_connection_string_the_capture_cannot_reduce_is_refused_without_its_value(url):
+    with pytest.raises(ValueError) as refused:
+        capture_environ.captured(environ_block(dict(RUNNING_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=url)))
+    assert str(refused.value) == (
+        "DB_SYNC_POSTGRES_CONNECTION_STRING is not a postgres:// URL that names its host, port and database, so it "
+        "cannot be reduced to <host>:<port>/<database>; its value is not shown")
+    assert PASSWORD not in repr(refused.value)
+
+
+# How the node's most forgiving reader takes a name: figment trims it, matches it and the MC__ prefix without regard
+# to ASCII case, trims again what follows the prefix, and nests at a dot.
+NAMES_READ_AS = {
+    "BLOCK_STABILITY_MARGIN": "BLOCK_STABILITY_MARGIN",
+    "BLOCK_STABILITY_MARGIN ": "BLOCK_STABILITY_MARGIN",
+    " CARDANO_SECURITY_PARAMETER": "CARDANO_SECURITY_PARAMETER",
+    "BLOCK_STABILITY_MARGIN\t": "BLOCK_STABILITY_MARGIN",
+    "DB_SYNC_POSTGRES_CONNECTION_STRING ": "DB_SYNC_POSTGRES_CONNECTION_STRING",
+    "\u00a0DB_SYNC_POSTGRES_CONNECTION_STRING\u2003": "DB_SYNC_POSTGRES_CONNECTION_STRING",
+    "block_stability_margin": "BLOCK_STABILITY_MARGIN",
+    "Mc__First_Epoch_Number": "MC__FIRST_EPOCH_NUMBER",
+    "MC__ FIRST_EPOCH_NUMBER": "MC__FIRST_EPOCH_NUMBER",
+    " mc__\tfirst_epoch_number ": "MC__FIRST_EPOCH_NUMBER",
+    "CARDANO_SECURITY_PARAMETER.depth": "CARDANO_SECURITY_PARAMETER",
+    "MC__FIRST_EPOCH_NUMBER .x": "MC__FIRST_EPOCH_NUMBER",
+    "PATH": "PATH",
+    "MC_FIRST_EPOCH_NUMBER": "MC_FIRST_EPOCH_NUMBER",
+}
+
+
+@pytest.mark.parametrize("name, setting", NAMES_READ_AS.items(), ids=list(map(repr, NAMES_READ_AS)))
+def test_a_name_is_read_as_the_most_forgiving_of_the_nodes_readers_takes_it(name, setting):
+    assert capture_environ.reads_as(name) == setting
+
+
+TWINS = [name for name, setting in NAMES_READ_AS.items() if name != setting and setting in capture_environ.CAPTURED]
+
+
+@pytest.mark.parametrize("twin", TWINS, ids=list(map(repr, TWINS)))
+def test_the_capture_keeps_a_name_the_node_reads_as_a_setting_spelled_as_the_process_has_it(twin):
+    """Dropped, the node would run on a value the capture does not show: figment takes the later of two entries it
+    reads as one setting."""
+    exact = NAMES_READ_AS[twin]
+    kept = capture_environ.captured(environ_block({exact: RUNNING_ENV[exact], twin: RUNNING_ENV[exact]}))
+    assert kept == {exact: AUTHORITY_ENV[exact], twin: AUTHORITY_ENV[exact]}
+    assert capture_environ.read(capture_block(kept)) == (kept, (NODE_PID, STARTED_TICKS))
+    assert capture_environ.captured(environ_block({twin: RUNNING_ENV[exact]})) == {twin: AUTHORITY_ENV[exact]}
+
+
+def test_a_connection_string_under_a_padded_name_is_reduced_like_the_exact_one():
+    kept = capture_environ.captured(environ_block({
+        "DB_SYNC_POSTGRES_CONNECTION_STRING": f"postgres://materios:{PASSWORD}@db-1.internal:5432/cexplorer",
+        "DB_SYNC_POSTGRES_CONNECTION_STRING ": f"postgres://materios:{PASSWORD}@db-9.elsewhere:5432/cexplorer"}))
+    assert kept == {"DB_SYNC_POSTGRES_CONNECTION_STRING": "db-1.internal:5432/cexplorer",
+                    "DB_SYNC_POSTGRES_CONNECTION_STRING ": "db-9.elsewhere:5432/cexplorer"}
+
+
+def test_the_capture_names_each_postgres_setting_and_shows_no_credential():
+    process = dict(RUNNING_ENV, PGHOST="db-9.elsewhere", PGPORT="6432", PGDATABASE="other", PGUSER="materios",
+                   PGPASSWORD=PASSWORD, PGPASSFILE="/run/secrets/pgpass", PGSSLKEY="/run/secrets/db.key",
+                   PGSSLMODE="disable", PGSSLROOTCERT="/tmp/ca.pem", PGSSLCERT="/tmp/cert.pem", PGAPPNAME="x",
+                   PGOPTIONS="-c search_path=fake")
+    kept = capture_environ.captured(environ_block(process))
+    assert {name: value for name, value in kept.items() if name.startswith("PG")} == {
+        "PGHOST": "db-9.elsewhere", "PGPORT": "6432", "PGDATABASE": "other", "PGSSLMODE": "disable",
+        "PGSSLROOTCERT": "/tmp/ca.pem", "PGSSLCERT": "/tmp/cert.pem", "PGAPPNAME": "x",
+        "PGOPTIONS": "-c search_path=fake", "PGUSER": "<set>", "PGPASSWORD": "<set>", "PGPASSFILE": "<set>",
+        "PGSSLKEY": "<set>"}
+    written = capture_environ.written(kept, (NODE_PID, 77))
+    assert PASSWORD.encode() not in written and b"/run/secrets" not in written and b"materios" not in written
+
+
+@pytest.mark.parametrize("raw", [b"PGPASSWORD=" + PASSWORD.encode() + b"\0process=1 2\0",
+                                 b"PGUSER=materios\0process=1 2\0"])
+def test_a_capture_file_that_shows_a_credential_is_refused(raw):
+    with pytest.raises(ValueError) as refused:
+        capture_environ.read(raw)
+    assert PASSWORD not in str(refused.value) and "materios" not in str(refused.value)
+
+
+def test_a_setting_the_process_has_twice_is_refused():
+    with pytest.raises(ValueError, match="^MAIN_CHAIN_FOLLOWER is set twice"):
+        capture_environ.captured(b"MAIN_CHAIN_FOLLOWER=yaci\0MAIN_CHAIN_FOLLOWER=db-sync\0")
+
+
+@pytest.mark.parametrize("raw", [
+    b"MAIN_CHAIN_FOLLOWER=yaci\0process=1 2", b"MAIN_CHAIN_FOLLOWER\0process=1 2\0", b"\xff=1\0process=1 2\0",
+    b"MAIN_CHAIN_FOLLOWER=yaci\0", b"", b"process=1 2\0MAIN_CHAIN_FOLLOWER=yaci\0",
+    b"MAIN_CHAIN_FOLLOWER=yaci\0process=1 2\0process=1 2\0", b"MAIN_CHAIN_FOLLOWER=yaci\0process=1\0",
+    b"MAIN_CHAIN_FOLLOWER=yaci\0process=one 2\0", b"MAIN_CHAIN_FOLLOWER=yaci\0process=1 -2\0",
+    b"HOME=/root\0process=1 2\0", b"MAIN_CHAIN_FOLLOWER=yaci\0MAIN_CHAIN_FOLLOWER=yaci\0process=1 2\0"],
+    ids=["no final NUL", "no =", "not UTF-8", "no process", "empty", "the process first", "two processes",
+         "a process with no start", "a pid that is no number", "a negative start", "a setting it does not write",
+         "a setting twice"])
+def test_a_capture_that_is_not_what_the_tool_writes_is_refused(raw):
+    with pytest.raises(ValueError):
+        capture_environ.read(raw)
+
+
+def test_the_process_a_capture_is_of_is_read_from_its_stat():
+    assert capture_environ.process_of(process_stat(77, "materios node) x (", 99).encode()) == (99, 77)
+    for stat in (b"", b"99 (materios-node", b"99 (materios-node) S 1"):
+        with pytest.raises(ValueError):
+            capture_environ.process_of(stat)
+
+
+def test_the_capture_tool_runs_with_the_standard_library_alone(tmp_path):
+    """A validator's machine needs python3 and this one file: no package of the preflight's."""
+    done = subprocess.run([sys.executable, "-I", "-S", str(HERE / "capture_environ.py"), "--help"],
+                          capture_output=True, text=True, cwd=tmp_path)
+    assert done.returncode == 0 and "environ" in done.stdout, done.stderr
+
+
+# When each process a test started began, in ticks after boot, read from its /proc/<pid>/stat before it is killed.
+STARTED_BY = {}
+
+
+def started(env: dict) -> subprocess.Popen:
+    """A process started with `env`, once the kernel shows its environment: /proc/<pid>/environ reads empty until
+    exec has set the new image's bounds, a moment after Popen returns."""
+    process = subprocess.Popen(["sleep", "60"], env=env)
+    deadline = time.monotonic() + 10
+    while not Path(f"/proc/{process.pid}/environ").read_bytes() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    STARTED_BY[process.pid] = int(Path(f"/proc/{process.pid}/stat").read_text().rpartition(")")[2].split()[19])
+    return process
+
+
+def test_the_capture_tool_writes_a_running_process_and_prints_only_names(tmp_path):
+    process = started(RUNNING_ENV)
+    try:
+        out = tmp_path / "val-1.cmdline.environ"
+        done = subprocess.run([sys.executable, "-I", "-S", str(HERE / "capture_environ.py"), str(process.pid),
+                               str(out)], capture_output=True, text=True, cwd=tmp_path)
+    finally:
+        process.kill()
+        process.wait()
+    assert done.returncode == 0, done.stderr
+    assert capture_environ.read(out.read_bytes()) == (AUTHORITY_ENV, (process.pid, STARTED_BY[process.pid]))
+    assert done.stdout == (f"pid {process.pid}: {len(AUTHORITY_ENV)} settings written to {out}: "
+                           f"{' '.join(sorted(AUTHORITY_ENV))}\n")
+    for secret in (PASSWORD, SECRET_TOKEN, "db-1", "0x" + "ab" * 32):
+        assert secret not in done.stdout + done.stderr
+
+
+def test_the_capture_tool_writes_nothing_for_a_connection_string_it_cannot_reduce(tmp_path):
+    env = dict(RUNNING_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=f"host=db-1 password={PASSWORD}")
+    process = started(env)
+    try:
+        out = tmp_path / "val-1.cmdline.environ"
+        done = subprocess.run([sys.executable, "-I", "-S", str(HERE / "capture_environ.py"), str(process.pid),
+                               str(out)], capture_output=True, text=True, cwd=tmp_path)
+    finally:
+        process.kill()
+        process.wait()
+    assert done.returncode == 1 and not out.exists()
+    assert done.stderr.startswith("DB_SYNC_POSTGRES_CONNECTION_STRING is not a postgres:// URL")
+    assert PASSWORD not in done.stdout + done.stderr
+
+
+def environment_findings(tmp_path: Path, running: dict, env: dict = AUTHORITY_ENV, script: str | None = None):
+    """Rule 8 on an authority whose manifest declares `env`, or a script, and whose node process was started with
+    `running`, as the capture tool saves it next to its cmdline capture."""
+    node = captured_node(tmp_path, env, script)
+    Path(node["cmdline"] + ".environ").write_bytes(capture_block(running))
+    return messages(lp.check_environment({"nodes": [node, {"name": "edge", "host": "edge", "authority": False}]}))
+
+
+def captured_node(tmp_path: Path, env: dict = AUTHORITY_ENV, script: str | None = None) -> dict:
+    """An authority with the captures rule 8 reads its environment by: its cmdline's path, which names where the
+    environment capture is, and its process's stat."""
+    node = dict(follower_node(env=env, script=script), cmdline=str(tmp_path / "val1.cmdline"),
+                process_stat=str(tmp_path / "val1.stat"))
+    Path(node["process_stat"]).write_text(process_stat())
+    return node
+
+
+def test_an_authority_whose_node_runs_with_the_settings_its_manifest_declares_passes(tmp_path):
+    assert environment_findings(tmp_path, AUTHORITY_ENV) == []
+    exports = "; ".join(f"export {name}={value}" for name, value in AUTHORITY_ENV.items())
+    assert environment_findings(tmp_path, AUTHORITY_ENV, {}, f"{exports}; exec materios-node --validator") == []
+    assert environment_findings(tmp_path, AUTHORITY_ENV, dict(AUTHORITY_ENV, RUST_LOG="info", TZ="UTC")) == []
+
+
+MOCK_FOLLOWER = ("its node runs on the mock Cardano follower, or is one setting from it: whoever can write the mock's "
+                 "registrations file chooses the committee data that node authors and verifies with")
+
+
+@pytest.mark.parametrize("name, value", [
+    ("USE_MAIN_CHAIN_FOLLOWER_MOCK", "true"), ("USE_MAIN_CHAIN_FOLLOWER_MOCK", "false"),
+    ("USE_MAIN_CHAIN_FOLLOWER_MOCK", ""), ("MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE", "/srv/mock.json")])
+def test_an_authority_whose_node_process_has_a_mock_follower_setting_is_refused(tmp_path, name, value):
+    assert environment_findings(tmp_path, dict(AUTHORITY_ENV, **{name: value})) == [
+        f"[8 node] authority val1: its node process was started with {name}: {MOCK_FOLLOWER}"]
+
+
+DECLARED_APART = ("the preflight checked the settings its manifest declares, and its node runs with others")
+
+
+@pytest.mark.parametrize("name, value", [("MC__FIRST_EPOCH_NUMBER", "209"), ("CARDANO_SECURITY_PARAMETER", "432"),
+                                         ("MAIN_CHAIN_FOLLOWER", "yaci"), ("BLOCK_STABILITY_MARGIN", "10"),
+                                         ("DB_SYNC_POSTGRES_CONNECTION_STRING", "db-9:5432/cexplorer"),
+                                         ("SIDECHAIN_BLOCK_BENEFICIARY", "0x" + "cd" * 32)])
+def test_an_authority_whose_node_runs_with_another_value_than_declared_is_refused(tmp_path, name, value):
+    assert environment_findings(tmp_path, dict(AUTHORITY_ENV, **{name: value})) == [
+        f"[8 node] authority val1: its node process was started with {name}={value}, and its manifest declares "
+        f"{name}={AUTHORITY_ENV[name]}: {DECLARED_APART}"]
+
+
+@pytest.mark.parametrize("name", sorted(AUTHORITY_ENV))
+def test_an_authority_whose_node_runs_without_a_declared_setting_is_refused(tmp_path, name):
+    running = {key: value for key, value in AUTHORITY_ENV.items() if key != name}
+    assert environment_findings(tmp_path, running) == [
+        f"[8 node] authority val1: its node process was started without {name}, which its manifest declares as "
+        f"{name}={AUTHORITY_ENV[name]}: {DECLARED_APART}"]
+
+
+@pytest.mark.parametrize("name, value", [("LD_PRELOAD", "/opt/hook.so"), ("MITHRIL_CLIENT_BIN", "/tmp/mithril"),
+                                         ("MITHRIL_AGGREGATOR_ENDPOINT", "https://aggregator.example"),
+                                         ("PGHOST", "db-9.elsewhere"), ("PGPORT", "6432"), ("PGDATABASE", "other"),
+                                         ("PGOPTIONS", "-c search_path=fake"), ("PGSSLMODE", "disable"),
+                                         ("PGSSLROOTCERT", "/tmp/ca.pem"), ("PGSSLCERT", "/tmp/cert.pem"),
+                                         ("PGAPPNAME", "x"), ("PGUSER", "<set>"), ("PGPASSWORD", "<set>"),
+                                         ("PGPASSFILE", "<set>"), ("PGSSLKEY", "<set>")])
+def test_an_authority_whose_node_runs_with_a_setting_its_manifest_does_not_declare_is_refused(tmp_path, name, value):
+    assert environment_findings(tmp_path, dict(AUTHORITY_ENV, **{name: value})) == [
+        f"[8 node] authority val1: its node process was started with {name}={value}, which its manifest does not "
+        f"declare: {DECLARED_APART}"]
+
+
+def twin_refused(twin: str) -> str:
+    return (f"[8 node] authority val1: its node process was started with a setting named {twin!r}, which is not the "
+            f"exact name {NAMES_READ_AS[twin]}: the node's follower trims a setting's name, reads it "
+            "whatever its case and takes the later of two it reads as one, so the node may run on that value and "
+            "not on the declared one")
+
+
+@pytest.mark.parametrize("twin", TWINS, ids=list(map(repr, TWINS)))
+def test_an_authority_whose_node_process_has_a_setting_under_a_name_that_is_not_exact_is_refused(tmp_path, twin):
+    """Beside the exact name, with the declared value under both, and in its place: either way the name refuses."""
+    exact = NAMES_READ_AS[twin]
+    assert environment_findings(tmp_path, dict(AUTHORITY_ENV, **{twin: AUTHORITY_ENV[exact]})) == [twin_refused(twin)]
+    alone = {name: value for name, value in AUTHORITY_ENV.items() if name != exact}
+    assert environment_findings(tmp_path, dict(alone, **{twin: AUTHORITY_ENV[exact]})) == [
+        twin_refused(twin),
+        f"[8 node] authority val1: its node process was started without {exact}, which its manifest declares as "
+        f"{exact}={AUTHORITY_ENV[exact]}: {DECLARED_APART}"]
+
+
+def test_the_value_under_a_name_that_is_not_exact_is_not_shown(tmp_path):
+    found = environment_findings(tmp_path, dict(AUTHORITY_ENV, **{"DB_SYNC_POSTGRES_CONNECTION_STRING ": "db-9:1/x"}))
+    assert found == [twin_refused("DB_SYNC_POSTGRES_CONNECTION_STRING ")] and "db-9" not in found[0]
+
+
+def test_an_environment_capture_of_another_process_than_its_stat_capture_is_refused(tmp_path):
+    """A capture left from before a restart, or taken of another process: the settings are not this node's."""
+    node = captured_node(tmp_path)
+    for pid, ticks, said in ((NODE_PID, STARTED_TICKS - 1, f"pid {NODE_PID}, started at tick {STARTED_TICKS - 1}"),
+                             (NODE_PID + 1, STARTED_TICKS, f"pid {NODE_PID + 1}, started at tick {STARTED_TICKS}")):
+        Path(node["cmdline"] + ".environ").write_bytes(capture_block(AUTHORITY_ENV, pid, ticks))
+        with pytest.raises(lp.InputError) as refused:
+            lp.check_environment({"nodes": [node]})
+        assert str(refused.value) == (
+            f"authority val1: environ {node['cmdline']}.environ was taken of {said}, and its process_stat capture is "
+            f"of pid {NODE_PID}, started at tick {STARTED_TICKS}: the settings are another process's, as a capture "
+            "left from before a restart is; take both of the node process that runs now")
+    Path(node["cmdline"] + ".environ").write_bytes(capture_block(AUTHORITY_ENV))
+    assert lp.check_environment({"nodes": [node]}) == []
+
+
+def test_an_authority_with_no_stat_capture_cannot_tie_its_environment_to_a_process(tmp_path):
+    node = captured_node(tmp_path)
+    Path(node["cmdline"] + ".environ").write_bytes(capture_block(AUTHORITY_ENV))
+    del node["process_stat"]
+    with pytest.raises(lp.InputError, match="authority val1: give a copy of its node process's /proc/<pid>/stat"):
+        lp.check_environment({"nodes": [node]})
+
+
+CONNECTION_URL = f"postgres://materios:{PASSWORD}@db-1.internal:5432/cexplorer"
+
+
+@pytest.mark.parametrize("running", [AUTHORITY_ENV,
+                                     dict(AUTHORITY_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING="db-9:5432/cexplorer"),
+                                     {name: value for name, value in AUTHORITY_ENV.items()
+                                      if name != "DB_SYNC_POSTGRES_CONNECTION_STRING"}],
+                         ids=["the same database", "another database", "none"])
+def test_a_connection_string_the_manifest_declares_is_never_shown(tmp_path, running):
+    """A manifest that wrongly holds the URL, password and all: rule 9 refuses it, and rule 8's line on the
+    difference names the setting and shows neither side's value unless it is a reduced one."""
+    found = environment_findings(tmp_path, running,
+                                 dict(AUTHORITY_ENV, DB_SYNC_POSTGRES_CONNECTION_STRING=CONNECTION_URL))
+    assert len(found) == 1 and "DB_SYNC_POSTGRES_CONNECTION_STRING" in found[0]
+    assert PASSWORD not in found[0] and "materios:" not in found[0] and "postgres://" not in found[0]
+
+
+def test_cli_never_shows_a_connection_string_a_manifest_wrongly_holds(clean, capsys):
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            clean.environ[node["name"]] = dict(node["env"])
+            node["env"]["DB_SYNC_POSTGRES_CONNECTION_STRING"] = CONNECTION_URL
+    code, out = clean.run(capsys)
+    assert code == 1 and "[9 committee] authority val0 gives DB_SYNC_POSTGRES_CONNECTION_STRING in another form" in out
+    assert "[8 node] authority val0: its node process was started with DB_SYNC_POSTGRES_CONNECTION_STRING" in out
+    assert PASSWORD not in out and "materios:" not in out
+
+
+def test_every_setting_an_authority_runs_apart_from_its_manifest_is_named(tmp_path):
+    running = dict(AUTHORITY_ENV, USE_MAIN_CHAIN_FOLLOWER_MOCK="true", MC__FIRST_EPOCH_NUMBER="209")
+    del running["SIDECHAIN_BLOCK_BENEFICIARY"]
+    assert len(environment_findings(tmp_path, running)) == 3
+
+
+def test_an_authority_with_no_environment_capture_is_an_input_error_that_says_how_to_take_it(tmp_path):
+    node = captured_node(tmp_path)
+    with pytest.raises(lp.InputError) as refused:
+        lp.check_environment({"nodes": [node]})
+    assert str(refused.value) == (
+        f"authority val1: cannot read environ {tmp_path / 'val1.cmdline.environ'}: No such file or directory; take it "
+        "on its machine with `python3 capture_environ.py <pid> <its cmdline capture>.environ`, which writes the "
+        "settings the preflight reads and no password")
+
+
+def test_an_environment_capture_that_is_no_capture_is_an_input_error(tmp_path):
+    node = captured_node(tmp_path)
+    Path(node["cmdline"] + ".environ").write_bytes(b"PATH=/usr/bin")
+    with pytest.raises(lp.InputError, match="authority val1: environ .* is not what capture_environ.py writes"):
+        lp.check_environment({"nodes": [node]})
+
+
+def test_a_raw_copy_of_the_environment_is_refused_as_a_capture(tmp_path):
+    """`cat /proc/<pid>/environ` holds every setting, the database password among them: the preflight reads only what
+    the capture tool writes."""
+    node = captured_node(tmp_path)
+    Path(node["cmdline"] + ".environ").write_bytes(environ_block(RUNNING_ENV))
+    with pytest.raises(lp.InputError) as refused:
+        lp.check_environment({"nodes": [node]})
+    assert "is not what capture_environ.py writes" in str(refused.value) and PASSWORD not in str(refused.value)
+
+
+# The rehearsal's PASS was given to four authorities on the mock follower: their manifest left the setting out.
+def test_cli_refuses_an_authority_running_the_mock_follower_its_manifest_leaves_out(clean, capsys):
+    clean.environ["val1"] = dict(clean.launch["nodes"][1]["env"], USE_MAIN_CHAIN_FOLLOWER_MOCK="true",
+                                 MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE="/srv/rehearsal/registrations.json")
+    code, out = clean.run(capsys)
+    assert (code, out.splitlines()[1:]) == (1, [
+        f"  [8 node] authority val1: its node process was started with {name}: {MOCK_FOLLOWER}"
+        for name in ("MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE", "USE_MAIN_CHAIN_FOLLOWER_MOCK")]), out
+
+
+def test_cli_refuses_an_authority_whose_database_is_not_the_declared_one(clean, capsys):
+    clean.environ["val3"] = dict(clean.launch["nodes"][3]["env"],
+                                 DB_SYNC_POSTGRES_CONNECTION_STRING="db-elsewhere:5432/cexplorer")
+    code, out = clean.run(capsys)
+    assert code == 1 and only_reason(
+        out, "[8 node] authority val3: its node process was started with DB_SYNC_POSTGRES_CONNECTION_STRING="
+             "db-elsewhere:5432/cexplorer, and its manifest declares DB_SYNC_POSTGRES_CONNECTION_STRING="
+             f"db-1.internal:5432/cexplorer: {DECLARED_APART}"), out
+
+
+# ---------------------------------------------------------------------------
+# A verdict before any node runs, and every input error in one run
+# ---------------------------------------------------------------------------
+
+GENESIS_PASS = "MAINNET LAUNCH PREFLIGHT (genesis stage): PASS"
+NOT_THE_GATE = ("This is not the launch gate: run check without --stage once every authority's node runs, and "
+                "announce the genesis hash only after it passes.")
+NOT_RUN_BEFORE_START = [
+    "[3 rpc] what each public RPC URL serves, probed live",
+    "[3 rpc] the argv each authority's node process runs with: its listeners were read from its manifest argv",
+    "[8 node] the genesis and chain each authority's running node serves, the binary and chain spec file it runs, "
+    "and when its --chain path last changed",
+    "[8 node] the environment each authority's node process was started with: a mock follower, or a setting other "
+    "than its manifest declares",
+]
+NOT_RUN_WITHOUT_KUPO = [
+    "[1 dev-keys] [9 committee] the D-parameter and the permissioned candidates on Cardano: their keys, the "
+    "committee the runtime draws from them, and their age",
+    "[3 rpc] a Cardano permissioned candidate with no authority node",
+    "[4 supply] the genesis lock on Cardano: the cMATRA it holds, who can spend it and the genesis its datum binds",
+]
+
+
+def genesis_stage(clean, capsys, kupo=True, binaries=None, launch=None) -> tuple[int, str]:
+    """`sign`, then `check --stage genesis`, with every keyholder's proof in and no authority's node running: no
+    capture of any is on disk."""
+    spec_path = clean.prepare()
+    for node in clean.launch["nodes"]:
+        for field in ("cmdline", *lp.CAPTURES):
+            if node["authority"] and field != "exe" and field in node:
+                Path(node[field]).unlink(missing_ok=True)
+        if "cmdline" in node:
+            Path(node["cmdline"] + ".environ").unlink(missing_ok=True)
+    operator = clean.tmp_path / "operator-keys.json"
+    operator.write_text(json.dumps({"keys": []}))
+    seed, signed, launch_path = (clean.tmp_path / name for name in ("launch.key", "signed.json", "launch.json"))
+    seed.write_text("0x" + clean.launch_key.encode().hex() + "\n")
+    launch_path.write_text(json.dumps(launch or prove(clean.launch, lp.load_spec(str(spec_path)))))
+    assert lp.main(["sign", "--spec", str(spec_path), "--launch", str(launch_path), "--key", str(seed), "--out",
+                    str(signed)]) == 0
+    capsys.readouterr()
+    binaries = [clean.node_exe] if binaries is None else binaries
+    code = lp.main(["check", "--stage", "genesis", "--spec", str(spec_path), "--launch", str(launch_path),
+                    "--signed-manifest", str(signed), "--subwasm", subwasm(), "--extra-well-known", str(operator),
+                    *(["--kupo", clean.kupo.url] if kupo else []),
+                    *(word for binary in binaries for word in ("--node-binary", str(binary)))])
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
+
+
+def test_cli_the_launch_gate_before_any_node_runs_names_every_capture_it_lacks(clean, capsys):
+    """The rehearsal's run before the nodes started stopped at the first authority's cmdline and said nothing else."""
+    spec_path = clean.prepare()
+    missing = []
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            for field in ("cmdline", "chain_spec", "served_genesis", *SERVED_IDENTITY, "process_stat", "system_stat",
+                          "chain_spec_stat"):
+                Path(node[field]).unlink()
+                missing.append(f"authority {node['name']}: cannot read {field} {node[field]}: No such file or "
+                               "directory")
+            Path(node["cmdline"] + ".environ").unlink()
+            missing.append(f"authority {node['name']}: cannot read environ {node['cmdline']}.environ: ")
+    code, out = run_cli(clean.tmp_path, spec_path, prove(clean.launch, lp.load_spec(str(spec_path))), capsys,
+                        clean.kupo.url, clean.launch_key)
+    assert code == 2 and "PASS" not in out
+    refused = [line for line in out.splitlines() if line.startswith("MAINNET LAUNCH PREFLIGHT: REFUSE (input) ")]
+    assert len(refused) == len(missing) == 40
+    assert all(any(reason in line for line in refused) for reason in missing), out
+    assert "check --stage genesis" in out
+
+
+def test_cli_the_genesis_stage_passes_a_clean_launch_before_any_node_runs(clean, capsys):
+    code, out = genesis_stage(clean, capsys)
+    assert code == 0, out
+    assert out.splitlines() == [GENESIS_PASS, *("  not run: " + rule for rule in NOT_RUN_BEFORE_START), NOT_THE_GATE]
+    assert PASS not in out
+
+
+def test_cli_the_genesis_stage_without_a_kupo_names_the_cardano_rules_it_did_not_run(clean, capsys):
+    code, out = genesis_stage(clean, capsys, kupo=False)
+    assert code == 0, out
+    assert out.splitlines() == [GENESIS_PASS, *("  not run: " + rule
+                                                for rule in NOT_RUN_BEFORE_START + NOT_RUN_WITHOUT_KUPO), NOT_THE_GATE]
+
+
+def test_cli_the_genesis_stage_runs_each_pinned_binarys_build_of_the_manifest(clean, capsys):
+    log = clean.tmp_path / "calls.jsonl"
+    exe = fake_node(clean.tmp_path, log=str(log))
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node.update(exe=str(clean.tmp_path / f"{node['name']}.exe-capture-to-come"), exe_sha256=sha256_pin(exe))
+    code, out = genesis_stage(clean, capsys, binaries=[exe])
+    assert code == 0, out
+    calls = node_calls(log)
+    assert sorted(call["argv"][1] for call in calls) == ["build-spec", "chain-id", "export-blocks", "export-blocks"]
+    assert [call["manifest_sha256"] for call in calls if call["argv"][1] == "build-spec"] == [hashlib.sha256(
+        (clean.tmp_path / "launch.json").read_bytes()).hexdigest()]
+    spec_sha = hashlib.sha256((clean.tmp_path / "clean-raw.json").read_bytes()).hexdigest()
+    assert [call["chain_sha256"] for call in calls if call["argv"][1] != "build-spec"] == [False, spec_sha, spec_sha]
+
+
+def test_cli_the_genesis_stage_refuses_a_spec_the_pinned_binary_does_not_build(clean, capsys):
+    clean.node_builds_this()
+    del clean.spec.storage[lp.storage_key("Grandpa", "CurrentSetId")]
+    code, out = genesis_stage(clean, capsys)
+    assert code == 1, out
+    assert out.splitlines()[:2] == [
+        "MAINNET LAUNCH PREFLIGHT (genesis stage): REFUSE (1 reasons)",
+        f"  {NOT_THE_BUILD}genesis storage differs at 1 key: Grandpa.CurrentSetId, which only the node's build sets"]
+    assert out.splitlines()[2:] == [*("  not run: " + rule for rule in NOT_RUN_BEFORE_START), NOT_THE_GATE]
+
+
+def test_cli_the_genesis_stage_needs_each_pinned_binary(clean, capsys):
+    other = fake_node(clean.tmp_path, log=str(clean.tmp_path / "unpinned.jsonl"))
+    code, out = genesis_stage(clean, capsys, binaries=[other])
+    pin = clean.launch["nodes"][0]["exe_sha256"]
+    assert (code, out.splitlines()) == (2, [
+        f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) authority {name} pins exe_sha256 {pin}, and no --node-binary given "
+        "is that file: the genesis stage runs each pinned binary's build-spec on the launch manifest, so give the "
+        "release binary every validator will run" for name in ("val0", "val1", "val2", "val3")]), out
+
+
+def test_cli_the_genesis_stage_refuses_what_the_launch_gate_refuses_of_the_manifest_proofs_and_signature(clean, capsys):
+    spec_path = clean.prepare()
+    launch = prove(clean.launch, lp.load_spec(str(spec_path)))
+    del launch["roles"]["sudo"][0]["members"][2]["pop"]
+    del launch["nodes"][1]["env"]["SIDECHAIN_BLOCK_BENEFICIARY"]
+    launch["nodes"][3]["argv"] = [*launch["nodes"][3]["argv"][:-1], "unsafe", "--unsafe-rpc-external"]
+    code, out = genesis_stage(clean, capsys, launch=launch)
+    assert code == 1, out
+    assert out.splitlines()[:4] == [
+        "MAINNET LAUNCH PREFLIGHT (genesis stage): REFUSE (3 reasons)",
+        "  " + no_pop("roles.sudo[0].members[2]", "sudo", "0 2"),
+        "  " + NO_BENEFICIARY,
+        "  [3 rpc] authority val3 serves unsafe RPC methods on an external listener"], out
+
+
+def test_cli_the_genesis_stage_checks_cardano_where_a_kupo_is_given(clean, capsys):
+    clean.lock_output = kupo_output(assets={lp.CMATRA_UNIT: 1})
+    code, out = genesis_stage(clean, capsys)
+    assert code == 1 and "[4 supply] Materios issues " in out.splitlines()[1], out
+
+
+def test_cli_the_genesis_stage_reads_no_capture(clean, capsys):
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            for field in ("cmdline", *lp.CAPTURES):
+                del node[field]
+    code, out = genesis_stage(clean, capsys)
+    assert (code, out.splitlines()[0]) == (0, GENESIS_PASS), out
+
+
+@pytest.mark.parametrize("words, error", [
+    (["--node-binary", "materios-node"], "--node-binary is read in the genesis stage only: the launch gate runs each "
+                                         "authority's exe capture, the binary its node process runs"),
+    ([], None)])
+def test_cli_the_launch_gate_takes_no_binary_and_needs_a_kupo(clean, capsys, words, error):
+    spec_path = clean.prepare()
+    operator = clean.tmp_path / "operator-keys.json"
+    operator.write_text(json.dumps({"keys": []}))
+    launch_path = clean.tmp_path / "launch.json"
+    launch_path.write_text(json.dumps(clean.launch))
+    code = lp.main(["check", "--spec", str(spec_path), "--launch", str(launch_path), "--signed-manifest",
+                    str(clean.tmp_path / "signed.json"), "--extra-well-known", str(operator),
+                    *(["--kupo", clean.kupo.url] if words else []), *words])
+    out = capsys.readouterr()
+    error = error or ("the launch gate needs --kupo, a Kupo on Cardano mainnet: only check --stage genesis runs "
+                      "without one, and says which rules it did not run")
+    assert (code, out.out + out.err) == (2, f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) {error}\n")
+
+
+def test_every_unreadable_part_of_a_launch_manifest_is_named_in_one_run():
+    launch = {"roles": {"oracle": "5Grw", "treasury": []}, "economics": {"fee_bufer": 1}, "supply": VALID_LOCK,
+              "slots_per_epoch": "600",
+              "nodes": [{"name": "val1", "host": "val1", "authority": True, "env": {"LD_PRELOAD": "/x.so"}},
+                        {"name": "edge", "host": "edge", "authority": False, "exe": "edge.exe"},
+                        dict(authority(["materios-node", "--validator"]), env={"USE_MAIN_CHAIN_FOLLOWER_MOCK": "1"})],
+              "public_rpc": ["ftp://rpc.example.org"]}
+    with pytest.raises(lp.InputError) as refused:
+        lp.validate_launch(launch)
+    assert [str(error).split(":")[0].split(",")[0] for error in refused.value.errors] == [
+        "roles.oracle must be a list of public keys",
+        "roles.treasury is not a role a mainnet launch knows",
+        "unknown economics field fee_bufer",
+        "slots_per_epoch must be a u32",
+        "node val1",
+        "nodes[1] exe is read for an authority only",
+        "node val1",
+        "public_rpc[0] must be an http"]
+    assert str(refused.value) == "\n".join(map(str, refused.value.errors))
+
+
+def test_one_unreadable_part_is_the_error_it_always_was():
+    with pytest.raises(lp.InputError) as refused:
+        lp.validate_launch({"roles": {}, "supply": VALID_LOCK, "slots_per_epoch": "600"})
+    assert type(refused.value) is lp.InputError and str(refused.value).startswith("slots_per_epoch must be a u32")
+
+
+def test_cli_names_every_unreadable_part_of_the_manifest_in_one_run(clean, capsys):
+    clean.launch["nodes"][0]["env"]["GCONV_PATH"] = "/tmp/gconv"
+    clean.launch["nodes"][2]["argv"].append("--not-an-option")
+    clean.launch["public_rpc"].append("ftp://rpc.example.org")
+    signing_code, code, out = sign_and_check(clean.tmp_path, clean.prepare(), clean.launch, capsys, clean.kupo.url,
+                                             clean.launch_key)
+    assert (signing_code, code) == (2, 2)
+    assert out.splitlines() == [
+        "MAINNET LAUNCH PREFLIGHT: REFUSE (input) node val0: sets GCONV_PATH, which is not a setting an authority may "
+        "set (logging, TZ and the node's Cardano follower settings); the preflight cannot read what it changes",
+        "MAINNET LAUNCH PREFLIGHT: REFUSE (input) authority val2: gives --not-an-option, an option the preflight does "
+        "not know, so it cannot tell whether it changes the genesis the node builds",
+        "MAINNET LAUNCH PREFLIGHT: REFUSE (input) public_rpc[1] must be an http, https, ws or wss URL"]
+
+
+def test_cli_names_the_input_errors_of_separate_rules_and_the_reasons_of_the_rest_in_one_run(clean, capsys):
+    """A stored number of another width stops rule 2 and an answer that is no JSON-RPC stops rule 8; rule 9 still
+    refuses the authority with no beneficiary."""
+    put(clean.spec, "OrinqReceipts", "EraCapBase", b"\x01")
+    clean.node_builds_this()
+    del clean.launch["nodes"][2]["env"]["SIDECHAIN_BLOCK_BENEFICIARY"]
+    spec_path = clean.prepare()
+    Path(clean.launch["nodes"][0]["served_chain"]).write_text("not json")
+    code, out = run_cli(clean.tmp_path, spec_path, prove(clean.launch, lp.load_spec(str(spec_path))), capsys,
+                        clean.kupo.url, clean.launch_key)
+    assert code == 2 and "PASS" not in out
+    assert "  " + NO_BENEFICIARY.replace("val1", "val2") in out.splitlines()
+    refused = [line for line in out.splitlines() if line.startswith("MAINNET LAUNCH PREFLIGHT: REFUSE (input) ")]
+    assert len(refused) == 2 and "OrinqReceipts.EraCapBase" in refused[0] and "served_chain" in refused[1], out
+
+
+# ---------------------------------------------------------------------------
+# The launch key: minted offline, pinned by review
+# ---------------------------------------------------------------------------
+
+def launch_key_cli(capsys, *words: str) -> tuple[int, str, str]:
+    code = lp.main(["launch-key", *words])
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def test_a_minted_launch_key_is_a_seed_only_its_owner_reads_and_prints_only_its_public_key(tmp_path, capsys):
+    path = tmp_path / "launch.key"
+    code, out, err = launch_key_cli(capsys, "new", "--out", str(path))
+    assert code == 0 and err == ""
+    assert path.stat().st_mode & 0o777 == 0o600
+    seed = path.read_text()
+    assert re.fullmatch(r"0x[0-9a-f]{64}\n", seed)
+    public = bytes(signing.SigningKey(bytes.fromhex(seed[2:-1])).verify_key)
+    assert out == f"0x{public.hex()}\n"
+    assert seed.strip() not in out and seed[2:-1] not in out
+
+
+def test_minting_two_launch_keys_gives_two_keys(tmp_path, capsys):
+    printed = [launch_key_cli(capsys, "new", "--out", str(tmp_path / f"{i}.key"))[1] for i in range(2)]
+    assert printed[0] != printed[1]
+
+
+def test_minting_a_launch_key_overwrites_no_file(tmp_path, capsys):
+    path = tmp_path / "launch.key"
+    path.write_text("0x" + "11" * 32 + "\n")
+    code, out, err = launch_key_cli(capsys, "new", "--out", str(path))
+    assert (code, out) == (2, "") and "File exists" in err and "11" * 32 not in err
+    assert path.read_text() == "0x" + "11" * 32 + "\n"
+
+
+def test_the_public_key_of_a_launch_key_file_is_printed_without_its_seed(tmp_path, capsys):
+    key = signing.SigningKey.generate()
+    path = tmp_path / "launch.key"
+    path.write_text("0x" + key.encode().hex() + "\n")
+    assert launch_key_cli(capsys, "public", "--key", str(path)) == (0, f"0x{pub(key).hex()}\n", "")
+
+
+@pytest.mark.parametrize("text", ["0x" + "11" * 31, "11" * 32, "0x" + "zz" * 32, ""])
+def test_a_launch_key_file_that_holds_no_seed_is_refused_without_echoing_it(tmp_path, capsys, text):
+    path = tmp_path / "launch.key"
+    path.write_text(text)
+    code, out, err = launch_key_cli(capsys, "public", "--key", str(path))
+    assert (code, out) == (2, "")
+    assert err.startswith(f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) cannot load the launch signing key from {path}")
+    assert not text or text[2:] not in err
+
+
+def test_a_minted_key_signs_a_manifest_that_verifies_under_the_key_it_printed(clean, tmp_path, capsys, monkeypatch):
+    path = tmp_path / "minted.key"
+    public = launch_key_cli(capsys, "new", "--out", str(path))[1].strip()
+    pin_launch_keys(monkeypatch, tmp_path, bytes.fromhex(public[2:]))
+    clean.launch_key = signing.SigningKey(bytes.fromhex(path.read_text()[2:-1]))
+    code, out = clean.run(capsys)
+    assert (code, out.splitlines()) == (0, [PASS, f"  signed by launch key {public}, pinned in "
+                                                  f"{tmp_path / 'launch_keys.json'}"]), out
+
+
+def test_cli_a_pass_names_the_pinned_launch_key_that_signed(clean, capsys):
+    code, out = clean.run(capsys)
+    assert (code, out.splitlines()) == (0, [PASS, f"  signed by launch key 0x{pub(clean.launch_key).hex()}, pinned in "
+                                                  f"{clean.tmp_path / 'launch_keys.json'}"])
+
+
+# ---------------------------------------------------------------------------
+# Rule 8: why a --chain path under a busy directory refuses
+# ---------------------------------------------------------------------------
+
+def test_a_refused_chain_path_says_what_moves_a_directorys_ctime(clean, capsys):
+    step = lookup(authority_chain(clean.tmp_path))[0]
+    clean.changed["val1"] = {step: STARTED + 30}
+    code, out = clean.run(capsys)
+    assert code == 1 and only_reason(out, changed_after_start(step, STARTED + 30).replace("val0", "val1")), out
+
+
+# ---------------------------------------------------------------------------
+# A setting's name, as the node's readers take it
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("twin", TWINS, ids=list(map(repr, TWINS)))
+def test_a_manifest_that_declares_a_setting_under_a_name_that_is_not_exact_is_refused(twin):
+    exact = NAMES_READ_AS[twin]
+    node = follower_node(env=dict(AUTHORITY_ENV, **{twin: AUTHORITY_ENV[exact]}))
+    with pytest.raises(lp.InputError) as refused:
+        lp.validate_node(node, "nodes[0]")
+    assert str(refused.value) == (
+        f"node val1: sets a setting named {twin!r}, which is not the exact name {exact}: the node's follower trims a "
+        "setting's name, reads it whatever its case and takes the later of two it reads as one, so declare each "
+        "setting under its exact name alone")
+
+
+@pytest.mark.parametrize("twin", ["use_main_chain_follower_mock", "LD_PRELOAD ", " pghost"])
+def test_a_node_that_is_no_authority_may_not_declare_such_a_name_either(twin):
+    node = {"name": "edge", "host": "edge", "authority": False, "env": {twin: "x"}}
+    with pytest.raises(lp.InputError, match=f"node edge: sets a setting named {twin!r}, which is not the exact name"):
+        lp.validate_node(node, "nodes[0]")
+
+
+def node_process_captures(clean, name: str, process: subprocess.Popen) -> None:
+    """Take an authority's environment, stat and machine captures from a process of this host, as its operator
+    takes them from its node: the tool for the first, a copy of /proc for the others."""
+    node = next(node for node in clean.launch["nodes"] if node["name"] == name)
+    Path(node["process_stat"]).write_bytes(Path(f"/proc/{process.pid}/stat").read_bytes())
+    Path(node["system_stat"]).write_bytes(Path("/proc/stat").read_bytes())
+    done = subprocess.run([sys.executable, "-I", "-S", str(HERE / "capture_environ.py"), str(process.pid),
+                           node["cmdline"] + ".environ"], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+
+
+def gate_on_a_process(clean, capsys, extra: dict) -> tuple[int, str]:
+    """The launch gate on the clean launch, its first authority's process captures taken from a process of this host
+    started with the settings its manifest declares, the database as the URL the node is given, and `extra`."""
+    spec_path = clean.prepare()
+    node = clean.launch["nodes"][0]
+    process = started(dict(node["env"], DB_SYNC_POSTGRES_CONNECTION_STRING=CONNECTION_URL, **extra))
+    try:
+        node_process_captures(clean, node["name"], process)
+    finally:
+        process.kill()
+        process.wait()
+    return run_cli(clean.tmp_path, spec_path, prove(clean.launch, lp.load_spec(str(spec_path))), capsys,
+                   clean.kupo.url, clean.launch_key)
+
+
+def test_cli_passes_an_authority_whose_process_was_started_with_what_its_manifest_declares(clean, capsys):
+    code, out = gate_on_a_process(clean, capsys, {})
+    assert (code, out.splitlines()[0]) == (0, PASS), out
+
+
+def test_cli_refuses_an_authority_whose_process_has_another_value_under_the_exact_name(clean, capsys):
+    code, out = gate_on_a_process(clean, capsys, {"MC__FIRST_EPOCH_NUMBER": "1"})
+    assert code == 1 and "started with MC__FIRST_EPOCH_NUMBER=1, and its manifest declares" in out, out
+
+
+# The node read the padded entry and the gate read the exact one: a database, an epoch layout, a security parameter
+# and a stability margin the manifest never showed.
+@pytest.mark.parametrize("extra", [
+    {"MC__FIRST_EPOCH_NUMBER ": "1"},
+    {"DB_SYNC_POSTGRES_CONNECTION_STRING ": f"postgres://materios:{PASSWORD}@attacker.example:5432/fake"},
+    {" CARDANO_SECURITY_PARAMETER": "5", "BLOCK_STABILITY_MARGIN\t": "9"},
+    {"MC__ FIRST_EPOCH_NUMBER": "1"}, {"mc__first_epoch_number": "1"}, {"PGOPTIONS": "-c search_path=fake"},
+], ids=["a padded epoch number", "a padded database", "a padded security parameter and margin",
+        "a space after the MC__ prefix", "a lowercase epoch number", "session options for the database"])
+def test_cli_refuses_an_authority_whose_process_has_a_setting_the_node_reads_and_the_manifest_does_not_show(
+        clean, capsys, extra):
+    code, out = gate_on_a_process(clean, capsys, extra)
+    refused = out.splitlines()[1:]
+    assert code == 1 and len(refused) == len(extra), out
+    for name, line in zip(sorted(extra), refused):
+        said = (f"was started with {name}={extra[name]}, which its manifest does not declare"
+                if capture_environ.reads_as(name) == name else
+                f"was started with a setting named {name!r}, which is not the exact name")
+        assert line.startswith("  [8 node] authority val0: its node process ") and said in line, out
+    assert PASSWORD not in out and "attacker.example" not in out
+
+
+# ---------------------------------------------------------------------------
+# What the genesis stage runs is what the launch gate runs, less what reads a running node
+# ---------------------------------------------------------------------------
+
+def pinned_to_a_node(clean, **knobs) -> Path:
+    """Pin every authority of the clean launch to a stand-in node with these knobs, and return its call log."""
+    log = clean.tmp_path / "pinned-calls.jsonl"
+    exe = fake_node(clean.tmp_path, log=str(log), **knobs)
+    clean.node_exe = exe
+    for node in clean.launch["nodes"]:
+        if node["authority"]:
+            node.update(exe=str(exe), exe_sha256=sha256_pin(exe))
+    return log
+
+
+def reasons(out: str) -> list[str]:
+    return [line for line in out.splitlines() if line.startswith("  [")]
+
+
+# What a pinned binary shows of the checked spec with no node running: the genesis it builds from it, the chain ids
+# its runtime holds at block one, the Cardano ids it reads, and the chain its argv names.
+BINARY_ALONE = {
+    "a node that builds another genesis": (lambda clean: pinned_to_a_node(clean, tamper=True),
+                                           "its node builds genesis 0x"),
+    "a runtime chain id that is not the genesis": (
+        lambda clean: pinned_to_a_node(clean, chain_ids={"Oracle.MateriosChainId": [7] * 32}),
+        "the spec's runtime holds Oracle.MateriosChainId 0x"),
+    "a runtime that reads other Cardano ids": (
+        lambda clean: pinned_to_a_node(clean, cardano_ids={"network_magic": 1, "mainchain_genesis_hash": [0] * 32,
+                                                           "aegis_policy_v1_script_hash": [0] * 28}),
+        "its node's chain-id reads IntentSettlement.CardanoIds as network magic 1"),
+    "a chain built into the node": (lambda clean: with_node_argv(clean, ["--chain", "local"]),
+                                    "--chain 'local' builds genesis 0x"),
+    "no chain": (lambda clean: with_node_argv(clean, []), "gives no --chain"),
+}
+
+
+@pytest.mark.parametrize("arrange, reason", BINARY_ALONE.values(), ids=BINARY_ALONE)
+def test_cli_the_genesis_stage_refuses_whatever_the_launch_gate_refuses_of_the_binary_and_the_spec_alone(
+        clean, capsys, arrange, reason):
+    arrange(clean)
+    gate_code, gate_out = clean.run(capsys)
+    stage_code, stage_out = genesis_stage(clean, capsys)
+    assert gate_code == 1 and all("[8 node]" in line and reason in line for line in reasons(gate_out)), gate_out
+    assert (stage_code, reasons(stage_out)) == (1, reasons(gate_out)), stage_out
+
+
+# Defects of a launch that no capture shows, one from each rule the stage runs.
+ANY_RULE = {
+    "1 dev-keys": lambda clean: clean.launch["roles"].update(anchor_signer=[ss58(ALICE)]),
+    "2 rewards": lambda clean: clean.launch["economics"].update(era_cap_baseline_attestor_count=31),
+    "3 rpc": lambda clean: clean.launch["nodes"][0].update(
+        argv=[*clean.launch["nodes"][0]["argv"][:-1], "unsafe", "--unsafe-rpc-external"]),
+    "4 supply": lambda clean: clean.launch["dust"]["dust_pool"].update(
+        {name: amount + 1 for name, amount in clean.launch["dust"]["dust_pool"].items()}),
+    "6 checkpoint": lambda clean: clean.spec.doc.update(codeSubstitutes={"1": "0x00"}),
+    "7 timelock": lambda clean: put(clean.spec, "RootTimelock", "Delays", delays(*TESTNET_DELAYS)),
+    "9 committee": lambda clean: clean.launch["nodes"][2]["env"].pop("SIDECHAIN_BLOCK_BENEFICIARY"),
+    "11 settlement": lambda clean: clean.launch.update(settlement=dict(BOUND_AFTER_GENESIS)),
+    "12 dust": lambda clean: put(clean.spec, "Motra", "Params", bytes(108)),
+}
+
+
+@pytest.mark.parametrize("rule", ANY_RULE)
+def test_cli_the_genesis_stage_gives_the_launch_gates_reasons_for_a_defect_no_capture_shows(clean, capsys, rule):
+    ANY_RULE[rule](clean)
+    clean.node_builds_this()
+    gate_code, gate_out = clean.run(capsys)
+    stage_code, stage_out = genesis_stage(clean, capsys)
+    assert gate_code == 1 and any(f"[{rule}]" in line for line in reasons(gate_out)), gate_out
+    assert (stage_code, reasons(stage_out)) == (1, reasons(gate_out)), stage_out
+
+
+def functions_of_the_preflight() -> dict[str, ast.FunctionDef]:
+    tree = ast.parse((HERE / "launch_preflight.py").read_text())
+    return {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+
+def names_used(node: ast.AST) -> set[str]:
+    """Every name a piece of code refers to: what it calls, and what it hands on to be called. A function is read by
+    its body: what a parameter defaults to is the caller's to replace."""
+    parts = node.body if isinstance(node, ast.FunctionDef) else [node]
+    return {inner.id for part in parts for inner in ast.walk(part) if isinstance(inner, ast.Name)}
+
+
+def reaches(start: set[str], functions: dict[str, ast.FunctionDef]) -> set[str]:
+    """`start` and every function of the preflight those functions refer to, at any depth."""
+    seen, queue = set(), [name for name in start if name in functions]
+    while queue:
+        name = queue.pop()
+        if name not in seen:
+            seen.add(name)
+            queue += [used for used in names_used(functions[name]) if used in functions]
+    return seen
+
+
+def findings_made(function: ast.FunctionDef) -> int:
+    return sum(isinstance(node, ast.Call) and getattr(node.func, "id", None) == "Finding"
+               for node in ast.walk(function))
+
+
+def steps_of_a_run() -> list[tuple[str | None, set[str]]]:
+    """(what the step needs that a run may lack, the functions it calls) for each step run_checks lists."""
+    run_checks = functions_of_the_preflight()["run_checks"]
+    steps = next(node.value for node in ast.walk(run_checks) if isinstance(node, ast.Assign)
+                 and getattr(node.targets[0], "id", None) == "steps")
+    listed = []
+    for step in steps.elts:
+        needs, check = step.elts
+        listed.append((getattr(lp, needs.id) if isinstance(needs, ast.Name) else needs.value, names_used(check)))
+    return listed
+
+
+# The readers through which a rule reads a running node: its captures but the binary, which the genesis stage is
+# given, and the live probe of a public URL.
+READS_A_RUNNING_NODE = {"read_capture", "running_argv", "running_environ", "rpc_answer"}
+# Each function that makes a finding and reads a running node, with how many findings it makes and the line the
+# genesis stage prints for not running it. A finding added to one of these is a finding the genesis stage does not
+# give: it is counted here once someone has seen that it needs the running node.
+NEEDS_A_RUNNING_NODE = {
+    "check_public_rpc": (3, "[3 rpc] what each public RPC URL serves, probed live"),
+    "check_node_genesis": (3, "[8 node] the genesis and chain each authority's running node serves, the binary and "
+                              "chain spec file it runs, and when its --chain path last changed"),
+    "check_served_chain": (1, "[8 node] the genesis and chain each authority's running node serves, the binary and "
+                              "chain spec file it runs, and when its --chain path last changed"),
+    "check_chain_spec_age": (1, "[8 node] the genesis and chain each authority's running node serves, the binary and "
+                                "chain spec file it runs, and when its --chain path last changed"),
+    "check_environment": (5, "[8 node] the environment each authority's node process was started with: a mock "
+                             "follower, or a setting other than its manifest declares"),
+}
+
+
+def test_every_finding_the_launch_gate_can_make_is_made_before_any_node_runs_or_named_as_not_run():
+    """Read from the source, so that a rule added later is in the genesis stage or in this table: every function
+    that makes a finding either reads a running node, and then the stage prints a line for it, or is reached from a
+    step the stage runs."""
+    functions = functions_of_the_preflight()
+    makes = {name: findings_made(function) for name, function in functions.items() if findings_made(function)}
+    reads_running = {name for name in makes if reaches({name}, functions) & READS_A_RUNNING_NODE}
+    assert {name: makes[name] for name in reads_running} == {
+        name: count for name, (count, _) in NEEDS_A_RUNNING_NODE.items()}
+    assert {line for _, line in NEEDS_A_RUNNING_NODE.values()} <= set(lp.NOT_RUN[lp.RUNNING])
+    steps = steps_of_a_run()
+    gate = reaches(set().union(*(calls for _, calls in steps)), functions)
+    stage = reaches(set().union(*(calls for needs, calls in steps if needs != lp.RUNNING)), functions)
+    assert set(makes) - gate == set(), "a function makes a finding no step of the launch gate reaches"
+    assert set(makes) - reads_running <= stage
+    assert len(makes) > 40 and len(steps) > 30
+    running_steps = set().union(*(calls for needs, calls in steps if needs == lp.RUNNING))
+    assert reaches(running_steps, functions) & set(makes) - stage == set(NEEDS_A_RUNNING_NODE)
+
+
+# ---------------------------------------------------------------------------
+# The genesis stage reads each binary it is given once
+# ---------------------------------------------------------------------------
+
+def test_cli_the_genesis_stage_runs_the_bytes_it_hashed_of_a_binary_that_reads_another_way_each_time(clean, capsys):
+    """A FIFO gives the pinned binary to its first reader and other bytes to every later one."""
+    log = pinned_to_a_node(clean)
+    fifo = clean.tmp_path / "node.fifo"
+    os.mkfifo(fifo)
+    pinned, done = clean.node_exe.read_bytes(), threading.Event()
+
+    def feed() -> None:
+        for payload in itertools.chain([pinned], itertools.repeat(b"#!/bin/sh\nexit 1\n")):
+            if done.is_set():
+                return
+            with contextlib.suppress(BrokenPipeError), open(fifo, "wb") as writer:
+                writer.write(payload)
+            time.sleep(0.2)
+
+    feeder = threading.Thread(target=feed, daemon=True)
+    feeder.start()
+    try:
+        code, out = genesis_stage(clean, capsys, binaries=[fifo])
+    finally:
+        done.set()
+        os.close(os.open(fifo, os.O_RDONLY | os.O_NONBLOCK))
+    assert (code, out.splitlines()[0]) == (0, GENESIS_PASS), out
+    assert sorted(call["argv"][1] for call in node_calls(log)) == ["build-spec", "chain-id", "export-blocks",
+                                                                   "export-blocks"]
+
+
+def test_cli_the_genesis_stage_runs_the_bytes_it_hashed_of_a_binary_replaced_once_it_was_read(clean, capsys,
+                                                                                              monkeypatch):
+    log = pinned_to_a_node(clean)
+    given = clean.tmp_path / "release-binary"
+    given.write_bytes(clean.node_exe.read_bytes())
+    read = lp.node_binaries
+
+    def then_replaced(*args):
+        staged = read(*args)
+        given.write_text("#!/bin/sh\necho replaced\n")
+        return staged
+
+    monkeypatch.setattr(lp, "node_binaries", then_replaced)
+    code, out = genesis_stage(clean, capsys, binaries=[given])
+    assert (code, out.splitlines()[0]) == (0, GENESIS_PASS), out
+    assert sorted(call["argv"][1] for call in node_calls(log)) == ["build-spec", "chain-id", "export-blocks",
+                                                                   "export-blocks"]
+
+
+def test_a_binary_that_is_not_the_pinned_one_when_the_genesis_stage_runs_it_is_a_reason(clean, tmp_path):
+    """Whatever stands at the path the stage runs must hash to the pin, or the stage says it ran no binary for that
+    authority."""
+    spec = lp.load_spec(str(clean.spec_path()))
+    other = tmp_path / "other"
+    other.write_text("#!/bin/sh\nexit 1\n")
+    launch = dict(clean.launch, nodes=[dict(node, exe=str(other)) if node["authority"] else node
+                                       for node in clean.launch["nodes"]])
+    lp.validate_launch(launch)
+    pin = clean.launch["nodes"][0]["exe_sha256"]
+    assert messages(lp.check_binary_genesis(spec, launch)) == [
+        f"[8 node] authority val{i}: the node binary read for it has sha256 {sha256_pin(other)}, not its pinned "
+        f"exe_sha256 {pin}: only the pinned binary is run to attest its genesis" for i in range(4)]
+
+
+# ---------------------------------------------------------------------------
+# A node whose name is no string, and a launch key file that cannot be written
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [["edge"], {"is": "edge"}, 7, None])
+def test_a_node_name_that_is_no_string_is_an_input_error(name):
+    launch = {"roles": {}, "supply": VALID_LOCK, "nodes": [{"name": name, "host": "edge", "authority": False}],
+              "rpc_proxies": [{"name": "p", "node": "edge", "kind": "nginx", "config": "c"}]}
+    with pytest.raises(lp.InputError) as refused:
+        lp.validate_launch(launch)
+    assert [str(error).split(":")[0] for error in refused.value.errors] == [
+        "nodes[0] needs a name and a host", "rpc_proxies[0] runs on edge, which is not a declared node"]
+
+
+def test_cli_a_node_name_that_is_no_string_is_an_input_error(clean, capsys):
+    clean.launch["nodes"][-1]["name"] = ["edge"]
+    signing_code, code, out = sign_and_check(clean.tmp_path, clean.prepare(), clean.launch, capsys, clean.kupo.url,
+                                             clean.launch_key)
+    assert (signing_code, code) == (2, 2)
+    assert out.splitlines()[0] == "MAINNET LAUNCH PREFLIGHT: REFUSE (input) nodes[4] needs a name and a host"
+
+
+def test_a_launch_key_whose_seed_cannot_be_written_leaves_no_file(tmp_path):
+    """The file is created before the seed is written: a write the file system refuses must not leave an empty key
+    file that a later run cannot replace."""
+    out = tmp_path / "launch.key"
+
+    def no_room() -> None:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+    done = subprocess.run([sys.executable, "-B", str(HERE / "launch_preflight.py"), "launch-key", "new", "--out",
+                           str(out)], capture_output=True, text=True, preexec_fn=no_room)
+    assert done.returncode == 2 and done.stdout == "", done.stderr
+    assert done.stderr == (f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) cannot write the launch key to {out}: File too "
+                           "large\n")
+    assert not out.exists()
+    again = subprocess.run([sys.executable, "-B", str(HERE / "launch_preflight.py"), "launch-key", "new", "--out",
+                            str(out)], capture_output=True, text=True)
+    assert again.returncode == 0 and out.stat().st_mode & 0o777 == 0o600

@@ -68,7 +68,10 @@ Rules, each of which refuses on its own:
                  sudo key, or sharing any account or member with it; its delays
                  missing, below the runtime's mainnet delays, above its
                  MaxDelay or out of the runtime's order
-  8 node         an authority's running node serves another genesis than the
+  8 node         an authority's node process was started with a mock Cardano
+                 follower setting, or with other settings than its manifest
+                 declares, of those capture_environ.py writes; an
+                 authority's running node serves another genesis than the
                  one the preflight computes, the manifest signs and the lock's
                  datum binds, or its own node binary, run offline on the
                  options its node process runs with, builds another; its
@@ -105,7 +108,9 @@ Rules, each of which refuses on its own:
                  do not divide Cardano's epoch; an authority whose Cardano
                  follower settings (the MC__ epoch layout, k and f) are not
                  the declared cardano_follower, or one other than Cardano
-                 mainnet's; a committee member or Cardano candidate whose
+                 mainnet's; an authority whose launch does not give its node a
+                 block beneficiary, a follower backend, its database and a
+                 stability margin; a committee member or Cardano candidate whose
                  partner-chain key is not the cross_chain key its authority
                  declares; a genesis UTXO, committee candidate address or
                  committee policy, declared or in genesis, other than the
@@ -117,8 +122,10 @@ Rules, each of which refuses on its own:
                  bare key or the all-zero key, gives no proof of possession,
                  or gives one that is not its key's signature (sr25519, or
                  ECDSA for a 33-byte key) of its challenge: the domain, the
-                 chain's name, id and genesis hash, the launch manifest hash
-                 without the proofs, its role and its position
+                 chain's name, id and genesis hash, the hash of the launch
+                 manifest's genesis-bound content (what the spec is built
+                 from, each authority's keys and node binary, who holds the
+                 lock), its role, its position and its key
  11 settlement   the Cardano network genesis stores for settlement
                  (IntentSettlement.CardanoIds) absent or other than Cardano
                  mainnet's network magic and Shelley genesis hash, or an Aegis
@@ -138,19 +145,37 @@ Rules, each of which refuses on its own:
                  than mainnet's, byte for byte; a Motra.AccrualCheckpoint
                  other than each endowed account's free balance at block 0
 
+    launch_preflight.py launch-key new --out launch.key
+    launch_preflight.py launch-key public --key launch.key
+    launch_preflight.py challenge --spec raw.json --launch launch.json --role sudo --index 0 1
+    launch_preflight.py sign --spec raw.json --launch launch.json --key <ed25519 seed file> --out signed.json
+    launch_preflight.py check --stage genesis --spec raw.json --launch launch.json \\
+        --signed-manifest signed.json --node-binary materios-node [--kupo http://<mainnet kupo>] \\
+        --extra-well-known exposed.json [--subwasm PATH]
     launch_preflight.py check --spec raw.json --launch launch.json \\
         --signed-manifest signed.json --kupo http://<mainnet kupo> \\
         --extra-well-known exposed.json [--extra-well-known ...] [--manifest-key 0x<ed25519 pubkey>] \\
         [--subwasm PATH]
-    launch_preflight.py sign --spec raw.json --launch launch.json --key <ed25519 seed file> --out signed.json
-    launch_preflight.py challenge --spec raw.json --launch launch.json --role sudo --index 0 1
 
-Exit 0 only when every rule passes; 1 with every reason when any refuses;
-2 when an input cannot be read.
+check is the launch gate: it runs once every authority's node runs, on captures
+of each. check --stage genesis runs before any node starts: every rule that
+reads only the spec, its metadata, the manifest, the proofs and the signed
+manifest; rule 3 on each authority's manifest argv; rule 8 on each pinned
+binary given with --node-binary, run offline (its build of the manifest, the
+genesis it builds from the checked spec as that argv launches it, and the chain
+ids and Cardano ids its runtime holds at block one); and, with --kupo, the
+rules that read Cardano. It gives every reason the launch gate gives that needs
+no running node, and prints a `not run:` line for each thing that does: what a
+running node serves, the binary, spec file, argv and settings it runs with, and
+what each public RPC URL serves.
+
+Exit 0 only when every rule run passes; 1 with every reason when any refuses;
+2 when an input cannot be read, with every such input named.
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import functools
 import glob
@@ -160,6 +185,7 @@ import ipaddress
 import itertools
 import json
 import math
+import os
 import re
 import shlex
 import socket
@@ -185,6 +211,8 @@ from nacl.exceptions import BadSignatureError
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as ws_connect
 
+import capture_environ
+
 HERE = Path(__file__).resolve().parent
 # The launch key holders' ed25519 public keys: a signed manifest counts only under one of these.
 LAUNCH_KEYS = HERE / "launch_keys.json"
@@ -205,7 +233,10 @@ ZSTD_STEP = 256
 DOMAIN = b"materios-launch-manifest-v1"
 DOMAIN_32 = DOMAIN.ljust(32, b"\0")
 # What a multisig member's proof of possession signs first, apart from anything else a key signs.
-POP_DOMAIN = b"materios-launch-pop-v1"
+POP_DOMAIN = b"materios-launch-pop-v2"
+# What the hash a proof of possession binds of the launch manifest is taken over, before the canonical JSON of the
+# manifest's genesis-bound content.
+GENESIS_CONTENT_DOMAIN = b"materios-launch-genesis-content-v1"
 # The ristretto identity. schnorrkel, in the node and here, verifies its sr25519 signature with R and s zero of any
 # message, which needs no secret; the well-known key table cannot name it, since rule 1 finds a table key anywhere in
 # genesis storage and the runtime code, which hold runs of 32 zero bytes.
@@ -423,6 +454,39 @@ AUTHORITY_SETTINGS = frozenset({
     "SIDECHAIN_BLOCK_BENEFICIARY", "MITHRIL_AGGREGATOR_ENDPOINT", "MITHRIL_GENESIS_VERIFICATION_KEY",
     *CARDANO_MAINNET_FOLLOWER,
 })
+# The mock Cardano follower's switch and the file it reads its committee data from: development only.
+MOCK_FOLLOWER_SETTINGS = ("USE_MAIN_CHAIN_FOLLOWER_MOCK", "MAIN_CHAIN_FOLLOWER_MOCK_REGISTRATIONS_FILE")
+# What an authority's node needs besides the Cardano settings its peers share, by setting: whether its node reads a
+# value, what is refused of an authority that leaves it out, and of one that gives another value. The block proposer
+# reads the beneficiary with sp_core's from_hex and takes 32 bytes; both follower backends read the stability margin
+# as a u32 and the database from the one connection string, and the node takes any backend name but yaci as db-sync.
+# A connection string is declared as capture_environ reduces the one the node runs with, and never shown.
+AUTHORITY_NEEDS = {
+    "SIDECHAIN_BLOCK_BENEFICIARY": (
+        re.compile(r"(?:0x)?[0-9a-fA-F]{64}").fullmatch,
+        "does not set SIDECHAIN_BLOCK_BENEFICIARY: its node's block proposer reads from it the 32 bytes its blocks "
+        "are counted under, and without it the node syncs, keeps its peers and authors no block",
+        "sets SIDECHAIN_BLOCK_BENEFICIARY to other than the 64 hex digits of 32 bytes, with or without 0x: its "
+        "node's block proposer reads no other value, and the node authors no block"),
+    "MAIN_CHAIN_FOLLOWER": (
+        re.compile(r"db-sync|yaci").fullmatch,
+        "does not set MAIN_CHAIN_FOLLOWER: declare the Cardano follower its node reads Cardano through, db-sync or "
+        "yaci",
+        "sets MAIN_CHAIN_FOLLOWER to {value!r}, not db-sync or yaci: its node reads any value but yaci, in any case, "
+        "as db-sync"),
+    "DB_SYNC_POSTGRES_CONNECTION_STRING": (
+        capture_environ.connection_is_reduced,
+        "does not set DB_SYNC_POSTGRES_CONNECTION_STRING, the database its Cardano follower reads: a node with none "
+        "does not start",
+        "gives DB_SYNC_POSTGRES_CONNECTION_STRING in another form than <host>:<port>/<database>, as "
+        "capture_environ.py writes what its node runs with: the manifest is signed and handed round, and holds no "
+        "user or password"),
+    "BLOCK_STABILITY_MARGIN": (
+        lambda value: re.fullmatch(r"[0-9]{1,10}", value) and int(value) < 2**32,
+        "does not set BLOCK_STABILITY_MARGIN: its Cardano follower does not start without it",
+        "sets BLOCK_STABILITY_MARGIN to {value!r}, not a number of Cardano blocks from 0 to 4294967295 in decimal: "
+        "its Cardano follower does not start on another value"),
+}
 # What an authority's launch may run before its node, as bare words: builtins and mkdir, which start nothing.
 SETUP_COMMANDS = ("set", "export", "cd", "umask", "ulimit", "mkdir")
 SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*\+?=.*", re.DOTALL)
@@ -434,6 +498,8 @@ RPC_ENDPOINT_FLAG = "--experimental-rpc-endpoint"
 DEFAULT_RPC_PORT = 9944
 WASM_OVERRIDES_FLAG = "--wasm-runtime-overrides"
 MANY = -1
+# check's stages: the launch gate, and the run before any authority's node starts.
+LAUNCH_STAGE, GENESIS_STAGE = "launch", "genesis"
 # Every option materios-node's run command takes (sc-cli at polkadot-stable2409-4: what `materios-node --help` lists,
 # and the aliases clap also takes), with how many values it takes (MANY: one or more, up to the next option), and
 # whether export-blocks is given it. export-blocks builds genesis the way the node does at startup and takes the
@@ -488,6 +554,22 @@ SERVED_IDENTITY = {"served_chain": ("system_chain", lambda doc: doc.get("name"))
 USER_HZ = 100
 # An authority's captures besides its cmdline: files taken on its machine, read by check only.
 CAPTURES = ("exe", "chain_spec", "served_genesis", *SERVED_IDENTITY, "process_stat", "system_stat", "chain_spec_stat")
+# What each capture the manifest names is, taken on the authority's machine once its node runs.
+CAPTURE_READS = {
+    "cmdline": "its running node process's /proc/<pid>/cmdline",
+    "exe": "a copy of its running node process's /proc/<pid>/exe",
+    "chain_spec": "a copy of the file its node's --chain names, taken on its machine,",
+    "served_genesis": "its running node's answer to chain_getBlockHash [0], saved from its local RPC,",
+    **{field: f"its running node's answer to {method}, saved from its local RPC,"
+       for field, (method, _) in SERVED_IDENTITY.items()},
+    "process_stat": "a copy of its node process's /proc/<pid>/stat",
+    "system_stat": "a copy of its machine's /proc/stat",
+    "chain_spec_stat": "what stat -c '%Z %f %n' prints for each step of the lookup of its --chain path",
+}
+# Where capture_environ.py's capture of an authority's node process is read: its cmdline capture's path and this.
+# The manifest names no field for it: the node's chain-spec builder reads the manifest too, and refuses a field it
+# does not know.
+ENVIRON_CAPTURE = ".environ"
 FILE_TYPE, DIRECTORY, REGULAR_FILE = 0o170000, 0o040000, 0o100000
 STAT_LINE = re.compile(r"(\d+) ([0-9a-f]+) (.*)")
 # What export-blocks --binary writes for --from 0 --to 0: a u64 block count, then genesis as SCALE, its header (zero
@@ -502,6 +584,85 @@ PARTNER_CHAIN_FIELDS = {"genesis_utxo", "committee_candidate_address", "d_parame
                         "permissioned_candidates_policy_id"}
 PROXY_KINDS = ("nginx", "nginx-dump", "cloudflared")
 PROXY_FIELDS = {"name", "node", "kind", "config", "other_targets"}
+# Every field of the launch manifest, by what binds it: a field of an object by its path, an entry of a list as [],
+# a role's entries as one field. GENESIS is what the chain spec is built from, each authority's keys and the node
+# binary that builds the genesis and runs it, and who holds the genesis lock: every keyholder's proof of possession
+# binds these (genesis_content), and so does the launch key's signature. DEPLOYMENT is where and how the launch
+# runs, which the launch key's signature alone binds. A multisig member's pop is neither: it is the proof.
+GENESIS, DEPLOYMENT = "genesis", "deployment"
+MANIFEST_FIELDS = {
+    "roles": GENESIS,
+    "dust": GENESIS,
+    "attestation_threshold": GENESIS,
+    "slots_per_epoch": GENESIS,
+    "economics.attestation_reward_per_signer": GENESIS,
+    "economics.era_cap_base": GENESIS,
+    "economics.era_cap_baseline_attestor_count": GENESIS,
+    "economics.validator_reward_per_era": GENESIS,
+    "economics.treasury_emission_share_perbill": GENESIS,
+    "economics.fee_buffer": GENESIS,
+    "partner_chain.genesis_utxo": GENESIS,
+    "partner_chain.committee_candidate_address": GENESIS,
+    "partner_chain.d_parameter_policy_id": GENESIS,
+    "partner_chain.permissioned_candidates_policy_id": GENESIS,
+    "settlement.aegis_policy_v1_script_hash": GENESIS,
+    "cardano_follower.MC__FIRST_EPOCH_TIMESTAMP_MILLIS": GENESIS,
+    "cardano_follower.MC__EPOCH_DURATION_MILLIS": GENESIS,
+    "cardano_follower.MC__FIRST_EPOCH_NUMBER": GENESIS,
+    "cardano_follower.MC__FIRST_SLOT_NUMBER": GENESIS,
+    "cardano_follower.MC__SLOT_DURATION_MILLIS": GENESIS,
+    "cardano_follower.CARDANO_SECURITY_PARAMETER": GENESIS,
+    "cardano_follower.CARDANO_ACTIVE_SLOTS_COEFF": GENESIS,
+    "supply.genesis_lock.address": GENESIS,
+    "supply.genesis_lock.native_script": GENESIS,
+    "supply.genesis_lock.utxo": DEPLOYMENT,
+    "nodes[].authority": GENESIS,
+    "nodes[].aura": GENESIS,
+    "nodes[].grandpa": GENESIS,
+    "nodes[].cross_chain": GENESIS,
+    "nodes[].exe_sha256": GENESIS,
+    "nodes[].name": DEPLOYMENT,
+    "nodes[].host": DEPLOYMENT,
+    "nodes[].addresses": DEPLOYMENT,
+    "nodes[].argv": DEPLOYMENT,
+    "nodes[].env": DEPLOYMENT,
+    "nodes[].cmdline": DEPLOYMENT,
+    "nodes[].exe": DEPLOYMENT,
+    "nodes[].chain_spec": DEPLOYMENT,
+    "nodes[].served_genesis": DEPLOYMENT,
+    "nodes[].served_chain": DEPLOYMENT,
+    "nodes[].served_chain_type": DEPLOYMENT,
+    "nodes[].served_properties": DEPLOYMENT,
+    "nodes[].process_stat": DEPLOYMENT,
+    "nodes[].system_stat": DEPLOYMENT,
+    "nodes[].chain_spec_stat": DEPLOYMENT,
+    "rpc_proxies[].name": DEPLOYMENT,
+    "rpc_proxies[].node": DEPLOYMENT,
+    "rpc_proxies[].kind": DEPLOYMENT,
+    "rpc_proxies[].config": DEPLOYMENT,
+    "rpc_proxies[].other_targets": DEPLOYMENT,
+    "public_rpc": DEPLOYMENT,
+}
+# What a rule reads that a run may lack: each authority's running node, before any starts, and Cardano, with no Kupo.
+RUNNING, CARDANO = "running", "cardano"
+# What check --stage genesis does not run, by what it lacks, as it says so.
+NOT_RUN = {
+    RUNNING: (
+        f"[{RPC}] what each public RPC URL serves, probed live",
+        f"[{RPC}] the argv each authority's node process runs with: its listeners were read from its manifest argv",
+        f"[{NODE}] the genesis and chain each authority's running node serves, the binary and chain spec file it "
+        "runs, and when its --chain path last changed",
+        f"[{NODE}] the environment each authority's node process was started with: a mock follower, or a setting "
+        "other than its manifest declares"),
+    CARDANO: (
+        f"[{KEYS}] [{COMMITTEE}] the D-parameter and the permissioned candidates on Cardano: their keys, the "
+        "committee the runtime draws from them, and their age",
+        f"[{RPC}] a Cardano permissioned candidate with no authority node",
+        f"[{SUPPLY}] the genesis lock on Cardano: the cMATRA it holds, who can spend it and the genesis its datum "
+        "binds"),
+}
+NOT_THE_GATE = ("This is not the launch gate: run check without --stage once every authority's node runs, and "
+                "announce the genesis hash only after it passes.")
 # What a node built from polkadot-stable2409-4 serves under --rpc-methods safe: its rpc_methods less each method whose
 # handler calls check_if_safe (author, system, offchain and state in sc-rpc, and substrate-frame-rpc-system's dry
 # run). A node lists every method it registers under --rpc-methods safe too, the unsafe ones included.
@@ -612,6 +773,39 @@ LOWER_HEX = re.compile(r"[0-9a-f]*")
 class InputError(Exception):
     """An input the preflight cannot read. Refuses like a failed rule."""
 
+    @property
+    def errors(self) -> list[InputError]:
+        return [self]
+
+
+class InputErrors(InputError):
+    """Several inputs the preflight cannot read, each an error of its own."""
+
+    def __init__(self, errors: list[InputError]):
+        super().__init__("\n".join(map(str, errors)))
+        self._errors = errors
+
+    @property
+    def errors(self) -> list[InputError]:
+        return self._errors
+
+
+def collected(steps) -> list[InputError]:
+    """The input errors of each step, run in turn, so that one unreadable input does not hide the next."""
+    errors = []
+    for step in steps:
+        try:
+            step()
+        except InputError as e:
+            errors += e.errors
+    return errors
+
+
+def refuse(errors: list[InputError]) -> None:
+    """Raise the input errors found, if any: one as itself, several as one error that lists them."""
+    if errors:
+        raise errors[0] if len(errors) == 1 else InputErrors(errors)
+
 
 def hex_bytes(value, where: str, prefix: str = "0x") -> bytes:
     """The bytes `value` spells as `prefix` and lowercase hex of whole bytes,
@@ -701,9 +895,12 @@ def scale_uints(raw: bytes, widths: tuple[int, ...]) -> tuple[int, ...] | None:
                  for end, width in zip(itertools.accumulate(widths), widths))
 
 
+def canonical_json(doc) -> bytes:
+    return json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
 def canonical_json_hash(doc) -> bytes:
-    canonical = json.dumps(doc, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    return blake2_256(canonical.encode())
+    return blake2_256(canonical_json(doc))
 
 
 def ss58(account: bytes, prefix: int) -> str:
@@ -1401,6 +1598,10 @@ class CardanoView:
     # what it holds ("D-parameter", "permissioned candidates").
     tip_slot: int | None = None
     created: dict[str, int] = dataclasses.field(default_factory=dict)
+
+
+# What the rules that read genesis and the manifest see of Cardano in a run given no Kupo: no lock and no candidate.
+NO_CARDANO = CardanoView(lock=None, candidates=[], d_parameter=(0, 0))
 
 
 def kupo_get(base: str, path: str):
@@ -2305,6 +2506,11 @@ def _env_splits_a_string(args: list[str]) -> bool:
 
 def _refuse_settings(names, authority: bool, where: str) -> None:
     for name in names:
+        exact = capture_environ.reads_as(name)
+        if exact != name and exact in capture_environ.CAPTURED:
+            raise InputError(f"{where}: sets a setting named {name!r}, which is not the exact name {exact}: the "
+                             "node's follower trims a setting's name, reads it whatever its case and takes the "
+                             "later of two it reads as one, so declare each setting under its exact name alone")
         if LOADER_SETTINGS.fullmatch(name):
             raise InputError(f"{where}: sets {name}, which changes what the shell or the dynamic loader runs; "
                              "the preflight cannot read it")
@@ -2416,14 +2622,12 @@ def running_argv(node: dict) -> list[str]:
     """The argv an authority's node process runs with, from its captured /proc/<pid>/cmdline, where the kernel
     ends each word with a NUL. Its launch's reading must give the same words: a node started some other way, or a
     launch the preflight misread, leaves which argv runs unresolved."""
-    where, path = f"authority {node['name']}", node.get("cmdline")
-    if path is None:
-        raise InputError(f"{where}: give its running node process's /proc/<pid>/cmdline as cmdline; the preflight "
-                         "checks the argv the node runs with")
+    where = f"authority {node['name']}"
+    path = capture_path(node, "cmdline", where)
     try:
         raw = Path(path).read_bytes()
     except OSError as e:
-        raise InputError(f"{where}: cannot read cmdline {path}: {e}") from e
+        raise unreadable(where, "cmdline", path, e) from e
     if not raw.endswith(b"\0"):
         raise InputError(f"{where}: cmdline {path} is not a /proc/<pid>/cmdline capture, which ends each word with "
                          "a NUL byte")
@@ -3159,16 +3363,39 @@ def check_sessions(spec: Spec, meta: Metadata, launch: dict) -> list[Finding]:
     return findings
 
 
-def follower_settings(node: dict) -> dict[str, list[str]]:
-    """Each Cardano follower setting an authority's launch gives, with every NAME=value or NAME+=value word that
-    gives it: its env, then the assignments and exports of its launch's commands."""
+def launch_settings(node: dict) -> dict[str, list[str]]:
+    """Each setting a node's launch gives its process, with every NAME=value or NAME+=value word that gives it: its
+    env, then the assignments and exports of its launch's commands."""
     words = [f"{name}={value}" for name, value in node.get("env", {}).items()]
     words += [word for command in launch_commands(node) for word in _assigned(command) if "=" in word]
     given: dict[str, list[str]] = {}
     for word in words:
-        if _setting(word) in CARDANO_MAINNET_FOLLOWER:
-            given.setdefault(_setting(word), []).append(word)
+        given.setdefault(_setting(word), []).append(word)
     return given
+
+
+def follower_settings(node: dict) -> dict[str, list[str]]:
+    """Each Cardano follower setting an authority's launch gives, with every word that gives it."""
+    return {name: words for name, words in launch_settings(node).items() if name in CARDANO_MAINNET_FOLLOWER}
+
+
+def check_authority_settings(launch: dict) -> list[Finding]:
+    """Every authority's launch must give its node each setting of AUTHORITY_NEEDS, as a value its node reads. One
+    with no block beneficiary starts, syncs and authors nothing, which no other rule sees, and one with no follower
+    backend, database or stability margin does not start."""
+    findings = []
+    for node in launch.get("nodes", []):
+        if not node["authority"]:
+            continue
+        given = launch_settings(node)
+        for name, (reads, left_out, another) in AUTHORITY_NEEDS.items():
+            if name not in given:
+                findings.append(Finding(COMMITTEE, f"authority {node['name']} {left_out}"))
+            for word in given.get(name, []):
+                value = word.partition("=")[2]
+                if word != f"{name}={value}" or not reads(value):
+                    findings.append(Finding(COMMITTEE, f"authority {node['name']} {another.format(value=value)}"))
+    return findings
 
 
 def check_follower(launch: dict) -> list[Finding]:
@@ -3355,7 +3582,9 @@ def proxied_nodes(launch: dict) -> set[tuple[str, int, str]]:
     return routes
 
 
-def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Finding]:
+def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]], argv_of=running_argv) -> list[Finding]:
+    """`argv_of` gives the argv an authority's listeners are read from: its running node process's, or, before any
+    node runs, the one its manifest declares (node_process)."""
     proxied = proxied_nodes(launch)
     findings = []
     nodes = launch.get("nodes", [])
@@ -3370,7 +3599,7 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]]) -> list[Fin
                 findings.append(Finding(RPC, f"node {node['name']} runs --validator but is not "
                                              "declared an authority"))
             continue
-        argv = running_argv(node)
+        argv = argv_of(node)
         port_flag = _flag(argv, "--rpc-port") or str(DEFAULT_RPC_PORT)
         if not port_flag.isdigit():
             raise InputError(f"node {node['name']}: --rpc-port {port_flag} is not a port")
@@ -3931,11 +4160,55 @@ def without_pops(entry):
     return {field: value for field, value in entry.items() if field != "pop"} if isinstance(entry, dict) else entry
 
 
+def roles_without_pops(roles: dict) -> dict:
+    return {role: [without_pops(entry) for entry in entries] for role, entries in roles.items()}
+
+
 def launch_manifest_hash(launch: dict) -> bytes:
-    """blake2-256 of the launch manifest's canonical JSON with no pop in it: each multisig member's holder signs this
-    hash, so collecting their pops leaves it as it was."""
-    return canonical_json_hash(dict(launch, roles={role: [without_pops(entry) for entry in entries]
-                                                   for role, entries in launch["roles"].items()}))
+    """blake2-256 of the whole launch manifest's canonical JSON with no pop in it: the launch key signs this hash,
+    deployment fields included, so collecting the keyholders' pops leaves it as it was."""
+    return canonical_json_hash(dict(launch, roles=roles_without_pops(launch["roles"])))
+
+
+UNBOUND = object()
+
+
+def genesis_fields(value, path: str = ""):
+    """`value`, which a launch manifest holds at `path`, less every field MANIFEST_FIELDS does not class as GENESIS,
+    and less each object or list left empty by that: UNBOUND when nothing of it is left. A field the classification
+    does not name is refused, so none reaches a launch bound by neither a proof nor a reviewed choice."""
+    if path in MANIFEST_FIELDS:
+        return value if MANIFEST_FIELDS[path] == GENESIS else UNBOUND
+    within = f"{path}[]" if isinstance(value, list) else f"{path}." if path else ""
+    if not isinstance(value, (dict, list)) or not any(field.startswith(within) for field in MANIFEST_FIELDS):
+        raise InputError(f"{path} is a launch manifest field no binding is given for: class it in MANIFEST_FIELDS as "
+                         "genesis-bound or deployment before a launch uses it")
+    if isinstance(value, list):
+        kept = [entry for entry in (genesis_fields(entry, within) for entry in value) if entry is not UNBOUND]
+    else:
+        kept = {name: field for name, field in ((name, genesis_fields(field, within + name))
+                                                for name, field in value.items()) if field is not UNBOUND}
+    return kept or UNBOUND
+
+
+def genesis_content(launch: dict) -> dict:
+    """What every proof of possession binds of a launch manifest: its GENESIS fields, with no pop in its roles, and
+    of its nodes the authorities alone, in an order of their own: neither a node that is no authority nor the order
+    the manifest lists its nodes in reaches genesis."""
+    content = genesis_fields(launch)
+    content = {} if content is UNBOUND else content
+    if "roles" in content:
+        content["roles"] = roles_without_pops(content["roles"])
+    authorities = sorted((node for node in content.pop("nodes", []) if node.get("authority") is True),
+                         key=canonical_json)
+    if authorities:
+        content["nodes"] = authorities
+    return content
+
+
+def genesis_content_hash(launch: dict) -> bytes:
+    """blake2-256 of GENESIS_CONTENT_DOMAIN and the canonical JSON of the manifest's genesis-bound content."""
+    return blake2_256(GENESIS_CONTENT_DOMAIN + canonical_json(genesis_content(launch)))
 
 
 def spec_genesis_hash(spec: Spec) -> bytes:
@@ -4005,20 +4278,31 @@ def check_code_overrides(launch: dict) -> list[Finding]:
                 for token in node_process(node))]
 
 
+def claimed_hashes(signed) -> dict[str, bytes]:
+    """The hashes and the signature a signed launch manifest gives."""
+    if not isinstance(signed, dict):
+        raise InputError("signed manifest must be a JSON object")
+    return {k: hex_bytes(signed.get(k), f"signed manifest {k}") for k in (*HASH_FIELDS, "signature")}
+
+
+def signers(signed, launch_keys: list[bytes]) -> list[bytes]:
+    """The launch keys, of those checked, whose signature the signed launch manifest carries."""
+    claimed = claimed_hashes(signed)
+    return [key for key in launch_keys if signature_verifies(key, canonical_payload(claimed), claimed["signature"])]
+
+
 def check_checkpoint(spec: Spec, launch: dict, signed: dict, launch_keys: list[bytes]) -> list[Finding]:
     findings = []
     if spec.doc.get("codeSubstitutes"):
         findings.append(Finding(CHECKPOINT, "chain spec carries codeSubstitutes"))
-    if not isinstance(signed, dict):
-        raise InputError("signed manifest must be a JSON object")
-    claimed = {k: hex_bytes(signed.get(k), f"signed manifest {k}") for k in (*HASH_FIELDS, "signature")}
+    claimed = claimed_hashes(signed)
     if signed.get("domain") != DOMAIN.decode():
         findings.append(Finding(CHECKPOINT, "signed manifest has the wrong domain"))
     for name, actual in launch_hashes(spec, launch).items():
         if claimed[name] != actual:
             findings.append(Finding(CHECKPOINT, f"{name} is 0x{actual.hex()}, signed manifest "
                                                 f"says 0x{claimed[name].hex()}"))
-    if not any(signature_verifies(key, canonical_payload(claimed), claimed["signature"]) for key in launch_keys):
+    if not signers(signed, launch_keys):
         findings.append(Finding(CHECKPOINT, "signed manifest signature does not verify "
                                             "under any launch key checked"))
     return findings
@@ -4133,19 +4417,21 @@ def scale_text(text: str) -> bytes:
 
 def possession_context(spec: Spec, launch: dict) -> bytes:
     """What every proof of possession of a launch signs first: the domain, the chain spec's name and id, the genesis
-    hash and the launch manifest hash, so a pop proves nothing for another chain, genesis or launch."""
+    hash and the hash of the launch manifest's genesis-bound content. A pop proves nothing for another chain, genesis,
+    role holder, authority key, node binary or lock holder, and stays good when a deployment field changes: the
+    launch key's signature alone binds those."""
     name, chain_id = spec.doc.get("name"), spec.doc.get("id")
     if not (isinstance(name, str) and isinstance(chain_id, str)):
         raise InputError("the chain spec must give its name and id as strings, as the node reads a spec: each proof "
                          "of possession binds both")
-    return POP_DOMAIN + scale_text(name) + scale_text(chain_id) + spec_genesis_hash(spec) + launch_manifest_hash(launch)
+    return POP_DOMAIN + scale_text(name) + scale_text(chain_id) + spec_genesis_hash(spec) + genesis_content_hash(launch)
 
 
-def possession_challenge(context: bytes, role: str, position: tuple[int, ...]) -> bytes:
-    """What the holder of the member at `position` in `role` signs: the launch's context, the role, then the
-    position as a SCALE list of u32 indices."""
+def possession_challenge(context: bytes, role: str, position: tuple[int, ...], key: bytes) -> bytes:
+    """What the holder of the member `key` at `position` in `role` signs: the launch's context, the role, the
+    position as a SCALE list of u32 indices, then the key as SCALE bytes."""
     return (context + scale_text(role) + compact(len(position))
-            + b"".join(index.to_bytes(4, "little") for index in position))
+            + b"".join(index.to_bytes(4, "little") for index in position) + compact(len(key)) + key)
 
 
 def check_possession(spec: Spec, launch: dict) -> list[Finding]:
@@ -4177,7 +4463,7 @@ def check_possession(spec: Spec, launch: dict) -> list[Finding]:
                                                 "needs no secret: its pop shows no one holds it"))
             continue
         context = context or possession_context(spec, launch)
-        challenge, pop = possession_challenge(context, role, position), hex_bytes(leaf["pop"], f"{where}.pop")
+        challenge, pop = possession_challenge(context, role, position, key), hex_bytes(leaf["pop"], f"{where}.pop")
         try:
             if len(key) == 33:
                 signer = coincurve.PublicKey.from_signature_and_message(pop, blake2_256(challenge), hasher=None)
@@ -4189,9 +4475,10 @@ def check_possession(spec: Spec, launch: dict) -> list[Finding]:
         if not held:
             scheme = "ECDSA" if len(key) == 33 else "sr25519"
             findings.append(Finding(POSSESSION, f"{where}: its pop is not an {scheme} signature by its key of its "
-                                                f"challenge ({command}), which binds this chain, genesis and launch "
-                                                "manifest and its role and position: another key signed it, or its "
-                                                "holder signed for another launch, role or position"))
+                                                f"challenge ({command}), which binds this chain, its genesis, the "
+                                                "launch manifest's genesis-bound fields, and its role, position and "
+                                                "key: another key signed it, its holder signed for another launch, "
+                                                "role or position, or a genesis-bound field changed since"))
     return findings
 
 
@@ -4347,44 +4634,161 @@ def stop_reason(output: str) -> str:
     return (telling or lines or [output])[-1][:300]
 
 
+def capture_path(node: dict, field: str, where: str) -> str:
+    """Where an authority's `field` capture is, as its manifest entry names it."""
+    path = node.get(field)
+    if path is None:
+        raise InputError(f"{where}: give {CAPTURE_READS[field]} as {field}; the preflight checks what the node runs, "
+                         "which a database already in its base path, a spec file replaced since it started or a "
+                         "unit that starts it another way hides from its manifest entry")
+    return path
+
+
+def unreadable(where: str, field: str, path: str, error: OSError) -> InputError:
+    return InputError(f"{where}: cannot read {field} {path}: {error.strerror}")
+
+
+def captured_process(node: dict, where: str) -> tuple[int, int]:
+    """The pid of an authority's node process and its start, in USER_HZ ticks after its machine's boot, from its
+    process_stat capture."""
+    try:
+        return capture_environ.process_of(read_capture(node, "process_stat", where))
+    except ValueError as e:
+        raise InputError(f"{where}: process_stat {node['process_stat']} is not a /proc/<pid>/stat capture: its pid, "
+                         "its command name in parentheses, then its fields, starttime the 20th after the name") from e
+
+
+def running_environ(node: dict, where: str) -> dict[str, str]:
+    """The settings an authority's node process was started with, of those capture_environ.py writes, from its
+    capture next to the cmdline capture. The capture names the process it was read from, which must be the one its
+    process_stat capture is of: a file left from before a restart shows another process's settings."""
+    path = capture_path(node, "cmdline", where) + ENVIRON_CAPTURE
+    try:
+        raw = Path(path).read_bytes()
+    except OSError as e:
+        raise InputError(f"{unreadable(where, 'environ', path, e)}; take it on its machine with `python3 "
+                         "capture_environ.py <pid> <its cmdline capture>.environ`, which writes the settings the "
+                         "preflight reads and no password") from e
+    try:
+        settings, process = capture_environ.read(raw)
+    except ValueError as e:
+        raise InputError(f"{where}: environ {path} is not what capture_environ.py writes ({e}): take it with "
+                         "`python3 capture_environ.py <pid> <out file>`, never as a copy of /proc/<pid>/environ, "
+                         "which holds every setting, a database password among them") from None
+    running = captured_process(node, where)
+    if process != running:
+        raise InputError(f"{where}: environ {path} was taken of pid {process[0]}, started at tick {process[1]}, and "
+                         f"its process_stat capture is of pid {running[0]}, started at tick {running[1]}: the "
+                         "settings are another process's, as a capture left from before a restart is; take both of "
+                         "the node process that runs now")
+    return settings
+
+
+def capture_errors(launch: dict) -> list[InputError]:
+    """Each capture of each authority that its manifest entry does not name, this host cannot open, or, for its
+    environment, cannot read, so one run names them all."""
+    errors = []
+    for node in launch.get("nodes", []):
+        if not node["authority"]:
+            continue
+        where = f"authority {node['name']}"
+        for field in CAPTURE_READS:
+            try:
+                path = capture_path(node, field, where)
+                with open(path, "rb"):
+                    pass
+            except InputError as e:
+                errors.append(e)
+            except OSError as e:
+                errors.append(unreadable(where, field, path, e))
+        if "cmdline" in node:
+            errors += collected([functools.partial(running_environ, node, where)])
+    return errors
+
+
+def check_environment(launch: dict) -> list[Finding]:
+    """Each authority's node process must have been started with exactly the settings its manifest declares, of
+    those capture_environ.py reads, and with no mock follower setting. Every rule that reads a setting reads the
+    manifest's, so a unit drop-in or compose override left from a rehearsal is checked nowhere else."""
+    apart = "the preflight checked the settings its manifest declares, and its node runs with others"
+    findings = []
+    for node in launch.get("nodes", []):
+        if not node["authority"]:
+            continue
+        where = f"authority {node['name']}"
+        running = running_environ(node, where)
+        declared = {name: [shown_setting(word) for word in words] for name, words in launch_settings(node).items()
+                    if name in capture_environ.CAPTURED}
+        for name, value in sorted(running.items()):
+            exact = capture_environ.reads_as(name)
+            if exact in MOCK_FOLLOWER_SETTINGS:
+                findings.append(Finding(NODE, f"{where}: its node process was started with {name}: its node runs on "
+                                              "the mock Cardano follower, or is one setting from it: whoever can "
+                                              "write the mock's registrations file chooses the committee data that "
+                                              "node authors and verifies with"))
+            elif exact != name:
+                findings.append(Finding(NODE, f"{where}: its node process was started with a setting named {name!r}, "
+                                              f"which is not the exact name {exact}: the node's follower trims a "
+                                              "setting's name, reads it whatever its case and takes the later of "
+                                              "two it reads as one, so the node may run on that value and not on "
+                                              "the declared one"))
+            elif name not in declared:
+                findings.append(Finding(NODE, f"{where}: its node process was started with {name}={value}, which its "
+                                              f"manifest does not declare: {apart}"))
+            findings += [Finding(NODE, f"{where}: its node process was started with {name}={value}, and its manifest "
+                                       f"declares {word}: {apart}")
+                         for word in declared.get(name, []) if word != f"{name}={value}"]
+        findings += [Finding(NODE, f"{where}: its node process was started without {name}, which its manifest "
+                                   f"declares as {words[-1]}: {apart}")
+                     for name, words in sorted(declared.items()) if name not in running]
+    return findings
+
+
+def shown_setting(word: str) -> str:
+    """A NAME=value word a launch gives, as a refusal may show it: a connection string the manifest declares in
+    another form than the reduced one may be the URL itself, password and all, so its value is left out."""
+    name, _, value = word.partition("=")
+    if _setting(word) in capture_environ.CONNECTION_STRINGS and not capture_environ.connection_is_reduced(value):
+        return f"{name}=<another form than <host>:<port>/<database>, not shown>"
+    return word
+
+
 def pinned_binary(node: dict, scratch: Path, where: str) -> tuple[str, Path]:
     """The sha256 of an authority's captured node binary, and a private copy of it to run, hashed as it is copied
     so the binary that runs is the one hashed."""
-    path = node.get("exe")
-    if path is None:
-        raise InputError(f"{where}: give a copy of its running node process's /proc/<pid>/exe as exe; the preflight "
-                         "runs that binary to attest the genesis it builds")
-    digest = hashlib.sha256()
+    path = capture_path(node, "exe", where)
     try:
-        with open(path, "rb") as source, tempfile.NamedTemporaryFile(dir=scratch, delete=False) as private:
-            for chunk in iter(lambda: source.read(1 << 20), b""):
-                digest.update(chunk)
-                private.write(chunk)
+        return hashed_copy(path, scratch)
     except OSError as e:
-        raise InputError(f"{where}: cannot read exe {path}: {e.strerror}") from e
+        raise unreadable(where, "exe", path, e) from e
+
+
+def hashed_copy(path: str, scratch: Path) -> tuple[str, Path]:
+    """The sha256 of a file and a private, runnable copy of it under `scratch`, from one reading of it."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source, tempfile.NamedTemporaryFile(dir=scratch, delete=False) as private:
+        for chunk in iter(lambda: source.read(1 << 20), b""):
+            digest.update(chunk)
+            private.write(chunk)
     pinned = scratch / f"exe-{digest.hexdigest()}"
     Path(private.name).replace(pinned)
     pinned.chmod(0o700)
     return "0x" + digest.hexdigest(), pinned
 
 
-def read_capture(node: dict, field: str, where: str, what: str) -> bytes:
-    """The bytes of an authority's `field` capture, which is `what`."""
-    path = node.get(field)
-    if path is None:
-        raise InputError(f"{where}: give {what} as {field}; the preflight checks what the node runs, which a "
-                         "database already in its base path, or a spec file replaced since it started, hides from "
-                         "its argv")
+def read_capture(node: dict, field: str, where: str) -> bytes:
+    """The bytes of an authority's `field` capture."""
+    path = capture_path(node, field, where)
     try:
         return Path(path).read_bytes()
     except OSError as e:
-        raise InputError(f"{where}: cannot read {field} {path}: {e.strerror}") from e
+        raise unreadable(where, field, path, e) from e
 
 
 def served_answer(node: dict, field: str, method: str, where: str):
     """The result of an authority's running node's answer to `method`, saved from its local RPC as its `field`
     capture: a JSON-RPC 2.0 answer, as the node gives it."""
-    raw = read_capture(node, field, where, f"its running node's answer to {method}, saved from its local RPC,")
+    raw = read_capture(node, field, where)
     try:
         answer = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_keys)
     except (ValueError, RecursionError) as e:
@@ -4428,17 +4832,12 @@ def process_start(node: dict, where: str) -> int:
     """When an authority's node process started, in hundredths of a second since the epoch, at the earliest: its
     machine's boot time (/proc/stat btime) and the process's starttime after boot (/proc/<pid>/stat, in USER_HZ
     ticks), each of which the kernel rounds down."""
-    stat = read_capture(node, "process_stat", where, "a copy of its node process's /proc/<pid>/stat")
-    _, _, rest = stat.rpartition(b")")
-    fields = rest[1:-1].split(b" ")
-    if not (rest.startswith(b" ") and rest.endswith(b"\n") and len(fields) > 19 and fields[19].isdigit()):
-        raise InputError(f"{where}: process_stat {node['process_stat']} is not a /proc/<pid>/stat capture: its pid, "
-                         "its command name in parentheses, then its fields, starttime the 20th after the name")
-    system = read_capture(node, "system_stat", where, "a copy of its machine's /proc/stat")
+    _, started = captured_process(node, where)
+    system = read_capture(node, "system_stat", where)
     boot = [line[len(b"btime "):] for line in system.split(b"\n") if line.startswith(b"btime ")]
     if len(boot) != 1 or not boot[0].isdigit():
         raise InputError(f"{where}: system_stat {node['system_stat']} is not a /proc/stat capture with one btime line")
-    return int(boot[0]) * USER_HZ + int(fields[19])
+    return int(boot[0]) * USER_HZ + started
 
 
 def check_chain_spec_age(node: dict, value: str, where: str) -> list[Finding]:
@@ -4454,8 +4853,7 @@ def check_chain_spec_age(node: dict, value: str, where: str) -> list[Finding]:
                          "from the process's root or working directory, which the check host may see apart from the "
                          "process above its root: name the file without '..'")
     steps = ["/".join(parts[:i + 1]) for i in range(len(parts))]
-    raw = read_capture(node, "chain_spec_stat", where,
-                       "what stat -c '%Z %f %n' prints for each step of the lookup of its --chain path")
+    raw = read_capture(node, "chain_spec_stat", where)
     unlisted = InputError(f"{where}: chain_spec_stat {node['chain_spec_stat']} is not what stat -c '%Z %f %n' prints "
                           f"for each step of the lookup of --chain {value!r}: {', '.join(steps)}, run in its node "
                           "process's root directory (/proc/<pid>/root) for an absolute path, or its working directory "
@@ -4480,52 +4878,123 @@ def check_chain_spec_age(node: dict, value: str, where: str) -> list[Finding]:
             findings.append(Finding(NODE, f"{where}: {step}, on the path its --chain names, changed at {ctime} (its "
                                           f"ctime), not a full second before its node process started at "
                                           f"{start // USER_HZ}.{start % USER_HZ:02d}: the path may have named another "
-                                          "chain spec when the node read it, and the node keeps the one it read"))
+                                          "chain spec when the node read it, and the node keeps the one it read. A "
+                                          "directory's ctime also moves when an entry is added to it or removed, so "
+                                          "keep the spec under directories nothing writes to once the node runs, and "
+                                          "restart the node to take the path as it is now"))
+    return findings
+
+
+@dataclass
+class Attestation:
+    """One run's offline attestation of the checked chain spec: a private directory that holds a copy of the spec and
+    the mock follower's empty registrations, the genesis the preflight computes, what each binary has built from
+    each set of options so far, and the binaries whose chain ids were read."""
+    spec: Spec
+    scratch: Path
+    checked: Path
+    genesis: bytes
+    runs: dict = dataclasses.field(default_factory=dict)
+    inspected: set = dataclasses.field(default_factory=set)
+
+    @classmethod
+    def of(cls, spec: Spec, scratch: Path) -> Attestation:
+        if spec.doc.get("telemetryEndpoints"):
+            raise InputError("the chain spec names telemetryEndpoints, which the node connects to while it builds "
+                             "genesis; the attestation runs offline, so give none (a node can take --telemetry-url)")
+        checked = scratch / "chain-spec.json"
+        checked.write_bytes(spec.source)
+        (scratch / "registrations.json").write_text("[]")
+        return cls(spec, scratch, checked, spec_genesis_hash(spec))
+
+    def built(self, exe: Path, pin: str, options: list[str], cwd: Path, where: str) -> tuple[bytes | None, str]:
+        """What the node builds from these options, run once for every authority whose binary and options are the
+        same: every run's working directory is new and empty."""
+        if (pin, *options) not in self.runs:
+            self.runs[(pin, *options)] = node_genesis(exe, options, cwd, self.scratch, where)
+        return self.runs[(pin, *options)]
+
+
+def attest_binary(run: Attestation, where: str, exe: Path, sha: str, options: list[str],
+                  path_unchanged=lambda value: []) -> list[Finding]:
+    """What an authority's pinned node binary, run offline, builds from the options its argv gives and holds at
+    block one: nothing here reads a running node. It runs export-blocks, which builds genesis as the node does at
+    startup, as launched, in an empty working directory, where a --chain that names no file here can only be a chain
+    built into the node, and on the checked spec, with the --chain value swapped for that file; then chain-id, once
+    for each binary. `path_unchanged` gives the launch gate's findings on the --chain path a running node read, at
+    the point they have always stood among these."""
+    spec, genesis, checked = run.spec, run.genesis, run.checked
+    chain = next((i for i, word in enumerate(options) if word.partition("=")[0] == "--chain"), None)
+    if chain is None:
+        return [Finding(NODE, f"{where} gives no --chain: its node loads the chain built into it as "
+                              f"{'dev' if '--dev' in options else 'local'}, not the checked chain spec")]
+    split = options[chain] == "--chain"
+    value = options[chain + 1] if split else options[chain].partition("=")[2]
+    cwd = Path(tempfile.mkdtemp(dir=run.scratch))
+    try:
+        here = (cwd / value).is_file()
+        other = here and (cwd / value).read_bytes() != spec.source
+    except OSError as e:
+        raise InputError(f"{where}: cannot read --chain {value!r} on this host: {e.strerror}; the node would "
+                         "load that path here, so run check where it holds the checked spec, or nothing") from e
+    if other:
+        raise InputError(f"{where}: --chain {value!r} names a file on this host that is not the checked chain "
+                         "spec, and the node would load it here; run check where that path holds the checked "
+                         "spec, or nothing")
+    launched, said = run.built(exe, sha, options, cwd, where)
+    if not here and launched is not None:
+        return [Finding(NODE, f"{where}: --chain {value!r} builds genesis 0x{launched.hex()} with no "
+                              "file of that name here: the node takes it as a chain built into it, "
+                              "not the checked chain spec")]
+    if not here and MISSING_SPEC_FILE.format(value) not in said:
+        raise InputError(f"{where}: its node builds no genesis from --chain {value!r} here, and does not "
+                         "report it as a missing file: the preflight cannot tell whether the node reads it as "
+                         f"a file or as a chain built into it ({stop_reason(said)})")
+    if here and launched is None:
+        raise InputError(f"{where}: its node builds no genesis from --chain {value!r} on this host, where it "
+                         f"is the checked chain spec: {stop_reason(said)}")
+    findings = path_unchanged(value)
+    swapped = ["--chain", str(checked)] if split else [f"--chain={checked}"]
+    attested, said = run.built(exe, sha, options[:chain] + swapped + options[chain + 1 + split:],
+                               Path(tempfile.mkdtemp(dir=run.scratch)), where)
+    if attested is None:
+        raise InputError(f"{where}: its node builds no genesis from the checked chain spec: "
+                         f"{stop_reason(said)}")
+    if sha not in run.inspected:
+        findings += check_runtime_chain_ids(exe, checked, genesis, stored_cardano_ids(spec), where)
+        run.inspected.add(sha)
+    wrong = next((h for h in (attested, launched) if h not in (None, genesis)), None)
+    if wrong is not None:
+        findings.append(Finding(NODE, f"{where}: its node builds genesis 0x{wrong.hex()} from the checked "
+                                      f"chain spec, and the preflight computes 0x{genesis.hex()}: the signed "
+                                      "genesis hash and the lock's datum bind the preflight's, not the chain "
+                                      "this authority starts"))
     return findings
 
 
 def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
     """Each authority's running node must serve, and its own node binary, pinned by sha256, must build, the genesis
-    the preflight computes, which the signed manifest and the lock's datum bind. The binary runs offline on
-    export-blocks, which builds genesis as the node does at startup, with the options its node process runs with: as
-    launched, in an empty working directory, where a --chain that names no file here can only be a chain built into
-    the node, and on the checked spec, with its --chain value swapped for that file. The file each authority's
-    --chain names, as captured, must be the checked spec, byte for byte. Wherever the node and the preflight read a
-    spec apart, the hashes differ; wherever the running node started from other than its argv and spec, what it
-    serves differs."""
+    the preflight computes, which the signed manifest and the lock's datum bind. The binary is run offline with the
+    options its node process runs with (attest_binary). The file each authority's --chain names, as captured, must
+    be the checked spec, byte for byte. Wherever the node and the preflight read a spec apart, the hashes differ;
+    wherever the running node started from other than its argv and spec, what it serves differs."""
     authorities = [node for node in launch.get("nodes", []) if node["authority"]]
     if not authorities:
         return []
-    if spec.doc.get("telemetryEndpoints"):
-        raise InputError("the chain spec names telemetryEndpoints, which the node connects to while it builds "
-                         "genesis; the attestation runs offline, so give none (a node can take --telemetry-url)")
-    genesis, spec_sha = spec_genesis_hash(spec), hashlib.sha256(spec.source).hexdigest()
-    findings, runs, inspected = [], {}, set()
+    findings, spec_sha = [], hashlib.sha256(spec.source).hexdigest()
     with tempfile.TemporaryDirectory(prefix="launch-preflight-node-") as tmp:
-        scratch = Path(tmp)
-        checked = scratch / "chain-spec.json"
-        checked.write_bytes(spec.source)
-        (scratch / "registrations.json").write_text("[]")
-
-        def built(exe: Path, pin: str, options: list[str], cwd: Path, where: str) -> tuple[bytes | None, str]:
-            """What the node builds from these options, run once for every authority whose binary and options are
-            the same: every run's working directory is new and empty."""
-            if (pin, *options) not in runs:
-                runs[(pin, *options)] = node_genesis(exe, options, cwd, scratch, where)
-            return runs[(pin, *options)]
-
+        run = Attestation.of(spec, Path(tmp))
         for node in authorities:
             where = f"authority {node['name']}"
             options = attested_options(running_argv(node), where)
-            sha, exe = pinned_binary(node, scratch, where)
-            chain_sha = hashlib.sha256(read_capture(node, "chain_spec", where, "a copy of the file its node's --chain "
-                                                    "names, taken on its machine,")).hexdigest()
+            sha, exe = pinned_binary(node, run.scratch, where)
+            chain_sha = hashlib.sha256(read_capture(node, "chain_spec", where)).hexdigest()
             running = served_genesis(node, where)
-            if running != genesis:
+            if running != run.genesis:
                 findings.append(Finding(NODE, f"{where}: its running node serves genesis 0x{running.hex()} as block 0, "
-                                              f"and the preflight computes 0x{genesis.hex()}: it started from another "
-                                              "chain spec, or from a database its base path already held, not the "
-                                              "chain the signed genesis hash and the lock's datum bind"))
+                                              f"and the preflight computes 0x{run.genesis.hex()}: it started from "
+                                              "another chain spec, or from a database its base path already held, not "
+                                              "the chain the signed genesis hash and the lock's datum bind"))
             findings += check_served_chain(spec, node, where)
             if sha != node["exe_sha256"]:
                 findings.append(Finding(NODE, f"{where} runs a node binary whose sha256 is {sha}, not its pinned "
@@ -4537,54 +5006,30 @@ def check_node_genesis(spec: Spec, launch: dict) -> list[Finding]:
                                               f"spec (sha256 0x{chain_sha}, the spec's 0x{spec_sha}): its node loads "
                                               "another chain spec"))
                 continue
-            chain = next((i for i, word in enumerate(options) if word.partition("=")[0] == "--chain"), None)
-            if chain is None:
-                findings.append(Finding(NODE, f"{where} gives no --chain: its node loads the chain built into it as "
-                                              f"{'dev' if '--dev' in options else 'local'}, not the checked chain "
-                                              "spec"))
+            findings += attest_binary(run, where, exe, sha, options,
+                                      functools.partial(check_chain_spec_age, node, where=where))
+    return findings
+
+
+def check_binary_genesis(spec: Spec, launch: dict) -> list[Finding]:
+    """Before any node runs: what check_node_genesis has each authority's pinned binary attest, from the argv its
+    manifest declares and the binary `launch` names as its exe, the one the genesis stage was given for its pin."""
+    authorities = [node for node in launch.get("nodes", []) if node["authority"]]
+    if not authorities:
+        return []
+    findings = []
+    with tempfile.TemporaryDirectory(prefix="launch-preflight-node-") as tmp:
+        run = Attestation.of(spec, Path(tmp))
+        for node in authorities:
+            where = f"authority {node['name']}"
+            options = attested_options(node_process(node), where)
+            sha, exe = pinned_binary(node, run.scratch, where)
+            if sha != node["exe_sha256"]:
+                findings.append(Finding(NODE, f"{where}: the node binary read for it has sha256 {sha}, not its "
+                                              f"pinned exe_sha256 {node['exe_sha256']}: only the pinned binary is "
+                                              "run to attest its genesis"))
                 continue
-            split = options[chain] == "--chain"
-            value = options[chain + 1] if split else options[chain].partition("=")[2]
-            cwd = Path(tempfile.mkdtemp(dir=scratch))
-            try:
-                here = (cwd / value).is_file()
-                other = here and (cwd / value).read_bytes() != spec.source
-            except OSError as e:
-                raise InputError(f"{where}: cannot read --chain {value!r} on this host: {e.strerror}; the node would "
-                                 "load that path here, so run check where it holds the checked spec, or nothing") from e
-            if other:
-                raise InputError(f"{where}: --chain {value!r} names a file on this host that is not the checked chain "
-                                 "spec, and the node would load it here; run check where that path holds the checked "
-                                 "spec, or nothing")
-            launched, said = built(exe, sha, options, cwd, where)
-            if not here and launched is not None:
-                findings.append(Finding(NODE, f"{where}: --chain {value!r} builds genesis 0x{launched.hex()} with no "
-                                              "file of that name here: the node takes it as a chain built into it, "
-                                              "not the checked chain spec"))
-                continue
-            if not here and MISSING_SPEC_FILE.format(value) not in said:
-                raise InputError(f"{where}: its node builds no genesis from --chain {value!r} here, and does not "
-                                 "report it as a missing file: the preflight cannot tell whether the node reads it as "
-                                 f"a file or as a chain built into it ({stop_reason(said)})")
-            if here and launched is None:
-                raise InputError(f"{where}: its node builds no genesis from --chain {value!r} on this host, where it "
-                                 f"is the checked chain spec: {stop_reason(said)}")
-            findings += check_chain_spec_age(node, value, where)
-            swapped = ["--chain", str(checked)] if split else [f"--chain={checked}"]
-            attested, said = built(exe, sha, options[:chain] + swapped + options[chain + 1 + split:],
-                                   Path(tempfile.mkdtemp(dir=scratch)), where)
-            if attested is None:
-                raise InputError(f"{where}: its node builds no genesis from the checked chain spec: "
-                                 f"{stop_reason(said)}")
-            if sha not in inspected:
-                findings += check_runtime_chain_ids(exe, checked, genesis, stored_cardano_ids(spec), where)
-                inspected.add(sha)
-            wrong = next((h for h in (attested, launched) if h not in (None, genesis)), None)
-            if wrong is not None:
-                findings.append(Finding(NODE, f"{where}: its node builds genesis 0x{wrong.hex()} from the checked "
-                                              f"chain spec, and the preflight computes 0x{genesis.hex()}: the signed "
-                                              "genesis hash and the lock's datum bind the preflight's, not the chain "
-                                              "this authority starts"))
+            findings += attest_binary(run, where, exe, sha, options)
     return findings
 
 
@@ -4852,22 +5297,24 @@ def validate_genesis_fields(launch: dict) -> None:
             raise InputError(f"partner_chain.{field} must be a {POLICY_ID_LEN}-byte Cardano policy id")
 
 
-def validate_launch(launch) -> None:
-    if not isinstance(launch, dict):
-        raise InputError("launch manifest must be a JSON object")
-    for field in sorted(set(launch) - LAUNCH_FIELDS):
-        raise InputError(f"unknown launch manifest field {field}")
+def validate_role(role: str, entries) -> None:
+    if role not in ROLES:
+        raise InputError(f"roles.{role} is not a role a mainnet launch knows: the roles are "
+                         f"{', '.join(sorted(ROLES))}")
+    if not isinstance(entries, list):
+        raise InputError(f"roles.{role} must be a list of public keys")
+    for i, entry in enumerate(entries):
+        validate_role_entry(entry, f"roles.{role}[{i}]")
+
+
+def validate_roles(launch: dict) -> None:
     roles = launch.get("roles")
     if not isinstance(roles, dict):
         raise InputError("launch manifest roles must map each role to a list of public keys")
-    for role, entries in roles.items():
-        if role not in ROLES:
-            raise InputError(f"roles.{role} is not a role a mainnet launch knows: the roles are "
-                             f"{', '.join(sorted(ROLES))}")
-        if not isinstance(entries, list):
-            raise InputError(f"roles.{role} must be a list of public keys")
-        for i, entry in enumerate(entries):
-            validate_role_entry(entry, f"roles.{role}[{i}]")
+    refuse(collected(functools.partial(validate_role, role, entries) for role, entries in roles.items()))
+
+
+def validate_economics(launch: dict) -> None:
     economics = launch.get("economics", {})
     if not isinstance(economics, dict):
         raise InputError("economics must be an object")
@@ -4876,6 +5323,9 @@ def validate_launch(launch) -> None:
     for field, value in sorted(economics.items()):
         if not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise InputError(f"economics.{field} must be a non-negative integer")
+
+
+def validate_supply(launch: dict) -> None:
     supply = launch.get("supply", {})
     if not isinstance(supply, dict):
         raise InputError("supply must be an object")
@@ -4891,16 +5341,24 @@ def validate_launch(launch) -> None:
     if not UTXO.fullmatch(lock["utxo"]):
         raise InputError("supply.genesis_lock.utxo must be <64 hex>#<index>")
     hex_bytes(lock["native_script"], "supply.genesis_lock.native_script")
-    validate_genesis_fields(launch)
+
+
+def validate_sessions(launch: dict) -> None:
     slots = launch.get("slots_per_epoch", 0)
     if type(slots) is not int or not 0 <= slots <= 0xFFFFFFFF:
         raise InputError("slots_per_epoch must be a u32: the slots in each session, which genesis "
                          "Sidechain.SlotsPerEpoch stores")
+
+
+def validate_follower(launch: dict) -> None:
     follower = launch.get("cardano_follower", CARDANO_MAINNET_FOLLOWER)
     if not (isinstance(follower, dict) and set(follower) == set(CARDANO_MAINNET_FOLLOWER)
             and all(isinstance(value, str) for value in follower.values())):
         raise InputError(f"cardano_follower must map exactly {', '.join(CARDANO_MAINNET_FOLLOWER)} to the strings "
                          "every authority's node is given as those settings")
+
+
+def validate_settlement(launch: dict) -> None:
     settlement = launch.get("settlement", {})
     if not isinstance(settlement, dict) or set(settlement) - SETTLEMENT_FIELDS:
         raise InputError("settlement must be an object whose one field is aegis_policy_v1_script_hash")
@@ -4910,15 +5368,22 @@ def validate_launch(launch) -> None:
         if len(policy) != AEGIS_POLICY_WIDTH or policy == bytes(AEGIS_POLICY_WIDTH):
             raise InputError(f"{where} must be the deployed policy's {AEGIS_POLICY_WIDTH}-byte script hash, or null "
                              "where Root binds it after genesis")
+
+
+def validate_nodes(launch: dict) -> None:
     nodes = launch.get("nodes", [])
     if not isinstance(nodes, list):
         raise InputError("nodes must be a list")
-    for i, node in enumerate(nodes):
-        validate_node(node, f"nodes[{i}]")
+    refuse(collected(functools.partial(validate_node, node, f"nodes[{i}]") for i, node in enumerate(nodes)))
+
+
+def validate_proxies(launch: dict) -> None:
     proxies = launch.get("rpc_proxies", [])
     if not isinstance(proxies, list):
         raise InputError("rpc_proxies must be a list")
-    node_names = {node["name"] for node in nodes}
+    nodes = launch.get("nodes", [])
+    node_names = {node["name"] for node in nodes if isinstance(node, dict) and isinstance(node.get("name"), str)} \
+        if isinstance(nodes, list) else set()
     for i, proxy in enumerate(proxies):
         if not isinstance(proxy, dict):
             raise InputError(f"rpc_proxies[{i}] must be an object")
@@ -4935,6 +5400,9 @@ def validate_launch(launch) -> None:
         if not (isinstance(others, list) and all(isinstance(t, str) and HOST_PORT.fullmatch(t) and ":" in t
                                                  for t in others)):
             raise InputError(f"rpc_proxies[{i}] other_targets must be host:port strings")
+
+
+def validate_public_rpc(launch: dict) -> None:
     public = launch.get("public_rpc", [])
     if not isinstance(public, list):
         raise InputError("public_rpc must be a list of URLs")
@@ -4951,42 +5419,130 @@ def validate_launch(launch) -> None:
             raise InputError(f"public_rpc[{i}] must name no user, password or fragment")
 
 
+def validate_launch(launch) -> None:
+    """Refuse a launch manifest the preflight cannot read, naming every part of it that it cannot: each role, each
+    node and each other field is read on its own."""
+    if not isinstance(launch, dict):
+        raise InputError("launch manifest must be a JSON object")
+    unknown = [InputError(f"unknown launch manifest field {field}") for field in sorted(set(launch) - LAUNCH_FIELDS)]
+    refuse(unknown + collected(functools.partial(part, launch) for part in (
+        validate_roles, validate_economics, validate_supply, validate_genesis_fields, validate_sessions,
+        validate_follower, validate_settlement, validate_nodes, validate_proxies, validate_public_rpc)))
+
+
+@dataclass
+class Verdict:
+    """What a run found: each rule's reasons to refuse, each input it could not read, what it did not run for want of
+    a running node or a Kupo, and the launch keys checked whose signature the signed manifest carries."""
+    findings: list[Finding]
+    errors: list[InputError]
+    not_run: list[str]
+    signed_by: list[bytes]
+    lacks_captures: bool = False
+
+
+def node_binaries(launch: dict, binaries: list[str], scratch: Path) -> dict:
+    """The launch as the genesis stage runs rule 8 on it, before any node runs: each authority's exe capture is a
+    private copy, under `scratch`, of the file among `binaries` whose sha256 its exe_sha256 pins. Each file is read
+    once, hashed as it is copied, so the bytes the stage runs are the bytes it hashed, whatever the path it was
+    given holds a moment later."""
+    given = {}
+    for binary in binaries:
+        try:
+            sha, private = hashed_copy(binary, scratch)
+        except OSError as e:
+            raise InputError(f"cannot read --node-binary {binary}: {e.strerror}") from e
+        given[sha] = private
+    nodes = launch.get("nodes", [])
+    refuse([InputError(f"authority {node['name']} pins exe_sha256 {node['exe_sha256']}, and no --node-binary given "
+                       "is that file: the genesis stage runs each pinned binary's build-spec on the launch manifest, "
+                       "so give the release binary every validator will run")
+            for node in nodes if node["authority"] and node["exe_sha256"] not in given])
+    return dict(launch, nodes=[dict(node, exe=str(given[node["exe_sha256"]])) if node["authority"] else node
+                               for node in nodes])
+
+
 def run_checks(spec: Spec, meta: Metadata, launch: dict, manifest: bytes, signed: dict, manifest_key: str | None,
-               cardano: CardanoView, extra_well_known: list[Path] = ()) -> list[Finding]:
+               cardano: CardanoView | None, extra_well_known: list[Path] = (),
+               binaries: list[str] | None = None) -> Verdict:
+    """Every rule the run can read its inputs for, each on its own: a rule that cannot read an input gives that
+    input's error and the rules after it still run. `binaries` are given in the genesis stage, before any authority's
+    node runs: the rules that read a running node are left out, rule 3 reads each authority's listeners from its
+    manifest argv, and rule 8 runs those files, each read once, on what needs no running node: the build of the
+    manifest, the genesis each builds from the checked spec with its authority's manifest argv, and the chain ids
+    and Cardano ids its runtime holds. With no `cardano`, the rules that read Cardano are left out. The launch gate
+    is the run with neither left out."""
     validate_launch(launch)
     keys, key_findings = launch_keys(manifest_key)
     well_known = load_well_known(extra_well_known)
-    return (check_chain_identity(spec)
-            + check_dev_keys(spec, meta, launch, cardano, keys, well_known)
-            + check_attestation_committee(spec, meta, launch)
-            + check_possession(spec, launch)
-            + check_committee(spec, meta, launch)
-            + check_sessions(spec, meta, launch)
-            + check_follower(launch)
-            + check_partner_chain(spec, launch)
-            + check_candidate_authorities(launch, cardano)
-            + check_cardano_committee(meta, cardano)
-            + check_committee_age(spec, meta, cardano)
-            + check_rewards(spec, meta, launch)
-            + check_rpc(launch, authorities(spec, cardano))
-            + check_public_rpc(launch)
-            + check_supply(spec, meta, launch, cardano)
-            + check_dust(spec, meta, launch)
-            + check_motra(spec)
-            + check_genesis_lock(spec, launch, cardano, well_known)
-            + check_genesis_storage(spec, meta)
-            + check_pinned_storage(spec, meta)
-            + check_pallets(meta)
-            + key_findings
-            + check_checkpoint(spec, launch, signed, keys)
-            + check_code_overrides(launch)
-            + check_last_runtime_upgrade(spec)
-            + check_observation(spec)
-            + check_guardian(spec, meta, launch, well_known)
-            + check_delays(spec, meta)
-            + check_node_genesis(spec, launch)
-            + check_node_build(spec, meta, launch, manifest)
-            + check_settlement(spec, launch))
+    absent = {RUNNING} if binaries is not None else set()
+    seen = cardano
+    if cardano is None:
+        absent.add(CARDANO)
+        seen = NO_CARDANO
+    errors = [] if RUNNING in absent else capture_errors(launch)
+    lacks_captures = bool(errors)
+    built_from, given = launch, contextlib.ExitStack()
+    if binaries is not None:
+        try:
+            built_from = node_binaries(launch, binaries, Path(given.enter_context(
+                tempfile.TemporaryDirectory(prefix="launch-preflight-binaries-"))))
+        except InputError as e:
+            errors += e.errors
+            built_from = None
+    # Each rule's check, after what it reads that a run may lack.
+    steps = [
+        (None, lambda: check_chain_identity(spec)),
+        (None, lambda: check_dev_keys(spec, meta, launch, seen, keys, well_known)),
+        (None, lambda: check_attestation_committee(spec, meta, launch)),
+        (None, lambda: check_possession(spec, launch)),
+        (None, lambda: check_committee(spec, meta, launch)),
+        (None, lambda: check_sessions(spec, meta, launch)),
+        (None, lambda: check_follower(launch)),
+        (None, lambda: check_authority_settings(launch)),
+        (None, lambda: check_partner_chain(spec, launch)),
+        (CARDANO, lambda: check_candidate_authorities(launch, seen)),
+        (CARDANO, lambda: check_cardano_committee(meta, seen)),
+        (CARDANO, lambda: check_committee_age(spec, meta, seen)),
+        (None, lambda: check_rewards(spec, meta, launch)),
+        (None, lambda: check_rpc(launch, authorities(spec, seen),
+                                 node_process if RUNNING in absent or lacks_captures else running_argv)),
+        (RUNNING, lambda: check_public_rpc(launch)),
+        (None, lambda: check_supply(spec, meta, launch, seen)),
+        (None, lambda: check_dust(spec, meta, launch)),
+        (None, lambda: check_motra(spec)),
+        (CARDANO, lambda: check_genesis_lock(spec, launch, seen, well_known)),
+        (None, lambda: check_genesis_storage(spec, meta)),
+        (None, lambda: check_pinned_storage(spec, meta)),
+        (None, lambda: check_pallets(meta)),
+        (None, lambda: key_findings + check_checkpoint(spec, launch, signed, keys)),
+        (None, lambda: check_code_overrides(launch)),
+        (None, lambda: check_last_runtime_upgrade(spec)),
+        (None, lambda: check_observation(spec)),
+        (None, lambda: check_guardian(spec, meta, launch, well_known)),
+        (None, lambda: check_delays(spec, meta)),
+        (RUNNING, lambda: check_node_genesis(spec, launch)),
+        (None, lambda: check_binary_genesis(spec, built_from) if binaries is not None and built_from else []),
+        (RUNNING, lambda: check_environment(launch)),
+        (None, lambda: check_node_build(spec, meta, built_from, manifest) if built_from else []),
+        (None, lambda: check_settlement(spec, launch)),
+    ]
+    findings = []
+    with given:
+        for needs, check in steps:
+            if needs in absent or (needs == RUNNING and lacks_captures):
+                continue
+            try:
+                findings += check()
+            except InputError as e:
+                errors += e.errors
+    try:
+        signed_by = signers(signed, keys)
+    except InputError:
+        signed_by = []
+    return Verdict(findings, list({str(error): error for error in errors}.values()),
+                   [rule for lack in (RUNNING, CARDANO) if lack in absent for rule in NOT_RUN[lack]], signed_by,
+                   lacks_captures)
 
 
 def unique_keys(pairs: list[tuple[str, object]]) -> dict:
@@ -5021,21 +5577,47 @@ def read_json(path: str, what: str):
 
 
 def cmd_check(args) -> int:
+    genesis_stage = args.stage == GENESIS_STAGE
+    if not genesis_stage and args.node_binary:
+        raise InputError("--node-binary is read in the genesis stage only: the launch gate runs each authority's exe "
+                         "capture, the binary its node process runs")
+    if not genesis_stage and args.kupo is None:
+        raise InputError("the launch gate needs --kupo, a Kupo on Cardano mainnet: only check --stage genesis runs "
+                         "without one, and says which rules it did not run")
     spec = load_spec(args.spec)
     manifest = read_file(args.launch, "launch manifest")
     launch = parse_json(manifest, args.launch, "launch manifest")
     validate_launch(launch)
     meta = Metadata.from_v14(subwasm_metadata(spec.code, args.subwasm))
-    cardano = cardano_view(args.kupo, spec, launch)
-    findings = run_checks(spec, meta, launch, manifest, read_json(args.signed_manifest, "signed manifest"),
-                          args.manifest_key, cardano, [Path(p) for p in args.extra_well_known])
-    if findings:
-        print(f"MAINNET LAUNCH PREFLIGHT: REFUSE ({len(findings)} reasons)")
-        for finding in findings:
+    cardano, unread = None, []
+    if args.kupo is not None:
+        try:
+            cardano = cardano_view(args.kupo, spec, launch)
+        except InputError as e:
+            unread = e.errors
+    verdict = run_checks(spec, meta, launch, manifest, read_json(args.signed_manifest, "signed manifest"),
+                         args.manifest_key, cardano, [Path(p) for p in args.extra_well_known],
+                         args.node_binary if genesis_stage else None)
+    name = "MAINNET LAUNCH PREFLIGHT (genesis stage)" if genesis_stage else "MAINNET LAUNCH PREFLIGHT"
+    if verdict.findings:
+        print(f"{name}: REFUSE ({len(verdict.findings)} reasons)")
+        for finding in verdict.findings:
             print(f"  {finding}")
-        return 1
-    print("MAINNET LAUNCH PREFLIGHT: PASS")
-    return 0
+    if unread or verdict.errors:
+        if verdict.lacks_captures:
+            print("MAINNET LAUNCH PREFLIGHT: the launch gate reads each authority's captures, taken once its node "
+                  "runs; before then, check --stage genesis gives a verdict on the genesis", file=sys.stderr)
+        raise InputErrors(unread + verdict.errors)
+    if not verdict.findings:
+        print(f"{name}: PASS")
+        if not genesis_stage:
+            for key in verdict.signed_by:
+                print(f"  signed by launch key 0x{key.hex()}, pinned in {LAUNCH_KEYS}")
+    if genesis_stage:
+        for rule in verdict.not_run:
+            print(f"  not run: {rule}")
+        print(NOT_THE_GATE)
+    return 1 if verdict.findings else 0
 
 
 def signed_manifest(spec: Spec, launch: dict, key: signing.SigningKey) -> dict:
@@ -5044,17 +5626,46 @@ def signed_manifest(spec: Spec, launch: dict, key: signing.SigningKey) -> dict:
             **{name: "0x" + value.hex() for name, value in hashes.items()}}
 
 
-def cmd_sign(args) -> int:
-    where = f"cannot load the launch signing key from {args.key}"
+def load_launch_key(path: str) -> signing.SigningKey:
+    """The launch key a file holds as its 32-byte ed25519 seed in 0x-hex. An error names the file, never what it
+    holds."""
+    where = f"cannot load the launch signing key from {path}"
     try:
-        key = signing.SigningKey(hex_bytes(Path(args.key).read_text().removesuffix("\n"), f"{where}: its seed"))
+        return signing.SigningKey(hex_bytes(Path(path).read_text().removesuffix("\n"), f"{where}: its seed"))
     except (OSError, ValueError) as e:
         raise InputError(f"{where}: {type(e).__name__}") from e
+
+
+def cmd_sign(args) -> int:
+    key = load_launch_key(args.key)
     launch = read_json(args.launch, "launch manifest")
     validate_launch(launch)
     manifest = signed_manifest(load_spec(args.spec), launch, key)
     Path(args.out).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     print(f"signed launch manifest -> {args.out}")
+    return 0
+
+
+def cmd_launch_key_new(args) -> int:
+    """Mint a launch key into a new file only its owner reads, and print its public key, the value launch_keys.json
+    pins. The seed is written nowhere else."""
+    try:
+        descriptor = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except OSError as e:
+        raise InputError(f"cannot write the launch key to {args.out}: {e.strerror}") from e
+    key = signing.SigningKey.generate()
+    try:
+        with os.fdopen(descriptor, "w") as out:
+            out.write("0x" + key.encode().hex() + "\n")
+    except OSError as e:
+        os.unlink(args.out)
+        raise InputError(f"cannot write the launch key to {args.out}: {e.strerror}") from None
+    print("0x" + key.verify_key.encode().hex())
+    return 0
+
+
+def cmd_launch_key_public(args) -> int:
+    print("0x" + load_launch_key(args.key).verify_key.encode().hex())
     return 0
 
 
@@ -5070,7 +5681,11 @@ def cmd_challenge(args) -> int:
     if not isinstance(leaf, dict):
         raise InputError(f'{where} is a bare key: give it as {{"key": ...}} before its holder signs, since its '
                          "challenge binds the launch manifest as it reads once the pop goes in")
-    print("0x" + possession_challenge(possession_context(load_spec(args.spec), launch), args.role, position).hex())
+    try:
+        key = decode_public_key(leaf["key"])
+    except ValueError as e:
+        raise InputError(f"{where}.key is no public key: {e}") from e
+    print("0x" + possession_challenge(possession_context(load_spec(args.spec), launch), args.role, position, key).hex())
     return 0
 
 
@@ -5083,8 +5698,15 @@ def main(argv: list[str] | None = None) -> int:
     check.add_argument("--signed-manifest", required=True)
     check.add_argument("--manifest-key", help="check against this ed25519 launch key (0x-hex) instead of "
                                               "the ones launch_keys.json pins; refuses unless it is pinned")
-    check.add_argument("--kupo", required=True, help="Kupo on Cardano mainnet, indexing the genesis lock "
-                                                     "and the permissioned candidates token")
+    check.add_argument("--stage", choices=(GENESIS_STAGE, LAUNCH_STAGE), default=LAUNCH_STAGE,
+                       help="launch (the default) is the launch gate, run once every authority's node runs; genesis "
+                            "runs before any does, on every rule that needs no running node, and names the rules it "
+                            "did not run")
+    check.add_argument("--node-binary", action="append", default=[], metavar="FILE",
+                       help="genesis stage: a node binary the authorities pin by exe_sha256, whose build-spec of the "
+                            "launch manifest the spec is held to; repeatable, one for each pinned binary")
+    check.add_argument("--kupo", help="Kupo on Cardano mainnet, indexing the genesis lock and the permissioned "
+                                      "candidates token; the launch gate needs it")
     check.add_argument("--subwasm", default="subwasm")
     check.add_argument("--extra-well-known", action="append", required=True, metavar="TABLE",
                        help="JSON key table of exposed keys kept out of the public tables; repeatable, and required: "
@@ -5104,11 +5726,22 @@ def main(argv: list[str] | None = None) -> int:
     challenge.add_argument("--index", required=True, type=int, nargs="+",
                            help="the multisig's index in the role, then the member's index in each multisig down to it")
     challenge.set_defaults(func=cmd_challenge)
+    launch_key = sub.add_parser("launch-key", help="mint the launch key offline, or print the public key of one")
+    key_command = launch_key.add_subparsers(dest="key_cmd", required=True)
+    new = key_command.add_parser("new", help="write a new launch key's seed to a file only its owner reads, and "
+                                             "print its public key and nothing else")
+    new.add_argument("--out", required=True, help="the seed file to create; an existing file is never overwritten")
+    new.set_defaults(func=cmd_launch_key_new)
+    public = key_command.add_parser("public", help="print the public key of a launch key file, as launch_keys.json "
+                                                   "pins it")
+    public.add_argument("--key", required=True, help="file holding the 32-byte ed25519 seed as 0x-hex")
+    public.set_defaults(func=cmd_launch_key_public)
     args = parser.parse_args(argv)
     try:
         return args.func(args)
     except InputError as e:
-        print(f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) {e}", file=sys.stderr)
+        for error in e.errors:
+            print(f"MAINNET LAUNCH PREFLIGHT: REFUSE (input) {error}", file=sys.stderr)
         return 2
 
 

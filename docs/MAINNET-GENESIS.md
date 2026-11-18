@@ -25,13 +25,27 @@ it, and the preflight's tests check the raw spec it builds
    genesis UTXO `G` is spent by governance init, and the D-parameter and
    permissioned candidates datums are published. `get-scripts` prints the
    values of the manifest's `partner_chain`, all functions of `G`.
-2. The manifest is written: roles, dust, authorities with their three keys,
-   the attestation committee, and `partner_chain`.
-3. `build-spec` writes the raw spec. Its genesis hash is the chain's id.
-4. The launch preflight signs and checks the spec and the manifest, the
-   cMATRA genesis lock is created with the genesis hash as its datum, and the
-   nodes start from the raw spec.
-5. The sudo multisig schedules `Oracle.register_attestor(pair, account)`
+2. The manifest is written: roles, dust, authorities with their three keys
+   and the sha256 of the one release binary they all run, the attestation
+   committee, and `partner_chain`, with the genesis lock's output id still a
+   placeholder.
+3. `build-spec` writes the raw spec. Its genesis hash is the chain's id. The
+   spec does not depend on the lock's output id or on any other deployment
+   field of the manifest.
+4. The cMATRA genesis lock is created on Cardano with the genesis hash as
+   its datum, which is why it comes after the spec, and its output id goes
+   into the manifest.
+5. The genesis-bound fields of the manifest are frozen, and each keyholder of
+   the sudo and guardian multisigs signs a proof of possession that binds the
+   genesis and those fields.
+6. The launch key signs the spec and the whole manifest. A deployment field
+   that changes after this (a host, a port, a path, the lock's output id)
+   needs this signature again and no keyholder.
+7. `check --stage genesis` gives the preflight's verdict before any node
+   starts; the nodes then start from the raw spec, their captures are taken,
+   and `check`, the launch gate, runs on what runs. The genesis hash is
+   announced only after it passes.
+8. The sudo multisig schedules `Oracle.register_attestor(pair, account)`
    through RootTimelock for each `roles.oracle` entry's account and each pair
    the chain prices, and the enactor enacts each call once its standard
    delay (7 days) has passed. Genesis has no field for the oracle roster, so
@@ -39,6 +53,11 @@ it, and the preflight's tests check the raw spec it builds
    `OracleMinAttestorThreshold` (3) registered attestors submitting for the
    same slot, and the builder refuses a manifest with fewer than 3 or more
    than `OracleMaxAttestors` (16) oracles.
+
+[launch/GENESIS-DAY.md](launch/GENESIS-DAY.md) is the operator's runbook for
+steps 2 to 7: each step with its command, what it proves and what to do when
+it fails. The preflight README says what a proof binds and what the launch
+key signs ("What a proof binds, and what the launch key signs").
 
 ## The launch manifest
 
@@ -63,6 +82,12 @@ and these roles, besides `sudo`, `guardian`, `anchor_signer`, `attestors`,
 | `recovery_friends` | `Recovery.vouch_recovery` for the sudo account. |
 | `recovery_rescuers` | A recovery of the sudo account (`initiate_recovery`, `claim_recovery`, `as_recovered`). |
 | `dust_pool` | Nothing. Holds dust for signers admitted after genesis: no signed call moves MATRA and none is minted, so Root's force transfer out of this pool is how a later signer gets the provider it needs. |
+
+The builder reads none of a node's `argv`, `env`, `host` or capture paths.
+The preflight does: each authority's `env` must give its node
+`SIDECHAIN_BLOCK_BENEFICIARY`, without which a validator never authors, and
+its follower's backend, database and stability margin, without which it does
+not start (the preflight README, "Launch manifest", `env`).
 
 `endowed` lists the sudo and guardian keyholders' own keys, which hold dust
 of their own. The preflight counts an account as declared when it is a role
