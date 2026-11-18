@@ -32,10 +32,19 @@ authority's keys or the node binary means a new spec and every proof again
 ### 0. One node build for every validator
 
 ```
-sha256sum materios-node            # the release build, on the machine that built it
+tools/runtime-build/build.sh --node <commit> release   # the release build: prints the node's sha256 and its :code blake2-256
 sha256sum materios-node            # on each validator, on the file it received
 ```
 
+- **The build:** `build.sh --node` builds the reviewed commit's node in the
+  digest-pinned image and at the fixed path `build.sh <commit>` builds the
+  runtime in, `--locked --release`, so every build of one commit gives the
+  same binary and the node embeds that commit's reproducible runtime (see
+  `tools/runtime-build/README.md`). Publish its sha256 next to the commit
+  id. `partnerchain/Dockerfile` cannot build the release: it builds with
+  rust 1.88 and without `--locked`, after editing the workspace
+  `Cargo.toml` with sed and patching sp-io, so its node embeds another
+  runtime and fails step 7a.
 - **Proves:** every validator runs the one binary the keyholders sign for.
   The manifest pins this hash as each authority's `exe_sha256`, each proof
   of possession binds it, and `check` hashes the binary each node process
@@ -233,6 +242,8 @@ P check --stage genesis --spec mainnet-raw.json --launch launch.json \
   rebuilds the release commit's runtime and prints its blake2-256. It must
   be the `code_hash` in `draft-signed.json`. If it is not, the binary embeds
   another runtime than the reviewed commit's: stop.
+  `tools/runtime-build/build.sh --node <commit>` rebuilds the binary itself;
+  its sha256 must be every authority's `exe_sha256`.
 
 ### 8. Create the genesis lock on Cardano: NOT REHEARSED AGAINST CARDANO
 
