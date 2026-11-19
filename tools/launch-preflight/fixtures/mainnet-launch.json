@@ -25,9 +25,6 @@
           },
           {
             "key": "5C7QQvEzdzz5uRpgKh6CqRPdMKwKSTEgXB3gcc3hhiJ5qSjT"
-          },
-          {
-            "key": "5EkfVaZz3tdUizFivv9LfiCpzS3J435aNr6bjGEMAvFCc97i"
           }
         ]
       }
@@ -66,8 +63,7 @@
       "5FWTMUWcv6cqUUA82uyMvAP9F4HLNHpn7AdW1DPzLyaKhxh7",
       "5D9zwy5S56X8k5gMSwAMsrE11o1Jfmjo1hDPixrVyG5oerGG",
       "5G6Vb6htiQMUhSvTDyMScva5wD65g8iRqwEmo9MV5wkQ4Tsu",
-      "5C7QQvEzdzz5uRpgKh6CqRPdMKwKSTEgXB3gcc3hhiJ5qSjT",
-      "5EkfVaZz3tdUizFivv9LfiCpzS3J435aNr6bjGEMAvFCc97i"
+      "5C7QQvEzdzz5uRpgKh6CqRPdMKwKSTEgXB3gcc3hhiJ5qSjT"
     ],
     "dust_pool": [
       "5GL4CkaM2n78vpozx1FWzMKGu2bwsrziLFHoZTjJebdy9fY9"
@@ -82,8 +78,7 @@
       "5FWTMUWcv6cqUUA82uyMvAP9F4HLNHpn7AdW1DPzLyaKhxh7": 110000,
       "5D9zwy5S56X8k5gMSwAMsrE11o1Jfmjo1hDPixrVyG5oerGG": 110000,
       "5G6Vb6htiQMUhSvTDyMScva5wD65g8iRqwEmo9MV5wkQ4Tsu": 17000,
-      "5C7QQvEzdzz5uRpgKh6CqRPdMKwKSTEgXB3gcc3hhiJ5qSjT": 17000,
-      "5EkfVaZz3tdUizFivv9LfiCpzS3J435aNr6bjGEMAvFCc97i": 17000
+      "5C7QQvEzdzz5uRpgKh6CqRPdMKwKSTEgXB3gcc3hhiJ5qSjT": 17000
     },
     "anchor_signer": {
       "5HZCjrLG7NswdX4P8L82CZvn88KUcHym21a4pGMnoZ99VB4F": 20000,
