@@ -243,8 +243,12 @@ that binary embeds, and the proofs of possession bind each pin. Where the
 hash comes from:
 
 1. **One release build.** The node is built once, from the reviewed commit,
-   by one recipe (the repository's is `partnerchain/Dockerfile`). Its
-   `sha256sum` is published with the release, next to the commit id.
+   by `tools/runtime-build/build.sh --node <commit>`. Its `sha256sum` is
+   published with the release, next to the commit id.
+   `partnerchain/Dockerfile` cannot build the release: it builds with rust
+   1.88 and without `--locked`, after editing the workspace `Cargo.toml`
+   with sed and patching sp-io, so its node embeds another runtime than
+   `build.sh <commit>` gives.
 2. **That one file goes to every validator.** Each operator runs `sha256sum`
    on the file they received, before the first start, and compares it with
    the published hash; `exe_sha256` in the manifest is that hash, the same
@@ -264,13 +268,15 @@ the binary the validators run.
 
 The preflight does not tie the binary's hash to a commit: steps 1 and 2 are
 what does, and any executable that answers `export-blocks`, `chain-id` and
-`build-spec` consistently is "the node" to rule 8. What can be checked
-against the source is the runtime the binary embeds:
-`tools/runtime-build/build.sh <commit>` rebuilds that commit's runtime to
-the same bytes on any machine and prints its blake2-256, which must be the
-`code_hash` `sign` writes in the signed manifest, the hash of the spec's
-`:code`, which rule 8 holds to what the pinned binary embeds. Whoever
-reviews the release runs it before the ceremony.
+`build-spec` consistently is "the node" to rule 8. Two things can be checked
+against the source. `tools/runtime-build/build.sh <commit>` rebuilds that
+commit's runtime to the same bytes on any machine and prints its
+blake2-256, which must be the `code_hash` `sign` writes in the signed
+manifest, the hash of the spec's `:code`, which rule 8 holds to what the
+pinned binary embeds. `tools/runtime-build/build.sh --node <commit>`
+rebuilds the binary itself and prints its sha256, which must be the
+published one and every `exe_sha256`. Whoever reviews the release runs both
+before the ceremony.
 
 ### Order of a launch
 

@@ -1,0 +1,19 @@
+when:
+  - event: [push, pull_request]
+    branch: main
+
+# Same agent as the rust workflow, selected by the same label.
+labels:
+  arm64-emu: "true"
+
+steps:
+  # build.sh against a stand-in docker: no image is pulled and nothing is built.
+  - name: test
+    image: python:3.12-slim-bookworm
+    directory: tools/runtime-build
+    commands:
+      - apt-get update
+      - apt-get install -y --no-install-recommends git
+      - pip install --no-cache-dir pytest==9.0.3 shellcheck-py==0.10.0.1
+      - shellcheck -s sh build.sh
+      - python3 -m pytest -q -p no:cacheprovider test_build.py

@@ -124,12 +124,13 @@
     },
     {
       "id": "runtime-build",
-      "name": "Reproducible runtime build",
-      "desc": "Builds a commit's runtime blob at a fixed path in a digest-pinned Rust image, with the runtime's build script remapping the toolchain, Cargo home and repository directories its panic messages name, so every builder gets the same bytes and code hash: the code a signed launch manifest pins can be rebuilt from source, and a genesis built from a plain spec carrying it does not depend on the node that ran build-spec.",
+      "name": "Reproducible runtime and release node build",
+      "desc": "Builds a commit's runtime blob at a fixed path in a digest-pinned Rust image, with the runtime's build script remapping the toolchain, Cargo home and repository directories its panic messages name, so every builder gets the same bytes and code hash: the code a signed launch manifest pins can be rebuilt from source, and a genesis built from a plain spec carrying it does not depend on the node that ran build-spec. With --node it builds the release node in the same image, path and preparation (--locked --release, linux/amd64, its --version naming the commit id the source archive records), so two clean builds give the same binary, the sha256 every authority pins as exe_sha256; it prints that sha256 and the :code the node's own build-spec writes, held byte for byte to the blob the build compiled. A test runs the script against a stand-in docker and holds it to one pinned image at the workspace toolchain, one preparation for both builds, the archived tree and commit, and the :code extraction on a real raw spec.",
       "kind": "toolkit",
       "paths": [
         "tools/runtime-build",
-        "partnerchain/runtime/build.rs"
+        "partnerchain/runtime/build.rs",
+        ".woodpecker/runtime-build.yaml"
       ],
       "consumes": [],
       "status": "experimental"
