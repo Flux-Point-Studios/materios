@@ -3598,6 +3598,33 @@ def proxied_nodes(launch: dict) -> set[tuple[str, int, str]]:
     return routes
 
 
+def rpc_listeners(name: str, argv: list[str]) -> list[tuple[int, bool, str]]:
+    """(port, external, methods) of each RPC listener a node's argv opens: the default listener and every
+    experimental endpoint."""
+    port_flag = _flag(argv, "--rpc-port") or str(DEFAULT_RPC_PORT)
+    if not port_flag.isdigit():
+        raise InputError(f"node {name}: --rpc-port {port_flag} is not a port")
+    listeners = [(int(port_flag), "--rpc-external" in argv or "--unsafe-rpc-external" in argv,
+                  (_flag(argv, "--rpc-methods") or "auto").lower())]
+    # sc-cli takes `--flag=value` as one endpoint, and `--flag` as every word up to the next
+    # option (a word starting with '-', other than '-' itself).
+    endpoints = [token.split("=", 1)[1] for token in argv if token.startswith(RPC_ENDPOINT_FLAG + "=")]
+    for i, token in enumerate(argv):
+        if token == RPC_ENDPOINT_FLAG:
+            endpoints += itertools.takewhile(option_value, argv[i + 1:])
+    for endpoint in endpoints:
+        # Trimmed as the node trims each option, its key and its value.
+        options = {key.strip(): value.strip()
+                   for key, _, value in (opt.partition("=") for opt in endpoint.split(","))}
+        address = options.get("listen-addr", "")
+        if not re.search(r":\d+$", address):
+            raise InputError(f"node {name}: {RPC_ENDPOINT_FLAG} {endpoint} has no "
+                             "listen-addr ip:port")
+        host, _, port = address.rpartition(":")
+        listeners.append((int(port), not is_loopback(host), options.get("methods", "auto").lower()))
+    return listeners
+
+
 def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]], argv_of=running_argv) -> list[Finding]:
     """`argv_of` gives the argv an authority's listeners are read from: its running node process's, or, before any
     node runs, the one its manifest declares (node_process)."""
@@ -3615,31 +3642,8 @@ def check_rpc(launch: dict, authority_keys: list[tuple[str, bytes]], argv_of=run
                 findings.append(Finding(RPC, f"node {node['name']} runs --validator but is not "
                                              "declared an authority"))
             continue
-        argv = argv_of(node)
-        port_flag = _flag(argv, "--rpc-port") or str(DEFAULT_RPC_PORT)
-        if not port_flag.isdigit():
-            raise InputError(f"node {node['name']}: --rpc-port {port_flag} is not a port")
-        # (port, external, methods) for the default listener and every experimental endpoint.
-        listeners = [(int(port_flag), "--rpc-external" in argv or "--unsafe-rpc-external" in argv,
-                      (_flag(argv, "--rpc-methods") or "auto").lower())]
-        # sc-cli takes `--flag=value` as one endpoint, and `--flag` as every word up to the next
-        # option (a word starting with '-', other than '-' itself).
-        endpoints = [token.split("=", 1)[1] for token in argv if token.startswith(RPC_ENDPOINT_FLAG + "=")]
-        for i, token in enumerate(argv):
-            if token == RPC_ENDPOINT_FLAG:
-                endpoints += itertools.takewhile(option_value, argv[i + 1:])
-        for endpoint in endpoints:
-            # Trimmed as the node trims each option, its key and its value.
-            options = {key.strip(): value.strip()
-                       for key, _, value in (opt.partition("=") for opt in endpoint.split(","))}
-            address = options.get("listen-addr", "")
-            if not re.search(r":\d+$", address):
-                raise InputError(f"node {node['name']}: {RPC_ENDPOINT_FLAG} {endpoint} has no "
-                                 "listen-addr ip:port")
-            host, _, port = address.rpartition(":")
-            listeners.append((int(port), not is_loopback(host), options.get("methods", "auto").lower()))
         reasons = []
-        for port, external, methods in listeners:
+        for port, external, methods in rpc_listeners(node["name"], argv_of(node)):
             if methods not in ("auto", "safe", "unsafe"):
                 reasons.append(f"node {node['name']}: unknown --rpc-methods {methods}")
                 continue
