@@ -10,13 +10,17 @@ a checkout of the commit that pins the launch key. Paths are examples. The
 preflight's rules and inputs are in `tools/launch-preflight/README.md`; this
 file is the order to run things in.
 
+`V` stands for `python3 tools/validator-host/validator_host.py`, run on a
+validator host with the preflight's Python packages.
+
 **What was rehearsed.** Every step below was run end to end on one machine
 with throwaway keys, four validators on loopback, the mock Cardano follower,
 and stand-ins for Kupo and the public RPC filter, except the steps marked
 **NOT REHEARSED AGAINST CARDANO**. Those need a rehearsal on Cardano preprod
-before the launch; the last section lists what the mock could not show. The
-rehearsal made its validator keys with a script, so the `subkey` commands of
-step 2 were not run in it: run them once on a throwaway key before the day.
+before the launch; the last section lists what the mock could not show. One
+validator host's part (its keys, its proof, its systemd unit, its first
+checks) is `tools/validator-host/README.md`, rehearsed on four hosts of one
+machine.
 
 **Who signs what.** Each keyholder of the Root and guardian multisigs signs
 a proof that binds the genesis and the genesis-bound fields of the manifest.
@@ -76,30 +80,27 @@ burnt. `get-scripts` on the genesis UTXO prints the manifest's
 
 Each validator needs an aura key (sr25519), a grandpa key (ed25519), a
 cross-chain key (ECDSA, 33 bytes compressed) and a libp2p node key. The node
-has no `key` subcommand; use `subkey` 20.0.0 and `jq`. `subkey generate` and
-`subkey inspect` print the secret phrase with the public key, so neither is
-run with its output on the terminal: the first writes to a file only the
-validator's user reads, and the others go through `jq`, which prints the
-public key alone.
+has no `key` subcommand; each operator makes them on the validator itself
+with `tools/validator-host/validator_host.py`, as the node's user
+(`tools/validator-host/README.md`, steps 1 to 3):
 
 ```
-umask 077
-subkey generate --scheme sr25519 --output-type json > val-1.key.json    # prints nothing
-jq -r .secretPhrase val-1.key.json > val-1.phrase                        # the secret URI, in a private file
-jq -r .publicKey val-1.key.json                                          # the aura public key
-subkey inspect --scheme ed25519 --output-type json val-1.phrase | jq -r .publicKey    # the grandpa public key
-subkey inspect --scheme ecdsa --output-type json val-1.phrase | jq -r .publicKey      # the cross-chain public key
-subkey generate-node-key --file node-key                                 # prints the peer id
+V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /etc/materios/node-key
+V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val-1 > val-1.proof.json
+V verify val-1.proof.json                                                # the coordinator, on each proof
 ```
 
-Keystore files go in `<base path>/chains/materios_mainnet/keystore/`, each
-named `<hex of the key type><hex of the public key>` and holding the secret
-URI as a JSON string (`jq -R . val-1.phrase > <keystore file>`, under the
-same umask). The key types are `aura`, `gran` and `crch`. Remove
-`val-1.key.json` once the keystore files are written; keep `val-1.phrase`
-wherever the validator's backup is kept, and nowhere else.
+`keygen` prints the three public keys, the peer id and the candidates row,
+and no secret; it writes the keystore files, each named
+`<hex of the key type><hex of the public key>` (`aura`, `gran`, `crch`), and
+the node key, and never over an existing one. The proof is a signature by
+each of the three keys over the validator's name and its row.
 
-- **Proves:** nothing; the manifest takes the three public keys.
+- **Proves:** each validator's keystore holds the secrets of the three
+  public keys the manifest and the candidates list take: `verify` passes on
+  its proof, and prints the row it proved.
+- **If `verify` refuses:** that validator's keys do not go in the manifest.
+  Its operator runs `V show`, which names what its keystore holds.
 - **If a validator has no node key:** it exits at start with
   `NetworkKeyNotFound`. Give `--node-key-file`.
 
@@ -372,8 +373,10 @@ whatever `--chain` names.
 
 ### 15. Start every validator
 
-With exactly its manifest argv and env. GRANDPA finalizes with more than two
-thirds of the authorities: three of four, four of five.
+With exactly its manifest argv and env: `V unit --launch launch.json --name
+<validator>` writes the systemd unit from the validator's manifest entry
+(`tools/validator-host/README.md`, steps 6 to 8). GRANDPA finalizes with
+more than two thirds of the authorities: three of four, four of five.
 
 - A validator with no peer authors nothing. Block 1 comes at the first slot
   of a validator that has a peer and whose follower serves the epoch's
