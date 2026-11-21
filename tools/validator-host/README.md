@@ -28,8 +28,9 @@ host's screen, never through the coordinator.
   |---|---|---|
   | `/usr/local/bin/materios-node` | the release binary | root, 0755 |
   | `/srv/materios/spec/mainnet-raw.json` | the chain spec; nothing else is ever written under `/srv/materios/spec` once the node runs | root, 0644 |
-  | `/var/lib/materios` | the base path, empty but for the keystore | materios, 0700 |
-  | `/etc/materios/node-key` | the libp2p node key | materios, 0600 |
+  | `/var/lib/materios` | the base path, empty but for the keystore and the node key | materios, 0700 |
+  | `/var/lib/materios/node-key` | the libp2p node key | materios, 0600 |
+  | `/etc/materios` | the directory of the environment file; the node's user writes nothing in it | root, 0755 |
   | `/etc/materios/validator.env` | the follower's database URL, with its password | root, 0600 |
 
 ## Before the day
@@ -46,7 +47,7 @@ sha256sum /usr/local/bin/materios-node      # the published sha256, or this host
 As the node's user:
 
 ```
-V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /etc/materios/node-key
+V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /var/lib/materios/node-key
 ```
 
 It makes an aura key (sr25519), a grandpa key (ed25519) and a partner-chain
@@ -63,13 +64,21 @@ candidates row: <partner-chain key>:<aura key>:<grandpa key>
 - Each keystore file is named `<hex of the key type><hex of the public key>`
   and holds its seed as the JSON string `"0x…"`, mode 0600, in a 0700
   directory. The key types are `aura`, `gran` and `crch`.
-- `keygen` never writes into a keystore that holds an entry or over a node
-  key. `V show` with the same two options prints the five lines again, from
-  the files, and refuses a keystore that holds anything but one key of each
+- `keygen` never writes into a keystore that holds an entry, over a node key
+  or through a link, and sets the keystore directory to 0700. It writes the
+  node key first: where a path cannot be written it removes what it wrote,
+  says which path, and can be run again.
+- `V show` with the same two options prints the five lines again, from the
+  files, and refuses a keystore that holds anything but one key of each
   type, each named by the public key its secret derives.
-- The keystore and the node key are the only copies. Back them up where the
-  validator's backup is kept, or not at all: a lost validator key is replaced
-  through the candidates list, a leaked one cannot be.
+- **What a raw seed costs.** Each secret is 32 random bytes in hex, not a
+  phrase: there are four files to back up (three keystore entries and the
+  node key), no words to write down and no checksum to catch a copying
+  mistake, and no recovery from a phrase. The files are plaintext on disk,
+  as every Substrate keystore entry is, and the tool does not wipe a seed
+  from memory when it exits. Back the four files up where the validator's
+  backup is kept, or not at all: a lost validator key is replaced through
+  the candidates list, a leaked one cannot be.
 - The node has no `key` subcommand, and `subkey` 20.0.0 is published neither
   as a binary nor as an image, so a host would have to compile it. The seeds
   here derive the public keys sp-core derives from them
@@ -86,10 +95,25 @@ V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val
   the candidates list reads off this host's own screen.
 - The proof holds the name, the three public keys and a signature by each key
   over `materios-validator-host-pop-v1`, the name and the candidates row. It
-  is public: send it, with the five lines of step 2, to the coordinator, who
-  runs `V verify val-1.proof.json` before the keys go into the manifest.
-  `verify` prints the row it proved; a refusal means the keystore does not
-  hold what the row says.
+  is public: send it, with the five lines of step 2, to the coordinator.
+- The coordinator writes the three keys into the validator's manifest entry
+  and runs
+
+  ```
+  V verify val-1.proof.json --launch launch.json --name val-1
+  ```
+
+  `verify` reads the name from its command line and the keys from the
+  manifest entry of that name, and passes only when those three keys signed
+  that name and their row. It prints nothing a proof brings. The verdict is
+  its exit status, 0, for the row the manifest holds: never a row read off a
+  proof or off anyone's output.
+- **The proof shows possession, not identity.** Whoever holds three keys can
+  sign any name with them. That a proof came from the operator of `val-1`
+  is established the way the record is: from the host's own screen, or over
+  a channel the coordinator already trusts for that operator.
+- A name is 1 to 64 of the letters A-Z and a-z, digits, `.`, `_` and `-`;
+  `prove`, `verify` and `unit` refuse any other.
 
 ### 4. The network
 
@@ -111,7 +135,7 @@ for the layout above:
 
 ```
 /usr/local/bin/materios-node --validator --chain /srv/materios/spec/mainnet-raw.json
-  --base-path /var/lib/materios --name val-1 --node-key-file /etc/materios/node-key
+  --base-path /var/lib/materios --name val-1 --node-key-file /var/lib/materios/node-key
   --listen-addr /ip4/0.0.0.0/tcp/30333 --rpc-port 9944 --rpc-methods safe
   --prometheus-port 9615 --no-telemetry --no-mdns
   --reserved-nodes /ip4/<address>/tcp/30333/p2p/<peer id> …      (every other validator)
@@ -129,7 +153,7 @@ sha256 of GENESIS-DAY steps 0 and 7:
 
 ```
 sha256sum /srv/materios/spec/mainnet-raw.json /usr/local/bin/materios-node
-ls -A /var/lib/materios/chains/materios_mainnet      # keystore, and nothing else
+ls -A /var/lib/materios /var/lib/materios/chains/materios_mainnet      # chains and node-key; keystore: nothing else
 ```
 
 Read this host's own entry in the manifest: its three keys are step 2's, its
@@ -152,7 +176,13 @@ systemctl daemon-reload
   as `<host>:<port>/<database>`, with no user and no password.
 - `unit` refuses an entry it cannot write exactly: a relative argv[0], or a
   word with a quote, a backslash, `%`, `$`, a control or a non-ASCII
-  character, which systemd would rewrite.
+  character, which systemd would rewrite; a `--user` that is no user name;
+  an entry whose `argv` is not a list of words or whose `env` is not a table
+  of strings.
+- `unit` refuses to start a validator with `--rpc-external`,
+  `--unsafe-rpc-external`, `--rpc-methods unsafe`, `--dev` or a development
+  key flag (`--alice` to `--two`). The launch preflight's rules 3 and 8 judge
+  the rest of the argv; this is no substitute for them.
 - `RestartSec=120` is the wait before a crashed GRANDPA voter votes again.
   `systemctl restart` skips it: to restart a validator by hand,
   `systemctl stop`, wait 120 seconds, `systemctl start`.
@@ -190,12 +220,17 @@ not on each validator.
 ## What was rehearsed
 
 On one machine, with throwaway keys and the release binary: four hosts, each
-through steps 1 to 3 and 6 to 8 as written, under a user manager (no `User=`,
-paths under one scratch directory), on the mock Cardano follower. The chain
+through steps 1 to 3 and 6 to 8, under a user manager (no `User=`, paths
+under one scratch directory), on the mock Cardano follower. The chain
 authored and finalized from keystores `keygen` wrote; the launch preflight
 read each running process's argv as its manifest entry's, word for word; a
 killed node came back after the 120 seconds and authored again; a stopped
 one left the other three finalizing.
+
+The four nodes ran before `verify` took the manifest and before the node key
+moved under the base path: they read their node key from a directory beside
+it. Since then one host walked `keygen`, `show`, `prove`, `verify` against a
+manifest entry and `unit` with the paths above, without starting a node.
 
 Not rehearsed: a system unit with `User=` and the root-owned paths, the
 firewall, more than one machine, a real follower database.

@@ -85,9 +85,15 @@ with `tools/validator-host/validator_host.py`, as the node's user
 (`tools/validator-host/README.md`, steps 1 to 3):
 
 ```
-V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /etc/materios/node-key
+V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /var/lib/materios/node-key
 V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val-1 > val-1.proof.json
-V verify val-1.proof.json                                                # the coordinator, on each proof
+```
+
+and, once step 6 has the validator's three keys in the manifest, the
+coordinator runs on each proof:
+
+```
+V verify val-1.proof.json --launch launch.json --name val-1
 ```
 
 `keygen` prints the three public keys, the peer id and the candidates row,
@@ -96,11 +102,13 @@ and no secret; it writes the keystore files, each named
 the node key, and never over an existing one. The proof is a signature by
 each of the three keys over the validator's name and its row.
 
-- **Proves:** each validator's keystore holds the secrets of the three
-  public keys the manifest and the candidates list take: `verify` passes on
-  its proof, and prints the row it proved.
-- **If `verify` refuses:** that validator's keys do not go in the manifest.
-  Its operator runs `V show`, which names what its keystore holds.
+- **Proves:** secrets signed for the three keys the manifest declares for
+  that validator, under its name. `verify` takes the keys from the manifest
+  and the name from its command line, never from the proof, and its exit
+  status is the verdict: do not judge a proof by reading output. It shows
+  possession of the keys, not who their operator is.
+- **If `verify` refuses:** that validator's keys do not stay in the
+  manifest. Its operator runs `V show`, which names what its keystore holds.
 - **If a validator has no node key:** it exits at start with
   `NetworkKeyNotFound`. Give `--node-key-file`.
 
