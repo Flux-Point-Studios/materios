@@ -21,7 +21,9 @@ host's screen, never through the coordinator.
   /opt/materios/venv/bin/pip install --no-cache-dir -r tools/launch-preflight/requirements.txt
   ```
 
-  `V` below stands for `/opt/materios/venv/bin/python tools/validator-host/validator_host.py`.
+  `V` below stands for `/opt/materios/venv/bin/python tools/validator-host/validator_host.py`,
+  run from a checkout: the tool reads keys and RPC listeners with the launch
+  preflight's own readers, from `tools/launch-preflight` beside it.
 - A user the node runs as (`materios`), and these paths:
 
   | Path | Holds | Owner, mode |
@@ -32,6 +34,14 @@ host's screen, never through the coordinator.
   | `/var/lib/materios/node-key` | the libp2p node key | materios, 0600 |
   | `/etc/materios` | the directory of the environment file; the node's user writes nothing in it | root, 0755 |
   | `/etc/materios/validator.env` | the follower's database URL, with its password | root, 0600 |
+
+  As root, before anything else:
+
+  ```
+  useradd --system --home-dir /var/lib/materios --shell /usr/sbin/nologin materios
+  install -d -o materios -g materios -m 0700 /var/lib/materios
+  install -d -o root -g root -m 0755 /etc/materios /srv/materios /srv/materios/spec
+  ```
 
 ## Before the day
 
@@ -65,7 +75,9 @@ candidates row: <partner-chain key>:<aura key>:<grandpa key>
   and holds its seed as the JSON string `"0x…"`, mode 0600, in a 0700
   directory. The key types are `aura`, `gran` and `crch`.
 - `keygen` never writes into a keystore that holds an entry, over a node key
-  or through a link, and sets the keystore directory to 0700. It writes the
+  or through a link. Every directory it makes is 0700 whatever the umask,
+  and it sets the keystore directory to 0700. It refuses a node key inside
+  the keystore, where the node would read it as a session key. It writes the
   node key first: where a path cannot be written it removes what it wrote,
   says which path, and can be run again.
 - `V show` with the same two options prints the five lines again, from the
@@ -108,6 +120,15 @@ V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val
   that name and their row. It prints nothing a proof brings. The verdict is
   its exit status, 0, for the row the manifest holds: never a row read off a
   proof or off anyone's output.
+- `verify` refuses a manifest key no secret stands behind, before it reads
+  a signature: the all-zero aura key and an ed25519 key of small order, for
+  which anyone can write a signature that verifies, and bytes that are no
+  key of their scheme (no canonical ristretto point, no canonical ed25519
+  point of the prime-order group, no compressed point on secp256k1). `show`
+  and `prove` refuse a keystore whose secret gives such a key. The launch
+  preflight's rule 1 refuses the first two for every authority, in the
+  manifest, in genesis and on Cardano; it is the gate, this is the earlier
+  look.
 - **The proof shows possession, not identity.** Whoever holds three keys can
   sign any name with them. That a proof came from the operator of `val-1`
   is established the way the record is: from the host's own screen, or over
@@ -179,10 +200,24 @@ systemctl daemon-reload
   character, which systemd would rewrite; a `--user` that is no user name;
   an entry whose `argv` is not a list of words or whose `env` is not a table
   of strings.
-- `unit` refuses to start a validator with `--rpc-external`,
-  `--unsafe-rpc-external`, `--rpc-methods unsafe`, `--dev` or a development
-  key flag (`--alice` to `--two`). The launch preflight's rules 3 and 8 judge
-  the rest of the argv; this is no substitute for them.
+- `unit` refuses an argv no mainnet validator runs with:
+  - without `--validator`;
+  - without exactly one `--chain`, or with one that is not an absolute path
+    (`dev`, `local` or `preprod` start a chain built into the node; a unit has
+    no working directory for a relative path);
+  - with an RPC listener beyond loopback or serving methods other than
+    `safe`, read as the preflight reads them: `--rpc-external`,
+    `--unsafe-rpc-external`, a missing or other `--rpc-methods`, and every
+    `--experimental-rpc-endpoint`, which needs a loopback `listen-addr` and
+    `methods=safe`;
+  - with `--dev` or a development key flag (`--alice` to `--two`);
+  - with `--password` or `--node-key`, whose value is a secret the unit and
+    the signed manifest would show: use `--password-filename` and
+    `--node-key-file`.
+
+  And an `env` with a setting of the dynamic loader (any name starting
+  `LD_`). The launch preflight's rules 3 and 8 judge the running node; this
+  is no substitute for them.
 - `RestartSec=120` is the wait before a crashed GRANDPA voter votes again.
   `systemctl restart` skips it: to restart a validator by hand,
   `systemctl stop`, wait 120 seconds, `systemctl start`.
@@ -230,7 +265,8 @@ one left the other three finalizing.
 The four nodes ran before `verify` took the manifest and before the node key
 moved under the base path: they read their node key from a directory beside
 it. Since then one host walked `keygen`, `show`, `prove`, `verify` against a
-manifest entry and `unit` with the paths above, without starting a node.
+manifest entry and `unit` with the paths above, twice, without starting a
+node.
 
 Not rehearsed: a system unit with `User=` and the root-owned paths, the
 firewall, more than one machine, a real follower database.

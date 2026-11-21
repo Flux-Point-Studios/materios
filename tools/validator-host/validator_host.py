@@ -13,7 +13,6 @@ that is none of the above. README.md gives the order."""
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import re
@@ -24,8 +23,12 @@ from pathlib import Path
 import base58
 import coincurve
 import sr25519
+from nacl.bindings import crypto_core_ed25519_is_valid_point
 from nacl.exceptions import BadSignatureError
 from nacl.signing import SigningKey, VerifyKey
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "launch-preflight"))
+import launch_preflight as lp  # noqa: E402
 
 # The node's key type of each session key, in the order a proof and the screen list them.
 KEY_TYPES = {"aura": "aura", "grandpa": "gran", "cross_chain": "crch"}
@@ -36,13 +39,33 @@ EXACT = re.compile(r"[ !#&-\[\]-~]*")
 SEED = re.compile(r"0x[0-9a-f]{64}")
 NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
 USER = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
-# What no validator's unit starts with: an RPC listener beyond loopback, and the keys every developer holds.
-FORBIDDEN = frozenset({"--rpc-external", "--unsafe-rpc-external", "--dev", "--alice", "--bob", "--charlie", "--dave",
-                       "--eve", "--ferdie", "--one", "--two"})
+# Options whose value is a secret: a unit is world-readable and the manifest is signed and handed round.
+SECRET_OPTIONS = ("--password", "--node-key")
+# What json.loads raises on a file that is no JSON, or nested past what Python parses.
+NOT_JSON = (ValueError, RecursionError)
 
 
 class Refused(Exception):
     pass
+
+
+def unusable(key: str, public: bytes) -> str | None:
+    """Why no secret stands behind these bytes as a key of their scheme, or None. The ristretto identity and an
+    ed25519 key of small order verify a signature anyone can write; the rest decode to no key at all."""
+    if key == "aura":
+        if public == bytes(32):
+            return "the all-zero key, whose sr25519 signature of any message needs no secret"
+        try:
+            sr25519.derive_pubkey((bytes(32), public), b"")
+        except ValueError:
+            return "no sr25519 key: the bytes are no canonical ristretto point"
+    elif key == "grandpa":
+        if not crypto_core_ed25519_is_valid_point(public):
+            return ("no ed25519 key a secret makes: a point of small order, whose signature of any message needs "
+                    "no secret, or bytes that are no canonical point of the prime-order group")
+    elif not lp.secp256k1_point(public):
+        return "no ECDSA key: not 0x02 or 0x03 and the x of a point on secp256k1"
+    return None
 
 
 def public_key(key: str, seed: bytes) -> bytes:
@@ -54,23 +77,32 @@ def public_key(key: str, seed: bytes) -> bytes:
     return coincurve.PrivateKey(seed).public_key.format(compressed=True)
 
 
+def private_directory(path: Path) -> None:
+    """Make the directory and each missing one above it, every one 0700 whatever the umask."""
+    for missing in reversed([d for d in (path, *path.parents) if not d.exists()]):
+        missing.mkdir()
+        missing.chmod(0o700)
+
+
 def keygen(keystore: Path, node_key: Path) -> None:
     if keystore.exists() and any(keystore.iterdir()):
         raise Refused(f"{keystore} already holds entries: keygen never writes into a keystore in use")
+    if keystore.resolve() in node_key.resolve().parents:
+        raise Refused(f"{node_key} is inside the keystore, where the node reads every file as a session key")
     files = {node_key: secrets.token_bytes(32).hex()}
     for key, key_type in KEY_TYPES.items():
         seed = secrets.token_bytes(32)
         files[keystore / (key_type.encode().hex() + public_key(key, seed).hex())] = json.dumps("0x" + seed.hex())
     written = []
     try:
-        node_key.parent.mkdir(parents=True, exist_ok=True)
+        private_directory(node_key.parent)
         for path, text in files.items():
             # O_EXCL neither opens an existing file nor follows a link at the path.
             with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as out:
                 written.append(path)
                 out.write(text)
             if path == node_key:
-                keystore.mkdir(parents=True, exist_ok=True)
+                private_directory(keystore)
                 keystore.chmod(0o700)
     except OSError as e:
         for path in written:
@@ -99,14 +131,20 @@ def read_seeds(keystore: Path) -> dict[str, bytes]:
             raise Refused(f"{keystore} holds {len(paths)} {KEY_TYPES[key]} entries: a validator holds exactly one")
         try:
             secret = json.loads(paths[0].read_text())
-        except (OSError, ValueError) as e:
+        except (OSError, *NOT_JSON) as e:
             raise Refused(f"{paths[0].name[:8]}… cannot be read as a keystore entry: {type(e).__name__}") from e
         if not isinstance(secret, str) or not SEED.fullmatch(secret):
             raise Refused(f"the {KEY_TYPES[key]} entry does not hold a 32-byte seed as 0x and lowercase hex: "
                           "it was not made by keygen")
         seeds[key] = bytes.fromhex(secret[2:])
-        if paths[0].name[8:] != public_key(key, seeds[key]).hex():
+        try:
+            public = public_key(key, seeds[key])
+        except ValueError as e:
+            raise Refused(f"the {KEY_TYPES[key]} entry holds no secret key of its scheme") from e
+        if paths[0].name[8:] != public.hex():
             raise Refused(f"the {KEY_TYPES[key]} entry's secret does not derive the public key its name gives")
+        if reason := unusable(key, public):
+            raise Refused(f"the {KEY_TYPES[key]} entry's public key is {reason}")
     return seeds
 
 
@@ -163,25 +201,11 @@ def signed(key: str, public: bytes, signature: bytes, message: bytes) -> bool:
         return False
 
 
-def ss58_key(text: str) -> bytes | None:
-    """The 32-byte key of an SS58 address of any network, or None."""
-    try:
-        raw = base58.b58decode(text)
-    except ValueError:
-        return None
-    body, checksum = raw[:-2], raw[-2:]
-    if not raw or len(body) != (1 if raw[0] < 64 else 2) + 32:
-        return None
-    if hashlib.blake2b(b"SS58PRE" + body, digest_size=64).digest()[:2] != checksum:
-        return None
-    return body[-32:]
-
-
 def authority(launch: Path, name: str) -> dict:
     try:
         nodes = json.loads(launch.read_text())["nodes"]
         found = [n for n in nodes if n.get("name") == name and n.get("authority") is True]
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+    except (OSError, *NOT_JSON, KeyError, TypeError, AttributeError) as e:
         raise Refused(f"{launch} is not a launch manifest: {type(e).__name__}") from e
     if len(found) != 1:
         raise Refused(f"{launch} declares no authority named {name}" if not found else
@@ -194,13 +218,14 @@ def declared_keys(node: dict, name: str) -> dict[str, bytes]:
     for a 32-byte key an SS58 address."""
     keys = {}
     for key, size in (("aura", 32), ("grandpa", 32), ("cross_chain", 33)):
-        text = node.get(key)
-        if isinstance(text, str) and re.fullmatch(f"0x[0-9a-f]{{{2 * size}}}", text):
-            keys[key] = bytes.fromhex(text[2:])
-        elif isinstance(text, str) and size == 32 and ss58_key(text):
-            keys[key] = ss58_key(text)
-        else:
+        try:
+            keys[key] = lp.decode_public_key(node.get(key))
+        except (ValueError, lp.InputError, TypeError, AttributeError) as e:
+            raise Refused(f"the manifest's {key} key of {name} is no {size}-byte public key") from e
+        if len(keys[key]) != size:
             raise Refused(f"the manifest's {key} key of {name} is no {size}-byte public key")
+        if reason := unusable(key, keys[key]):
+            raise Refused(f"the manifest's {key} key of {name} is {reason}: do not list this validator")
     return keys
 
 
@@ -212,7 +237,7 @@ def verify(path: Path, launch: Path, name: str) -> str:
         doc = json.loads(path.read_text())
         claimed = {key: doc[key] for key in ("name", *KEY_TYPES)}
         signatures = {key: bytes.fromhex(doc["signatures"][key].removeprefix("0x")) for key in KEY_TYPES}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+    except (OSError, *NOT_JSON, KeyError, TypeError, AttributeError) as e:
         raise Refused(f"{path} is not a proof this tool wrote: {type(e).__name__}") from e
     if claimed["name"] != name:
         raise Refused(f"{path} names another validator than {name}: do not list it under this name")
@@ -247,19 +272,37 @@ def unit(launch: Path, name: str, env_file: str, user: str | None) -> str:
     if not argv[0].startswith("/"):
         raise Refused(f"argv[0] of {name} must be the absolute path of the node binary: systemd runs nothing else, "
                       "and the launch gate compares it with the running process word for word")
-    for i, word in enumerate(argv):
-        flag, _, value = word.partition("=")
-        if flag == "--rpc-methods" and (value or "".join(argv[i + 1:i + 2])).lower() == "unsafe":
-            flag = "--rpc-methods unsafe"
-        elif flag not in FORBIDDEN:
-            continue
-        raise Refused(f"a validator must not run with {flag}: unsafe RPC, an RPC listener beyond loopback, or keys "
-                      "every developer holds")
+    flags = [word.partition("=")[0] for word in argv]
+    if "--validator" not in flags:
+        raise Refused(f"the argv of {name} is without --validator: an authority that is no validator authors nothing")
+    if dev := sorted(lp.DEV_KEYRING_FLAGS.intersection(flags)):
+        raise Refused(f"a validator must not run with {dev[0]}, which loads keys every developer holds")
+    if secret := [flag for flag in SECRET_OPTIONS if flag in flags]:
+        raise Refused(f"{secret[0]} puts a secret in its argv, which the unit and the signed manifest show to "
+                      f"everyone: give {secret[0]}-file or --password-filename")
+    chain = lp._flag(argv, "--chain")
+    if flags.count("--chain") != 1 or not chain or not chain.startswith("/"):
+        raise Refused(f"the argv of {name} must give --chain once, as the absolute path of the spec file: a name "
+                      "(dev, local, preprod) starts a chain built into the node, and the unit has no working directory "
+                      "for a relative path")
+    try:
+        listeners = lp.rpc_listeners(name, argv)
+    except lp.InputError as e:
+        raise Refused(str(e)) from e
+    for port, external, methods in listeners:
+        if external:
+            raise Refused(f"the RPC listener on port {port} of {name} listens beyond loopback: a validator's RPC "
+                          "stays on loopback")
+        if methods != "safe":
+            raise Refused(f"the RPC listener on port {port} of {name} serves methods other than safe: give "
+                          "--rpc-methods safe, and methods=safe in every --experimental-rpc-endpoint")
     if not env_file.startswith("/") or not EXACT.fullmatch(env_file) or " " in env_file:
         raise Refused("--env-file must be an absolute path without spaces")
     for key in env:
         if not re.fullmatch("[A-Za-z_][A-Za-z0-9_]*", key):
             raise Refused(f"{key!r} is no environment name")
+        if key.upper().startswith("LD_"):
+            raise Refused(f"{key} is a setting of the dynamic loader, which runs other code in the node")
     lines = ["[Unit]", f"Description=Materios mainnet validator {name}", "Wants=network-online.target",
              "After=network-online.target", "", "[Service]"]
     if user:

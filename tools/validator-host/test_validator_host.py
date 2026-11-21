@@ -1,4 +1,5 @@
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -7,6 +8,8 @@ from pathlib import Path
 import pytest
 
 import validator_host
+
+lp = validator_host.lp
 
 TOOL = Path(__file__).with_name("validator_host.py")
 # sp-core's `seeded_pair_should_work` seed and the public key each scheme derives from it.
@@ -157,9 +160,37 @@ def test_keygen_makes_fresh_secrets_each_time(tmp_path):
 
 def test_show_reads_a_node_key_of_raw_bytes_as_no_key_and_shows_none_of_it(tmp_path):
     keystore, node_key = seeded(tmp_path)
-    node_key.write_bytes(bytes(range(200, 232)))
-    err = refused("show", "--keystore", keystore, "--node-key", node_key)
-    assert "in hex" in err and "0xc8" not in err and "200" not in err
+    raw = bytes(range(0x80, 0xa0))
+    node_key.write_bytes(raw)
+    said = refused("show", "--keystore", keystore, "--node-key", node_key).replace(str(node_key), "")
+    assert "in hex" in said
+    for byte in raw:
+        assert f"{byte:02x}" not in said.lower() and str(byte) not in said and chr(byte) not in said
+
+
+def test_keygen_makes_every_directory_private_whatever_the_umask(tmp_path):
+    base = tmp_path / "base"
+    keystore, node_key = base / "chains" / "materios_mainnet" / "keystore", base / "keys" / "node-key"
+    done = subprocess.run([sys.executable, str(TOOL), "keygen", "--keystore", keystore, "--node-key", node_key],
+                          capture_output=True, text=True, preexec_fn=lambda: os.umask(0))
+    assert done.returncode == 0, done.stderr
+    made = [base, base / "chains", base / "chains" / "materios_mainnet", keystore, base / "keys"]
+    assert [stat.S_IMODE(d.stat().st_mode) for d in made] == [0o700] * 5
+    assert {stat.S_IMODE(f.stat().st_mode) for f in (*keystore.iterdir(), node_key)} == {0o600}
+
+
+@pytest.mark.parametrize("inside", ["node-key", "sub/node-key"])
+def test_keygen_refuses_a_node_key_inside_the_keystore_before_any_write(tmp_path, inside):
+    keystore = tmp_path / "keystore"
+    assert "inside the keystore" in refused("keygen", "--keystore", keystore, "--node-key", keystore / inside)
+    assert not keystore.exists()
+    ok("keygen", "--keystore", keystore, "--node-key", tmp_path / "node-key")
+
+
+def test_show_refuses_a_seed_that_is_no_secret_of_its_scheme(tmp_path):
+    keystore, node_key = seeded(tmp_path)
+    (keystore / ("crch".encode().hex() + CROSS_CHAIN)).write_text(json.dumps("0x" + "00" * 32))
+    assert "crch entry" in refused("show", "--keystore", keystore, "--node-key", node_key)
 
 
 @pytest.mark.parametrize("damage, reason", [
@@ -241,6 +272,57 @@ def test_two_authorities_under_one_name_are_refused(tmp_path):
     refuses(run("verify", tmp_path / "proof.json", "--launch", path, "--name", "val-1"), "2 authorities named val-1")
 
 
+P = 2**255 - 19
+SECP = 2**256 - 2**32 - 977
+# Keys nobody holds, or everybody does. sr25519: the ristretto identity, whose signature of R and s zero verifies
+# for any message; an s that is odd; an s that is not below the field prime; an s of no point (RFC 9496, A.3).
+NO_AURA = {
+    "identity": bytes(32),
+    "negative": (1).to_bytes(32, "little"),
+    "not below p": P.to_bytes(32, "little"),
+    "all ones": bytes([255]) * 32,
+    "no point": bytes.fromhex("26948d35ca62e643e26a83177332e6b6afeb9d08e4268b650f1f5bbd8d81d371"),
+}
+# ed25519: every encoding the node's verifier reads as a key of small order, a y that is not below p, and one
+# that is no key of the prime-order group.
+NO_GRANDPA = {
+    **{f"small order {key.hex()[:8]}…{key.hex()[-2:]}": key for key in sorted(lp.ED25519_SMALL_ORDER)},
+    "y = p + 3": (P + 3).to_bytes(32, "little"),
+    "y = 2": (2).to_bytes(32, "little"),
+}
+# secp256k1: 33 bytes that are no compressed point.
+NO_CROSS_CHAIN = {
+    "prefix 00 (infinity)": bytes(33),
+    "prefix 04": b"\x04" + bytes.fromhex(CROSS_CHAIN)[1:],
+    "prefix 01": b"\x01" + bytes.fromhex(CROSS_CHAIN)[1:],
+    "x = 5, on no point": b"\x02" + (5).to_bytes(32, "big"),
+    "x = 0, on no point": b"\x02" + bytes(32),
+    "x = p": b"\x02" + SECP.to_bytes(32, "big"),
+    "x = p + 1": b"\x03" + (SECP + 1).to_bytes(32, "big"),
+}
+UNUSABLE = [(key, label, value) for key, table in (("aura", NO_AURA), ("grandpa", NO_GRANDPA),
+                                                   ("cross_chain", NO_CROSS_CHAIN)) for label, value in table.items()]
+
+
+def test_the_small_order_table_is_the_fourteen_encodings():
+    assert len(lp.ED25519_SMALL_ORDER) == 14
+
+
+@pytest.mark.parametrize("key, label, value", UNUSABLE, ids=[f"{k}: {label}" for k, label, _ in UNUSABLE])
+def test_verify_refuses_a_manifest_key_no_secret_stands_behind(tmp_path, key, label, value):
+    """Whatever the proof holds: the same bytes as its key, and for the keys that verify without a secret the
+    signature that does."""
+    doc = json.loads(json.dumps(FIXED_PROOF))
+    doc[key] = "0x" + value.hex()
+    doc["signatures"][key] = "0x" + (bytes(63) + b"\x80" if key == "aura" else bytes(64)).hex()
+    refuses(verify(tmp_path, doc, **{key: "0x" + value.hex()}), f"{key} key of val-1")
+
+
+def test_the_identity_and_a_small_order_key_do_verify_without_a_secret():
+    """Why the refusal cannot be left to the signature check."""
+    assert validator_host.signed("aura", bytes(32), bytes(63) + b"\x80", b"any message")
+
+
 def test_a_proof_is_for_the_validator_asked_about(tmp_path):
     refuses(verify(tmp_path, FIXED_PROOF, name="val-2"), "declares no authority named val-2")
     path = tmp_path / "proof.json"
@@ -278,8 +360,12 @@ def test_verify_prints_nothing_a_proof_brings(tmp_path):
     assert "11" * 32 not in done.stderr and "\x1b" not in done.stderr and done.stderr.count("\n") == 1
 
 
+DEEP = "[" * 100000 + "]" * 100000
+
+
 @pytest.mark.parametrize("doc", ["[]", "{}", '{"name": 5}', "not json", json.dumps({**FIXED_PROOF, "aura": "0xzz"}),
-                                 json.dumps({**FIXED_PROOF, "signatures": []})])
+                                 json.dumps({**FIXED_PROOF, "signatures": []}), DEEP],
+                         ids=["list", "empty", "number name", "not json", "bad hex", "no signatures", "deep"])
 def test_verify_refuses_a_file_that_is_no_proof(tmp_path, doc):
     path = tmp_path / "proof.json"
     path.write_text(doc)
@@ -333,16 +419,17 @@ def test_unit_for_a_user_manager_names_no_user(tmp_path):
 
 
 NODE = "/usr/local/bin/materios-node"
+BASE_ARGV = [NODE, "--validator", "--chain", "/srv/materios/spec/mainnet-raw.json", "--rpc-methods", "safe"]
 
 
 @pytest.mark.parametrize("changes, name, reason", [
     ({}, "val-9", "no authority named val-9"),
     ({}, "rpc-1", "no authority named rpc-1"),
-    ({"argv": ["materios-node", "--validator"]}, "val-1", "absolute path"),
-    ({"argv": [NODE, "--name", "50%"]}, "val-1", "systemd would rewrite"),
-    ({"argv": [NODE, "--name", "a$b"]}, "val-1", "systemd would rewrite"),
-    ({"argv": [NODE, "--name", 'a"b']}, "val-1", "systemd would rewrite"),
-    ({"argv": [NODE, "--name", "a\nb"]}, "val-1", "systemd would rewrite"),
+    ({"argv": ["materios-node", *BASE_ARGV[1:]]}, "val-1", "argv[0] of val-1 must be the absolute path"),
+    ({"argv": [*BASE_ARGV, "--name", "50%"]}, "val-1", "systemd would rewrite"),
+    ({"argv": [*BASE_ARGV, "--name", "a$b"]}, "val-1", "systemd would rewrite"),
+    ({"argv": [*BASE_ARGV, "--name", 'a"b']}, "val-1", "systemd would rewrite"),
+    ({"argv": [*BASE_ARGV, "--name", "a\nb"]}, "val-1", "systemd would rewrite"),
     ({"env": {"MAIN_CHAIN_FOLLOWER": "db\\sync"}}, "val-1", "systemd would rewrite"),
     ({"env": {"BAD NAME": "1"}}, "val-1", "is no environment name"),
     ({"argv": []}, "val-1", "argv"),
@@ -352,10 +439,38 @@ NODE = "/usr/local/bin/materios-node"
     ({"env": None}, "val-1", "env"),
     ({"env": ["A=1"]}, "val-1", "env"),
     ({"env": {"A": 1}}, "val-1", "env"),
-    *[({"argv": [NODE, "--validator", *flag]}, "val-1", "must not run with")
-      for flag in (["--unsafe-rpc-external"], ["--rpc-external"], ["--rpc-methods", "unsafe"], ["--rpc-methods=Unsafe"],
-                   ["--dev"], ["--alice"], ["--bob"], ["--charlie"], ["--dave"], ["--eve"], ["--ferdie"], ["--one"],
-                   ["--two"])],
+    *[({"argv": [*BASE_ARGV, *flag]}, "val-1", reason) for reason, flags in {
+        "loads keys every developer holds": (["--dev"], ["--alice"], ["--bob"], ["--charlie"], ["--dave"], ["--eve"],
+                                             ["--ferdie"], ["--one"], ["--two"]),
+        "beyond loopback": (["--unsafe-rpc-external"], ["--rpc-external"],
+                            ["--experimental-rpc-endpoint", "listen-addr=0.0.0.0:9944,methods=safe"],
+                            ["--experimental-rpc-endpoint=listen-addr=0.0.0.0:9944,methods=safe"],
+                            ["--experimental-rpc-endpoint", "listen-addr=[::]:9944,methods=safe"],
+                            ["--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9955,methods=safe",
+                             "listen-addr=10.0.0.5:9956,methods=safe"]),
+        "methods other than safe": (["--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9955,methods=unsafe"],
+                                    ["--experimental-rpc-endpoint=listen-addr=127.0.0.1:9955,methods=Unsafe"],
+                                    ["--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9955"],
+                                    ["--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9955,methods=auto"]),
+        "has no listen-addr": (["--experimental-rpc-endpoint", "methods=safe"],),
+        "a secret in its argv": (["--password", "hunter2"], ["--password=hunter2"], ["--node-key", "00" * 32],
+                                 ["--node-key=" + "00" * 32]),
+    }.items() for flag in flags],
+    *[({"argv": argv}, "val-1", reason) for argv, reason in [
+        ([NODE, "--validator", "--chain", "/srv/materios/spec/mainnet-raw.json", "--rpc-methods", "unsafe"],
+         "methods other than safe"),
+        ([NODE, "--validator", "--chain", "/srv/materios/spec/mainnet-raw.json", "--rpc-methods=Unsafe"],
+         "methods other than safe"),
+        ([NODE, "--validator", "--chain", "/srv/materios/spec/mainnet-raw.json"], "methods other than safe"),
+        ([NODE, "--chain", "/srv/materios/spec/mainnet-raw.json", "--rpc-methods", "safe"], "without --validator"),
+        ([NODE, "--validator", "--rpc-methods", "safe"], "--chain"),
+        ([NODE, "--validator", "--chain", "dev", "--rpc-methods", "safe"], "--chain"),
+        ([NODE, "--validator", "--chain=local", "--rpc-methods", "safe"], "--chain"),
+        ([NODE, "--validator", "--chain", "spec/mainnet-raw.json", "--rpc-methods", "safe"], "--chain"),
+        ([NODE, "--validator", "--chain", "/a.json", "--chain", "/b.json", "--rpc-methods", "safe"], "--chain"),
+    ]],
+    *[({"env": {name: "/tmp/x.so"}}, "val-1", "loader")
+      for name in ("LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT", "ld_preload")],
 ])
 def test_unit_refuses_what_it_cannot_write_exactly_or_must_not_start(tmp_path, changes, name, reason):
     assert reason in refused("unit", "--launch", launch(tmp_path, **changes), "--name", name,
@@ -371,17 +486,32 @@ def test_unit_refuses_an_entry_without_its_argv_or_env(tmp_path, missing):
     assert missing in refused("unit", "--launch", path, "--name", "val-1", "--env-file", "/etc/materios/v.env")
 
 
-@pytest.mark.parametrize("doc", ["[]", '{"nodes": 5}', '{"nodes": [5]}', "not json"])
-def test_unit_refuses_a_file_that_is_no_manifest(tmp_path, doc):
+@pytest.mark.parametrize("doc", ["[]", '{"nodes": 5}', '{"nodes": [5]}', "not json", DEEP],
+                         ids=["list", "number", "number node", "not json", "deep"])
+def test_unit_and_verify_refuse_a_file_that_is_no_manifest(tmp_path, doc):
     path = tmp_path / "launch.json"
     path.write_text(doc)
     refused("unit", "--launch", path, "--name", "val-1", "--env-file", "/etc/materios/v.env")
+    (tmp_path / "proof.json").write_text(json.dumps(FIXED_PROOF))
+    refused("verify", tmp_path / "proof.json", "--launch", path, "--name", "val-1")
+
+
+def test_a_deeply_nested_keystore_entry_is_refused_in_one_line(tmp_path):
+    keystore, node_key = seeded(tmp_path)
+    (keystore / ("aura".encode().hex() + AURA)).write_text(DEEP)
+    refused("show", "--keystore", keystore, "--node-key", node_key)
 
 
 @pytest.mark.parametrize("user", ["mat%erios", "materios\nExecStartPre=/bin/x", "Materios", "", "a b"])
 def test_unit_refuses_a_user_that_is_no_user_name(tmp_path, user):
     assert "is no user name" in refused("unit", "--launch", launch(tmp_path), "--name", "val-1", "--user", user,
                                         "--env-file", "/etc/materios/validator.env")
+
+
+def test_unit_takes_a_loopback_endpoint_with_safe_methods(tmp_path):
+    argv = [*BASE_ARGV, "--experimental-rpc-endpoint", "listen-addr=127.0.0.1:9955,methods=safe"]
+    assert '"listen-addr=127.0.0.1:9955,methods=safe"' in ok(
+        "unit", "--launch", launch(tmp_path, argv=argv), "--name", "val-1", "--env-file", "/etc/materios/v.env")
 
 
 def test_unit_refuses_a_relative_env_file(tmp_path):
