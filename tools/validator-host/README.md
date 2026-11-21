@@ -13,17 +13,24 @@ host's screen, never through the coordinator.
 
 - The release node, built by `tools/runtime-build/build.sh --node <commit>
   release`, and its published sha256.
-- python3 3.10 or newer and the launch preflight's hash-pinned packages, in a
-  virtual environment:
+- python3 3.10 or newer with its `venv` module, a checkout of the reviewed
+  commit at `/opt/materios/src` (its `tools/validator-host` and
+  `tools/launch-preflight` are enough: the tool reads keys and RPC listeners
+  with the launch preflight's own readers, from the directory beside it),
+  and the launch preflight's hash-pinned packages in a virtual environment.
+  As root:
 
   ```
+  install -d -o root -g root -m 0755 /opt/materios /opt/materios/src
+  tar -x -C /opt/materios/src -f checkout.tar      # git archive <commit> tools/validator-host tools/launch-preflight
   python3 -m venv /opt/materios/venv
-  /opt/materios/venv/bin/pip install --no-cache-dir -r tools/launch-preflight/requirements.txt
+  /opt/materios/venv/bin/pip install --no-cache-dir -r /opt/materios/src/tools/launch-preflight/requirements.txt
   ```
 
   `V` below stands for `/opt/materios/venv/bin/python tools/validator-host/validator_host.py`,
-  run from a checkout: the tool reads keys and RPC listeners with the launch
-  preflight's own readers, from `tools/launch-preflight` beside it.
+  run with `/opt/materios/src` as the working directory. Every command
+  below is run as root unless it says `sudo -u materios`: the node's user
+  has no login shell.
 - A user the node runs as (`materios`), and these paths:
 
   | Path | Holds | Owner, mode |
@@ -39,9 +46,18 @@ host's screen, never through the coordinator.
 
   ```
   useradd --system --home-dir /var/lib/materios --shell /usr/sbin/nologin materios
+  ps -eo uid= | grep -cw "$(id -u materios)"      # must print 0
   install -d -o materios -g materios -m 0700 /var/lib/materios
   install -d -o root -g root -m 0755 /etc/materios /srv/materios /srv/materios/spec
   ```
+
+  `useradd --system` takes the highest system uid `/etc/passwd` leaves free,
+  and does not see the uids containers run under: on a host with a Postgres
+  container it can hand out 999, the uid that Postgres runs as, and the
+  keystore would then belong to the same uid as the database's processes. If
+  the `ps` line prints anything but 0, `userdel materios` and add the user
+  again with `--uid <n>`, an `n` below 1000 for which both `getent passwd
+  <n>` and that `ps` line show nothing.
 
 ## Before the day
 
@@ -57,7 +73,8 @@ sha256sum /usr/local/bin/materios-node      # the published sha256, or this host
 As the node's user:
 
 ```
-V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /var/lib/materios/node-key
+cd /opt/materios/src
+sudo -u materios V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /var/lib/materios/node-key
 ```
 
 It makes an aura key (sr25519), a grandpa key (ed25519) and a partner-chain
@@ -100,11 +117,13 @@ candidates row: <partner-chain key>:<aura key>:<grandpa key>
 
 ```
 python3 -I candidates.py record val-1 <partner-chain key> <aura key> <grandpa key>
-V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val-1 > val-1.proof.json
+sudo -u materios V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val-1 > ~/val-1.proof.json
 ```
 
-- The record (the Cardano setup kit's `candidates.py`) is what whoever builds
-  the candidates list reads off this host's own screen.
+- The record (the Cardano setup kit's `candidates.py`, one file that needs
+  python3 alone, copied to the host with the checkout) is what whoever
+  builds the candidates list reads off this host's own screen. The keys are
+  the three of step 2, as printed.
 - The proof holds the name, the three public keys and a signature by each key
   over `materios-validator-host-pop-v1`, the name and the candidates row. It
   is public: send it, with the five lines of step 2, to the coordinator.
@@ -145,9 +164,16 @@ V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val
   `--unsafe-rpc-external` or `--rpc-methods unsafe` on a validator:
   `--unsafe-rpc-external` also opens a second listener on a random port,
   which a firewall rule for the RPC port misses.
-- **NOT REHEARSED** (needs root): `ufw default deny incoming`, `ufw allow
-  <ssh port>/tcp`, `ufw allow 30333/tcp`, `ufw enable`. Step 8 checks the
-  listeners whatever the firewall is.
+- On a host whose firewall is already active (`ufw status`), one rule opens
+  the peer-to-peer port: `ufw allow 30333/tcp`, or for peers of one network
+  only `ufw allow from <network>/<bits> to any port 30333 proto tcp`.
+  Rehearsed with the second form on three hosts.
+- **NOT REHEARSED:** turning a firewall on where none runs (`ufw default
+  deny incoming`, `ufw allow <ssh port>/tcp`, `ufw allow 30333/tcp`, `ufw
+  enable`). Step 8 checks the listeners whatever the firewall is.
+- A host that already runs another node (a preprod validator on 30333, 9944
+  or 9615) takes other ports in its manifest argv; `ss -ltn` shows what is
+  taken.
 
 ### 5. The manifest entry
 
@@ -174,7 +200,7 @@ sha256 of GENESIS-DAY steps 0 and 7:
 
 ```
 sha256sum /srv/materios/spec/mainnet-raw.json /usr/local/bin/materios-node
-ls -A /var/lib/materios /var/lib/materios/chains/materios_mainnet      # chains and node-key; keystore: nothing else
+ls -A /var/lib/materios /var/lib/materios/chains/materios_mainnet      # as root. chains and node-key; keystore: nothing else
 ```
 
 Read this host's own entry in the manifest: its three keys are step 2's, its
@@ -183,8 +209,9 @@ Read this host's own entry in the manifest: its three keys are step 2's, its
 ### 7. The unit
 
 ```
-printf 'DB_SYNC_POSTGRES_CONNECTION_STRING=postgres://<user>:<password>@<host>:<port>/<database>\n' \
-    > /etc/materios/validator.env                                  # root, umask 077
+(umask 077; printf 'DB_SYNC_POSTGRES_CONNECTION_STRING=postgres://<user>:<password>@<host>:<port>/<database>\n' \
+    > /etc/materios/validator.env)
+stat -c '%a %U' /etc/materios/validator.env                        # 600 root
 V unit --launch launch.json --name val-1 --user materios --env-file /etc/materios/validator.env \
     > /etc/systemd/system/materios-validator.service
 systemd-analyze verify /etc/systemd/system/materios-validator.service
@@ -227,12 +254,16 @@ systemctl daemon-reload
 ### 8. Start, and the first checks
 
 ```
+systemctl enable materios-validator         # so it starts again after a reboot
 systemctl start materios-validator
 journalctl -u materios-validator -o cat | grep -E 'Local node identity|Running JSON-RPC|Strict Ariadne'
 ss -ltnp | grep materios-node
 curl -s -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"system_peers","params":[]}' http://127.0.0.1:9944
 ```
 
+- The three log lines come within a few seconds of the start, later on a
+  busy host: look again before judging. `journalctl` and `ss -p` show
+  another user's process to root alone.
 - The identity is step 2's peer id. The JSON-RPC line names loopback and the
   manifest's port: a busy port moves the listener to a random one.
 - `ss` lists the peer-to-peer port, and RPC and Prometheus on loopback, and
@@ -254,22 +285,34 @@ not on each validator.
 
 ## What was rehearsed
 
-On one machine, with throwaway keys and the release binary: four hosts, each
-through steps 1 to 3 and 6 to 8, under a user manager (no `User=`, paths
-under one scratch directory), on the mock Cardano follower. The chain
-authored and finalized from keystores `keygen` wrote; the launch preflight
-read each running process's argv as its manifest entry's, word for word; a
-killed node came back after the 120 seconds and authored again; a stopped
-one left the other three finalizing.
+**On three machines, as root** (2026-11-21, this file at commit `f74c255e`,
+release binary `35a8405b…d744`, throwaway keys, a throwaway genesis, the mock
+Cardano follower): one validator on each of three hosts that also run other
+services, and a second instance on one of them, each through every step
+above at the documented paths: `useradd` and `install -d`, the checkout and
+the virtual environment, the binary and its sha256, `keygen`, `show`, the
+record, `prove`, the coordinator's `verify` against the manifest, the one
+firewall rule on an active ufw, the spec, the environment file, `unit` as a
+system unit with `User=materios`, `systemd-analyze verify`, the start and
+the first checks. Peer-to-peer ran over the LAN on reserved nodes by peer
+id; RPC and Prometheus were closed from the other machines. The chain
+authored on all four and finalized; the launch preflight read each running
+process's argv as its manifest entry's, word for word, and each binary as
+the pinned one; a node killed with SIGKILL on one machine came back after
+the 120 seconds and authored again, and a node stopped on another left the
+other three finalizing and rejoined. Every host was then returned to what
+it was.
 
-The four nodes ran before `verify` took the manifest and before the node key
-moved under the base path: they read their node key from a directory beside
-it. Since then one host walked `keygen`, `show`, `prove`, `verify` against a
-manifest entry and `unit` with the paths above, twice, without starting a
-node.
+Earlier, on one machine under a user manager: the same on four scratch
+directories, before `verify` took the manifest.
 
-Not rehearsed: a system unit with `User=` and the root-owned paths, the
-firewall, more than one machine, a real follower database.
+Not rehearsed: a real follower database (db-sync or yaci) and so the env
+file's password; adding the user again with `--uid` (one of the three hosts
+gave it 999, a Postgres container's uid, which is why the check above
+exists); turning a firewall on where none runs; peers across NAT
+with `--public-addr`; a reboot (`systemctl enable` was run on one host
+and made the `multi-user.target` link; no machine was restarted); a spec
+with `bootNodes`.
 
 ## Tests
 
