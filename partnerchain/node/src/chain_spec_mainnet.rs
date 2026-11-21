@@ -3581,7 +3581,7 @@ mod tests {
             let cross_chain = get_from_seed::<ecdsa::Public>(seed);
             let fields: Vec<(&str, Json)> = vec![
                 ("/roles/sudo/0/members/0/key", account.to_ss58check().into()),
-                ("/roles/guardian/0/members/2/key", hex(&account.0)),
+                ("/roles/guardian/0/members/1/key", hex(&account.0)),
                 ("/roles/anchor_signer/0", account.to_ss58check().into()),
                 ("/roles/attestors/1", hex(&account.0)),
                 ("/roles/oracle/0", hex(&cross_chain.0)),
@@ -3762,7 +3762,7 @@ mod tests {
         );
         let (keyholder, guardian) = (
             members(&launch, "sudo")[1].clone(),
-            members(&launch, "guardian")[2].clone(),
+            members(&launch, "guardian")[1].clone(),
         );
         let spare = AccountId::from([7; 32]);
         let unendowed = |role: &'static str, who: &AccountId| -> Box<dyn Fn(&mut Json)> {
@@ -3786,7 +3786,7 @@ mod tests {
             (
                 unendowed("endowed", &guardian),
                 format!(
-                    "roles.guardian[0].members[2] ({guardian}), a keyholder of roles.guardian[0], \
+                    "roles.guardian[0].members[1] ({guardian}), a keyholder of roles.guardian[0], \
                      holds no dust: endow it at least 16347"
                 ),
             ),
@@ -4051,7 +4051,7 @@ mod tests {
         }
         let enactor = holders(&launch, "enactor")[0].clone();
         let sudo = preflight_multisig(members(&launch, "sudo"), 2);
-        let guardian = members(&launch, "guardian")[2].clone();
+        let guardian = members(&launch, "guardian")[1].clone();
         let pool = holders(&launch, DUST_POOL)[0].clone();
         for row in [
             format!(
@@ -4063,7 +4063,7 @@ mod tests {
             ),
             format!(
                 "    17000     16347       653  dust.endowed.{guardian}: \
-                 roles.guardian[0].members[2] ({guardian}), a keyholder of roles.guardian[0]"
+                 roles.guardian[0].members[1] ({guardian}), a keyholder of roles.guardian[0]"
             ),
             format!(
                 "    90000       500     89500  dust.dust_pool.{pool}: dust for signers admitted \
@@ -4076,8 +4076,8 @@ mod tests {
             lines[2 + endowed.len()..],
             [
                 "      500       500         0  the Treasury's existential deposit",
-                "   994000  issued at genesis, fixed as OrinqReceipts.FixedIssuance",
-                "     5999  headroom: the dust that can still be added with the issuance under one MATRA",
+                "   977000  issued at genesis, fixed as OrinqReceipts.FixedIssuance",
+                "    22999  headroom: the dust that can still be added with the issuance under one MATRA",
                 "    90000  dust pool: 4 later signers of 22167 each; later_signers 4 takes 88668",
                 "     1332  dust pool spare beyond later_signers, which endows one of:",
                 "        0  replacement anchor_signer keys at the floor of 17945",
@@ -4613,13 +4613,12 @@ mod tests {
 
     /// Issuance stays under one MATRA, and that, not the oracle roster's 16,
     /// bounds the oracles a genesis funds: with every account at its floor,
-    /// a standby for each single-key role and the pool at four later
-    /// signers, three oracles fit and a fourth does not. A fourth fits in
-    /// place of the anchor signer's standby. More come out of the dust pool
-    /// after genesis.
+    /// a 2-of-2 guardian, a standby for each single-key role and the pool at
+    /// four later signers, four oracles fit and a fifth does not. More come
+    /// out of the dust pool after genesis.
     #[test]
-    fn the_issuance_cap_bounds_the_oracles_a_genesis_funds_to_three_at_the_floors() {
-        let at_the_floors = |oracles: usize, standby: bool| {
+    fn the_issuance_cap_bounds_the_oracles_a_genesis_funds_to_four_at_the_floors() {
+        let at_the_floors = |oracles: usize| {
             edited(|launch| {
                 let by_role = [
                     ("anchor_signer", FLOORS[3]),
@@ -4650,36 +4649,25 @@ mod tests {
                         .push(key.clone().into());
                     launch["dust"]["oracle"][&key] = (FLOORS[5] as u64).into();
                 }
-                if !standby {
-                    let standby = launch["roles"]["anchor_signer"]
-                        .as_array_mut()
-                        .unwrap()
-                        .pop()
-                        .unwrap();
-                    launch["dust"]["anchor_signer"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove(standby.as_str().unwrap());
-                    launch[NO_STANDBY] = serde_json::json!(["anchor_signer"]);
-                }
             })
         };
-        start(&build(&at_the_floors(3, true)).unwrap()).execute_with(|| {
-            assert_eq!(Balances::total_issuance(), 958_110);
+        assert_eq!(members(&fixture(), "guardian").len(), 2);
+        start(&build(&at_the_floors(3)).unwrap()).execute_with(|| {
+            assert_eq!(Balances::total_issuance(), 941_763);
         });
-        let refused = build(&at_the_floors(4, true)).err().unwrap_or_default();
+        start(&build(&at_the_floors(4)).unwrap()).execute_with(|| {
+            assert_eq!(Balances::total_issuance(), 992_663);
+        });
+        let refused = build(&at_the_floors(5)).err().unwrap_or_default();
         assert!(
             refused.contains(
-                "dust endows 1009010 base units with the Treasury's existential deposit: mainnet \
+                "dust endows 1043563 base units with the Treasury's existential deposit: mainnet \
                  issues less than one MATRA (1000000). With each account at its floor and the \
-                 dust pool at the 88668 of later_signers it would issue 1009010: what the cap \
+                 dust pool at the 88668 of later_signers it would issue 1043563: what the cap \
                  leaves no room for at genesis is endowed out of the dust pool after it"
             ),
             "{refused}"
         );
-        start(&build(&at_the_floors(4, false)).unwrap()).execute_with(|| {
-            assert_eq!(Balances::total_issuance(), 991_065);
-        });
     }
 
     /// The dust pool's dust is spare only if no account of it needs dust for
@@ -4772,7 +4760,7 @@ mod tests {
                 + burst_dust(veto, GUARDIAN_MEMBER.call_bytes)
         );
         assert_eq!(combined, 67_363);
-        let keyholder = members(&launch, "guardian")[2].clone();
+        let keyholder = members(&launch, "guardian")[1].clone();
         let key = keyholder.to_ss58check();
         let both = |dust: Balance| {
             edited(|launch| {

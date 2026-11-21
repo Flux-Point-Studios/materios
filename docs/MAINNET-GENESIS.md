@@ -239,11 +239,11 @@ saved from. A guardian keyholder that is also an oracle has a floor of
 
 ### The cap, the pool and the oracles
 
-The whole issuance stays under one MATRA. With a 2-of-3 sudo key, a 2-of-3
-guardian, three oracles, three attestors, three recovery friends, a rescuer,
-and two anchor signers and two gateway sponsors, the floors and the
-Treasury's deposit come to 869,442, and the dust pool at its least to
-88,668: 958,110 in all, 41,889 under the cap.
+The whole issuance stays under one MATRA. With a 2-of-3 sudo key, a 2-of-2
+guardian (the shape the key kit drives), three oracles, three attestors,
+three recovery friends, a rescuer, and two anchor signers and two gateway
+sponsors, the floors and the Treasury's deposit come to 853,095, and the
+dust pool at its least to 88,668: 941,763 in all, 58,236 under the cap.
 
 The dust pool is the only source of dust after genesis, and Root's transfer
 out of it waits 7 days. It holds at least `later_signers` times 22,167, the
@@ -255,9 +255,8 @@ each single-key role that spare covers at the role's floor, each of them an
 alternative to the others.
 
 `OracleMaxAttestors` is 16, but the cap, not the roster, bounds the oracles a
-genesis funds: at the floors above, three oracles fit and a fourth does
-not (1,009,010). A fourth fits in place of the anchor signer's standby
-(991,065) or with a 2-of-2 guardian (992,663). A price needs `OracleMinAttestorThreshold` (3) oracles submitting, so a
+genesis funds: at the floors above, four oracles fit (992,663) and a fifth
+does not (1,043,563). A price needs `OracleMinAttestorThreshold` (3) oracles submitting, so a
 launch that seats three stops pricing when one is offline until Root
 registers another, endowed out of the pool. Root can also raise
 `Motra.Params.generationPerMatraPerBlock` behind the standard delay, which

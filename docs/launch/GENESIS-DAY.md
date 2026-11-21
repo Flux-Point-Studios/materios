@@ -492,9 +492,21 @@ Rehearsed on the local chain; the calls and the delay classes are in
     each oracle and pair, and any `Balances.force_transfer` of dust from the
     dust pool to a signer admitted later. It waits the standard delay of
     seven days; the enactor then submits `RootTimelock.enact`.
-22. TEE attestation ships disabled. Releasing it is scheduled, then waits
-    seven days or the guardian's `fast_track`, then is enacted. The
-    kill-switch, `TeeAttestation.set_disabled(true)`, runs at once.
+
+    The enactor is a hot key whose only job is `RootTimelock.enact`. Anyone
+    may enact a ready task, so a stolen enactor key risks only the
+    enactor's own dust, and the day-7 enactments need no offline sitting.
+    Its secret lives on an online host, in a file of mode 0600, never on a
+    card. If the enactor is down, one sudo card signs the same `enact`,
+    which is the coordinator's `enact` step.
+22. TEE attestation ships disabled, and is released on genesis day without
+    the seven-day wait. The two guardian keyholders sign
+    `RootTimelock.approve` carrying the hash of
+    `TeeAttestation.set_disabled(false)`. Then two sudo keyholders submit
+    `Sudo.sudo(RootTimelock.enact_approved(TeeAttestation.set_disabled(false)))`,
+    which runs that one call at once. `fast_track` is not used on genesis
+    day, and the coordinator has no step for it. The kill-switch,
+    `TeeAttestation.set_disabled(true)`, runs at once.
 23. A guardian drill: both guardian keyholders cancel a scheduled task.
 
 ## What the rehearsal's mock could not show

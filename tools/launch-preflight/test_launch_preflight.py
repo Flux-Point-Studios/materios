@@ -4547,7 +4547,7 @@ def test_the_mainnet_fixture_checkpoints_each_endowed_account_at_its_free_balanc
     balance it holds, held since block 0."""
     spec, meta, _ = mainnet
     prefix = lp.storage_key("Motra", "AccrualCheckpoint")
-    assert lp.treasury_account(meta) in spec.accounts() and len(spec.accounts()) == 24
+    assert lp.treasury_account(meta) in spec.accounts() and len(spec.accounts()) == 23
     assert {key: value for key, value in spec.storage.items() if key.startswith(prefix)} == {
         map_key("Motra", "AccrualCheckpoint", account): checkpoint(spec.balance(account)[0])
         for account in spec.accounts()}
@@ -4586,7 +4586,7 @@ def test_a_genesis_with_no_checkpoint_is_refused_for_every_account(mainnet):
     for key in [key for key in spec.storage if key.startswith(lp.storage_key("Motra", "AccrualCheckpoint"))]:
         del spec.storage[key]
     found = motra_findings(spec)
-    assert len(found) == 24 and all("genesis sets no Motra.AccrualCheckpoint for " in message for message in found)
+    assert len(found) == 23 and all("genesis sets no Motra.AccrualCheckpoint for " in message for message in found)
 
 
 @pytest.mark.parametrize("stray", ["an account genesis does not endow", "another hash", "a longer key"])
@@ -4764,13 +4764,22 @@ ED = 500
 TREASURY = (b"modl" + b"mat/trsy").ljust(32, b"\0")
 
 
+def test_the_mainnet_fixture_guards_the_timelock_with_the_2_of_2_the_key_kit_drives(mainnet):
+    """The key kit and its coordinator hold the guardian as two keyholders who both sign: genesis names that
+    multisig's account as the timelock guardian."""
+    spec, _, launch = mainnet
+    (guardian,) = launch["roles"]["guardian"]
+    assert guardian["threshold"] == 2 and len(guardian["members"]) == 2
+    assert spec.value("RootTimelock", "Guardian") == lp.role_account(guardian)
+
+
 def test_the_mainnet_fixture_fixes_its_issuance_at_its_dust_and_the_treasurys_existential_deposit(mainnet):
     spec, meta, launch = mainnet
     dust = sum(amount for accounts in launch["dust"].values() for amount in accounts.values())
     assert meta.constants[("Balances", "ExistentialDeposit")] == ED.to_bytes(16, "little")
     assert lp.treasury_account(meta) == TREASURY and spec.balance(TREASURY) == (ED, 0)
     assert spec.uint("OrinqReceipts", "FixedIssuance", 16) == spec.uint("Balances", "TotalIssuance", 16) \
-        == dust + ED == 994_000
+        == dust + ED == 977_000
 
 
 def account_of(text: str) -> bytes:
@@ -5135,11 +5144,11 @@ def test_a_genesis_that_fixes_no_issuance_is_refused(spec244, mainnet):
 
 def test_a_fixed_issuance_other_than_genesis_holds_is_refused(mainnet):
     spec, meta, launch = mainnet
-    put(spec, "OrinqReceipts", "FixedIssuance", (994_001).to_bytes(16, "little"))
+    put(spec, "OrinqReceipts", "FixedIssuance", (977_001).to_bytes(16, "little"))
     assert mainnet_supply(spec, meta, launch) == [
-        "[4 supply] OrinqReceipts.FixedIssuance stores 994001, but Balances.TotalIssuance stores 994000: the runtime "
+        "[4 supply] OrinqReceipts.FixedIssuance stores 977001, but Balances.TotalIssuance stores 977000: the runtime "
         "holds the issuance to the fixed one",
-        "[4 supply] OrinqReceipts.FixedIssuance stores 994001, not the 994000 the launch's dust and the Treasury's "
+        "[4 supply] OrinqReceipts.FixedIssuance stores 977001, not the 977000 the launch's dust and the Treasury's "
         "existential deposit sum to"]
 
 
@@ -5149,7 +5158,7 @@ def test_an_account_holding_other_than_its_declared_dust_is_refused(mainnet):
     set_account(spec, account_of(oracle), 55_001)
     assert mainnet_supply(spec, meta, launch) == [
         f"[4 supply] genesis endows {oracle} 55001 free and 0 reserved, but dust.oracle.{oracle} declares 55000",
-        "[4 supply] OrinqReceipts.FixedIssuance stores 994001, not the 994000 the launch's dust and the Treasury's "
+        "[4 supply] OrinqReceipts.FixedIssuance stores 977001, not the 977000 the launch's dust and the Treasury's "
         "existential deposit sum to"]
 
 
@@ -5280,7 +5289,7 @@ def test_a_launch_that_declares_no_dust_is_refused(mainnet):
 def test_a_genesis_that_issues_a_matra_is_refused(mainnet):
     spec, meta, launch = mainnet
     pool = launch["roles"]["dust_pool"][0]
-    redust(spec, launch, "dust_pool", pool, lp.MATRA - 994_000 + 90_000)
+    redust(spec, launch, "dust_pool", pool, lp.MATRA - 977_000 + 90_000)
     assert mainnet_supply(spec, meta, launch) == [
         "[4 supply] genesis issues 1000000 base units, at least one MATRA (1000000): a mainnet genesis issues dust, "
         "enough for each role account to exist and sign"]
@@ -5312,13 +5321,13 @@ def test_a_fixed_issuance_genesis_that_pays_or_bonds_anything_is_refused(mainnet
 def test_no_emission_reserve_counts_against_the_lock_of_a_fixed_issuance(mainnet):
     spec, meta, launch = mainnet
     assert ("OrinqReceipts", "ValidatorEmissionReserve") in meta.constants
-    assert mainnet_supply(spec, meta, launch, locked(994_000, launch["supply"]["genesis_lock"]["address"])) == []
+    assert mainnet_supply(spec, meta, launch, locked(977_000, launch["supply"]["genesis_lock"]["address"])) == []
 
 
 def test_a_fixed_issuance_above_the_cardano_lock_is_refused(mainnet):
     spec, meta, launch = mainnet
-    assert mainnet_supply(spec, meta, launch, locked(993_999, launch["supply"]["genesis_lock"]["address"])) == [
-        f"[4 supply] Materios issues 994000 at genesis against 993999 cMATRA locked on Cardano at "
+    assert mainnet_supply(spec, meta, launch, locked(976_999, launch["supply"]["genesis_lock"]["address"])) == [
+        f"[4 supply] Materios issues 977000 at genesis against 976999 cMATRA locked on Cardano at "
         f"{launch['supply']['genesis_lock']['utxo']}: the difference is MATRA no cMATRA backs"]
 
 
@@ -5505,7 +5514,7 @@ def test_the_fee_the_dust_is_sized_for_is_the_runtimes_below_its_congestion_targ
 # floor is the deposits and, left free, the larger of the existential deposit 500 and the working dust.
 SIGNER_FLOORS = [
     (("roles", "sudo", 0, "members", 1), "roles.sudo[0].members[1], a keyholder of roles.sudo[0]", 2_000, 18_270),
-    (("roles", "guardian", 0, "members", 2), "roles.guardian[0].members[2], a keyholder of roles.guardian[0]", 2_000,
+    (("roles", "guardian", 0, "members", 1), "roles.guardian[0].members[1], a keyholder of roles.guardian[0]", 2_000,
      13_847),
     (("roles", "sudo", 0), "roles.sudo[0], which reserves a recovery configuration of up to 4 friends", 3_000, 0),
     (("roles", "recovery_rescuers", 0), "roles.recovery_rescuers[0]", 1_000, 5_048),
@@ -5630,10 +5639,10 @@ def test_a_guardian_keyholder_that_is_also_an_oracle_needs_both_roles_calls_and_
     """64 vetoes of 384 bytes and 4,800 prices of 512 a day take 51,035 to sustain, and the veto within ten blocks
     13,847 more, since the prices spend what the veto was saved from: 2,000 reserved and 64,882 free."""
     spec, meta, launch = sized
-    member = launch["roles"]["guardian"][0]["members"][2]["key"]
+    member = launch["roles"]["guardian"][0]["members"][1]["key"]
     launch["roles"]["oracle"][0] = member
     account = account_of(member)
-    who = "roles.guardian[0].members[2], a keyholder of roles.guardian[0] and roles.oracle[0]"
+    who = "roles.guardian[0].members[1], a keyholder of roles.guardian[0] and roles.oracle[0]"
     set_account(spec, account, 66_881)
     assert below_floor(who, account, 66_881, 2_000, 64_882, False) in dust_findings(spec, meta, launch)
     set_account(spec, account, 66_882)
@@ -9216,7 +9225,7 @@ def test_cli_refuses_root_whose_other_member_anyone_holds(clean, capsys, label, 
     assert (code, out.splitlines()[1:]) == (1, [
         f"  [1 dev-keys] System.Account: {label} (sr25519) is in genesis",
         f"  [1 dev-keys] Motra.AccrualCheckpoint: {label} (sr25519) is in genesis",
-        f"  [1 dev-keys] roles.endowed[4]: {label} (sr25519)",
+        f"  [1 dev-keys] roles.endowed[3]: {label} (sr25519)",
         f"  [1 dev-keys] roles.sudo[0].members[1]: {label} (sr25519)",
         "  " + helped_holder("1 dev-keys", "roles.sudo[0]", members[0], "members[0]", ["members[1]"], SUDO_POWER)]), out
 
@@ -9950,7 +9959,7 @@ def test_an_edit_to_a_deployment_field_leaves_every_proof_valid_and_needs_a_new_
     edited = copy.deepcopy(launch)
     FIELD_EDITS[field](edited)
     assert edited != launch
-    assert len(members_of(edited)) == 6 and possession_findings(spec, edited) == []
+    assert len(members_of(edited)) == 5 and possession_findings(spec, edited) == []
     refused = checkpoint_findings(clean, spec, edited, signed)
     assert len(refused) == 1 and refused[0].startswith(MANIFEST_EDITED)
     assert checkpoint_findings(clean, spec, edited, lp.signed_manifest(spec, edited, clean.launch_key)) == []
