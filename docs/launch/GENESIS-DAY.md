@@ -85,8 +85,8 @@ with `tools/validator-host/validator_host.py`, as the node's user
 (`tools/validator-host/README.md`, steps 1 to 3):
 
 ```
-V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /var/lib/materios/node-key
-V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val-1 > val-1.proof.json
+sudo -u materios V keygen --keystore /var/lib/materios/chains/materios_mainnet/keystore --node-key /var/lib/materios/node-key
+sudo -u materios V prove --keystore /var/lib/materios/chains/materios_mainnet/keystore --name val-1 > ~/val-1.proof.json
 ```
 
 and, once step 6 has the validator's three keys in the manifest, the
